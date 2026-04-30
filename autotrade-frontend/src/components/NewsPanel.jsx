@@ -1,0 +1,7 @@
+export default function NewsPanel({ articles }) {
+  return (
+    <div className="bg-panel border border-border rounded-xl p-4">
+      <span className="text-muted text-sm">NewsPanel</span>
+    </div>
+  );
+}
