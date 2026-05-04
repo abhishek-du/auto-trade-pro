@@ -1,0 +1,46 @@
+# AutoTrade Pro — Docker Compose (workers only)
+# Database  → Supabase (external, set DATABASE_URL in .env)
+# Redis     → Upstash  (external, set REDIS_URL in .env)
+# API       → Vercel   (deploy with `vercel --prod`)
+#
+# This compose file runs only the Celery worker + beat scheduler locally
+# or on any Linux host (Railway, Fly.io, Render, etc.).
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI app (local dev only) ──────────────────────────────────────────
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  # ── Celery worker ─────────────────────────────────────────────────────────
+  celery_worker:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/app
+    command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2
+    restart: unless-stopped
+    depends_on:
+      - app
+
+  # ── Celery beat (periodic scheduler) ────────────────────────────────────
+  celery_beat:
+    build: .
+    env_file: .env
+    volumes:
+      - .:/app
+    command: celery -A tasks.celery_app beat --loglevel=info
+    restart: unless-stopped
+    depends_on:
+      - app
+
+# No local volumes needed — database and cache are fully managed externally.

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip --version)",
+      "Read(//home/**)",
+      "Read(//var/www/html/etravel-hub.com/**)",
+      "Read(//var/www/html/dev.etravel-hub.com/**)",
+      "Read(//var/www/**)",
+      "Read(//root/**)",
+      "Bash(supabase projects *)",
+      "Bash(supabase --version)",
+      "Bash(supabase db *)",
+      "Bash(supabase inspect *)",
+      "Bash(supabase --help)",
+      "Bash(supabase link *)"
+    ]
+  }
+}
