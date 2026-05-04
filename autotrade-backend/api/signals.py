@@ -94,7 +94,7 @@ async def seed_and_analyse(db: AsyncSession = Depends(get_db)):
 
 
 @router.get(
-    "/{symbol}",
+    "/{symbol:path}",
     response_model=list[SignalOut],
     summary="Last 10 signals for a specific symbol",
 )
