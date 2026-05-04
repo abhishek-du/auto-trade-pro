@@ -18,6 +18,9 @@ httpx
 
 # ── Market data: yfinance primary, Twelve Data secondary ─────────────────────
 yfinance
+mftool    # mutual fund NAVs only -- actively maintained v3.0
+nselib    # FPI data fallback only -- v2.5.1 May 2026
+# do NOT add nsepy or jugaad-trader -- both are broken/inactive
 
 # ── Technical analysis ────────────────────────────────────────────────────────
 # ta-lib requires the C library — see Dockerfile
