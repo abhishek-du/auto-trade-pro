@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
-    Date, DateTime, Enum, Float, ForeignKey,
+    BigInteger, Date, DateTime, Enum, Float, ForeignKey,
     Index, Integer, JSON, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -228,7 +228,66 @@ class NewsItem(Base):
         )
 
 
-# ── 7. SimulationLog ──────────────────────────────────────────────────────────
+# ── 7. FIIDIIFlow ─────────────────────────────────────────────────────────────
+
+class FIIDIIFlow(Base):
+    """Daily institutional flow data from NSE, values in INR Crores."""
+    __tablename__ = "fii_dii_flows"
+    __table_args__ = (
+        Index("ix_fii_dii_flows_date", "date", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    fii_net_buy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    dii_net_buy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fii_gross_buy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fii_gross_sell: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    dii_gross_buy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    dii_gross_sell: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    market_direction: Mapped[str] = mapped_column(String(10), nullable=False, default="NEUTRAL")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<FIIDIIFlow date={self.date} "
+            f"fii={self.fii_net_buy:+,.2f}Cr dii={self.dii_net_buy:+,.2f}Cr "
+            f"direction={self.market_direction}>"
+        )
+
+
+# ── 8. OptionsChainSnapshot ───────────────────────────────────────────────────
+
+class OptionsChainSnapshot(Base):
+    """NSE index options-chain snapshot for PCR, max pain, and OI levels."""
+    __tablename__ = "options_chain_snapshots"
+    __table_args__ = (
+        Index("ix_options_chain_symbol_expiry", "symbol", "expiry_date"),
+        Index("ix_options_chain_snapshot_at", "snapshot_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    atm_strike: Mapped[float] = mapped_column(Float, nullable=False)
+    pcr: Mapped[float] = mapped_column(Float, nullable=False)
+    max_pain: Mapped[float] = mapped_column(Float, nullable=False)
+    total_call_oi: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    total_put_oi: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    support_levels: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    resistance_levels: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<OptionsChainSnapshot {self.symbol} expiry={self.expiry_date} "
+            f"atm={self.atm_strike} pcr={self.pcr:.2f} max_pain={self.max_pain}>"
+        )
+
+
+# ── 9. SimulationLog ──────────────────────────────────────────────────────────
 
 class SimulationLog(Base):
     """Append-only audit log of every AI decision for post-analysis."""
@@ -251,7 +310,7 @@ class SimulationLog(Base):
         )
 
 
-# ── 8. PerformanceSnapshot ────────────────────────────────────────────────────
+# ── 10. PerformanceSnapshot ───────────────────────────────────────────────────
 
 class PerformanceSnapshot(Base):
     """Daily equity-curve data point, saved once per calendar day."""
