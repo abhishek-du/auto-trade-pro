@@ -10,20 +10,13 @@ from utils.logger import logger
 
 
 def _run_async(coro):
-    # Dispose the shared engine's connection pool before creating a new event
-    # loop.  asyncpg connections are bound to the loop they were created on; if
-    # we don't flush the pool first, SQLAlchemy hands a stale connection (from
-    # the parent process's loop) to the new loop and raises
-    # "Future attached to a different loop".
-    from db.database import engine
-    engine.sync_engine.dispose()
     return asyncio.run(coro)
 
 
 async def _loop():
     from sqlalchemy import select
 
-    from db.database import AsyncSessionLocal
+    from db.database import engine, AsyncSessionLocal
     from db.models import OpenPosition
     from engine.llm_explainer import (
         format_paper_trade_notification,
@@ -38,74 +31,81 @@ async def _loop():
     )
     from paper_trading.virtual_wallet import VirtualWallet
 
-    async with AsyncSessionLocal() as session:
+    try:
+        async with AsyncSessionLocal() as session:
 
-        # ── Step 1: close SL/TP hits, refresh unrealised PnL ─────────────────
-        auto_closed = await update_positions_with_current_prices(session)
-        if auto_closed:
+            # ── Step 1: close SL/TP hits, refresh unrealised PnL ─────────────
+            auto_closed = await update_positions_with_current_prices(session)
+            if auto_closed:
+                logger.info(
+                    f"[paper_trade_loop] {len(auto_closed)} position(s) auto-closed "
+                    f"this cycle"
+                )
+
+            # ── Step 2: generate actionable signals for all watchlist symbols ──
+            signals = await analyze_all_symbols(session)
             logger.info(
-                f"[paper_trade_loop] {len(auto_closed)} position(s) auto-closed "
-                f"this cycle"
+                f"[paper_trade_loop] {len(signals)} actionable signal(s) generated"
             )
 
-        # ── Step 2: generate actionable signals for all watchlist symbols ─────
-        signals = await analyze_all_symbols(session)
-        logger.info(
-            f"[paper_trade_loop] {len(signals)} actionable signal(s) generated"
-        )
+            if not signals:
+                await VirtualWallet.take_daily_snapshot(session)
+                await session.commit()
+                return
 
-        if not signals:
-            await VirtualWallet.take_daily_snapshot(session)
-            await session.commit()
-            return
+            # ── Step 3: current wallet state ──────────────────────────────────
+            summary = await VirtualWallet.get_summary(session)
+            balance = summary["balance"]
 
-        # ── Step 3: current wallet state ──────────────────────────────────────
-        summary = await VirtualWallet.get_summary(session)
-        balance = summary["balance"]
-
-        # ── Step 4: process each signal through the risk gate ─────────────────
-        pos_result = await session.execute(select(OpenPosition))
-        open_positions = list(pos_result.scalars().all())
-
-        for signal in signals:
-            validated, reason = await validate_signal(
-                signal, balance, open_positions, session
-            )
-
-            await SimLogger.log_analysis_cycle(
-                session, signal.symbol, signal,
-                rejected=not validated,
-                reject_reason=reason if not validated else None,
-            )
-
-            if not validated:
-                continue
-
-            pos_size = calculate_position_size(signal, balance)
-            trade    = await open_paper_trade(signal, pos_size, session)
-
-            # Keep in-memory state consistent for the next iteration
-            balance -= pos_size["usd_value"] * 0.1
-            pos_result     = await session.execute(select(OpenPosition))
+            # ── Step 4: process each signal through the risk gate ─────────────
+            pos_result = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 
-            explanation  = await generate_trade_explanation(signal)
-            notification = format_paper_trade_notification(trade, explanation)
-            logger.info(notification)
+            for signal in signals:
+                validated, reason = await validate_signal(
+                    signal, balance, open_positions, session
+                )
 
-        # ── Step 5: persist today's performance snapshot ──────────────────────
-        await VirtualWallet.take_daily_snapshot(session)
+                await SimLogger.log_analysis_cycle(
+                    session, signal.symbol, signal,
+                    rejected=not validated,
+                    reject_reason=reason if not validated else None,
+                )
 
-        final = await VirtualWallet.get_summary(session)
-        logger.info(
-            f"[paper_trade_loop] Cycle complete — "
-            f"balance=${final['balance']:.2f}  "
-            f"equity=${final['equity']:.2f}  "
-            f"roi={final['roi_percent']:+.2f}%  "
-            f"open_positions={len(open_positions)}"
-        )
+                if not validated:
+                    continue
 
-        await session.commit()
+                pos_size = calculate_position_size(signal, balance)
+                trade    = await open_paper_trade(signal, pos_size, session)
+
+                # Keep in-memory state consistent for the next iteration
+                balance -= pos_size["usd_value"] * 0.1
+                pos_result     = await session.execute(select(OpenPosition))
+                open_positions = list(pos_result.scalars().all())
+
+                explanation  = await generate_trade_explanation(signal)
+                notification = format_paper_trade_notification(trade, explanation)
+                logger.info(notification)
+
+            # ── Step 5: persist today's performance snapshot ──────────────────
+            await VirtualWallet.take_daily_snapshot(session)
+
+            final = await VirtualWallet.get_summary(session)
+            logger.info(
+                f"[paper_trade_loop] Cycle complete — "
+                f"balance=${final['balance']:.2f}  "
+                f"equity=${final['equity']:.2f}  "
+                f"roi={final['roi_percent']:+.2f}%  "
+                f"open_positions={len(open_positions)}"
+            )
+
+            await session.commit()
+    finally:
+        # Close pooled asyncpg connections while the event loop is still open.
+        # asyncio.run() shuts the loop after this coroutine returns; without
+        # this, SQLAlchemy's sync teardown raises MissingGreenlet / "Event
+        # loop is closed" trying to close the async connections.
+        await engine.dispose()
 
 
 @celery_app.task(name="tasks.paper_trade_loop.run_paper_trade_loop")

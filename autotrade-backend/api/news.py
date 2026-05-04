@@ -47,7 +47,7 @@ async def get_recent_news(
 
 
 @router.get(
-    "/sentiment/{symbol}",
+    "/sentiment/{symbol:path}",
     response_model=SentimentOut,
     summary="Aggregate FinBERT sentiment score for a symbol",
 )
