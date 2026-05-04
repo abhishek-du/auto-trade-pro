@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
-  Newspaper, FlaskConical, Settings, TrendingUp,
+  Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/news',       label: 'News',       Icon: Newspaper       },
   { to: '/simulation', label: 'Simulation', Icon: FlaskConical    },
   { to: '/settings',   label: 'Settings',   Icon: Settings        },
+  { to: '/documentation', label: 'Documentation', Icon: BookOpenText },
 ];
 
 export default function Sidebar() {

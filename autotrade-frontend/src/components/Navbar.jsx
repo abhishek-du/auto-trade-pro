@@ -10,6 +10,7 @@ const PAGE_TITLES = {
   '/news':       'News Feed',
   '/simulation': 'Simulation',
   '/settings':   'Settings',
+  '/documentation': 'Documentation',
 };
 
 function LiveClock() {
