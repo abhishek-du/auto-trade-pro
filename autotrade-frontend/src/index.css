@@ -2,28 +2,70 @@
 
 @theme {
   --color-profit:  #10B981;
-  --color-loss:    #EF4444;
-  --color-neutral: #6B7280;
-  --color-accent:  #1A56DB;
-  --color-surface: #0F172A;
-  --color-panel:   #1E293B;
-  --color-border:  #334155;
+  --color-loss:    #F43F5E;
+  --color-neutral: #64748B;
+  --color-accent:  #3B82F6;
+  --color-cyan:    #06B6D4;
+  --color-surface: #080D1A;
+  --color-panel:   #0F1829;
+  --color-card:    #131E30;
+  --color-border:  #1E2D45;
   --color-warn:    #F59E0B;
-  --color-muted:   #64748B;
+  --color-muted:   #4E6280;
 }
 
 body {
-  background-color: #0F172A;
-  color: #F1F5F9;
+  background-color: #080D1A;
+  color: #E2EAF4;
   font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #1E293B; }
-::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #0F1829; }
+::-webkit-scrollbar-thumb { background: #1E2D45; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #2A3F5E; }
 
+/* ── Animations ── */
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.3; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.85); }
 }
-.pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+.pulse-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+.shimmer {
+  background: linear-gradient(90deg, #1E2D45 25%, #2A3F5E 50%, #1E2D45 75%);
+  background-size: 200% auto;
+  animation: shimmer 1.8s linear infinite;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fade-in 0.25s ease-out forwards; }
+
+/* ── Glass card ── */
+.glass {
+  background: rgba(15, 24, 41, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(30, 45, 69, 0.8);
+}
+
+/* ── Glow effects ── */
+.glow-profit { box-shadow: 0 0 20px rgba(16, 185, 129, 0.12); }
+.glow-loss   { box-shadow: 0 0 20px rgba(244, 63,  94, 0.12); }
+.glow-accent { box-shadow: 0 0 20px rgba(59, 130, 246, 0.15); }
+
+/* ── Gradient text ── */
+.gradient-text {
+  background: linear-gradient(135deg, #3B82F6, #06B6D4);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
