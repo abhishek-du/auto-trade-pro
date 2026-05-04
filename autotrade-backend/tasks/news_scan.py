@@ -1,4 +1,4 @@
-# Celery task: fetch news headlines, score sentiment, persist — every 5 min.
+# Celery task: fetch news headlines, score sentiment, persist.
 
 import asyncio
 
@@ -11,21 +11,18 @@ def _run_async(coro):
 
 
 async def _crawl():
-    from db.database import engine, AsyncSessionLocal
     from crawler.news_crawler import run_news_crawl
+    from tasks._db import celery_session
 
-    try:
-        async with AsyncSessionLocal() as session:
-            result = await run_news_crawl(session)
-            await session.commit()
+    async with celery_session() as session:
+        result = await run_news_crawl(session)
+        await session.commit()
 
-        logger.info(
-            f"[news_scan] fetched={result['total_fetched']}  "
-            f"saved={result['total_saved']}  "
-            f"errors={len(result['errors'])}"
-        )
-    finally:
-        await engine.dispose()
+    logger.info(
+        f"[news_scan] fetched={result['total_fetched']}  "
+        f"saved={result['total_saved']}  "
+        f"errors={len(result['errors'])}"
+    )
 
 
 @celery_app.task(name="tasks.news_scan.scan_news")
