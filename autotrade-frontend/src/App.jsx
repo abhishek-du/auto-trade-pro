@@ -8,6 +8,7 @@ import Analytics  from './pages/Analytics';
 import News       from './pages/News';
 import Simulation from './pages/Simulation';
 import Settings   from './pages/Settings';
+import Documentation from './pages/Documentation';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
               <Route path="/news"       element={<News />}       />
               <Route path="/simulation" element={<Simulation />} />
               <Route path="/settings"   element={<Settings />}   />
+              <Route path="/documentation" element={<Documentation />} />
             </Routes>
           </main>
         </div>
