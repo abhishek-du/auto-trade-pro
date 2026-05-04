@@ -18,6 +18,7 @@ except ImportError:
     TALIB_AVAILABLE = False
 
 from utils.config import settings
+from utils.logger import logger
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -163,6 +164,88 @@ def _composite_score(
     return rsi_score + macd_score + bb_score + ema_score + stoch_score
 
 
+def calculate_supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 3.0) -> dict:
+    """Calculate Supertrend line, direction, and score contribution."""
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+
+    if len(df) < period + 1:
+        return {"supertrend": math.nan, "direction": "BEARISH", "score": 0.0}
+
+    high = df["high"].astype(float).values
+    low = df["low"].astype(float).values
+    close = df["close"].astype(float).values
+
+    if TALIB_AVAILABLE:
+        atr = talib.ATR(high, low, close, timeperiod=period)
+    else:
+        prev_close = pd.Series(close).shift(1)
+        tr = pd.concat([
+            pd.Series(high) - pd.Series(low),
+            (pd.Series(high) - prev_close).abs(),
+            (pd.Series(low) - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().values
+
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+
+    final_upper = np.full(len(df), np.nan)
+    final_lower = np.full(len(df), np.nan)
+    supertrend = np.full(len(df), np.nan)
+
+    valid_indices = np.where(~np.isnan(atr))[0]
+    if len(valid_indices) == 0:
+        return {"supertrend": math.nan, "direction": "BEARISH", "score": 0.0}
+
+    start = int(valid_indices[0])
+    final_upper[start] = upper_band[start]
+    final_lower[start] = lower_band[start]
+    supertrend[start] = final_upper[start] if close[start] <= final_upper[start] else final_lower[start]
+
+    for i in range(start + 1, len(df)):
+        if upper_band[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+            final_upper[i] = upper_band[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+
+        if lower_band[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+            final_lower[i] = lower_band[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+
+        if supertrend[i - 1] == final_upper[i - 1]:
+            if close[i] > final_upper[i]:
+                supertrend[i] = final_lower[i]
+            else:
+                supertrend[i] = final_upper[i]
+        elif supertrend[i - 1] == final_lower[i - 1]:
+            if close[i] < final_lower[i]:
+                supertrend[i] = final_upper[i]
+            else:
+                supertrend[i] = final_lower[i]
+        else:
+            supertrend[i] = final_upper[i] if close[i] <= final_upper[i] else final_lower[i]
+
+    value = _safe_last(supertrend)
+    if math.isnan(value):
+        return {"supertrend": math.nan, "direction": "BEARISH", "score": 0.0}
+
+    direction = "BULLISH" if close[-1] > value else "BEARISH"
+    score = 20.0 if direction == "BULLISH" else -20.0
+
+    directions = []
+    for i in range(max(start, len(df) - 3), len(df)):
+        if not math.isnan(supertrend[i]):
+            directions.append("BULLISH" if close[i] > supertrend[i] else "BEARISH")
+    if len(directions) >= 2 and directions[-1] != directions[-2]:
+        score += 5.0 if direction == "BULLISH" else -5.0
+
+    logger.info(f"Supertrend: {direction} | Line: {value:.2f} | Close: {close[-1]:.2f}")
+    return {"supertrend": value, "direction": direction, "score": score}
+
+
 # ── Main dataclass ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -191,6 +274,10 @@ class IndicatorSignals:
     stoch_d: float
     stoch_signal: str                 # 'OVERSOLD' | 'OVERBOUGHT' | 'NEUTRAL'
 
+    supertrend: float
+    supertrend_direction: str          # 'BULLISH' | 'BEARISH'
+    supertrend_score: float
+
     composite_score: float            # -100 … +100
 
     def to_dict(self) -> dict:
@@ -214,6 +301,7 @@ def _nan_bundle() -> IndicatorSignals:
         ema_20=nan,        ema_50=nan,         ema_200=nan,        ema_trend="NEUTRAL",
         atr=nan,
         stoch_k=nan,       stoch_d=nan,        stoch_signal="NEUTRAL",
+        supertrend=nan,    supertrend_direction="BEARISH", supertrend_score=0.0,
         composite_score=0.0,
     )
 
@@ -329,8 +417,14 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
     sk = _safe_last(sk_arr)
     sd = _safe_last(sd_arr)
 
+    # ── Supertrend ────────────────────────────────────────────────────────────
+    supertrend = calculate_supertrend(df)
+
     # ── Composite score ────────────────────────────────────────────────────────
-    score = _composite_score(rsi, cross, bb_pos, trend, sk)
+    score = max(
+        -100.0,
+        min(100.0, _composite_score(rsi, cross, bb_pos, trend, sk) + supertrend["score"]),
+    )
 
     return IndicatorSignals(
         rsi=rsi,               rsi_signal=_rsi_signal(rsi),
@@ -342,6 +436,9 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
         ema_trend=trend,
         atr=atr,
         stoch_k=sk,            stoch_d=sd,            stoch_signal=_stoch_signal(sk, sd),
+        supertrend=supertrend["supertrend"],
+        supertrend_direction=supertrend["direction"],
+        supertrend_score=supertrend["score"],
         composite_score=score,
     )
 
