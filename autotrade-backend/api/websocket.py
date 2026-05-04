@@ -1,0 +1,218 @@
+# WebSocket API — real-time portfolio, trade events, prices, and log tail.
+
+import asyncio
+import json
+from datetime import datetime
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import func, select
+
+from db.database import AsyncSessionLocal
+from db.models import SimulationLog
+from utils.config import settings
+from utils.logger import logger
+
+router = APIRouter(tags=["WebSocket"])
+
+# ── Shared broadcast helper (used by engine loop to push trade events) ────────
+
+class _Broadcaster:
+    def __init__(self):
+        self._channels: dict[str, list[WebSocket]] = {}
+
+    def _get(self, channel: str) -> list[WebSocket]:
+        return self._channels.setdefault(channel, [])
+
+    async def connect(self, channel: str, ws: WebSocket):
+        await ws.accept()
+        self._get(channel).append(ws)
+        logger.debug(f"WS connect  channel={channel}  total={len(self._get(channel))}")
+
+    def disconnect(self, channel: str, ws: WebSocket):
+        conns = self._get(channel)
+        if ws in conns:
+            conns.remove(ws)
+
+    async def push(self, channel: str, payload: dict):
+        dead = []
+        for ws in list(self._get(channel)):
+            try:
+                await ws.send_text(json.dumps(payload, default=str))
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(channel, ws)
+
+
+broadcaster = _Broadcaster()
+
+
+async def broadcast_trade_event(event: str, symbol: str, data: dict):
+    """Called by the engine to push trade events to /ws/trades subscribers."""
+    await broadcaster.push("trades", {
+        "type":      "trade_event",
+        "event":     event,
+        "symbol":    symbol,
+        "timestamp": datetime.utcnow().isoformat(),
+        **data,
+    })
+
+
+# ── /ws/portfolio — wallet snapshot every 10 s ───────────────────────────────
+
+@router.websocket("/portfolio")
+async def ws_portfolio(ws: WebSocket):
+    """Streams wallet balance, equity, unrealised PnL, and open-position count every 10 s."""
+    await broadcaster.connect("portfolio", ws)
+    try:
+        while True:
+            async with AsyncSessionLocal() as session:
+                from paper_trading.position_tracker import PositionTracker
+                from paper_trading.virtual_wallet import VirtualWallet
+
+                summary    = await VirtualWallet.get_summary(session)
+                open_count = await PositionTracker.count_open(session)
+
+            await ws.send_text(json.dumps({
+                "type":           "portfolio_update",
+                "balance":        summary["balance"],
+                "equity":         summary["equity"],
+                "unrealised_pnl": summary["unrealised_pnl"],
+                "realised_pnl":   summary["realised_pnl"],
+                "roi_percent":    summary["roi_percent"],
+                "open_count":     open_count,
+                "timestamp":      datetime.utcnow().isoformat(),
+            }))
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        broadcaster.disconnect("portfolio", ws)
+
+
+# ── /ws/trades — trade open/close events ─────────────────────────────────────
+
+@router.websocket("/trades")
+async def ws_trades(ws: WebSocket):
+    """Streams TRADE_OPENED / TRADE_CLOSED events from the simulation log."""
+    await broadcaster.connect("trades", ws)
+    _TRADE_EVENTS = {"TRADE_OPENED", "TRADE_CLOSED", "TRADE_STOPPED"}
+    last_id = 0
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(func.max(SimulationLog.id)))
+        last_id = int(result.scalar() or 0)
+
+    try:
+        while True:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(SimulationLog)
+                    .where(
+                        SimulationLog.id > last_id,
+                        SimulationLog.event_type.in_(_TRADE_EVENTS),
+                    )
+                    .order_by(SimulationLog.id)
+                    .limit(20)
+                )
+                new_logs = result.scalars().all()
+
+            for log in new_logs:
+                await ws.send_text(json.dumps({
+                    "type":      "trade_event",
+                    "event":     log.event_type,
+                    "symbol":    log.symbol,
+                    "message":   log.message,
+                    "data":      log.data,
+                    "timestamp": log.timestamp.isoformat(),
+                }, default=str))
+                last_id = log.id
+
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        broadcaster.disconnect("trades", ws)
+
+
+# ── /ws/prices — latest prices every 5 s ─────────────────────────────────────
+
+@router.websocket("/prices")
+async def ws_prices(ws: WebSocket):
+    """Streams latest price for every watchlist symbol every 5 s."""
+    await broadcaster.connect("prices", ws)
+    all_symbols = (settings.forex_symbols + settings.stock_symbols)[:15]
+
+    try:
+        while True:
+            from crawler.price_feed import get_latest_price
+
+            prices = []
+            for symbol in all_symbols:
+                price = await get_latest_price(symbol)
+                if price is not None:
+                    prices.append({"symbol": symbol, "price": price})
+
+            await ws.send_text(json.dumps({
+                "type":      "price_update",
+                "prices":    prices,
+                "timestamp": datetime.utcnow().isoformat(),
+            }))
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        broadcaster.disconnect("prices", ws)
+
+
+# ── /ws/logs — real-time simulation log tail ──────────────────────────────────
+
+@router.websocket("/logs")
+async def ws_logs(ws: WebSocket):
+    """Streams SimulationLog entries as they arrive (tail -f style).
+    Sends the 10 most recent entries first, then polls for new ones every second."""
+    await broadcaster.connect("logs", ws)
+    last_id = 0
+
+    async with AsyncSessionLocal() as session:
+        # Seed with last 10 entries
+        result = await session.execute(
+            select(SimulationLog)
+            .order_by(SimulationLog.id.desc())
+            .limit(10)
+        )
+        recent = list(reversed(result.scalars().all()))
+
+        if recent:
+            last_id = recent[-1].id
+            for log in recent:
+                await ws.send_text(json.dumps({
+                    "type":       "log_entry",
+                    "id":         log.id,
+                    "event_type": log.event_type,
+                    "symbol":     log.symbol,
+                    "message":    log.message,
+                    "data":       log.data,
+                    "timestamp":  log.timestamp.isoformat(),
+                }, default=str))
+
+    try:
+        while True:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(SimulationLog)
+                    .where(SimulationLog.id > last_id)
+                    .order_by(SimulationLog.id)
+                    .limit(50)
+                )
+                new_logs = result.scalars().all()
+
+            for log in new_logs:
+                await ws.send_text(json.dumps({
+                    "type":       "log_entry",
+                    "id":         log.id,
+                    "event_type": log.event_type,
+                    "symbol":     log.symbol,
+                    "message":    log.message,
+                    "data":       log.data,
+                    "timestamp":  log.timestamp.isoformat(),
+                }, default=str))
+                last_id = log.id
+
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        broadcaster.disconnect("logs", ws)

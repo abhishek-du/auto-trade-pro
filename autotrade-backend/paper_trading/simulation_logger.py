@@ -1,0 +1,309 @@
+"""Structured simulation event logger for the paper-trading engine.
+
+Writes to the simulation_logs DB table and to loguru simultaneously.
+Every automated decision — open, close, skip, signal, error — gets an entry.
+
+Classes
+-------
+SimulationLogger  — low-level event writer (used internally by trade_simulator).
+SimLogger         — high-level analysis cycle logger and performance reporter.
+"""
+
+from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.models import PaperTrade, SimulationLog, TradeStatus
+from utils.config import settings
+from utils.logger import logger
+
+
+class SimulationLogger:
+    """Stateless logger — all methods are static.
+
+    Each entry maps to one SimulationLog row:
+        event_type  — machine-readable category
+        symbol      — ticker involved (or '—' for system events)
+        message     — human-readable description
+        data        — arbitrary JSON payload for deeper analysis
+    """
+
+    @staticmethod
+    async def log(
+        session: AsyncSession,
+        event_type: str,
+        symbol: str,
+        message: str,
+        data: dict | None = None,
+    ) -> SimulationLog:
+        entry = SimulationLog(
+            event_type=event_type,
+            symbol=symbol,
+            message=message,
+        data=data or {},
+        )
+        session.add(entry)
+        await session.flush()
+
+        logger.info(f"[SIM {event_type:<18}] {symbol:<8} — {message[:120]}")
+        return entry
+
+    # ── Trading decision helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    async def log_signal(
+        session: AsyncSession,
+        symbol: str,
+        signal_type: str,   # "BUY" | "SELL" | "HOLD"
+        final_score: float,
+        confidence: float,
+        pattern: str = "",
+        indicators: dict | None = None,
+        news_sentiment: float = 0.0,
+    ) -> SimulationLog:
+        return await SimulationLogger.log(
+            session, "SIGNAL_GENERATED", symbol,
+            f"{signal_type} signal for {symbol} — score={final_score:.2f} conf={confidence:.1f}%",
+            {
+                "signal_type":    signal_type,
+                "final_score":    final_score,
+                "confidence":     confidence,
+                "pattern":        pattern,
+                "indicators":     indicators or {},
+                "news_sentiment": news_sentiment,
+            },
+        )
+
+    @staticmethod
+    async def log_skip(
+        session: AsyncSession,
+        symbol: str,
+        reason: str,
+        score: float | None = None,
+        data: dict | None = None,
+    ) -> SimulationLog:
+        return await SimulationLogger.log(
+            session, "TRADE_SKIPPED", symbol,
+            f"Skipped {symbol}: {reason}",
+            {"reason": reason, "score": score, **(data or {})},
+        )
+
+    @staticmethod
+    async def log_error(
+        session: AsyncSession,
+        symbol: str,
+        error: str,
+        data: dict | None = None,
+    ) -> SimulationLog:
+        logger.error(f"[SIM ERROR] {symbol}: {error}")
+        return await SimulationLogger.log(
+            session, "ENGINE_ERROR", symbol,
+            f"Error processing {symbol}: {error}",
+            {"error": error, **(data or {})},
+        )
+
+    @staticmethod
+    async def log_price_update(
+        session: AsyncSession,
+        symbol: str,
+        price: float,
+        unrealised_pnl: float,
+    ) -> SimulationLog:
+        return await SimulationLogger.log(
+            session, "PRICE_UPDATE", symbol,
+            f"{symbol} price updated to {price:.4f} — unrealised PnL ${unrealised_pnl:+.2f}",
+            {"price": price, "unrealised_pnl": unrealised_pnl},
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SimLogger — analysis-cycle logging and performance reporting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SimLogger:
+    """High-level logger for analysis cycles and strategy performance.
+
+    Every time the engine analyses a symbol — whether or not a trade is taken —
+    one ANALYSIS_CYCLE record is written.  Over time this gives a complete
+    picture of how the AI has been thinking, including all the rejected signals.
+    """
+
+    # ── Analysis cycle ────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def log_analysis_cycle(
+        session:       AsyncSession,
+        symbol:        str,
+        signal,                         # TradingSignal (import deferred — avoid circular)
+        rejected:      bool,
+        reject_reason: str | None = None,
+    ) -> SimulationLog:
+        """Log every analysis cycle — whether a trade was taken or not.
+
+        Parameters
+        ----------
+        symbol        : Ticker being analysed.
+        signal        : The TradingSignal generated by the engine.
+        rejected      : True if a risk check blocked the trade.
+        reject_reason : Human-readable rejection message (None when trade taken).
+        """
+        trade_taken = not rejected
+        message = (
+            f"{'TRADED' if trade_taken else 'SKIPPED'} "
+            f"{signal.action} {symbol} "
+            f"score={signal.final_score:+.1f} conf={signal.confidence:.0f}%"
+            + (f" — {reject_reason}" if reject_reason else "")
+        )
+        entry = SimulationLog(
+            event_type="ANALYSIS_CYCLE",
+            symbol=symbol,
+            message=message,
+            data={
+                "symbol":          symbol,
+                "action":          signal.action,
+                "confidence":      signal.confidence,
+                "final_score":     signal.final_score,
+                "pattern_score":   signal.pattern_score,
+                "indicator_score": signal.indicator_score,
+                "sentiment_score": signal.sentiment_score,
+                "patterns":        signal.patterns_detected,
+                "reasoning":       signal.reasoning_points,
+                "trade_taken":     trade_taken,
+                "reject_reason":   reject_reason,
+            },
+        )
+        session.add(entry)
+        await session.flush()
+        logger.debug(f"[ANALYSIS_CYCLE] {symbol:<12} {message[:100]}")
+        return entry
+
+    # ── Analysis history ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def get_analysis_history(
+        session: AsyncSession,
+        symbol:  str | None = None,
+        limit:   int = 50,
+    ) -> list[dict]:
+        """Retrieve the analysis log for post-run review.
+
+        Shows how the AI has been thinking about each symbol — every signal
+        generated, whether traded or not, and why.
+
+        Parameters
+        ----------
+        symbol : Filter to a single ticker. None returns all symbols.
+        limit  : Maximum number of records to return (newest first).
+
+        Returns
+        -------
+        list[dict] — each entry contains all fields from the ANALYSIS_CYCLE data
+                     plus ``timestamp`` and ``id`` from the SimulationLog row.
+        """
+        conditions = [SimulationLog.event_type == "ANALYSIS_CYCLE"]
+        if symbol:
+            conditions.append(SimulationLog.symbol == symbol)
+
+        result = await session.execute(
+            select(SimulationLog)
+            .where(and_(*conditions))
+            .order_by(SimulationLog.timestamp.desc())
+            .limit(limit)
+        )
+        rows = result.scalars().all()
+
+        return [
+            {
+                "id":        row.id,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "symbol":    row.symbol,
+                "message":   row.message,
+                **(row.data or {}),
+            }
+            for row in rows
+        ]
+
+    # ── Performance summary ───────────────────────────────────────────────────
+
+    @staticmethod
+    async def get_performance_summary(session: AsyncSession) -> dict:
+        """Return complete paper-trading performance statistics.
+
+        Used to evaluate whether the strategy is profitable before going live.
+
+        Returns
+        -------
+        dict with keys:
+            total_signals_generated   — all ANALYSIS_CYCLE events logged
+            trades_taken              — all PaperTrade records (open + closed)
+            trades_rejected           — signals that were blocked by risk checks
+            win_rate                  — % of closed trades with pnl > 0
+            avg_pnl                   — mean PnL per closed trade
+            best_trade                — highest single-trade PnL
+            worst_trade               — worst single-trade PnL
+            roi_percent               — total realised PnL / initial balance × 100
+            avg_confidence_on_wins    — mean signal_confidence on profitable trades
+            avg_confidence_on_losses  — mean signal_confidence on losing trades
+        """
+        # Total analysis cycles run
+        sig_result = await session.execute(
+            select(func.count(SimulationLog.id)).where(
+                SimulationLog.event_type == "ANALYSIS_CYCLE"
+            )
+        )
+        total_signals = int(sig_result.scalar_one() or 0)
+
+        # All paper trades (any status)
+        all_trades_result = await session.execute(select(func.count(PaperTrade.id)))
+        trades_taken = int(all_trades_result.scalar_one() or 0)
+
+        trades_rejected = max(0, total_signals - trades_taken)
+
+        # Closed trades only (for PnL stats)
+        closed_result = await session.execute(
+            select(PaperTrade).where(
+                PaperTrade.status.in_([TradeStatus.CLOSED, TradeStatus.STOPPED]),
+                PaperTrade.pnl.isnot(None),
+            )
+        )
+        closed = closed_result.scalars().all()
+
+        wins   = [t for t in closed if (t.pnl or 0) > 0]
+        losses = [t for t in closed if (t.pnl or 0) <= 0]
+        n      = len(closed)
+
+        win_rate  = round(len(wins) / n * 100, 2) if n else 0.0
+        avg_pnl   = round(sum(t.pnl for t in closed) / n, 4) if n else 0.0
+        best      = round(max((t.pnl for t in closed), default=0.0), 4)
+        worst     = round(min((t.pnl for t in closed), default=0.0), 4)
+        total_pnl = sum(t.pnl for t in closed)
+        roi       = round(total_pnl / settings.PAPER_TRADING_BALANCE * 100, 4)
+
+        avg_conf_wins   = (
+            round(sum(t.signal_confidence for t in wins) / len(wins), 2)
+            if wins else 0.0
+        )
+        avg_conf_losses = (
+            round(sum(t.signal_confidence for t in losses) / len(losses), 2)
+            if losses else 0.0
+        )
+
+        summary = {
+            "total_signals_generated":  total_signals,
+            "trades_taken":             trades_taken,
+            "trades_rejected":          trades_rejected,
+            "win_rate":                 win_rate,
+            "avg_pnl":                  avg_pnl,
+            "best_trade":               best,
+            "worst_trade":              worst,
+            "roi_percent":              roi,
+            "avg_confidence_on_wins":   avg_conf_wins,
+            "avg_confidence_on_losses": avg_conf_losses,
+        }
+
+        logger.info(
+            f"Performance summary  "
+            f"signals={total_signals}  trades={trades_taken}  "
+            f"win_rate={win_rate:.1f}%  roi={roi:+.2f}%  "
+            f"best=${best:.2f}  worst=${worst:.2f}"
+        )
+        return summary

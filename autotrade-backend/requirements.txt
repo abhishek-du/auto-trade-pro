@@ -1,0 +1,46 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+
+# ── Database (Supabase PostgreSQL via asyncpg) ────────────────────────────────
+sqlalchemy[asyncio]
+asyncpg
+alembic
+
+# ── Task queue (Upstash Redis broker) ────────────────────────────────────────
+celery[redis]
+redis
+
+# ── Data / numerics ───────────────────────────────────────────────────────────
+pandas
+numpy
+httpx
+
+# ── Market data: yfinance primary, Twelve Data secondary ─────────────────────
+yfinance
+
+# ── Technical analysis ────────────────────────────────────────────────────────
+# ta-lib requires the C library — see Dockerfile
+ta-lib
+
+# ── NLP / sentiment (FinBERT) ─────────────────────────────────────────────────
+transformers
+torch
+feedparser
+
+# ── Config / env ──────────────────────────────────────────────────────────────
+pydantic-settings
+python-dotenv
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+loguru
+
+# ── Real-time ─────────────────────────────────────────────────────────────────
+websockets
+
+# ── LLM: Groq (fast inference) + Claude (explanations) ───────────────────────
+groq
+anthropic
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+slowapi

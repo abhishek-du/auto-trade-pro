@@ -1,0 +1,575 @@
+"""Async financial news crawler with FinBERT sentiment analysis.
+
+Sources (in priority order):
+  1. NewsAPI   — requires NEWSAPI_KEY  (optional)
+  2. Finnhub   — requires FINNHUB_KEY  (optional)
+  3. Free RSS  — no key required       (always attempted)
+
+Sentiment is scored by ProsusAI/finbert when torch+transformers are present;
+falls back to a keyword heuristic otherwise.
+"""
+
+import asyncio
+import re
+import time
+from datetime import datetime
+from functools import lru_cache
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.models import NewsItem
+from utils.config import settings
+from utils.logger import logger
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_NEWSAPI_BASE  = "https://newsapi.org/v2/everything"
+_FINNHUB_BASE  = "https://finnhub.io/api/v1"
+_RSS_FEEDS     = [
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US",
+    "https://www.forexfactory.com/news?format=rss",
+]
+_FOREX_CODES   = {"EUR", "USD", "GBP", "JPY", "AUD", "CHF", "CAD"}
+_FINBERT_MODEL = "ProsusAI/finbert"
+
+_POSITIVE_WORDS = [
+    "rally", "gain", "surge", "bullish", "rise", "growth",
+    "profit", "record high",
+]
+_NEGATIVE_WORDS = [
+    "crash", "fall", "drop", "bearish", "decline", "loss",
+    "recession", "plunge",
+]
+
+# FinBERT accuracy guards
+_CONFIDENCE_THRESHOLD = 0.60   # below this → treat as neutral (model is unsure)
+_UNCERTAINTY_PHRASES  = [
+    "ahead of", "before decision", "awaiting", "pending",
+    "holds steady", "flat ahead", "rangebound", "consolidates",
+    "wait-and-see", "cautious ahead", "on hold",
+]
+
+
+def _is_uncertain(headline: str) -> bool:
+    """Return True for wait-and-see headlines FinBERT mis-scores as directional."""
+    lower = headline.lower()
+    return any(phrase in lower for phrase in _UNCERTAINTY_PHRASES)
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _struct_to_dt(t) -> datetime | None:
+    """Convert a feedparser time.struct_time to a naive UTC datetime."""
+    if t is None:
+        return None
+    try:
+        return datetime(*t[:6])
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 1 — News Fetching
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def fetch_newsapi_headlines(
+    query: str = "forex stock market trading",
+) -> list[dict]:
+    """Fetch up to 20 English headlines from NewsAPI /v2/everything.
+
+    Returns [] silently when NEWSAPI_KEY is absent — never raises.
+    Each item: {headline, source, url, published_at}
+    """
+    if not settings.newsapi_available:
+        logger.warning("NEWSAPI_KEY not configured — skipping NewsAPI fetch")
+        return []
+
+    params = {
+        "q":        query,
+        "language": "en",
+        "sortBy":   "publishedAt",
+        "pageSize": 20,
+        "apiKey":   settings.NEWSAPI_KEY,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(_NEWSAPI_BASE, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        articles = data.get("articles", [])
+        result = [
+            {
+                "headline":     a.get("title", "").strip(),
+                "source":       (a.get("source") or {}).get("name", "NewsAPI"),
+                "url":          a.get("url"),
+                "published_at": _parse_dt(a.get("publishedAt")),
+            }
+            for a in articles
+            if a.get("title") and a["title"] != "[Removed]"
+        ]
+        logger.info(f"NewsAPI ✓  {len(result)} headlines  query={query!r}")
+        return result
+
+    except Exception as exc:
+        logger.error(f"NewsAPI fetch failed: {exc}")
+        return []
+
+
+async def fetch_finnhub_news(category: str = "general") -> list[dict]:
+    """Fetch general market news from Finnhub /api/v1/news.
+
+    Returns [] silently when FINNHUB_KEY is absent — never raises.
+    Each item: {headline, source, url, published_at}
+    """
+    if not settings.finnhub_available:
+        logger.warning("FINNHUB_KEY not configured — skipping Finnhub fetch")
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{_FINNHUB_BASE}/news",
+                params={"category": category, "token": settings.FINNHUB_KEY},
+            )
+            resp.raise_for_status()
+            items = resp.json()
+
+        result = [
+            {
+                "headline":     item.get("headline", "").strip(),
+                "source":       item.get("source", "Finnhub"),
+                "url":          item.get("url"),
+                "published_at": (
+                    datetime.utcfromtimestamp(item["datetime"])
+                    if item.get("datetime") else None
+                ),
+            }
+            for item in items
+            if item.get("headline")
+        ]
+        logger.info(f"Finnhub ✓  {len(result)} headlines  category={category!r}")
+        return result
+
+    except Exception as exc:
+        logger.error(f"Finnhub news fetch failed: {exc}")
+        return []
+
+
+async def fetch_free_rss_news() -> list[dict]:
+    """Fetch headlines from free RSS feeds — no API key required.
+
+    Uses feedparser (synchronous) dispatched to a thread-pool executor.
+    Each item: {headline, source, url, published_at}
+    """
+    import feedparser  # noqa: PLC0415  (optional dep, checked at runtime)
+
+    def _parse_feed(url: str) -> list[dict]:
+        try:
+            feed = feedparser.parse(url)
+            source = feed.feed.get("title", url.split("/")[2])
+            rows = []
+            for entry in feed.entries:
+                title = (entry.get("title") or "").strip()
+                if not title:
+                    continue
+                rows.append({
+                    "headline":     title,
+                    "source":       source,
+                    "url":          entry.get("link"),
+                    "published_at": _struct_to_dt(entry.get("published_parsed")),
+                })
+            return rows
+        except Exception as exc:
+            logger.error(f"RSS parse failed [{url}]: {exc}")
+            return []
+
+    loop = asyncio.get_event_loop()
+    all_rows: list[dict] = []
+    for feed_url in _RSS_FEEDS:
+        rows = await loop.run_in_executor(None, _parse_feed, feed_url)
+        all_rows.extend(rows)
+        if rows:
+            logger.info(f"RSS ✓  {len(rows)} headlines  feed={feed_url.split('?')[0]}")
+
+    return all_rows
+
+
+def extract_tickers_from_headline(headline: str) -> list[str]:
+    """Return stock tickers and forex currency codes found in a headline.
+
+    Matches whole words only (case-insensitive for currency codes,
+    case-sensitive upper-case for stock tickers).
+    """
+    found: list[str] = []
+    words = set(re.findall(r"\b[A-Z]{2,6}\b", headline))
+
+    # Stock tickers — exact upper-case word match against watchlist
+    for sym in settings.stock_symbols:
+        if sym.upper() in words:
+            found.append(sym)
+
+    # Forex currency codes
+    for code in _FOREX_CODES:
+        if re.search(rf"\b{code}\b", headline, re.IGNORECASE):
+            found.append(code)
+
+    return list(dict.fromkeys(found))  # preserve order, deduplicate
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 2 — FinBERT Sentiment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@lru_cache(maxsize=1)
+def _load_finbert_pipeline():
+    """Load ProsusAI/finbert once per process, cached via lru_cache."""
+    try:
+        from transformers import pipeline as hf_pipeline
+        logger.info(f"Loading FinBERT '{_FINBERT_MODEL}' — first call may take a moment")
+        pipe = hf_pipeline(
+            "text-classification",
+            model=_FINBERT_MODEL,
+            tokenizer=_FINBERT_MODEL,
+            truncation=True,
+            max_length=512,
+        )
+        logger.info("FinBERT loaded successfully")
+        return pipe
+    except Exception as exc:
+        logger.warning(f"FinBERT unavailable ({exc}) — using keyword fallback")
+        return None
+
+
+def _keyword_score(headline: str) -> dict:
+    """Keyword heuristic fallback when torch/transformers are unavailable."""
+    text   = headline.lower()
+    words  = re.findall(r"\b\w+\b", text)
+    n      = max(len(words), 1)
+
+    pos_count = sum(1 for w in _POSITIVE_WORDS if w in text)
+    neg_count = sum(1 for w in _NEGATIVE_WORDS if w in text)
+
+    raw   = (pos_count - neg_count) / n
+    score = max(-1.0, min(1.0, raw))
+
+    if score > 0.01:
+        sentiment = "positive"
+    elif score < -0.01:
+        sentiment = "negative"
+    else:
+        sentiment = "neutral"
+
+    return {
+        "sentiment":  sentiment,
+        "score":      round(score, 4),
+        "confidence": round(abs(score), 4),
+    }
+
+
+class SentimentAnalyser:
+    """FinBERT-based financial sentiment analyser with keyword fallback.
+
+    The model is loaded once at instantiation and shared across all calls
+    via an lru_cache on the loader function.
+    """
+
+    def __init__(self) -> None:
+        self._pipe = _load_finbert_pipeline()
+        self._available = self._pipe is not None
+
+    def analyse(self, headline: str) -> dict:
+        """Score a single headline.
+
+        Returns:
+            sentiment   — 'positive' | 'negative' | 'neutral'
+            score       — float in [-1, +1]
+            confidence  — raw model probability [0, 1]
+
+        Two accuracy guards are applied:
+          1. Uncertainty pre-filter — wait-and-see headlines are forced to
+             neutral before calling FinBERT (model mis-scores these as directional).
+          2. Confidence threshold — calls below 60% confidence are returned as
+             neutral; low-confidence predictions are worse than no prediction.
+        """
+        if not headline.strip():
+            return {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
+
+        if not self._available:
+            return _keyword_score(headline)
+
+        # Guard 1: uncertainty/consolidation headlines → neutral
+        if _is_uncertain(headline):
+            return {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}
+
+        try:
+            result     = self._pipe(headline[:512])[0]
+            label      = result["label"].lower()
+            confidence = float(result["score"])
+
+            # Guard 2: low-confidence calls are unreliable
+            if confidence < _CONFIDENCE_THRESHOLD:
+                return {"sentiment": "neutral", "score": 0.0, "confidence": round(confidence, 4)}
+
+            if label == "positive":
+                score = confidence
+            elif label == "negative":
+                score = -confidence
+            else:
+                score = 0.0
+
+            return {
+                "sentiment":  label,
+                "score":      round(score, 4),
+                "confidence": round(confidence, 4),
+            }
+        except Exception as exc:
+            logger.error(f"FinBERT inference failed: {exc}")
+            return {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
+
+    def analyse_batch(self, headlines: list[str]) -> list[dict]:
+        """Score multiple headlines, processing up to 8 at a time.
+
+        Applies the same two accuracy guards as analyse():
+          - Uncertainty pre-filter runs before FinBERT to skip wait-and-see headlines.
+          - Confidence threshold converts low-confidence results to neutral.
+
+        Returns one result dict per input headline (same order).
+        """
+        if not headlines:
+            return []
+
+        if not self._available:
+            return [_keyword_score(h) for h in headlines]
+
+        results: list[dict] = []
+        chunk_size = 8
+
+        for i in range(0, len(headlines), chunk_size):
+            chunk_headlines = headlines[i : i + chunk_size]
+
+            # Pre-classify: slot each headline as pre-decided neutral or FinBERT-bound
+            slot_results: list[dict | None] = []
+            finbert_jobs: list[tuple[int, str]] = []  # (slot index, truncated text)
+
+            for h in chunk_headlines:
+                if not h.strip():
+                    slot_results.append(
+                        {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
+                    )
+                elif _is_uncertain(h):
+                    slot_results.append(
+                        {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}
+                    )
+                else:
+                    slot_results.append(None)
+                    finbert_jobs.append((len(slot_results) - 1, h[:512]))
+
+            # Run FinBERT only on the non-pre-decided headlines
+            if finbert_jobs:
+                try:
+                    batch_out = self._pipe([text for _, text in finbert_jobs])
+                    for (slot_idx, _), item in zip(finbert_jobs, batch_out):
+                        label      = item["label"].lower()
+                        confidence = float(item["score"])
+                        if confidence < _CONFIDENCE_THRESHOLD:
+                            slot_results[slot_idx] = {
+                                "sentiment": "neutral",
+                                "score":     0.0,
+                                "confidence": round(confidence, 4),
+                            }
+                        else:
+                            score = (
+                                confidence  if label == "positive" else
+                                -confidence if label == "negative" else 0.0
+                            )
+                            slot_results[slot_idx] = {
+                                "sentiment":  label,
+                                "score":      round(score, 4),
+                                "confidence": round(confidence, 4),
+                            }
+                except Exception as exc:
+                    logger.error(f"FinBERT batch inference failed: {exc}")
+                    for slot_idx, _ in finbert_jobs:
+                        slot_results[slot_idx] = {
+                            "sentiment": "neutral", "score": 0.0, "confidence": 0.0
+                        }
+
+            results.extend(slot_results)  # type: ignore[arg-type]
+
+        return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 3 — Main crawl function
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def run_news_crawl(session: AsyncSession) -> dict:
+    """Fetch news from all sources, score sentiment, and persist to DB.
+
+    Deduplicates within the batch (by URL) and against the DB before inserting.
+
+    Returns:
+        total_fetched   — raw headline count across all sources
+        total_saved     — new rows inserted into news_items
+        sources         — per-source headline counts
+        errors          — list of "<source>: <reason>" strings
+    """
+    errors: list[str] = []
+
+    # ── Fetch from all sources ────────────────────────────────────────────────
+    newsapi_rows, finnhub_rows, rss_rows = await asyncio.gather(
+        fetch_newsapi_headlines(),
+        fetch_finnhub_news(),
+        fetch_free_rss_news(),
+        return_exceptions=True,
+    )
+
+    def _unwrap(name: str, result) -> list[dict]:
+        if isinstance(result, Exception):
+            errors.append(f"{name}: {result}")
+            logger.error(f"News source {name} raised: {result}")
+            return []
+        return result  # type: ignore[return-value]
+
+    newsapi_rows = _unwrap("newsapi", newsapi_rows)
+    finnhub_rows = _unwrap("finnhub", finnhub_rows)
+    rss_rows     = _unwrap("rss",     rss_rows)
+
+    source_counts = {
+        "newsapi": len(newsapi_rows),
+        "finnhub": len(finnhub_rows),
+        "rss":     len(rss_rows),
+    }
+
+    all_raw: list[dict] = newsapi_rows + finnhub_rows + rss_rows
+    total_fetched = len(all_raw)
+
+    # ── Deduplicate within batch by URL ───────────────────────────────────────
+    seen_urls: set[str] = set()
+    deduped: list[dict] = []
+    for item in all_raw:
+        url = item.get("url") or ""
+        key = url.strip().lower()
+        if key and key in seen_urls:
+            continue
+        if key:
+            seen_urls.add(key)
+        deduped.append(item)
+
+    # ── Filter against DB (skip already-saved URLs) ───────────────────────────
+    batch_urls = [item["url"] for item in deduped if item.get("url")]
+    if batch_urls:
+        existing_result = await session.execute(
+            select(NewsItem.url).where(NewsItem.url.in_(batch_urls))
+        )
+        existing_urls = set(existing_result.scalars().all())
+    else:
+        existing_urls = set()
+
+    new_items = [
+        item for item in deduped
+        if item.get("url") not in existing_urls
+    ]
+
+    if not new_items:
+        logger.info(
+            f"━━ News crawl DONE ━━  fetched={total_fetched}  "
+            f"saved=0 (all duplicates)  sources={source_counts}"
+        )
+        return {
+            "total_fetched": total_fetched,
+            "total_saved":   0,
+            "sources":       source_counts,
+            "errors":        errors,
+        }
+
+    # ── Run sentiment in one batch ────────────────────────────────────────────
+    analyser   = SentimentAnalyser()
+    headlines  = [item["headline"] for item in new_items]
+    sentiments = analyser.analyse_batch(headlines)
+
+    # ── Persist to DB ─────────────────────────────────────────────────────────
+    total_saved = 0
+    for item, sent in zip(new_items, sentiments):
+        tickers = extract_tickers_from_headline(item["headline"])
+        row = NewsItem(
+            headline=item["headline"],
+            source=item["source"],
+            url=item.get("url"),
+            sentiment=sent["sentiment"],
+            score=sent["score"],
+            tickers_affected=tickers or None,
+            published_at=item.get("published_at"),
+        )
+        session.add(row)
+        total_saved += 1
+
+    await session.flush()
+
+    logger.info(
+        f"━━ News crawl DONE ━━  fetched={total_fetched}  "
+        f"saved={total_saved}  sources={source_counts}  errors={len(errors)}"
+    )
+    return {
+        "total_fetched": total_fetched,
+        "total_saved":   total_saved,
+        "sources":       source_counts,
+        "errors":        errors,
+    }
+
+
+async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
+    """Return the average sentiment score for the last 10 news items mentioning symbol.
+
+    Checks both tickers_affected (JSON array) and the raw headline text.
+    Returns 0.0 when no relevant news is found.
+    """
+    # Fetch a recent window and filter in Python — avoids JSON operator dialect differences
+    result = await session.execute(
+        select(NewsItem)
+        .where(NewsItem.tickers_affected.isnot(None))
+        .order_by(NewsItem.crawled_at.desc())
+        .limit(200)
+    )
+    candidates = result.scalars().all()
+
+    scores: list[float] = []
+    for news in candidates:
+        if symbol in (news.tickers_affected or []):
+            scores.append(news.score)
+        if len(scores) >= 10:
+            break
+
+    if not scores:
+        # Fallback: headline text search in the same recent window
+        result2 = await session.execute(
+            select(NewsItem)
+            .order_by(NewsItem.crawled_at.desc())
+            .limit(200)
+        )
+        for news in result2.scalars().all():
+            if re.search(rf"\b{re.escape(symbol)}\b", news.headline, re.IGNORECASE):
+                scores.append(news.score)
+            if len(scores) >= 10:
+                break
+
+    if not scores:
+        return 0.0
+
+    avg = sum(scores) / len(scores)
+    logger.debug(
+        f"Market sentiment  {symbol}  n={len(scores)}  avg={avg:+.4f}"
+    )
+    return round(avg, 4)
