@@ -346,6 +346,219 @@ def calculate_vwap(df: pd.DataFrame) -> dict:
     }
 
 
+def calculate_ichimoku(df: pd.DataFrame) -> dict:
+    """Ichimoku Cloud with 5-level signal (STRONG_BUY → STRONG_SELL).
+
+    Requires ≥52 bars for Senkou Span B; ≥78 for the cloud at the current bar
+    (Senkou B shifted 26 forward). The pd.notna guard catches insufficient data.
+    """
+    nan = math.nan
+    _empty = {
+        "ichimoku_tenkan": nan, "ichimoku_kijun": nan,
+        "ichimoku_senkou_a": nan, "ichimoku_senkou_b": nan,
+        "ichimoku_signal": "NEUTRAL", "ichimoku_score": 0.0,
+    }
+
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+
+    if len(df) < 52:
+        return _empty
+
+    high_s  = df["high"].astype(float)
+    low_s   = df["low"].astype(float)
+    close_s = df["close"].astype(float)
+
+    tenkan   = (high_s.rolling(9).max()  + low_s.rolling(9).min())  / 2
+    kijun    = (high_s.rolling(26).max() + low_s.rolling(26).min()) / 2
+    # .shift(26): senkou_a.iloc[-1] = (tenkan.iloc[-27] + kijun.iloc[-27]) / 2 — current cloud
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    senkou_b = ((high_s.rolling(52).max() + low_s.rolling(52).min()) / 2).shift(26)
+
+    def _iloc_float(s: pd.Series) -> float:
+        v = s.iloc[-1]
+        return float(v) if pd.notna(v) else nan
+
+    tk_now = _iloc_float(tenkan)
+    kj_now = _iloc_float(kijun)
+    sa_now = _iloc_float(senkou_a)
+    sb_now = _iloc_float(senkou_b)
+
+    if any(math.isnan(v) for v in (tk_now, kj_now, sa_now, sb_now)):
+        return _empty
+
+    price_now    = float(close_s.iloc[-1])
+    chikou_close = float(close_s.iloc[-27]) if len(close_s) > 26 else price_now
+    cloud_top    = max(sa_now, sb_now)
+    cloud_bot    = min(sa_now, sb_now)
+
+    bull_conditions = [
+        price_now > cloud_top,       # price above cloud
+        tk_now > kj_now,             # tenkan above kijun (momentum)
+        sa_now > sb_now,             # bullish (green) cloud
+        price_now > chikou_close,    # chikou: current close above price 26 bars ago
+    ]
+    bear_conditions = [
+        price_now < cloud_bot,
+        tk_now < kj_now,
+        sa_now < sb_now,
+        price_now < chikou_close,
+    ]
+
+    bull_count = sum(bull_conditions)
+    bear_count = sum(bear_conditions)
+
+    if   bull_count == 4: signal, score = "STRONG_BUY",   35.0
+    elif bull_count >= 3: signal, score = "BUY",           20.0
+    elif bear_count == 4: signal, score = "STRONG_SELL",  -35.0
+    elif bear_count >= 3: signal, score = "SELL",         -20.0
+    else:                 signal, score = "NEUTRAL",        0.0
+
+    logger.info(
+        f"Ichimoku: {signal}  │  T: {tk_now:.2f}  K: {kj_now:.2f}  "
+        f"Cloud [{cloud_bot:.2f}, {cloud_top:.2f}]  │  Price: {price_now:.2f}"
+    )
+    return {
+        "ichimoku_tenkan": tk_now, "ichimoku_kijun": kj_now,
+        "ichimoku_senkou_a": sa_now, "ichimoku_senkou_b": sb_now,
+        "ichimoku_signal": signal, "ichimoku_score": score,
+    }
+
+
+def calculate_adx(df: pd.DataFrame) -> dict:
+    """ADX trend strength with +DI/-DI directional indicators."""
+    nan = math.nan
+    _empty = {
+        "adx": nan, "adx_plus_di": nan, "adx_minus_di": nan,
+        "adx_trend_strength": "NONE", "adx_direction": "BEARISH", "adx_score": 0.0,
+    }
+
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+
+    if len(df) < 28:
+        return _empty
+
+    high  = df["high"].astype(float).values
+    low   = df["low"].astype(float).values
+    close = df["close"].astype(float).values
+
+    if TALIB_AVAILABLE:
+        adx_arr      = talib.ADX(high, low, close, timeperiod=14)
+        plus_di_arr  = talib.PLUS_DI(high, low, close, timeperiod=14)
+        minus_di_arr = talib.MINUS_DI(high, low, close, timeperiod=14)
+    else:
+        s_h, s_l, s_c = pd.Series(high), pd.Series(low), pd.Series(close)
+        prev_h = s_h.shift(1).bfill()
+        prev_l = s_l.shift(1).bfill()
+        prev_c = s_c.shift(1).bfill()
+
+        tr = pd.concat([
+            s_h - s_l,
+            (s_h - prev_c).abs(),
+            (s_l - prev_c).abs(),
+        ], axis=1).max(axis=1)
+        up, down = s_h - prev_h, prev_l - s_l
+        plus_dm  = pd.Series(np.where((up > down) & (up > 0),   up.values,   0.0))
+        minus_dm = pd.Series(np.where((down > up) & (down > 0), down.values, 0.0))
+
+        alpha = 1.0 / 14
+        smt_tr  = tr.ewm(alpha=alpha, adjust=False).mean()
+        smt_pdm = plus_dm.ewm(alpha=alpha, adjust=False).mean()
+        smt_mdm = minus_dm.ewm(alpha=alpha, adjust=False).mean()
+
+        plus_di_s  = 100.0 * smt_pdm / smt_tr
+        minus_di_s = 100.0 * smt_mdm / smt_tr
+        dx_s = (100.0 * (plus_di_s - minus_di_s).abs()
+                / (plus_di_s + minus_di_s + 1e-10))
+        adx_s = dx_s.ewm(alpha=alpha, adjust=False).mean()
+
+        adx_arr      = adx_s.values
+        plus_di_arr  = plus_di_s.values
+        minus_di_arr = minus_di_s.values
+
+    adx_val      = _safe_last(adx_arr)
+    plus_di_val  = _safe_last(plus_di_arr)
+    minus_di_val = _safe_last(minus_di_arr)
+
+    if math.isnan(adx_val):
+        return _empty
+
+    if adx_val > 25:
+        strength = "STRONG"
+    elif adx_val > 15:
+        strength = "WEAK"
+    else:
+        strength = "NONE"
+
+    direction = "BULLISH" if plus_di_val > minus_di_val else "BEARISH"
+
+    if   strength == "STRONG": score = 25.0 if direction == "BULLISH" else -25.0
+    elif strength == "WEAK":   score = 12.0 if direction == "BULLISH" else -12.0
+    else:                      score = 0.0
+
+    logger.info(
+        f"ADX: {adx_val:.1f} ({strength})  │  "
+        f"+DI: {plus_di_val:.1f}  -DI: {minus_di_val:.1f}  │  {direction}"
+    )
+    return {
+        "adx": adx_val, "adx_plus_di": plus_di_val, "adx_minus_di": minus_di_val,
+        "adx_trend_strength": strength, "adx_direction": direction, "adx_score": score,
+    }
+
+
+_RIBBON_PERIODS = (5, 8, 13, 21, 34, 55, 89, 144)
+
+
+def calculate_ema_ribbon(df: pd.DataFrame) -> dict:
+    """8-period Fibonacci EMA ribbon: spread/compressed state with score."""
+    nan = math.nan
+    _empty = {
+        "ema_ribbon": [nan] * 8, "ema_ribbon_state": "COMPRESSED", "ribbon_score": 0.0,
+    }
+
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+
+    if len(df) < 144:
+        return _empty
+
+    close = df["close"].astype(float).values
+    price = float(close[-1])
+
+    emas: list[float] = []
+    for p in _RIBBON_PERIODS:
+        if TALIB_AVAILABLE:
+            val = _safe_last(talib.EMA(close, timeperiod=p))
+        else:
+            val = _safe_last(pd.Series(close).ewm(span=p, adjust=False).mean().values)
+        emas.append(val)
+
+    if any(math.isnan(e) for e in emas):
+        return _empty
+
+    # BULLISH_SPREAD: fastest → slowest strictly decreasing, price above fastest
+    is_bullish    = all(emas[i] > emas[i + 1] for i in range(7)) and price > emas[0]
+    # BEARISH_SPREAD: fastest → slowest strictly increasing, price below fastest
+    is_bearish    = all(emas[i] < emas[i + 1] for i in range(7)) and price < emas[0]
+    # COMPRESSED: all 8 EMAs span ≤2% of the median EMA
+    ema_range     = max(emas) - min(emas)
+    median_ema    = sorted(emas)[3]
+    is_compressed = (median_ema != 0) and (ema_range / abs(median_ema) * 100 <= 2.0)
+
+    if   is_bullish:    state, score = "BULLISH_SPREAD",  20.0
+    elif is_bearish:    state, score = "BEARISH_SPREAD", -20.0
+    elif is_compressed: state, score = "COMPRESSED",      0.0
+    else:               state, score = "TRANSITIONAL",    0.0
+
+    logger.info(
+        f"EMA Ribbon: {state}  │  "
+        f"EMA5={emas[0]:.2f}  EMA21={emas[3]:.2f}  EMA89={emas[6]:.2f}  EMA144={emas[7]:.2f}  │  "
+        f"Price={price:.2f}"
+    )
+    return {"ema_ribbon": emas, "ema_ribbon_state": state, "ribbon_score": score}
+
+
 # ── Main dataclass ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -386,6 +599,23 @@ class IndicatorSignals:
     vwap_position: str                 # 'ABOVE_VWAP' | 'NEAR_VWAP' | 'BELOW_VWAP'
     vwap_score: float
 
+    ichimoku_tenkan: float
+    ichimoku_kijun: float
+    ichimoku_senkou_a: float
+    ichimoku_senkou_b: float
+    ichimoku_signal: str               # 'STRONG_BUY'|'BUY'|'NEUTRAL'|'SELL'|'STRONG_SELL'
+    ichimoku_score: float
+
+    adx: float
+    adx_plus_di: float
+    adx_minus_di: float
+    adx_trend_strength: str            # 'STRONG' | 'WEAK' | 'NONE'
+    adx_direction: str                 # 'BULLISH' | 'BEARISH'
+    adx_score: float
+
+    ema_ribbon: list[float]            # EMA values for periods [5,8,13,21,34,55,89,144]
+    ema_ribbon_state: str              # 'BULLISH_SPREAD'|'BEARISH_SPREAD'|'COMPRESSED'|'TRANSITIONAL'
+
     composite_score: float            # -100 … +100
 
     def to_dict(self) -> dict:
@@ -393,6 +623,8 @@ class IndicatorSignals:
         def _clean(v):
             if isinstance(v, float) and math.isnan(v):
                 return None
+            if isinstance(v, list):
+                return [None if (isinstance(x, float) and math.isnan(x)) else x for x in v]
             return v
 
         return {k: _clean(v) for k, v in self.__dict__.items()}
@@ -413,6 +645,12 @@ def _nan_bundle() -> IndicatorSignals:
         vwap=nan,          vwap_upper_1=nan,  vwap_upper_2=nan,
         vwap_lower_1=nan,  vwap_lower_2=nan,
         vwap_position="NEAR_VWAP",             vwap_score=0.0,
+        ichimoku_tenkan=nan,   ichimoku_kijun=nan,
+        ichimoku_senkou_a=nan, ichimoku_senkou_b=nan,
+        ichimoku_signal="NEUTRAL",             ichimoku_score=0.0,
+        adx=nan,           adx_plus_di=nan,   adx_minus_di=nan,
+        adx_trend_strength="NONE", adx_direction="BEARISH", adx_score=0.0,
+        ema_ribbon=[nan] * 8,  ema_ribbon_state="COMPRESSED",
         composite_score=0.0,
     )
 
@@ -534,13 +772,25 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
     # ── VWAP ──────────────────────────────────────────────────────────────────
     vwap = calculate_vwap(df)
 
+    # ── Ichimoku Cloud ────────────────────────────────────────────────────────
+    ichimoku = calculate_ichimoku(df)
+
+    # ── ADX ───────────────────────────────────────────────────────────────────
+    adx = calculate_adx(df)
+
+    # ── EMA Ribbon ────────────────────────────────────────────────────────────
+    ribbon = calculate_ema_ribbon(df)
+
     # ── Composite score ────────────────────────────────────────────────────────
     score = max(
         -100.0,
         min(100.0,
             _composite_score(rsi, cross, bb_pos, trend, sk)
             + supertrend["score"]
-            + vwap["vwap_score"]),
+            + vwap["vwap_score"]
+            + ichimoku["ichimoku_score"]
+            + adx["adx_score"]
+            + ribbon["ribbon_score"]),
     )
 
     return IndicatorSignals(
@@ -563,6 +813,20 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
         vwap_lower_2=vwap["vwap_lower_2"],
         vwap_position=vwap["vwap_position"],
         vwap_score=vwap["vwap_score"],
+        ichimoku_tenkan=ichimoku["ichimoku_tenkan"],
+        ichimoku_kijun=ichimoku["ichimoku_kijun"],
+        ichimoku_senkou_a=ichimoku["ichimoku_senkou_a"],
+        ichimoku_senkou_b=ichimoku["ichimoku_senkou_b"],
+        ichimoku_signal=ichimoku["ichimoku_signal"],
+        ichimoku_score=ichimoku["ichimoku_score"],
+        adx=adx["adx"],
+        adx_plus_di=adx["adx_plus_di"],
+        adx_minus_di=adx["adx_minus_di"],
+        adx_trend_strength=adx["adx_trend_strength"],
+        adx_direction=adx["adx_direction"],
+        adx_score=adx["adx_score"],
+        ema_ribbon=ribbon["ema_ribbon"],
+        ema_ribbon_state=ribbon["ema_ribbon_state"],
         composite_score=score,
     )
 
