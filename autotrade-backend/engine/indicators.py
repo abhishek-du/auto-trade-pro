@@ -246,6 +246,106 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 
     return {"supertrend": value, "direction": direction, "score": score}
 
 
+def calculate_vwap(df: pd.DataFrame) -> dict:
+    """VWAP with ±1σ/±2σ bands, reset per trading day (IST).
+
+    Only meaningful on intraday bars (≤30 min interval).  Returns score=0
+    with a warning for daily/weekly data or when no timestamp column exists.
+    """
+    nan = math.nan
+    _empty = {
+        "vwap": nan, "vwap_upper_1": nan, "vwap_upper_2": nan,
+        "vwap_lower_1": nan, "vwap_lower_2": nan,
+        "vwap_position": "NEAR_VWAP", "vwap_score": 0.0,
+    }
+
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+
+    if "timestamp" not in df.columns:
+        logger.debug("calculate_vwap: no timestamp column — VWAP skipped")
+        return _empty
+
+    ts = pd.to_datetime(df["timestamp"])
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    ts_ist = ts.dt.tz_convert("Asia/Kolkata")
+
+    # Guard: only meaningful on ≤30-min intraday bars
+    if len(ts_ist) >= 2:
+        median_min = ts_ist.diff().dropna().median().total_seconds() / 60
+        if median_min > 30:
+            logger.warning(
+                f"calculate_vwap: bar interval ~{median_min:.0f} min — "
+                "VWAP is not meaningful on daily/weekly data; score set to 0"
+            )
+            return _empty
+
+    df["_date"]    = ts_ist.dt.date
+    df["_typical"] = (
+        df["high"].astype(float) + df["low"].astype(float) + df["close"].astype(float)
+    ) / 3
+
+    # Cumulative VWAP per calendar day — resets at midnight IST (≈ 9:15 AM IST session open)
+    vwap_pieces: list[pd.Series] = []
+    for _, grp in df.groupby("_date", sort=False):
+        tp_vol  = (grp["_typical"] * grp["volume"].astype(float)).cumsum()
+        cum_vol = grp["volume"].astype(float).cumsum().replace(0, np.nan)
+        vwap_pieces.append(tp_vol / cum_vol)
+    df["_vwap"] = pd.concat(vwap_pieces)
+
+    # ±1σ / ±2σ bands using rolling 20-bar deviation
+    df["_dev"]     = df["_typical"] - df["_vwap"]
+    rolling_std    = df["_dev"].rolling(window=20, min_periods=2).std()
+    df["_upper_1"] = df["_vwap"] + rolling_std
+    df["_upper_2"] = df["_vwap"] + 2 * rolling_std
+    df["_lower_1"] = df["_vwap"] - rolling_std
+    df["_lower_2"] = df["_vwap"] - 2 * rolling_std
+
+    last_close   = float(df["close"].iloc[-1])
+    last_vwap    = _safe_last(df["_vwap"].values)
+    last_upper_1 = _safe_last(df["_upper_1"].values)
+    last_upper_2 = _safe_last(df["_upper_2"].values)
+    last_lower_1 = _safe_last(df["_lower_1"].values)
+    last_lower_2 = _safe_last(df["_lower_2"].values)
+
+    if any(math.isnan(v) for v in (last_vwap, last_upper_1, last_lower_1)):
+        return _empty
+
+    # Collapsed bands (zero std) — not enough price spread to classify position
+    if last_upper_1 == last_lower_1:
+        return {**_empty, "vwap": last_vwap, "vwap_upper_1": last_upper_1,
+                "vwap_upper_2": last_upper_2, "vwap_lower_1": last_lower_1,
+                "vwap_lower_2": last_lower_2}
+
+    # Position and score
+    if last_close >= last_upper_2:
+        position, score = "ABOVE_VWAP", -25.0
+    elif last_close > last_upper_1:
+        position, score = "ABOVE_VWAP", -10.0
+    elif last_close <= last_lower_2:
+        position, score = "BELOW_VWAP",  25.0
+    elif last_close < last_lower_1:
+        position, score = "BELOW_VWAP",  15.0
+    else:
+        position, score = "NEAR_VWAP",    0.0
+
+    logger.info(
+        f"VWAP: {last_vwap:.2f}  │  Close: {last_close:.2f}  │  "
+        f"±1σ [{last_lower_1:.2f}, {last_upper_1:.2f}]  "
+        f"±2σ [{last_lower_2:.2f}, {last_upper_2:.2f}]  │  {position}"
+    )
+    return {
+        "vwap": last_vwap,
+        "vwap_upper_1": last_upper_1,
+        "vwap_upper_2": last_upper_2,
+        "vwap_lower_1": last_lower_1,
+        "vwap_lower_2": last_lower_2,
+        "vwap_position": position,
+        "vwap_score": score,
+    }
+
+
 # ── Main dataclass ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -278,6 +378,14 @@ class IndicatorSignals:
     supertrend_direction: str          # 'BULLISH' | 'BEARISH'
     supertrend_score: float
 
+    vwap: float
+    vwap_upper_1: float                # +1 standard deviation band
+    vwap_upper_2: float                # +2 standard deviations band
+    vwap_lower_1: float                # -1 standard deviation band
+    vwap_lower_2: float                # -2 standard deviations band
+    vwap_position: str                 # 'ABOVE_VWAP' | 'NEAR_VWAP' | 'BELOW_VWAP'
+    vwap_score: float
+
     composite_score: float            # -100 … +100
 
     def to_dict(self) -> dict:
@@ -302,6 +410,9 @@ def _nan_bundle() -> IndicatorSignals:
         atr=nan,
         stoch_k=nan,       stoch_d=nan,        stoch_signal="NEUTRAL",
         supertrend=nan,    supertrend_direction="BEARISH", supertrend_score=0.0,
+        vwap=nan,          vwap_upper_1=nan,  vwap_upper_2=nan,
+        vwap_lower_1=nan,  vwap_lower_2=nan,
+        vwap_position="NEAR_VWAP",             vwap_score=0.0,
         composite_score=0.0,
     )
 
@@ -420,10 +531,16 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
     # ── Supertrend ────────────────────────────────────────────────────────────
     supertrend = calculate_supertrend(df)
 
+    # ── VWAP ──────────────────────────────────────────────────────────────────
+    vwap = calculate_vwap(df)
+
     # ── Composite score ────────────────────────────────────────────────────────
     score = max(
         -100.0,
-        min(100.0, _composite_score(rsi, cross, bb_pos, trend, sk) + supertrend["score"]),
+        min(100.0,
+            _composite_score(rsi, cross, bb_pos, trend, sk)
+            + supertrend["score"]
+            + vwap["vwap_score"]),
     )
 
     return IndicatorSignals(
@@ -439,6 +556,13 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
         supertrend=supertrend["supertrend"],
         supertrend_direction=supertrend["direction"],
         supertrend_score=supertrend["score"],
+        vwap=vwap["vwap"],
+        vwap_upper_1=vwap["vwap_upper_1"],
+        vwap_upper_2=vwap["vwap_upper_2"],
+        vwap_lower_1=vwap["vwap_lower_1"],
+        vwap_lower_2=vwap["vwap_lower_2"],
+        vwap_position=vwap["vwap_position"],
+        vwap_score=vwap["vwap_score"],
         composite_score=score,
     )
 
