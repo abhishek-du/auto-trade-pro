@@ -354,3 +354,35 @@ class RuntimeSettings(Base):
 
     def __repr__(self) -> str:
         return f"<RuntimeSettings key={self.key!r} value={self.value!r}>"
+
+
+# ── 12. MutualFundNAV ─────────────────────────────────────────────────────────
+
+class MutualFundNAV(Base):
+    """Daily NAV snapshot for a mutual fund scheme with computed returns."""
+    __tablename__ = "mutual_fund_navs"
+    __table_args__ = (
+        Index("ix_mf_nav_scheme_recorded", "scheme_code", "recorded_at"),
+    )
+
+    id:                 Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scheme_code:        Mapped[str]           = mapped_column(String(20),  nullable=False)
+    scheme_name:        Mapped[str]           = mapped_column(String(200), nullable=False)
+    nav:                Mapped[float]         = mapped_column(Float, nullable=False)
+    prev_nav:           Mapped[float]         = mapped_column(Float, nullable=False, default=0.0)
+    change:             Mapped[float]         = mapped_column(Float, nullable=False, default=0.0)
+    change_pct:         Mapped[float]         = mapped_column(Float, nullable=False, default=0.0)
+    category:           Mapped[str]           = mapped_column(String(120), nullable=False, default="")
+    one_month_return:   Mapped[float | None]  = mapped_column(Float, nullable=True)
+    three_month_return: Mapped[float | None]  = mapped_column(Float, nullable=True)
+    one_year_return:    Mapped[float | None]  = mapped_column(Float, nullable=True)
+    three_year_return:  Mapped[float | None]  = mapped_column(Float, nullable=True)
+    recorded_at:        Mapped[datetime]      = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<MutualFundNAV {self.scheme_code} nav={self.nav} "
+            f"1y={self.one_year_return}% @{self.recorded_at.date()}>"
+        )

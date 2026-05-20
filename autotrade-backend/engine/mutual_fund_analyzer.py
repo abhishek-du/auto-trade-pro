@@ -1,14 +1,16 @@
-"""Mutual Fund Analyzer — NAV history, CAGR, SIP simulation, risk metrics.
+"""Mutual Fund Analyzer — DB-backed NAV tracking and SIP analysis.
 
-Uses mftool (AMFI data) for all NAV lookups. All network calls run in
-asyncio executors so the async DB session is never blocked.
+NAV data is fetched from AMFI via mftool, persisted to the MutualFundNAV
+table, and used for SIP simulation and buy-signal generation.  All mftool
+calls are dispatched to the thread-pool executor.
 
 Public API
 ----------
-fetch_scheme_info(scheme_code)                           -> SchemeInfo | None  (async)
-analyze_scheme(scheme_code)                              -> MutualFundAnalysis | None  (async)
-analyze_all_schemes(scheme_codes)                        -> list[MutualFundAnalysis]   (async)
-project_sip(monthly_amount, annual_return_pct, months)  -> dict  (sync, projection only)
+fetch_and_save_nav(scheme_code, session)                        -> dict        (async)
+simulate_sip(scheme_code, monthly_amount, months, session)      -> dict        (async)
+compare_funds(scheme_codes, session)                            -> list[dict]  (async)
+get_mf_buy_signal(scheme_code, session)                         -> dict        (async)
+project_sip(monthly_amount, expected_annual_return_pct, months) -> dict        (sync)
 """
 
 from __future__ import annotations
@@ -16,14 +18,16 @@ from __future__ import annotations
 import asyncio
 import datetime
 import math
-from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.models import MutualFundNAV
 from utils.logger import logger
 
-# ── Optional mftool import ────────────────────────────────────────────────────
+# ── Optional mftool ───────────────────────────────────────────────────────────
 
 _MFTOOL_AVAILABLE = False
 try:
@@ -32,345 +36,578 @@ try:
 except ImportError:
     pass
 
-_DEFAULT_SIP_AMOUNT: float = 5_000.0   # ₹5,000 / month for simulation
-_RISK_FREE_RATE:     float = 0.065     # 6.5% p.a. — approximate Indian T-bill rate
 
-
-def _get_mftool():
+def _get_mftool() -> "_Mftool":
     if not _MFTOOL_AVAILABLE:
         raise ImportError("mftool not installed — run: pip install mftool")
     return _Mftool()
 
 
-# ── Data classes ──────────────────────────────────────────────────────────────
-
-@dataclass
-class SchemeInfo:
-    scheme_code: str
-    scheme_name: str
-    nav: float
-    nav_date: datetime.date
-    category: str
-    fund_house: str
-
-
-@dataclass
-class SIPResult:
-    scheme_code: str
-    scheme_name: str
-    monthly_amount: float
-    months_invested: int
-    total_invested: float
-    current_value: float
-    absolute_return_pct: float
-    cagr: float
-    units_held: float
-
-
-@dataclass
-class MutualFundAnalysis:
-    scheme_code:  str
-    scheme_name:  str
-    fund_house:   str
-    category:     str
-    current_nav:  float
-    nav_date:     datetime.date
-    return_1y:    Optional[float]     # CAGR %
-    return_3y:    Optional[float]
-    return_5y:    Optional[float]
-    sip_1y:       Optional[SIPResult] # ₹5,000/month × 12 months
-    sip_3y:       Optional[SIPResult] # ₹5,000/month × 36 months
-    volatility:   Optional[float]     # annualised std dev of daily returns %
-    sharpe_ratio: Optional[float]     # annualised, risk-free = 6.5%
-    analyzed_at:  datetime.datetime = field(default_factory=datetime.datetime.now)
-
-
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _parse_historical_nav(scheme_code: str) -> pd.DataFrame:
-    """Fetch and parse AMFI historical NAV into a sorted DataFrame.
-
-    Returns columns: date (datetime64), nav (float64).
-    Returns empty DataFrame on failure.
-    """
-    mf = _get_mftool()
+def _parse_nav_float(value) -> float:
+    """Convert mftool NAV string '123.456' → float.  Returns 0.0 on failure."""
     try:
-        data = mf.get_scheme_historical_nav(scheme_code, as_Dataframe=False)
-    except Exception as exc:
-        logger.warning(f"_parse_historical_nav {scheme_code}: mftool error — {exc}")
-        return pd.DataFrame()
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return 0.0
 
-    if not data or data.get("status") != "SUCCESS":
-        logger.warning(f"_parse_historical_nav {scheme_code}: bad status — {data!r}")
-        return pd.DataFrame()
 
-    records = data.get("data", [])
-    if not records:
-        return pd.DataFrame()
+def _normalize_hist_df(raw) -> pd.DataFrame:
+    """Normalise mftool historical NAV result to a sorted DataFrame.
 
-    df = pd.DataFrame(records)
+    Accepts either a dict (as_Dataframe=False) or a DataFrame (as_Dataframe=True).
+    Returns columns: date (datetime64[ns]), nav (float64).
+    """
+    if isinstance(raw, pd.DataFrame):
+        df = raw.copy()
+        # Reset index in case date is the index
+        if df.index.name == "date" or not {"date", "nav"}.issubset(df.columns):
+            df = df.reset_index()
+        if len(df.columns) >= 2:
+            df.columns = list(df.columns[:2])
+            df = df.rename(columns={df.columns[0]: "date", df.columns[1]: "nav"})
+    elif isinstance(raw, dict) and raw.get("status") == "SUCCESS":
+        records = raw.get("data", [])
+        df = pd.DataFrame(records)
+    else:
+        return pd.DataFrame(columns=["date", "nav"])
+
     df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
     df["nav"]  = pd.to_numeric(df["nav"], errors="coerce")
-    df = df.dropna(subset=["date", "nav"]).sort_values("date").reset_index(drop=True)
+    df = (
+        df.dropna(subset=["date", "nav"])
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
     return df
 
 
-def _parse_nav_date(raw: str | None) -> datetime.date:
-    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%b %d, %Y"):
-        try:
-            if raw:
-                return datetime.datetime.strptime(raw.strip(), fmt).date()
-        except (ValueError, AttributeError):
-            continue
-    return datetime.date.today()
+def _return_pct(nav_now: float, nav_then: float) -> float | None:
+    """Simple point-to-point return in percent."""
+    if not nav_then or nav_then <= 0:
+        return None
+    return round((nav_now / nav_then - 1) * 100, 2)
 
 
-def calculate_cagr(nav_now: float, nav_then: float, years: float) -> float:
-    """Compound Annual Growth Rate in percent."""
-    if nav_then <= 0 or years <= 0 or nav_now <= 0:
-        return 0.0
-    return ((nav_now / nav_then) ** (1.0 / years) - 1.0) * 100.0
+def _cagr(nav_now: float, nav_then: float, years: float) -> float | None:
+    """CAGR in percent."""
+    if not nav_then or nav_then <= 0 or years <= 0 or nav_now <= 0:
+        return None
+    return round(((nav_now / nav_then) ** (1 / years) - 1) * 100, 2)
 
 
-def _simulate_sip_from_history(
-    df: pd.DataFrame,
+def _nav_n_days_ago(df: pd.DataFrame, days: int) -> float | None:
+    target = df["date"].iloc[-1] - pd.Timedelta(days=days)
+    subset = df[df["date"] <= target]
+    return float(subset["nav"].iloc[-1]) if not subset.empty else None
+
+
+# ── 1. fetch_and_save_nav ─────────────────────────────────────────────────────
+
+async def fetch_and_save_nav(
     scheme_code: str,
-    scheme_name: str,
-    monthly_amount: float,
-    months: int,
-) -> SIPResult | None:
-    """Simulate monthly SIP purchases using actual historical NAVs.
+    session: AsyncSession,
+) -> dict:
+    """Fetch current NAV + returns from AMFI and persist to MutualFundNAV table.
 
-    Takes the first available NAV per calendar month over the last `months`
-    months as the purchase NAV, then values at today's (last available) NAV.
-    Returns None when there is insufficient history.
+    Steps
+    -----
+    1. mf.get_scheme_quote()  → current NAV, scheme name, category
+    2. mf.get_scheme_historical_nav(as_Dataframe=True) → past NAVs
+    3. Calculate 1-month, 3-month, 1-year, 3-year returns
+    4. Query DB for prev_nav; compute day-over-day change
+    5. Insert MutualFundNAV row; return summary dict
+
+    Returns an empty dict if mftool is unavailable or the scheme is not found.
     """
-    if df.empty or len(df) < 5:
-        return None
-
-    current_nav = float(df["nav"].iloc[-1])
-    end_date    = df["date"].iloc[-1]
-    start_date  = end_date - pd.DateOffset(months=months)
-
-    window = df[df["date"] >= start_date].copy()
-    if window.empty:
-        return None
-
-    window["month"] = window["date"].dt.to_period("M")
-    first_per_month = (
-        window.groupby("month", sort=True)
-        .first()
-        .reset_index()
-    )
-
-    total_units    = 0.0
-    total_invested = 0.0
-
-    for _, row in first_per_month.iterrows():
-        nav_at_purchase = float(row["nav"])
-        if nav_at_purchase > 0:
-            total_units    += monthly_amount / nav_at_purchase
-            total_invested += monthly_amount
-
-    if total_invested == 0.0:
-        return None
-
-    current_value = total_units * current_nav
-    abs_return_pct = (current_value - total_invested) / total_invested * 100.0
-    years = len(first_per_month) / 12.0
-    cagr  = calculate_cagr(current_value, total_invested, years) if years > 0 else 0.0
-
-    return SIPResult(
-        scheme_code=scheme_code,
-        scheme_name=scheme_name,
-        monthly_amount=monthly_amount,
-        months_invested=len(first_per_month),
-        total_invested=round(total_invested, 2),
-        current_value=round(current_value, 2),
-        absolute_return_pct=round(abs_return_pct, 2),
-        cagr=round(cagr, 2),
-        units_held=round(total_units, 4),
-    )
-
-
-def _calculate_risk_metrics(df: pd.DataFrame) -> tuple[float | None, float | None]:
-    """Return (annualised_volatility_pct, sharpe_ratio) from daily NAV returns.
-
-    Uses up to 252 trading days (1 year). Returns (None, None) when
-    fewer than 30 data points are available.
-    """
-    if len(df) < 30:
-        return None, None
-
-    recent = df.tail(252).copy()
-    recent["ret"] = recent["nav"].pct_change()
-    recent = recent.dropna(subset=["ret"])
-
-    if len(recent) < 20:
-        return None, None
-
-    daily_std = float(recent["ret"].std())
-    if daily_std == 0:
-        return 0.0, 0.0
-
-    annualised_vol = daily_std * math.sqrt(252) * 100.0
-
-    daily_mean = float(recent["ret"].mean())
-    daily_rf   = (1 + _RISK_FREE_RATE) ** (1 / 252) - 1
-    sharpe     = (daily_mean - daily_rf) / daily_std * math.sqrt(252)
-
-    return round(annualised_vol, 2), round(sharpe, 2)
-
-
-# ── Public async API ──────────────────────────────────────────────────────────
-
-async def fetch_scheme_info(scheme_code: str) -> SchemeInfo | None:
-    """Return current NAV and metadata for *scheme_code* from AMFI via mftool."""
     loop = asyncio.get_event_loop()
+
     try:
-        mf    = _get_mftool()
+        mf = _get_mftool()
+    except ImportError as exc:
+        logger.error(f"fetch_and_save_nav: {exc}")
+        return {}
+
+    # ── Step 1: current quote ─────────────────────────────────────────────────
+    try:
         quote = await loop.run_in_executor(None, mf.get_scheme_quote, scheme_code)
     except Exception as exc:
-        logger.warning(f"fetch_scheme_info {scheme_code}: {exc}")
-        return None
+        logger.warning(f"fetch_and_save_nav {scheme_code}: quote failed — {exc}")
+        return {}
 
     if not quote:
-        return None
+        logger.warning(f"fetch_and_save_nav {scheme_code}: empty quote")
+        return {}
 
-    nav_raw  = quote.get("nav") or quote.get("Net Asset Value") or "0"
-    nav      = float(str(nav_raw).replace(",", "")) if nav_raw else 0.0
-    nav_date = _parse_nav_date(quote.get("last_updated") or quote.get("Date"))
+    nav          = _parse_nav_float(quote.get("nav") or quote.get("Net Asset Value"))
+    scheme_name  = quote.get("scheme_name", "")
+    category     = quote.get("scheme_category") or quote.get("mutual_fund_family", "")
 
-    return SchemeInfo(
-        scheme_code=scheme_code,
-        scheme_name=quote.get("scheme_name", ""),
-        nav=nav,
-        nav_date=nav_date,
-        category=quote.get("scheme_category", ""),
-        fund_house=quote.get("mutual_fund_family") or quote.get("fund_house", ""),
-    )
+    if nav <= 0:
+        logger.warning(f"fetch_and_save_nav {scheme_code}: invalid NAV={nav}")
+        return {}
 
-
-async def analyze_scheme(scheme_code: str) -> MutualFundAnalysis | None:
-    """Full analysis: CAGR (1Y/3Y/5Y), SIP simulation, volatility, Sharpe.
-
-    All blocking mftool calls are dispatched to the thread pool executor
-    to avoid stalling the event loop.
-    """
-    loop = asyncio.get_event_loop()
-
+    # ── Step 2: historical NAV ────────────────────────────────────────────────
     try:
-        df = await loop.run_in_executor(None, _parse_historical_nav, scheme_code)
+        raw_hist = await loop.run_in_executor(
+            None,
+            lambda: mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True),
+        )
+        hist_df = _normalize_hist_df(raw_hist)
     except Exception as exc:
-        logger.warning(f"analyze_scheme {scheme_code}: NAV history fetch failed — {exc}")
-        return None
+        logger.warning(f"fetch_and_save_nav {scheme_code}: history failed — {exc}")
+        hist_df = pd.DataFrame(columns=["date", "nav"])
 
-    if df.empty or len(df) < 5:
-        logger.warning(f"analyze_scheme {scheme_code}: insufficient NAV history")
-        return None
+    # ── Step 3: calculate returns ─────────────────────────────────────────────
+    one_month_return = three_month_return = one_year_return = three_year_return = None
 
-    info = await fetch_scheme_info(scheme_code)
+    if not hist_df.empty:
+        nav_1m  = _nav_n_days_ago(hist_df, 30)
+        nav_3m  = _nav_n_days_ago(hist_df, 90)
+        nav_1y  = _nav_n_days_ago(hist_df, 365)
+        nav_3y  = _nav_n_days_ago(hist_df, 1095)
 
-    current_nav = float(df["nav"].iloc[-1])
-    nav_date    = df["date"].iloc[-1].date()
+        one_month_return   = _return_pct(nav, nav_1m)
+        three_month_return = _return_pct(nav, nav_3m)
+        one_year_return    = _cagr(nav, nav_1y, 1.0)    # 1Y CAGR = simple return
+        three_year_return  = _cagr(nav, nav_3y, 3.0)
 
-    def _nav_years_ago(years: float) -> float | None:
-        target = df["date"].iloc[-1] - pd.Timedelta(days=int(years * 365.25))
-        subset = df[df["date"] <= target]
-        return float(subset["nav"].iloc[-1]) if not subset.empty else None
+    # ── Step 4: prev_nav + change ─────────────────────────────────────────────
+    last_row = (await session.execute(
+        select(MutualFundNAV)
+        .where(MutualFundNAV.scheme_code == scheme_code)
+        .order_by(desc(MutualFundNAV.recorded_at))
+        .limit(1)
+    )).scalar_one_or_none()
 
-    nav_1y = _nav_years_ago(1)
-    nav_3y = _nav_years_ago(3)
-    nav_5y = _nav_years_ago(5)
+    prev_nav   = last_row.nav if last_row else nav
+    change     = round(nav - prev_nav, 4)
+    change_pct = round(change / prev_nav * 100, 2) if prev_nav > 0 else 0.0
 
-    return_1y = round(calculate_cagr(current_nav, nav_1y, 1.0), 2) if nav_1y else None
-    return_3y = round(calculate_cagr(current_nav, nav_3y, 3.0), 2) if nav_3y else None
-    return_5y = round(calculate_cagr(current_nav, nav_5y, 5.0), 2) if nav_5y else None
-
-    scheme_name = info.scheme_name if info else scheme_code
-
-    sip_1y = _simulate_sip_from_history(df, scheme_code, scheme_name, _DEFAULT_SIP_AMOUNT, 12)
-    sip_3y = _simulate_sip_from_history(df, scheme_code, scheme_name, _DEFAULT_SIP_AMOUNT, 36)
-
-    vol, sharpe = _calculate_risk_metrics(df)
-
-    analysis = MutualFundAnalysis(
+    # ── Step 5: persist ───────────────────────────────────────────────────────
+    row = MutualFundNAV(
         scheme_code=scheme_code,
         scheme_name=scheme_name,
-        fund_house=info.fund_house if info else "",
-        category=info.category  if info else "",
-        current_nav=round(current_nav, 4),
-        nav_date=nav_date,
-        return_1y=return_1y,
-        return_3y=return_3y,
-        return_5y=return_5y,
-        sip_1y=sip_1y,
-        sip_3y=sip_3y,
-        volatility=vol,
-        sharpe_ratio=sharpe,
+        nav=nav,
+        prev_nav=prev_nav,
+        change=change,
+        change_pct=change_pct,
+        category=category,
+        one_month_return=one_month_return,
+        three_month_return=three_month_return,
+        one_year_return=one_year_return,
+        three_year_return=three_year_return,
     )
+    session.add(row)
+    await session.flush()
 
+    summary = {
+        "scheme_code":        scheme_code,
+        "scheme_name":        scheme_name,
+        "nav":                nav,
+        "prev_nav":           prev_nav,
+        "change":             change,
+        "change_pct":         change_pct,
+        "category":           category,
+        "one_month_return":   one_month_return,
+        "three_month_return": three_month_return,
+        "one_year_return":    one_year_return,
+        "three_year_return":  three_year_return,
+        "recorded_at":        row.recorded_at,
+    }
     logger.info(
         f"MF {scheme_code} ({scheme_name[:40]})  "
-        f"NAV={current_nav:.4f}  1Y={return_1y}%  3Y={return_3y}%  "
-        f"vol={vol}%  sharpe={sharpe}"
+        f"NAV={nav}  Δ={change_pct:+.2f}%  1Y={one_year_return}%"
     )
-    return analysis
+    return summary
 
 
-async def analyze_all_schemes(
-    scheme_codes: list[str] | None = None,
-) -> list[MutualFundAnalysis]:
-    """Analyze all configured mutual fund schemes.
+# ── 2. simulate_sip ───────────────────────────────────────────────────────────
 
-    Falls back to settings.WATCHLIST_MUTUAL_FUND_SCHEMES when no codes given.
-    Results are sorted by 1-year return (descending).
+async def simulate_sip(
+    scheme_code: str,
+    monthly_amount: float,
+    months: int,
+    session: AsyncSession,
+) -> dict:
+    """Simulate a monthly SIP using historical NAV data.
+
+    Uses DB records (MutualFundNAV) grouped by calendar month.  When the DB
+    has fewer than 2 months of data, falls back to mftool historical NAV.
+
+    Returns
+    -------
+    dict with keys:
+      total_invested, current_value, total_units, avg_nav,
+      absolute_return, cagr_percent, best_month, worst_month
     """
-    from utils.config import settings
+    # ── Fetch monthly NAV series ──────────────────────────────────────────────
+    monthly_df = await _get_monthly_nav_series(scheme_code, months, session)
 
-    codes   = scheme_codes or settings.WATCHLIST_MUTUAL_FUND_SCHEMES
-    results: list[MutualFundAnalysis] = []
+    if monthly_df.empty or len(monthly_df) < 2:
+        logger.warning(f"simulate_sip {scheme_code}: no monthly NAV data available")
+        return {}
 
-    for code in codes:
-        analysis = await analyze_scheme(code)
-        if analysis:
-            results.append(analysis)
-        else:
-            logger.warning(f"analyze_all_schemes: skipped scheme {code}")
+    # Get current NAV (latest record)
+    current_nav = float(monthly_df["nav"].iloc[-1])
 
-    results.sort(
-        key=lambda a: a.return_1y if a.return_1y is not None else float("-inf"),
-        reverse=True,
+    # ── SIP simulation ────────────────────────────────────────────────────────
+    units_per_month: list[dict] = []
+    for _, row in monthly_df.iterrows():
+        purchase_nav = float(row["nav"])
+        if purchase_nav > 0:
+            units = monthly_amount / purchase_nav
+            units_per_month.append(
+                {"month": str(row["month"]), "nav": purchase_nav, "units": units}
+            )
+
+    if not units_per_month:
+        return {}
+
+    total_units    = sum(m["units"] for m in units_per_month)
+    total_invested = monthly_amount * len(units_per_month)
+    current_value  = total_units * current_nav
+    avg_nav        = total_invested / total_units if total_units > 0 else 0.0
+    abs_return_pct = (current_value - total_invested) / total_invested * 100.0
+    years          = len(units_per_month) / 12.0
+    cagr_percent   = _cagr(current_value, total_invested, years) or 0.0
+
+    # ── Monthly returns for best/worst ────────────────────────────────────────
+    monthly_returns: list[dict] = []
+    navs = [m["nav"] for m in units_per_month]
+    for i in range(1, len(navs)):
+        if navs[i - 1] > 0:
+            month_ret = (navs[i] / navs[i - 1] - 1) * 100
+            monthly_returns.append(
+                {"month": units_per_month[i]["month"], "return_pct": round(month_ret, 2)}
+            )
+
+    best_month  = max(monthly_returns, key=lambda m: m["return_pct"]) if monthly_returns else None
+    worst_month = min(monthly_returns, key=lambda m: m["return_pct"]) if monthly_returns else None
+
+    return {
+        "scheme_code":    scheme_code,
+        "monthly_amount": monthly_amount,
+        "months":         len(units_per_month),
+        "total_invested": round(total_invested, 2),
+        "current_value":  round(current_value, 2),
+        "total_units":    round(total_units, 4),
+        "avg_nav":        round(avg_nav, 4),
+        "absolute_return": round(abs_return_pct, 2),
+        "cagr_percent":   cagr_percent,
+        "best_month":     best_month,
+        "worst_month":    worst_month,
+    }
+
+
+async def _get_monthly_nav_series(
+    scheme_code: str,
+    months: int,
+    session: AsyncSession,
+) -> pd.DataFrame:
+    """Return a DataFrame with columns [month (Period), nav (float)].
+
+    Tries DB first; falls back to mftool when DB has fewer than 2 months.
+    """
+    # ── Query DB ──────────────────────────────────────────────────────────────
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=months * 31 + 10)
+    rows = (await session.execute(
+        select(MutualFundNAV)
+        .where(
+            MutualFundNAV.scheme_code == scheme_code,
+            MutualFundNAV.recorded_at >= cutoff,
+        )
+        .order_by(MutualFundNAV.recorded_at)
+    )).scalars().all()
+
+    if rows:
+        df = pd.DataFrame(
+            [{"date": r.recorded_at, "nav": r.nav} for r in rows]
+        )
+        df["date"]  = pd.to_datetime(df["date"])
+        df["month"] = df["date"].dt.to_period("M")
+        monthly = (
+            df.groupby("month", sort=True)
+            .first()
+            .reset_index()[["month", "nav"]]
+        )
+        if len(monthly) >= 2:
+            return monthly.tail(months)
+
+    # ── Fallback: mftool historical ───────────────────────────────────────────
+    logger.debug(f"_get_monthly_nav_series {scheme_code}: DB sparse, falling back to mftool")
+    try:
+        loop = asyncio.get_event_loop()
+        mf   = _get_mftool()
+        raw  = await loop.run_in_executor(
+            None,
+            lambda: mf.get_scheme_historical_nav(scheme_code, as_Dataframe=True),
+        )
+        df = _normalize_hist_df(raw)
+    except Exception as exc:
+        logger.warning(f"_get_monthly_nav_series {scheme_code}: mftool failed — {exc}")
+        return pd.DataFrame(columns=["month", "nav"])
+
+    if df.empty:
+        return pd.DataFrame(columns=["month", "nav"])
+
+    end_date   = df["date"].iloc[-1]
+    start_date = end_date - pd.DateOffset(months=months)
+    df = df[df["date"] >= start_date].copy()
+    df["month"] = df["date"].dt.to_period("M")
+    monthly = (
+        df.groupby("month", sort=True)
+        .first()
+        .reset_index()[["month", "nav"]]
     )
-    return results
+    return monthly
 
 
-# ── Sync projection helper (no mftool required) ───────────────────────────────
+# ── 3. compare_funds ─────────────────────────────────────────────────────────
+
+async def compare_funds(
+    scheme_codes: list[str],
+    session: AsyncSession,
+) -> list[dict]:
+    """Compare funds on 1-year return, 3-year return, and consistency.
+
+    Consistency is measured as the standard deviation of monthly NAV returns
+    over the last 3 years (lower = more consistent).
+
+    Ranking score  =  0.4 × one_year_return
+                    + 0.4 × three_year_return
+                    - 0.2 × consistency_std_dev
+
+    Returns a list of dicts sorted by score descending, with the top fund
+    flagged as ``best_fund: True``.
+    """
+    entries: list[dict] = []
+
+    for code in scheme_codes:
+        # Get or refresh latest snapshot
+        latest = (await session.execute(
+            select(MutualFundNAV)
+            .where(MutualFundNAV.scheme_code == code)
+            .order_by(desc(MutualFundNAV.recorded_at))
+            .limit(1)
+        )).scalar_one_or_none()
+
+        if latest is None:
+            summary = await fetch_and_save_nav(code, session)
+            if not summary:
+                logger.warning(f"compare_funds: could not fetch data for {code}")
+                continue
+            # Re-query after save
+            latest = (await session.execute(
+                select(MutualFundNAV)
+                .where(MutualFundNAV.scheme_code == code)
+                .order_by(desc(MutualFundNAV.recorded_at))
+                .limit(1)
+            )).scalar_one_or_none()
+
+        if latest is None:
+            continue
+
+        # Consistency: std dev of monthly returns over 3 years from DB
+        consistency_std = await _monthly_return_std(code, session, years=3)
+
+        one_year   = latest.one_year_return   or 0.0
+        three_year = latest.three_year_return or 0.0
+        score = (
+            0.4 * one_year
+            + 0.4 * three_year
+            - 0.2 * (consistency_std if consistency_std is not None else 0.0)
+        )
+
+        entries.append({
+            "scheme_code":       code,
+            "scheme_name":       latest.scheme_name,
+            "current_nav":       latest.nav,
+            "one_year_return":   one_year,
+            "three_year_return": three_year,
+            "consistency_std":   round(consistency_std, 2) if consistency_std else None,
+            "composite_score":   round(score, 2),
+            "best_fund":         False,
+        })
+
+    entries.sort(key=lambda e: e["composite_score"], reverse=True)
+    if entries:
+        entries[0]["best_fund"] = True
+
+    return entries
+
+
+async def _monthly_return_std(
+    scheme_code: str,
+    session: AsyncSession,
+    years: int = 3,
+) -> float | None:
+    """Std dev of monthly NAV returns over the last *years* years from DB."""
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=years * 365)
+    rows = (await session.execute(
+        select(MutualFundNAV)
+        .where(
+            MutualFundNAV.scheme_code == scheme_code,
+            MutualFundNAV.recorded_at >= cutoff,
+        )
+        .order_by(MutualFundNAV.recorded_at)
+    )).scalars().all()
+
+    if len(rows) < 4:
+        return None
+
+    df = pd.DataFrame([{"date": r.recorded_at, "nav": r.nav} for r in rows])
+    df["date"]  = pd.to_datetime(df["date"])
+    df["month"] = df["date"].dt.to_period("M")
+    monthly = df.groupby("month", sort=True)["nav"].last().reset_index()
+    monthly["ret"] = monthly["nav"].pct_change()
+    monthly = monthly.dropna(subset=["ret"])
+
+    if len(monthly) < 3:
+        return None
+
+    return round(float(monthly["ret"].std() * 100), 2)
+
+
+# ── 4. get_mf_buy_signal ──────────────────────────────────────────────────────
+
+async def get_mf_buy_signal(
+    scheme_code: str,
+    session: AsyncSession,
+) -> dict:
+    """Generate a BUY / HOLD signal for a mutual fund scheme.
+
+    Buy conditions (ALL must be met)
+    ---------------------------------
+    1. one_year_return > 15 %
+    2. current_nav is more than 5 % below the 52-week high (dip opportunity)
+    3. India VIX < 20 (favorable market conditions)
+
+    Hold conditions
+    ---------------
+    Any condition above is not satisfied.
+
+    Returns
+    -------
+    dict: signal, reason, current_nav, one_year_return, high_52w, vix
+    """
+    # ── 1. Get latest NAV from DB (or fetch fresh) ────────────────────────────
+    latest = (await session.execute(
+        select(MutualFundNAV)
+        .where(MutualFundNAV.scheme_code == scheme_code)
+        .order_by(desc(MutualFundNAV.recorded_at))
+        .limit(1)
+    )).scalar_one_or_none()
+
+    if latest is None:
+        await fetch_and_save_nav(scheme_code, session)
+        latest = (await session.execute(
+            select(MutualFundNAV)
+            .where(MutualFundNAV.scheme_code == scheme_code)
+            .order_by(desc(MutualFundNAV.recorded_at))
+            .limit(1)
+        )).scalar_one_or_none()
+
+    if latest is None:
+        return {
+            "scheme_code":     scheme_code,
+            "signal":          "HOLD",
+            "reason":          "No NAV data available",
+            "current_nav":     None,
+            "one_year_return": None,
+            "high_52w":        None,
+            "vix":             None,
+        }
+
+    current_nav    = latest.nav
+    one_year_return = latest.one_year_return
+
+    # ── 2. 52-week high from DB ───────────────────────────────────────────────
+    cutoff_52w = datetime.datetime.utcnow() - datetime.timedelta(days=365)
+    high_52w_row = (await session.execute(
+        select(func.max(MutualFundNAV.nav))
+        .where(
+            MutualFundNAV.scheme_code == scheme_code,
+            MutualFundNAV.recorded_at >= cutoff_52w,
+        )
+    )).scalar_one_or_none()
+
+    # If DB has no 52-week history, use current NAV as fallback
+    high_52w = float(high_52w_row) if high_52w_row else current_nav
+
+    dip_pct = (high_52w - current_nav) / high_52w * 100 if high_52w > 0 else 0.0
+
+    # ── 3. India VIX ─────────────────────────────────────────────────────────
+    vix: float | None = None
+    try:
+        from crawler.india_price_feed import fetch_india_vix
+        loop = asyncio.get_event_loop()
+        vix  = await loop.run_in_executor(None, fetch_india_vix)
+    except Exception as exc:
+        logger.debug(f"get_mf_buy_signal: VIX fetch failed — {exc}")
+
+    # ── 4. Signal logic ────────────────────────────────────────────────────────
+    good_return = one_year_return is not None and one_year_return > 15.0
+    good_dip    = dip_pct > 5.0
+    good_vix    = vix is not None and vix < 20.0
+
+    if good_return and good_dip and good_vix:
+        signal = "BUY"
+        reason = (
+            f"1-year return {one_year_return:.1f}% > 15%; "
+            f"NAV is {dip_pct:.1f}% below 52-week high; "
+            f"India VIX={vix:.1f} < 20 (favourable market)"
+        )
+    elif not good_return and one_year_return is not None:
+        signal = "HOLD"
+        reason = f"1-year return {one_year_return:.1f}% does not exceed the 15% threshold"
+    elif not good_dip:
+        signal = "HOLD"
+        reason = (
+            f"NAV is only {dip_pct:.1f}% below 52-week high — "
+            "not enough of a dip (need > 5%)"
+        )
+    elif not good_vix:
+        vix_str = f"{vix:.1f}" if vix is not None else "N/A"
+        signal  = "HOLD"
+        reason  = f"India VIX={vix_str} ≥ 20 — market conditions are not favourable"
+    else:
+        signal = "HOLD"
+        reason = "Insufficient data to generate a BUY signal"
+
+    logger.info(
+        f"MF signal {scheme_code}: {signal}  1Y={one_year_return}%  "
+        f"dip={dip_pct:.1f}%  VIX={vix}"
+    )
+    return {
+        "scheme_code":      scheme_code,
+        "scheme_name":      latest.scheme_name,
+        "signal":           signal,
+        "reason":           reason,
+        "current_nav":      current_nav,
+        "one_year_return":  one_year_return,
+        "high_52w":         round(high_52w, 4),
+        "dip_from_high_pct": round(dip_pct, 2),
+        "vix":              vix,
+    }
+
+
+# ── SIP projection (planning tool — no DB) ────────────────────────────────────
 
 def project_sip(
     monthly_amount: float,
     expected_annual_return_pct: float,
     months: int,
 ) -> dict:
-    """Project future SIP corpus using a constant assumed CAGR.
+    """Project SIP corpus using a constant assumed CAGR (planning tool only).
 
-    This is a planning tool — it does NOT use actual NAV history.
-
-    Parameters
-    ----------
-    monthly_amount : ₹ invested at the start of each month
-    expected_annual_return_pct : assumed CAGR (e.g. 12 for 12%)
-    months : investment horizon in months
-
-    Returns
-    -------
-    dict with keys: monthly_amount, months, assumed_cagr_pct,
-    total_invested, projected_value, absolute_return, absolute_return_pct
+    Does NOT use historical NAV data.  Use simulate_sip() for realistic results.
     """
     if months <= 0 or monthly_amount <= 0:
         raise ValueError("monthly_amount and months must be positive")
 
-    annual_rate = expected_annual_return_pct / 100.0
+    annual_rate  = expected_annual_return_pct / 100.0
     monthly_rate = (1 + annual_rate) ** (1 / 12) - 1
 
     if monthly_rate == 0:
@@ -387,11 +624,11 @@ def project_sip(
     absolute_return = future_value - total_invested
 
     return {
-        "monthly_amount":       round(monthly_amount, 2),
-        "months":               months,
-        "assumed_cagr_pct":     expected_annual_return_pct,
-        "total_invested":       round(total_invested, 2),
-        "projected_value":      round(future_value, 2),
-        "absolute_return":      round(absolute_return, 2),
-        "absolute_return_pct":  round(absolute_return / total_invested * 100, 2),
+        "monthly_amount":      round(monthly_amount, 2),
+        "months":              months,
+        "assumed_cagr_pct":    expected_annual_return_pct,
+        "total_invested":      round(total_invested, 2),
+        "projected_value":     round(future_value, 2),
+        "absolute_return":     round(absolute_return, 2),
+        "absolute_return_pct": round(absolute_return / total_invested * 100, 2),
     }
