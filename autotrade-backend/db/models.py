@@ -334,3 +334,23 @@ class PerformanceSnapshot(Base):
             f"equity=${self.equity:,.2f} daily_pnl={self.daily_pnl:+,.2f} "
             f"trades={self.trades_today} win_rate={self.win_rate_today:.1f}%>"
         )
+
+
+# ── 11. RuntimeSettings ───────────────────────────────────────────────────────
+
+class RuntimeSettings(Base):
+    """Key-value store for runtime-configurable parameters.
+
+    Updated via /api/v1/settings; read by API workers and Celery tasks.
+    Values are JSON-encoded so any scalar, list, or bool is supported.
+    """
+    __tablename__ = "runtime_settings"
+
+    key:        Mapped[str]      = mapped_column(String(80),  primary_key=True)
+    value:      Mapped[str]      = mapped_column(Text,         nullable=False)   # JSON
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<RuntimeSettings key={self.key!r} value={self.value!r}>"
