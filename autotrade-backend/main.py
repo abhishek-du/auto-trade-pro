@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import analytics, news, portfolio, settings as settings_api, signals, simulation, trades, websocket
+from api import analytics, india, news, portfolio, settings as settings_api, signals, simulation, trades, websocket
 import db.models  # noqa: F401 — registers all ORM models on Base.metadata
 from db.database import engine, init_db
 from utils.config import settings
@@ -67,6 +67,7 @@ app.include_router(analytics.router,  prefix="/api/v1/analytics")
 app.include_router(simulation.router,   prefix="/api/v1/simulation")
 app.include_router(settings_api.router, prefix="/api/v1/settings")
 app.include_router(websocket.router,    prefix="/ws")
+app.include_router(india.router,        prefix="/api/v1/india")
 
 
 # ── Core endpoints ────────────────────────────────────────────────────────────

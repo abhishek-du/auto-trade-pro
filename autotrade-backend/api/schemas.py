@@ -200,3 +200,119 @@ class AnalyticsOut(BaseModel):
     best_trade:                Optional[dict[str, Any]]
     worst_trade:               Optional[dict[str, Any]]
     avg_trade_duration_hours:  Optional[float]
+
+
+# ── Indian market ─────────────────────────────────────────────────────────────
+
+class FIIDIIFlowOut(BaseModel):
+    id:              int
+    date:            date
+    fii_net_buy:     float
+    dii_net_buy:     float
+    fii_gross_buy:   float
+    fii_gross_sell:  float
+    dii_gross_buy:   float
+    dii_gross_sell:  float
+    market_direction: str
+    created_at:      datetime
+
+
+class OptionsSnapshotOut(BaseModel):
+    id:                int
+    symbol:            str
+    expiry_date:       date
+    atm_strike:        float
+    pcr:               float
+    max_pain:          float
+    total_call_oi:     int
+    total_put_oi:      int
+    support_levels:    Optional[list]
+    resistance_levels: Optional[list]
+    snapshot_at:       datetime
+
+
+class VIXScoreOut(BaseModel):
+    vix:   Optional[float]
+    score: float
+    label: str   # 'CRASH_ZONE'|'EXTREME_FEAR'|'HIGH_FEAR'|'ELEVATED'|'NORMAL'|'BULL_RUN'|'COMPLACENCY'
+
+
+class SIPResultOut(BaseModel):
+    scheme_code:       str
+    scheme_name:       str
+    monthly_amount:    float
+    months_invested:   int
+    total_invested:    float
+    current_value:     float
+    absolute_return_pct: float
+    cagr:              float
+    units_held:        float
+
+
+class MutualFundOut(BaseModel):
+    scheme_code:    str
+    scheme_name:    str
+    fund_house:     str
+    category:       str
+    current_nav:    float
+    nav_date:       date
+    return_1y:      Optional[float]
+    return_3y:      Optional[float]
+    return_5y:      Optional[float]
+    sip_1y:         Optional[SIPResultOut]
+    sip_3y:         Optional[SIPResultOut]
+    volatility:     Optional[float]
+    sharpe_ratio:   Optional[float]
+    analyzed_at:    datetime
+
+
+class SIPProjectionIn(BaseModel):
+    monthly_amount:             float
+    expected_annual_return_pct: float
+    months:                     int
+
+
+class SIPProjectionOut(BaseModel):
+    monthly_amount:       float
+    months:               int
+    assumed_cagr_pct:     float
+    total_invested:       float
+    projected_value:      float
+    absolute_return:      float
+    absolute_return_pct:  float
+
+
+class FundamentalDataOut(BaseModel):
+    symbol:             str
+    market_cap_cr:      Optional[float]
+    current_price:      Optional[float]
+    high_52w:           Optional[float]
+    low_52w:            Optional[float]
+    pe_ratio:           Optional[float]
+    pb_ratio:           Optional[float]
+    dividend_yield_pct: Optional[float]
+    roce_pct:           Optional[float]
+    roe_pct:            Optional[float]
+    debt_to_equity:     Optional[float]
+    eps:                Optional[float]
+    book_value:         Optional[float]
+    face_value:         Optional[float]
+    fetched_at:         datetime
+
+
+class FundamentalAnalysisOut(BaseModel):
+    symbol:          str
+    data:            FundamentalDataOut
+    pe_score:        float
+    roe_score:       float
+    debt_score:      float
+    roce_score:      float
+    composite_score: float
+    valuation_label: str
+    analyzed_at:     datetime
+
+
+class SectorRotationOut(BaseModel):
+    symbol:  str
+    sector:  str
+    score:   float
