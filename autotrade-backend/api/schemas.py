@@ -316,3 +316,65 @@ class SectorRotationOut(BaseModel):
     symbol:  str
     sector:  str
     score:   float
+
+
+# ── Mutual fund (DB-backed, replaces in-memory MutualFundOut) ─────────────────
+
+class MutualFundNAVOut(BaseModel):
+    id:                 int
+    scheme_code:        str
+    scheme_name:        str
+    nav:                float
+    prev_nav:           float
+    change:             float
+    change_pct:         float
+    category:           str
+    one_month_return:   Optional[float]
+    three_month_return: Optional[float]
+    one_year_return:    Optional[float]
+    three_year_return:  Optional[float]
+    recorded_at:        datetime
+
+
+class MutualFundWithSignalOut(BaseModel):
+    scheme_code:        str
+    scheme_name:        str
+    current_nav:        float
+    one_month_return:   Optional[float]
+    three_month_return: Optional[float]
+    one_year_return:    Optional[float]
+    three_year_return:  Optional[float]
+    change_pct:         float
+    category:           str
+    recorded_at:        datetime
+    # Signal fields
+    signal:             str            # 'BUY' | 'HOLD'
+    reason:             str
+    high_52w:           Optional[float]
+    dip_from_high_pct:  Optional[float]
+    vix:                Optional[float]
+
+
+class SIPSimulationOut(BaseModel):
+    scheme_code:     str
+    monthly_amount:  float
+    months:          int
+    total_invested:  float
+    current_value:   float
+    total_units:     float
+    avg_nav:         float
+    absolute_return: float
+    cagr_percent:    float
+    best_month:      Optional[dict]
+    worst_month:     Optional[dict]
+
+
+class FundComparisonOut(BaseModel):
+    scheme_code:       str
+    scheme_name:       str
+    current_nav:       float
+    one_year_return:   float
+    three_year_return: float
+    consistency_std:   Optional[float]
+    composite_score:   float
+    best_fund:         bool

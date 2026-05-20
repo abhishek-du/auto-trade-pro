@@ -18,12 +18,14 @@ from api.schemas import (
     FIIDIIFlowOut,
     FundamentalAnalysisOut,
     FundamentalDataOut,
-    MutualFundOut,
+    FundComparisonOut,
+    MutualFundNAVOut,
+    MutualFundWithSignalOut,
     OptionsSnapshotOut,
     SectorRotationOut,
     SIPProjectionIn,
     SIPProjectionOut,
-    SIPResultOut,
+    SIPSimulationOut,
     SignalOut,
     TriggerResult,
     VIXScoreOut,
@@ -40,7 +42,14 @@ from engine.india_specific import (
     calculate_india_vix_score,
     calculate_sector_rotation_score,
 )
-from engine.mutual_fund_analyzer import analyze_all_schemes, analyze_scheme, project_sip
+from db.models import MutualFundNAV
+from engine.mutual_fund_analyzer import (
+    compare_funds,
+    fetch_and_save_nav,
+    get_mf_buy_signal,
+    project_sip,
+    simulate_sip,
+)
 from engine.signal_generator import save_signal
 from utils.config import settings
 from utils.logger import logger
@@ -94,38 +103,21 @@ def _options_out(o: OptionsChainSnapshot) -> OptionsSnapshotOut:
     )
 
 
-def _sip_result_out(s) -> Optional[SIPResultOut]:
-    if s is None:
-        return None
-    return SIPResultOut(
-        scheme_code=s.scheme_code,
-        scheme_name=s.scheme_name,
-        monthly_amount=s.monthly_amount,
-        months_invested=s.months_invested,
-        total_invested=s.total_invested,
-        current_value=s.current_value,
-        absolute_return_pct=s.absolute_return_pct,
-        cagr=s.cagr,
-        units_held=s.units_held,
-    )
-
-
-def _mf_out(a) -> MutualFundOut:
-    return MutualFundOut(
-        scheme_code=a.scheme_code,
-        scheme_name=a.scheme_name,
-        fund_house=a.fund_house,
-        category=a.category,
-        current_nav=a.current_nav,
-        nav_date=a.nav_date,
-        return_1y=a.return_1y,
-        return_3y=a.return_3y,
-        return_5y=a.return_5y,
-        sip_1y=_sip_result_out(a.sip_1y),
-        sip_3y=_sip_result_out(a.sip_3y),
-        volatility=a.volatility,
-        sharpe_ratio=a.sharpe_ratio,
-        analyzed_at=a.analyzed_at,
+def _mf_nav_out(r: MutualFundNAV) -> MutualFundNAVOut:
+    return MutualFundNAVOut(
+        id=r.id,
+        scheme_code=r.scheme_code,
+        scheme_name=r.scheme_name,
+        nav=r.nav,
+        prev_nav=r.prev_nav,
+        change=r.change,
+        change_pct=r.change_pct,
+        category=r.category,
+        one_month_return=r.one_month_return,
+        three_month_return=r.three_month_return,
+        one_year_return=r.one_year_return,
+        three_year_return=r.three_year_return,
+        recorded_at=r.recorded_at,
     )
 
 
@@ -330,39 +322,201 @@ async def get_india_vix(db: AsyncSession = Depends(get_db)):
 
 @router.get(
     "/mutual-funds",
-    response_model=list[MutualFundOut],
-    summary="Analyze all configured mutual fund schemes",
+    response_model=list[MutualFundWithSignalOut],
+    summary="All tracked fund NAVs with performance metrics and buy signal",
 )
 async def list_mutual_funds(
     scheme_codes: Optional[str] = Query(
         default=None,
         description="Comma-separated scheme codes; defaults to WATCHLIST_MUTUAL_FUND_SCHEMES",
     ),
+    db: AsyncSession = Depends(get_db),
 ):
-    codes = [c.strip() for c in scheme_codes.split(",")] if scheme_codes else None
-    analyses = await analyze_all_schemes(codes)
-    return [_mf_out(a) for a in analyses]
+    """Returns the latest NAV snapshot for each scheme from the DB.
+    If a scheme has no DB record yet, a fresh NAV fetch is triggered automatically.
+    """
+    codes = (
+        [c.strip() for c in scheme_codes.split(",")]
+        if scheme_codes
+        else settings.WATCHLIST_MUTUAL_FUND_SCHEMES
+    )
+
+    results: list[MutualFundWithSignalOut] = []
+    for code in codes:
+        # Check DB for latest record
+        latest = (await db.execute(
+            select(MutualFundNAV)
+            .where(MutualFundNAV.scheme_code == code)
+            .order_by(desc(MutualFundNAV.recorded_at))
+            .limit(1)
+        )).scalar_one_or_none()
+
+        # Auto-fetch if no record
+        if latest is None:
+            await fetch_and_save_nav(code, db)
+            await db.commit()
+            latest = (await db.execute(
+                select(MutualFundNAV)
+                .where(MutualFundNAV.scheme_code == code)
+                .order_by(desc(MutualFundNAV.recorded_at))
+                .limit(1)
+            )).scalar_one_or_none()
+
+        if latest is None:
+            logger.warning(f"list_mutual_funds: no data for scheme {code}")
+            continue
+
+        signal_data = await get_mf_buy_signal(code, db)
+
+        results.append(MutualFundWithSignalOut(
+            scheme_code=latest.scheme_code,
+            scheme_name=latest.scheme_name,
+            current_nav=latest.nav,
+            one_month_return=latest.one_month_return,
+            three_month_return=latest.three_month_return,
+            one_year_return=latest.one_year_return,
+            three_year_return=latest.three_year_return,
+            change_pct=latest.change_pct,
+            category=latest.category,
+            recorded_at=latest.recorded_at,
+            signal=signal_data.get("signal", "HOLD"),
+            reason=signal_data.get("reason", ""),
+            high_52w=signal_data.get("high_52w"),
+            dip_from_high_pct=signal_data.get("dip_from_high_pct"),
+            vix=signal_data.get("vix"),
+        ))
+
+    return results
 
 
 @router.get(
-    "/mutual-funds/{scheme_code}",
-    response_model=MutualFundOut,
-    summary="Analyze a single mutual fund scheme",
+    "/mutual-funds/{scheme_code}/nav",
+    response_model=list[MutualFundNAVOut],
+    summary="Historical NAV snapshots for a scheme (from DB)",
 )
-async def get_mutual_fund(scheme_code: str):
-    analysis = await analyze_scheme(scheme_code)
-    if analysis is None:
-        raise HTTPException(status_code=404, detail=f"Scheme {scheme_code} not found or no NAV data")
-    return _mf_out(analysis)
+async def get_mf_nav_history(
+    scheme_code: str,
+    limit: int = Query(default=30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (await db.execute(
+        select(MutualFundNAV)
+        .where(MutualFundNAV.scheme_code == scheme_code)
+        .order_by(desc(MutualFundNAV.recorded_at))
+        .limit(limit)
+    )).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No NAV data for scheme {scheme_code}")
+    return [_mf_nav_out(r) for r in rows]
+
+
+@router.post(
+    "/mutual-funds/{scheme_code}/refresh",
+    response_model=MutualFundNAVOut,
+    summary="Fetch fresh NAV from AMFI and persist to DB",
+)
+async def refresh_mf_nav(scheme_code: str, db: AsyncSession = Depends(get_db)):
+    summary = await fetch_and_save_nav(scheme_code, db)
+    if not summary:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch NAV for scheme {scheme_code}")
+    await db.commit()
+    latest = (await db.execute(
+        select(MutualFundNAV)
+        .where(MutualFundNAV.scheme_code == scheme_code)
+        .order_by(desc(MutualFundNAV.recorded_at))
+        .limit(1)
+    )).scalar_one()
+    return _mf_nav_out(latest)
+
+
+@router.get(
+    "/mutual-funds/{scheme_code}/signal",
+    response_model=MutualFundWithSignalOut,
+    summary="BUY / HOLD signal for a single fund scheme",
+)
+async def get_fund_signal(scheme_code: str, db: AsyncSession = Depends(get_db)):
+    latest = (await db.execute(
+        select(MutualFundNAV)
+        .where(MutualFundNAV.scheme_code == scheme_code)
+        .order_by(desc(MutualFundNAV.recorded_at))
+        .limit(1)
+    )).scalar_one_or_none()
+
+    if latest is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No NAV data for scheme {scheme_code}. Call POST /refresh first.",
+        )
+
+    signal_data = await get_mf_buy_signal(scheme_code, db)
+    return MutualFundWithSignalOut(
+        scheme_code=latest.scheme_code,
+        scheme_name=latest.scheme_name,
+        current_nav=latest.nav,
+        one_month_return=latest.one_month_return,
+        three_month_return=latest.three_month_return,
+        one_year_return=latest.one_year_return,
+        three_year_return=latest.three_year_return,
+        change_pct=latest.change_pct,
+        category=latest.category,
+        recorded_at=latest.recorded_at,
+        signal=signal_data.get("signal", "HOLD"),
+        reason=signal_data.get("reason", ""),
+        high_52w=signal_data.get("high_52w"),
+        dip_from_high_pct=signal_data.get("dip_from_high_pct"),
+        vix=signal_data.get("vix"),
+    )
+
+
+@router.get(
+    "/mutual-funds/compare",
+    response_model=list[FundComparisonOut],
+    summary="Compare funds by 1Y/3Y return and consistency; top fund highlighted",
+)
+async def compare_mutual_funds(
+    scheme_codes: Optional[str] = Query(
+        default=None,
+        description="Comma-separated scheme codes; defaults to WATCHLIST_MUTUAL_FUND_SCHEMES",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    codes = (
+        [c.strip() for c in scheme_codes.split(",")]
+        if scheme_codes
+        else settings.WATCHLIST_MUTUAL_FUND_SCHEMES
+    )
+    entries = await compare_funds(codes, db)
+    await db.commit()
+    return [FundComparisonOut(**e) for e in entries]
+
+
+@router.get(
+    "/mutual-funds/{scheme_code}/sip",
+    response_model=SIPSimulationOut,
+    summary="Simulate a monthly SIP using actual historical NAV data from DB",
+)
+async def simulate_sip_endpoint(
+    scheme_code: str,
+    monthly_amount: float = Query(default=5000.0, gt=0, description="Monthly SIP amount in INR"),
+    months: int = Query(default=36, ge=1, le=360, description="Number of months to simulate"),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await simulate_sip(scheme_code, monthly_amount, months, db)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No historical NAV data for scheme {scheme_code}",
+        )
+    return SIPSimulationOut(**result)
 
 
 @router.post(
     "/sip/project",
     response_model=SIPProjectionOut,
-    summary="Project SIP corpus using an assumed constant CAGR",
+    summary="Project SIP corpus using an assumed constant CAGR (planning tool)",
 )
 async def project_sip_returns(body: SIPProjectionIn):
-    """Planning tool — does not use real NAV history."""
+    """Does NOT use real NAV history. Use /mutual-funds/{code}/sip for real data."""
     if body.months <= 0 or body.monthly_amount <= 0:
         raise HTTPException(status_code=400, detail="monthly_amount and months must be positive")
     result = project_sip(body.monthly_amount, body.expected_annual_return_pct, body.months)
