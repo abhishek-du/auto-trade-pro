@@ -284,32 +284,22 @@ class SIPProjectionOut(BaseModel):
 
 class FundamentalDataOut(BaseModel):
     symbol:             str
-    market_cap_cr:      Optional[float]
-    current_price:      Optional[float]
-    high_52w:           Optional[float]
-    low_52w:            Optional[float]
+    company_name:       str
     pe_ratio:           Optional[float]
     pb_ratio:           Optional[float]
-    dividend_yield_pct: Optional[float]
-    roce_pct:           Optional[float]
-    roe_pct:            Optional[float]
+    roe:                Optional[float]
+    roce:               Optional[float]
     debt_to_equity:     Optional[float]
-    eps:                Optional[float]
-    book_value:         Optional[float]
-    face_value:         Optional[float]
-    fetched_at:         datetime
-
-
-class FundamentalAnalysisOut(BaseModel):
-    symbol:          str
-    data:            FundamentalDataOut
-    pe_score:        float
-    roe_score:       float
-    debt_score:      float
-    roce_score:      float
-    composite_score: float
-    valuation_label: str
-    analyzed_at:     datetime
+    current_ratio:      Optional[float]
+    revenue_growth_3yr: Optional[float]
+    profit_growth_3yr:  Optional[float]
+    promoter_holding:   Optional[float]
+    fii_holding:        Optional[float]
+    pledged_pct:        Optional[float]
+    market_cap_cr:      Optional[float]
+    dividend_yield:     Optional[float]
+    fundamental_score:  Optional[float]
+    last_updated:       datetime
 
 
 class SectorRotationOut(BaseModel):

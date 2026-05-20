@@ -386,3 +386,41 @@ class MutualFundNAV(Base):
             f"<MutualFundNAV {self.scheme_code} nav={self.nav} "
             f"1y={self.one_year_return}% @{self.recorded_at.date()}>"
         )
+
+
+# ── 13. FundamentalData ───────────────────────────────────────────────────────
+
+class FundamentalData(Base):
+    """Weekly fundamental snapshot for an NSE-listed stock.
+
+    One row per symbol — updated in-place each weekly run.
+    Sources: yfinance (PE/ROE/D·E) + Screener.in (ROCE/promoter/pledged/growth).
+    """
+    __tablename__ = "fundamental_data"
+
+    id:                 Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:             Mapped[str]          = mapped_column(String(30),  nullable=False, unique=True)
+    company_name:       Mapped[str]          = mapped_column(String(200), nullable=False, default="")
+    pe_ratio:           Mapped[float | None] = mapped_column(Float, nullable=True)
+    pb_ratio:           Mapped[float | None] = mapped_column(Float, nullable=True)
+    roe:                Mapped[float | None] = mapped_column(Float, nullable=True)   # %
+    roce:               Mapped[float | None] = mapped_column(Float, nullable=True)   # %
+    debt_to_equity:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_ratio:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_growth_3yr: Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    profit_growth_3yr:  Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    promoter_holding:   Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    fii_holding:        Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    pledged_pct:        Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    market_cap_cr:      Mapped[float | None] = mapped_column(Float, nullable=True)  # INR Crores
+    dividend_yield:     Mapped[float | None] = mapped_column(Float, nullable=True)  # %
+    fundamental_score:  Mapped[float | None] = mapped_column(Float, nullable=True)  # 0–100
+    last_updated:       Mapped[datetime]     = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FundamentalData {self.symbol} score={self.fundamental_score} "
+            f"pe={self.pe_ratio} roe={self.roe}% roce={self.roce}%>"
+        )
