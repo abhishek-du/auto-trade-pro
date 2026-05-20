@@ -40,7 +40,10 @@ _KERAS_AVAILABLE   = False
 _JOBLIB_AVAILABLE  = False
 
 try:
-    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.preprocessing import MinMaxScaler, StandardScaler
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.metrics import accuracy_score
     _SKLEARN_AVAILABLE = True
 except ImportError:
     pass
@@ -84,8 +87,10 @@ _MIN_TRAIN_ROWS = _SEQUENCE_LENGTH + 60   # need at least this many bars
 
 # ── In-memory caches (avoid repeated disk I/O) ────────────────────────────────
 
-_model_cache:  dict[str, Any] = {}
-_scaler_cache: dict[str, Any] = {}
+_model_cache:    dict[str, Any] = {}   # LSTM models
+_scaler_cache:   dict[str, Any] = {}   # LSTM scalers
+_rf_model_cache: dict[str, Any] = {}   # RF models
+_rf_scaler_cache: dict[str, Any] = {}  # RF StandardScalers
 
 
 # ── Low-level indicator helpers ───────────────────────────────────────────────
@@ -589,3 +594,528 @@ async def train_all_models(session) -> None:
             )
 
     logger.info("[train_all_models] Complete")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Random Forest Signal Classifier (IN-13)
+# 50-feature set  |  5-day forward return labels  |  TimeSeriesSplit(5)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── RF constants ──────────────────────────────────────────────────────────────
+
+_RF_LABEL_THRESHOLD = 0.02   # ±2% 5-day return → UP/DOWN; inside = FLAT
+_RF_LABEL_WINDOW    = 5      # forward bars for label
+_RF_MIN_TRAIN_ROWS  = 300
+
+_RF_FEATURE_NAMES: list[str] = [
+    # Technical (14)
+    "rsi", "macd", "macd_histogram", "bb_position", "atr_normalized",
+    "stoch_k", "stoch_d", "adx", "plus_di", "minus_di",
+    "ema5_ratio", "ema20_ratio", "ema50_ratio", "ema200_ratio",
+    # Pattern flags (5)
+    "bullish_engulfing", "hammer", "doji", "morning_star", "shooting_star",
+    # Volume (3)
+    "obv_trend", "volume_ratio", "vwap_position",
+    # India-specific (3)
+    "fii_net_flow_normalized", "india_vix_normalized", "sector_rs",
+    # Calendar effects (8)
+    "is_monday", "is_friday", "week_of_month", "days_to_weekly_expiry",
+    "is_budget_month", "is_rbi_week", "month_normalized", "quarter",
+    # Price action (8)
+    "gap_up", "gap_down", "inside_bar", "outside_bar",
+    "consecutive_up_days", "consecutive_down_days", "body_size_ratio", "shadow_ratio",
+    # Extra momentum (9 → total 50)
+    "lag_return_1d", "lag_return_2d", "lag_return_3d",
+    "williams_r", "cci", "roc_5", "donchian_position",
+    "close_to_high_52w", "close_to_low_52w",
+]
+
+assert len(_RF_FEATURE_NAMES) == 50, f"Expected 50 features, got {len(_RF_FEATURE_NAMES)}"
+
+
+# ── RF indicator helpers ──────────────────────────────────────────────────────
+
+def _stochastic(df: pd.DataFrame, period: int = 14, smooth: int = 3) -> tuple[pd.Series, pd.Series]:
+    lo = df["low"].rolling(period,  min_periods=1).min()
+    hi = df["high"].rolling(period, min_periods=1).max()
+    k  = (100 * (df["close"] - lo) / (hi - lo + 1e-10)).fillna(50)
+    d  = k.rolling(smooth, min_periods=1).mean()
+    return k, d
+
+
+def _adx_indicators(df: pd.DataFrame, period: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    hi, lo, cl = df["high"], df["low"], df["close"]
+    prev_hi = hi.shift(1)
+    prev_lo = lo.shift(1)
+    prev_cl = cl.shift(1)
+
+    tr = pd.concat([hi - lo, (hi - prev_cl).abs(), (lo - prev_cl).abs()], axis=1).max(axis=1)
+    up   = hi - prev_hi
+    down = prev_lo - lo
+    pos_dm = np.where((up > down) & (up > 0), up.values, 0.0)
+    neg_dm = np.where((down > up) & (down > 0), down.values, 0.0)
+
+    sm_tr   = pd.Series(pos_dm, index=df.index).ewm(span=period, adjust=False).mean()
+    sm_pos  = pd.Series(pos_dm, index=df.index).ewm(span=period, adjust=False).mean()
+    sm_neg  = pd.Series(neg_dm, index=df.index).ewm(span=period, adjust=False).mean()
+    sm_tr2  = tr.ewm(span=period, adjust=False).mean()
+
+    plus_di  = (100 * sm_pos / (sm_tr2 + 1e-10)).fillna(0)
+    minus_di = (100 * sm_neg / (sm_tr2 + 1e-10)).fillna(0)
+    dx       = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10))
+    adx_s    = dx.ewm(span=period, adjust=False).mean().fillna(0)
+    return adx_s, plus_di, minus_di
+
+
+def _obv(df: pd.DataFrame) -> pd.Series:
+    direction = np.sign(df["close"].diff().fillna(0))
+    return (direction * df["volume"]).cumsum()
+
+
+def _cci(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    tp  = (df["high"] + df["low"] + df["close"]) / 3
+    sma = tp.rolling(period, min_periods=1).mean()
+    mad = tp.rolling(period, min_periods=1).apply(
+        lambda x: np.abs(x - x.mean()).mean(), raw=True
+    )
+    return ((tp - sma) / (0.015 * mad + 1e-10)).fillna(0)
+
+
+def _williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    hi = df["high"].rolling(period, min_periods=1).max()
+    lo = df["low"].rolling(period,  min_periods=1).min()
+    return -100 * (hi - df["close"]) / (hi - lo + 1e-10)
+
+
+def _rolling_vwap(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    tp  = (df["high"] + df["low"] + df["close"]) / 3
+    vol = df["volume"].clip(lower=0)
+    return (
+        (tp * vol).rolling(period, min_periods=1).sum()
+        / vol.rolling(period, min_periods=1).sum()
+    )
+
+
+def _consecutive_moves(close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    ret  = close.pct_change().fillna(0).values
+    up   = np.zeros(len(ret), dtype=np.float32)
+    down = np.zeros(len(ret), dtype=np.float32)
+    for i in range(1, len(ret)):
+        if ret[i] > 0:
+            up[i]   = up[i - 1] + 1
+        elif ret[i] < 0:
+            down[i] = down[i - 1] + 1
+    return pd.Series(up, index=close.index), pd.Series(down, index=close.index)
+
+
+# ── Candlestick pattern detector ──────────────────────────────────────────────
+
+def _detect_patterns(df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Return five binary (0/1 float32) pattern arrays aligned with df."""
+    o, h, l, c = df["open"].values, df["high"].values, df["low"].values, df["close"].values
+    n       = len(df)
+    total   = h - l + 1e-10
+    body    = np.abs(c - o)
+    low_sh  = np.where(c >= o, o - l, c - l).clip(0)
+    up_sh   = np.where(c >= o, h - c, h - o).clip(0)
+
+    # Bullish engulfing
+    be = np.zeros(n, dtype=np.float32)
+    for i in range(1, n):
+        if c[i-1] < o[i-1] and c[i] > o[i] and o[i] < c[i-1] and c[i] > o[i-1]:
+            be[i] = 1.0
+
+    # Hammer: small body at top, long lower shadow
+    hammer = np.where(
+        (body / total < 0.35) & (low_sh / total > 0.55) & (up_sh / total < 0.15),
+        1.0, 0.0,
+    ).astype(np.float32)
+
+    # Doji: body < 10% of range
+    doji = np.where(body / total < 0.10, 1.0, 0.0).astype(np.float32)
+
+    # Morning star: bearish → small-body → bullish, closes above midpoint of bar 1
+    ms = np.zeros(n, dtype=np.float32)
+    for i in range(2, n):
+        if (c[i-2] < o[i-2] and body[i-2] / total[i-2] > 0.40
+                and body[i-1] / total[i-1] < 0.30
+                and c[i] > o[i]
+                and c[i] > (o[i-2] + c[i-2]) / 2):
+            ms[i] = 1.0
+
+    # Shooting star: small body at bottom, long upper shadow
+    shooting = np.where(
+        (body / total < 0.35) & (up_sh / total > 0.55) & (low_sh / total < 0.15),
+        1.0, 0.0,
+    ).astype(np.float32)
+
+    return {
+        "bullish_engulfing": be,
+        "hammer":       hammer,
+        "doji":         doji,
+        "morning_star": ms,
+        "shooting_star": shooting,
+    }
+
+
+# ── RF 50-feature matrix builder ──────────────────────────────────────────────
+
+def _build_rf_features(
+    df: pd.DataFrame,
+    indicators_list: list[dict] | None = None,
+) -> np.ndarray:
+    """Compute the raw (unscaled) 50-column RF feature matrix.
+
+    Parameters
+    ----------
+    df              : OHLCV DataFrame.
+    indicators_list : optional list of per-bar dicts (same length as df).
+                      Recognised keys: fii_net_flow_normalized,
+                      india_vix_normalized, sector_rs.
+
+    Returns
+    -------
+    np.ndarray of shape (len(df), 50), dtype float32.
+    """
+    n     = len(df)
+    close = df["close"]
+    vol   = df["volume"]
+
+    # ── Technical (14) ───────────────────────────────────────────────────────
+    rsi_s    = _rsi(close) / 100.0
+    ml, ms_  = _macd(close)
+    mh       = ml - ms_
+    macd_n   = (ml / (close + 1e-10)).fillna(0)
+    mh_n     = (mh / (close + 1e-10)).fillna(0)
+    bb_sma   = close.rolling(20, min_periods=2).mean()
+    bb_std   = close.rolling(20, min_periods=2).std().fillna(0)
+    bb_pos   = ((close - (bb_sma - 2*bb_std)) / (4*bb_std + 1e-10)).clip(0, 1)
+    atr_n    = (_atr(df) / (close + 1e-10)).fillna(0).clip(0, 0.2)
+    sk, sd   = _stochastic(df)
+    adx_v, pdi, ndi = _adx_indicators(df)
+    ema5     = close.ewm(span=5,   adjust=False).mean()
+    ema20    = close.ewm(span=20,  adjust=False).mean()
+    ema50    = close.ewm(span=50,  adjust=False).mean()
+    ema200   = close.ewm(span=200, adjust=False).mean()
+
+    # ── Patterns (5) ─────────────────────────────────────────────────────────
+    pats = _detect_patterns(df)
+
+    # ── Volume (3) ───────────────────────────────────────────────────────────
+    obv_raw  = _obv(df)
+    obv_t    = np.sign(obv_raw.diff(5).fillna(0)).values.astype(np.float32)
+    vol_sma  = vol.rolling(20, min_periods=1).mean()
+    vol_r    = (vol / (vol_sma + 1e-10)).clip(0, 10)
+    vwap_    = _rolling_vwap(df)
+    vwap_pos = np.sign(close - vwap_).fillna(0).values.astype(np.float32)
+
+    # ── India-specific (3) — from indicators_list or zero ────────────────────
+    fii_n = np.zeros(n, dtype=np.float32)
+    vix_n = np.zeros(n, dtype=np.float32)
+    sec_r = np.zeros(n, dtype=np.float32)
+    if indicators_list:
+        for i, d in enumerate(indicators_list[:n]):
+            fii_n[i] = float(d.get("fii_net_flow_normalized", 0))
+            vix_n[i] = float(d.get("india_vix_normalized",    0))
+            sec_r[i] = float(d.get("sector_rs",               0))
+
+    # ── Calendar (8) ─────────────────────────────────────────────────────────
+    if hasattr(df.index, "dayofweek"):
+        dow_a   = np.array(df.index.dayofweek, dtype=np.int32)
+        mon_a   = np.array(df.index.month,     dtype=np.int32)
+        day_a   = np.array(df.index.day,       dtype=np.int32)
+        is_mon  = (dow_a == 0).astype(np.float32)
+        is_fri  = (dow_a == 4).astype(np.float32)
+        wom     = np.clip((day_a - 1) // 7 + 1, 1, 4).astype(np.float32)
+        # Days to next Thursday (NSE weekly expiry)
+        d2exp   = ((3 - dow_a + 7) % 7).astype(np.float32)
+        is_bud  = (mon_a == 2).astype(np.float32)
+        # RBI MPC: typically 1st week of even months
+        is_rbi  = ((mon_a % 2 == 0) & (day_a <= 7)).astype(np.float32)
+        mon_n   = (mon_a / 12.0).astype(np.float32)
+        qtr     = (np.ceil(mon_a / 3.0) / 4.0).astype(np.float32)
+    else:
+        is_mon = is_fri = wom = d2exp = is_bud = is_rbi = mon_n = qtr = (
+            np.zeros(n, dtype=np.float32)
+        )
+
+    # ── Price action (8) ─────────────────────────────────────────────────────
+    o_a, h_a, l_a, c_a = (
+        df["open"].values, df["high"].values, df["low"].values, df["close"].values
+    )
+    prev_h = df["high"].shift(1).bfill().values
+    prev_l = df["low"].shift(1).bfill().values
+    total_ = h_a - l_a + 1e-10
+    body_  = np.abs(c_a - o_a)
+    lo_sh  = np.where(c_a >= o_a, o_a - l_a, c_a - l_a).clip(0)
+    up_sh  = np.where(c_a >= o_a, h_a - c_a, h_a - o_a).clip(0)
+
+    gap_up   = (df["open"] > df["high"].shift(1)).astype(np.float32).values
+    gap_dn   = (df["open"] < df["low"].shift(1)).astype(np.float32).values
+    inside   = ((h_a < prev_h) & (l_a > prev_l)).astype(np.float32)
+    outside  = ((h_a > prev_h) & (l_a < prev_l)).astype(np.float32)
+    body_r   = (body_ / total_).astype(np.float32)
+    shadow_r = ((lo_sh + up_sh) / total_).astype(np.float32)
+    up_d, dn_d = _consecutive_moves(close)
+    up_d_n   = (up_d / 10.0).clip(0, 1).values
+    dn_d_n   = (dn_d / 10.0).clip(0, 1).values
+
+    # ── Extra momentum (9) ───────────────────────────────────────────────────
+    lag1    = close.pct_change(1).fillna(0)
+    lag2    = close.pct_change(2).fillna(0)
+    lag3    = close.pct_change(3).fillna(0)
+    wr_n    = ((_williams_r(df) + 100) / 100.0).clip(0, 1)
+    cci_n   = ((_cci(df).clip(-200, 200) + 200) / 400.0)
+    roc5    = close.pct_change(5).fillna(0)
+    d_hi    = df["high"].rolling(20, min_periods=1).max()
+    d_lo    = df["low"].rolling(20,  min_periods=1).min()
+    don_pos = ((close - d_lo) / (d_hi - d_lo + 1e-10)).clip(0, 1)
+    hi52    = df["high"].rolling(252, min_periods=1).max()
+    lo52    = df["low"].rolling(252,  min_periods=1).min()
+    to_hi   = ((close / (hi52 + 1e-10)) - 1).clip(-0.5, 0.5)
+    to_lo   = ((close / (lo52 + 1e-10)) - 1).clip(-0.5, 0.5)
+
+    # ── Assemble 50-column matrix ─────────────────────────────────────────────
+    mat = np.column_stack([
+        # Technical (14)
+        rsi_s.values, macd_n.values, mh_n.values, bb_pos.values, atr_n.values,
+        (sk / 100.0).values, (sd / 100.0).values,
+        (adx_v / 100.0).values, (pdi / 100.0).values, (ndi / 100.0).values,
+        (close / (ema5  + 1e-10)).fillna(1).values,
+        (close / (ema20 + 1e-10)).fillna(1).values,
+        (close / (ema50 + 1e-10)).fillna(1).values,
+        (close / (ema200+ 1e-10)).fillna(1).values,
+        # Patterns (5)
+        pats["bullish_engulfing"], pats["hammer"], pats["doji"],
+        pats["morning_star"], pats["shooting_star"],
+        # Volume (3)
+        obv_t, vol_r.values, vwap_pos,
+        # India-specific (3)
+        fii_n, vix_n, sec_r,
+        # Calendar (8)
+        is_mon, is_fri, wom / 4.0, d2exp / 7.0,
+        is_bud, is_rbi, mon_n, qtr,
+        # Price action (8)
+        gap_up, gap_dn, inside, outside,
+        up_d_n, dn_d_n, body_r, shadow_r,
+        # Extra (9)
+        lag1.values, lag2.values, lag3.values,
+        wr_n.values, cci_n.values, roc5.values,
+        don_pos.values, to_hi.values, to_lo.values,
+    ]).astype(np.float32)
+
+    return np.nan_to_num(mat, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+# ── 7. train_random_forest ────────────────────────────────────────────────────
+
+def train_random_forest(
+    symbol: str,
+    df: pd.DataFrame,
+    indicators_list: list | None = None,
+) -> dict:
+    """Train and persist a Random Forest signal classifier for *symbol*.
+
+    Uses TimeSeriesSplit(5) for cross-validation (preserves time order).
+    Labels: UP/DOWN/FLAT based on 5-day forward return (±2% threshold).
+
+    Parameters
+    ----------
+    symbol          : NSE ticker; used as model file stem.
+    df              : OHLCV DataFrame; needs ≥ ``_RF_MIN_TRAIN_ROWS`` rows.
+    indicators_list : optional list of per-bar dicts for India-specific features.
+
+    Returns
+    -------
+    dict: {symbol, accuracy, top_features, trained_at}
+    On failure: {symbol, error}
+    """
+    if not (_SKLEARN_AVAILABLE and _JOBLIB_AVAILABLE):
+        return {"symbol": symbol, "error": "scikit-learn / joblib not installed"}
+
+    if len(df) < _RF_MIN_TRAIN_ROWS:
+        msg = f"need ≥ {_RF_MIN_TRAIN_ROWS} rows, got {len(df)}"
+        logger.warning(f"[train_rf] {symbol}: {msg}")
+        return {"symbol": symbol, "error": msg}
+
+    try:
+        # ── Features ─────────────────────────────────────────────────────────
+        X_raw = _build_rf_features(df, indicators_list)
+
+        # ── 5-day forward return labels ──────────────────────────────────────
+        fut = df["close"].pct_change(_RF_LABEL_WINDOW).shift(-_RF_LABEL_WINDOW).fillna(0).values
+        y   = np.where(
+            fut >  _RF_LABEL_THRESHOLD, 2,       # UP
+            np.where(fut < -_RF_LABEL_THRESHOLD, 0, 1)   # DOWN / FLAT
+        ).astype(np.int32)
+
+        # Drop tail rows where label is undefined
+        X_raw = X_raw[:-_RF_LABEL_WINDOW]
+        y     = y[:-_RF_LABEL_WINDOW]
+
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X_raw)
+
+        # ── TimeSeriesSplit cross-validation (5 folds, no shuffling) ─────────
+        tscv      = TimeSeriesSplit(n_splits=5)
+        fold_accs: list[float] = []
+
+        for fold, (tr_idx, val_idx) in enumerate(tscv.split(X_scaled)):
+            rf_fold = RandomForestClassifier(
+                n_estimators=200, max_depth=10, min_samples_split=10,
+                class_weight="balanced", random_state=42, n_jobs=-1,
+            )
+            rf_fold.fit(X_scaled[tr_idx], y[tr_idx])
+            acc = accuracy_score(y[val_idx], rf_fold.predict(X_scaled[val_idx]))
+            fold_accs.append(acc)
+            logger.debug(f"[train_rf] {symbol} fold {fold+1}/5: val_acc={acc:.2%}")
+
+        avg_acc = float(np.mean(fold_accs))
+        logger.info(f"[train_rf] {symbol}: avg_cv_acc={avg_acc:.2%}")
+
+        # ── Final model on full dataset ───────────────────────────────────────
+        rf_final = RandomForestClassifier(
+            n_estimators=200, max_depth=10, min_samples_split=10,
+            class_weight="balanced", random_state=42, n_jobs=-1,
+        )
+        rf_final.fit(X_scaled, y)
+
+        # ── Top 10 features by importance ─────────────────────────────────────
+        imp       = rf_final.feature_importances_
+        top_idx   = np.argsort(imp)[::-1][:10]
+        top_feats = {_RF_FEATURE_NAMES[i]: round(float(imp[i]), 4) for i in top_idx}
+        logger.info(f"[train_rf] {symbol} top features: {top_feats}")
+
+        # ── Persist ───────────────────────────────────────────────────────────
+        model_path  = _MODEL_DIR / f"{symbol}_rf.pkl"
+        scaler_path = _MODEL_DIR / f"{symbol}_rf_scaler.pkl"
+        joblib.dump(rf_final, model_path)
+        joblib.dump(scaler,   scaler_path)
+
+        _rf_model_cache.pop(symbol, None)
+        _rf_scaler_cache.pop(symbol, None)
+
+        logger.info(f"[train_rf] {symbol}: saved → {model_path}")
+        return {
+            "symbol":       symbol,
+            "accuracy":     round(avg_acc, 4),
+            "top_features": top_feats,
+            "trained_at":   datetime.datetime.utcnow().isoformat(),
+        }
+
+    except Exception as exc:
+        logger.warning(f"[train_rf] {symbol}: {exc}")
+        return {"symbol": symbol, "error": str(exc)}
+
+
+# ── 8. get_rf_score ───────────────────────────────────────────────────────────
+
+def get_rf_score(symbol: str, feature_vector: np.ndarray) -> float:
+    """Return the RF score contribution (+15 / -15 / 0) for one bar.
+
+    Parameters
+    ----------
+    symbol         : NSE ticker; determines which RF model file to load.
+    feature_vector : 1-D array of shape (50,).  Raw values — the saved
+                     StandardScaler is applied internally before inference.
+
+    Returns
+    -------
+    +15  if P(UP)   > 0.65
+    -15  if P(DOWN) > 0.65
+      0  otherwise (FLAT or low-confidence)
+    """
+    if not (_SKLEARN_AVAILABLE and _JOBLIB_AVAILABLE):
+        return 0.0
+
+    model_path  = _MODEL_DIR / f"{symbol}_rf.pkl"
+    scaler_path = _MODEL_DIR / f"{symbol}_rf_scaler.pkl"
+
+    if not model_path.exists() or not scaler_path.exists():
+        return 0.0
+
+    try:
+        if symbol not in _rf_model_cache:
+            _rf_model_cache[symbol]  = joblib.load(model_path)
+        if symbol not in _rf_scaler_cache:
+            _rf_scaler_cache[symbol] = joblib.load(scaler_path)
+
+        rf     = _rf_model_cache[symbol]
+        scaler = _rf_scaler_cache[symbol]
+
+        vec   = np.nan_to_num(
+            np.asarray(feature_vector, dtype=np.float32).reshape(1, -1),
+            nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        X     = scaler.transform(vec)
+        proba = rf.predict_proba(X)[0]
+
+        # Classes are sorted; map label integers to proba slots
+        cls_list  = list(rf.classes_)
+        up_prob   = float(proba[cls_list.index(2)]) if 2 in cls_list else 0.0
+        down_prob = float(proba[cls_list.index(0)]) if 0 in cls_list else 0.0
+
+        if up_prob > 0.65:
+            score = 15.0
+        elif down_prob > 0.65:
+            score = -15.0
+        else:
+            score = 0.0
+
+        logger.debug(
+            f"[get_rf_score] {symbol}: up={up_prob:.2%} down={down_prob:.2%} score={score:+.0f}"
+        )
+        return score
+
+    except Exception as exc:
+        logger.warning(f"[get_rf_score] {symbol}: {exc}")
+        _rf_model_cache.pop(symbol, None)
+        _rf_scaler_cache.pop(symbol, None)
+        return 0.0
+
+
+# ── 9. get_combined_ml_score ──────────────────────────────────────────────────
+
+def get_combined_ml_score(symbol: str, df: pd.DataFrame) -> float:
+    """Consensus score from LSTM + Random Forest.
+
+    Consensus logic
+    ---------------
+    Both positive  (LSTM +, RF +)  → +15   (strong bullish agreement)
+    Both negative  (LSTM −, RF −)  → -15   (strong bearish agreement)
+    One is zero                     → other × 0.5  (single model confirmation)
+    Conflicting    (one +, one −)   →   0   (no consensus — abstain)
+
+    Returns a float in {−15, −7.5, 0, +7.5, +15}.
+    Returns 0 immediately when ENABLE_ML_PREDICTIONS is False.
+    """
+    from utils.config import settings
+
+    if not settings.ENABLE_ML_PREDICTIONS:
+        return 0.0
+
+    lstm_score = get_ml_score(symbol, df)
+
+    rf_score = 0.0
+    if (_MODEL_DIR / f"{symbol}_rf.pkl").exists() and len(df) >= 260:
+        warmup = df.tail(520).copy()       # extra rows for EMA/ATR warm-up
+        fv     = _build_rf_features(warmup, indicators_list=None)
+        if fv.shape[0] > 0:
+            rf_score = get_rf_score(symbol, fv[-1])
+
+    logger.debug(
+        f"[get_combined_ml_score] {symbol}: lstm={lstm_score:+.0f} rf={rf_score:+.0f}"
+    )
+
+    # Consensus
+    if lstm_score > 0 and rf_score > 0:
+        return 15.0
+    if lstm_score < 0 and rf_score < 0:
+        return -15.0
+    if lstm_score == 0 and rf_score == 0:
+        return 0.0
+    if lstm_score == 0:
+        return rf_score * 0.5
+    if rf_score == 0:
+        return lstm_score * 0.5
+    return 0.0      # conflicting signals → no contribution
