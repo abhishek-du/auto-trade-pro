@@ -1,17 +1,22 @@
-"""Fundamental Analyzer — Screener.in scraper for NSE equity fundamentals.
+"""Fundamental Analyzer — PE, ROE, ROCE, promoter holding analysis.
 
-Scrapes key financial ratios for NSE-listed stocks from Screener.in and
-produces a composite fundamental score used by the signal generator.
+Data sources
+------------
+yfinance    : PE, P/B, ROE, D/E, current ratio, dividend yield, market cap,
+              insider (promoter) %, institutional (FII+DII) %
+Screener.in : ROCE, accurate promoter %, pledged %, 3-year revenue/profit CAGR
+bsedata     : corporate actions / BSE announcements (optional, BSE code needed)
 
-All HTTP calls use async httpx with browser-impersonation headers.
-BeautifulSoup + lxml parse the ratio section; no login is required.
+All Screener.in HTTP calls include a 2-second delay to respect rate limits.
+All blocking calls (yfinance, bsedata) run in the thread-pool executor.
 
 Public API
 ----------
-fetch_fundamental_data(symbol)          -> FundamentalData | None  (async)
-calculate_fundamental_score(data)       -> float  (sync, -100 to +100)
-analyze_fundamentals(symbol)            -> FundamentalAnalysis | None  (async)
-analyze_all_nse_symbols(symbols)        -> list[FundamentalAnalysis]  (async)
+fetch_fundamentals_yfinance(symbol)            -> dict   (sync)
+fetch_fundamentals_screener(symbol_bare)       -> dict   (async)
+calculate_fundamental_score(data)              -> float  (sync, 0-100)
+get_fundamental_contribution(symbol, session)  -> float  (async, -30 to +30)
+run_fundamental_update(session)                -> None   (async)
 """
 
 from __future__ import annotations
@@ -19,14 +24,16 @@ from __future__ import annotations
 import asyncio
 import datetime
 import re
-from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.models import FundamentalData
 from utils.logger import logger
 
-# ── Optional BeautifulSoup import ─────────────────────────────────────────────
+# ── Optional imports ──────────────────────────────────────────────────────────
 
 _BS4_AVAILABLE = False
 try:
@@ -35,11 +42,17 @@ try:
 except ImportError:
     pass
 
+_BSEDATA_AVAILABLE = False
+try:
+    from bsedata.bse import BSE as _BSE
+    _BSEDATA_AVAILABLE = True
+except ImportError:
+    pass
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_SCREENER_BASE    = "https://www.screener.in/company"
-_REQUEST_TIMEOUT  = 15.0   # seconds
-_REQUEST_DELAY    = 1.5    # seconds between consecutive requests — avoid 429
+_SCREENER_BASE   = "https://www.screener.in/company"
+_REQUEST_TIMEOUT = 15.0
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -48,316 +61,557 @@ _HEADERS = {
     ),
     "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-IN,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "Referer":         "https://www.screener.in/",
-    "DNT":             "1",
 }
 
 
-# ── Data classes ──────────────────────────────────────────────────────────────
+# ── Scoring helpers (each returns 0–10 or None) ───────────────────────────────
 
-@dataclass
-class FundamentalData:
-    symbol:             str
-    market_cap_cr:      Optional[float]   # INR Crores
-    current_price:      Optional[float]
-    high_52w:           Optional[float]
-    low_52w:            Optional[float]
-    pe_ratio:           Optional[float]   # Price / EPS (trailing)
-    pb_ratio:           Optional[float]   # Price / Book Value
-    dividend_yield_pct: Optional[float]
-    roce_pct:           Optional[float]   # Return on Capital Employed
-    roe_pct:            Optional[float]   # Return on Equity
-    debt_to_equity:     Optional[float]
-    eps:                Optional[float]   # EPS (TTM) — derived if not scraped
-    book_value:         Optional[float]
-    face_value:         Optional[float]
-    fetched_at: datetime.datetime = field(default_factory=datetime.datetime.now)
+def _score_pe(pe: float | None) -> float | None:
+    """PE < 10 = 10 pts … PE > 40 = 1 pt; negative EPS = 0."""
+    if pe is None:   return None
+    if pe <= 0:      return 0.0
+    if pe < 10:      return 10.0
+    if pe < 15:      return 8.0
+    if pe < 25:      return 6.0
+    if pe < 40:      return 3.0
+    return 1.0
 
 
-@dataclass
-class FundamentalAnalysis:
-    symbol:          str
-    data:            FundamentalData
-    pe_score:        float   # component score
-    roe_score:       float
-    debt_score:      float
-    roce_score:      float
-    composite_score: float   # weighted sum, clamped to [-100, +100]
-    valuation_label: str     # 'UNDERVALUED'|'FAIR_VALUE'|'OVERVALUED'|'INSUFFICIENT_DATA'
-    analyzed_at: datetime.datetime = field(default_factory=datetime.datetime.now)
+def _score_roe(roe: float | None) -> float | None:
+    """ROE in %; >25 = 10 pts … <10 = 1 pt."""
+    if roe is None:  return None
+    if roe > 25:     return 10.0
+    if roe > 20:     return 8.0
+    if roe > 15:     return 6.0
+    if roe > 10:     return 4.0
+    return 1.0
+
+
+def _score_roce(roce: float | None) -> float | None:
+    """ROCE in %; >20 = 10 pts … <10 = 1 pt."""
+    if roce is None: return None
+    if roce > 20:    return 10.0
+    if roce > 15:    return 7.0
+    if roce > 10:    return 4.0
+    return 1.0
+
+
+def _score_de(de: float | None) -> float | None:
+    """D/E ratio; <0.3 = 10 pts … >1.5 = 1 pt."""
+    if de is None:   return None
+    if de < 0.3:     return 10.0
+    if de < 0.7:     return 7.0
+    if de < 1.5:     return 4.0
+    return 1.0
+
+
+def _score_promoter(ph: float | None) -> float | None:
+    """Promoter holding %; >65 = 10 pts … <35 = 2 pts."""
+    if ph is None:   return None
+    if ph > 65:      return 10.0
+    if ph > 50:      return 7.0
+    if ph > 35:      return 5.0
+    return 2.0
+
+
+def _score_pledged(p: float | None) -> float | None:
+    """Pledged %; 0% = 10 pts … >20% = 0 (red flag)."""
+    if p is None:    return None
+    if p == 0:       return 10.0
+    if p < 5:        return 8.0
+    if p < 20:       return 4.0
+    return 0.0
+
+
+def _score_revenue_growth(rg: float | None) -> float | None:
+    """3-yr revenue CAGR %; >20 = 10 pts … <5 = 2 pts."""
+    if rg is None:   return None
+    if rg > 20:      return 10.0
+    if rg > 15:      return 8.0
+    if rg > 10:      return 6.0
+    if rg > 5:       return 4.0
+    return 2.0
+
+
+def _score_profit_growth(pg: float | None) -> float | None:
+    """3-yr profit CAGR %; >25 = 10 pts … <10 = 2 pts."""
+    if pg is None:   return None
+    if pg > 25:      return 10.0
+    if pg > 15:      return 8.0
+    if pg > 10:      return 5.0
+    return 2.0
 
 
 # ── Number parser ─────────────────────────────────────────────────────────────
 
-def _parse_number(text: str) -> float | None:
-    """Strip currency symbols, units, commas and return float or None."""
-    if not text:
-        return None
-    text = str(text).strip()
-    text = re.sub(r"[₹,\s]",      "",   text)
-    text = re.sub(r"Cr\.?",        "",   text, flags=re.IGNORECASE)
-    text = re.sub(r"%",            "",   text)
-    # Keep first number token only (handles "2,890 / 2,120" format)
-    m = re.search(r"-?\d+(?:\.\d+)?", text)
+def _to_float(text: Any, default: float | None = None) -> float | None:
+    """Strip currency symbols/units and return float, or default."""
+    if text is None:
+        return default
+    cleaned = re.sub(r"[₹,\s%]", "", str(text))
+    cleaned = re.sub(r"Cr\.?", "", cleaned, flags=re.IGNORECASE)
+    m = re.search(r"-?\d+(?:\.\d+)?", cleaned)
     if m:
         try:
             return float(m.group())
         except ValueError:
             pass
-    return None
+    return default
 
 
-# ── HTML scraping ─────────────────────────────────────────────────────────────
+# ── 1. yfinance fetch (sync) ──────────────────────────────────────────────────
 
-def _parse_screener_html(html: str, symbol: str) -> FundamentalData:
-    """Extract financial ratios from a Screener.in company page."""
+def fetch_fundamentals_yfinance(symbol: str) -> dict:
+    """Fetch fundamental ratios from Yahoo Finance via yfinance.
+
+    Parameters
+    ----------
+    symbol : NSE ticker including suffix, e.g. ``RELIANCE.NS``
+
+    Returns
+    -------
+    dict with keys: company_name, pe_ratio, pb_ratio, roe, debt_to_equity,
+    current_ratio, revenue_growth_ttm, profit_growth_ttm, dividend_yield,
+    market_cap_cr, promoter_holding, fii_holding.
+
+    NOTE:  yfinance ``debtToEquity`` is stored as a percentage (50 = D/E 0.5).
+           ``returnOnEquity`` is a decimal (0.18 = 18 %).
+           ``heldPercentInsiders`` approximates promoter holding (decimal).
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.error("fetch_fundamentals_yfinance: yfinance not installed")
+        return {}
+
+    try:
+        info: dict = yf.Ticker(symbol).info
+    except Exception as exc:
+        logger.warning(f"fetch_fundamentals_yfinance {symbol}: {exc}")
+        return {}
+
+    def _g(key: str) -> Any:
+        return info.get(key)
+
+    # ROE: decimal → percent
+    roe_raw = _g("returnOnEquity")
+    roe = round(roe_raw * 100, 2) if roe_raw is not None else None
+
+    # D/E: Yahoo Finance stores as ratio * 100 (e.g., 50.5 means 0.505)
+    de_raw = _g("debtToEquity")
+    de = round(de_raw / 100, 4) if de_raw is not None else None
+
+    # Dividend yield: decimal → percent
+    dy_raw = _g("dividendYield")
+    div_yield = round(dy_raw * 100, 2) if dy_raw is not None else None
+
+    # Market cap: INR → Crores (1 Cr = 10^7)
+    mc_raw = _g("marketCap")
+    market_cap_cr = round(mc_raw / 1e7, 2) if mc_raw else None
+
+    # Promoter holding (heldPercentInsiders): decimal → percent
+    ins_raw = _g("heldPercentInsiders")
+    promoter_holding = round(ins_raw * 100, 2) if ins_raw is not None else None
+
+    # FII holding (heldPercentInstitutions): decimal → percent
+    inst_raw = _g("heldPercentInstitutions")
+    fii_holding = round(inst_raw * 100, 2) if inst_raw is not None else None
+
+    # TTM growth rates: decimal → percent
+    rev_g = _g("revenueGrowth")
+    rev_growth_ttm = round(rev_g * 100, 2) if rev_g is not None else None
+
+    earn_g = _g("earningsGrowth")
+    profit_growth_ttm = round(earn_g * 100, 2) if earn_g is not None else None
+
+    return {
+        "company_name":       _g("longName") or _g("shortName") or "",
+        "pe_ratio":           _g("trailingPE"),
+        "pb_ratio":           _g("priceToBook"),
+        "roe":                roe,
+        "debt_to_equity":     de,
+        "current_ratio":      _g("currentRatio"),
+        "revenue_growth_ttm": rev_growth_ttm,
+        "profit_growth_ttm":  profit_growth_ttm,
+        "dividend_yield":     div_yield,
+        "market_cap_cr":      market_cap_cr,
+        "promoter_holding":   promoter_holding,
+        "fii_holding":        fii_holding,
+    }
+
+
+# ── 2. Screener.in fetch (async) ──────────────────────────────────────────────
+
+async def fetch_fundamentals_screener(symbol_bare: str) -> dict:
+    """Scrape fundamental ratios from Screener.in for an NSE symbol.
+
+    Parameters
+    ----------
+    symbol_bare : NSE symbol WITHOUT the ``.NS`` suffix, e.g. ``RELIANCE``
+
+    Returns
+    -------
+    dict with keys: pe_ratio, pb_ratio, roe, roce, debt_to_equity,
+    promoter_holding, fii_holding, pledged_pct,
+    revenue_growth_3yr, profit_growth_3yr.
+
+    A 2-second sleep is applied after the HTTP call to respect rate limits.
+    """
     if not _BS4_AVAILABLE:
-        raise ImportError("beautifulsoup4 not installed — run: pip install beautifulsoup4 lxml")
+        logger.error("fetch_fundamentals_screener: beautifulsoup4 not installed")
+        return {}
+
+    sym = symbol_bare.replace(".NS", "").replace(".BO", "").upper()
+    urls = [
+        f"{_SCREENER_BASE}/{sym}/consolidated/",
+        f"{_SCREENER_BASE}/{sym}/",
+    ]
+
+    html: str | None = None
+    async with httpx.AsyncClient(
+        headers=_HEADERS, timeout=_REQUEST_TIMEOUT, follow_redirects=True
+    ) as client:
+        for url in urls:
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+                html = resp.text
+                break
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    f"fetch_fundamentals_screener {sym}: HTTP {exc.response.status_code}"
+                )
+            except httpx.RequestError as exc:
+                logger.warning(f"fetch_fundamentals_screener {sym}: {exc}")
+
+    # Always wait 2 seconds after the HTTP call (even on failure)
+    await asyncio.sleep(2)
+
+    if not html:
+        return {}
 
     soup = BeautifulSoup(html, "lxml")
+    result: dict = {}
 
-    # Locate the top-ratios block (id first, then class fallback)
+    result.update(_parse_top_ratios(soup))
+    result.update(_parse_shareholding(soup))
+    result.update(_parse_growth_tables(soup))
+
+    return result
+
+
+def _parse_top_ratios(soup: BeautifulSoup) -> dict:
+    """Extract key ratios from the #top-ratios list."""
     ratios_ul = soup.find(id="top-ratios") or soup.find(class_="company-ratios")
+    if not ratios_ul:
+        return {}
 
     raw: dict[str, float | None] = {}
+    for li in ratios_ul.find_all("li"):
+        name_tag  = li.find(class_="name")
+        value_tag = li.find(class_="value") or li.find(class_="number")
+        if not (name_tag and value_tag):
+            continue
+        key = name_tag.get_text(strip=True).lower()
+        raw[key] = _to_float(value_tag.get_text(strip=True))
 
-    if ratios_ul:
-        for li in ratios_ul.find_all("li"):
-            name_tag  = li.find(class_="name")
-            value_tag = li.find(class_="value") or li.find(class_="number")
-            if not name_tag or not value_tag:
-                continue
-            key = name_tag.get_text(strip=True).lower()
-            val = value_tag.get_text(strip=True)
-            raw[key] = _parse_number(val)
-
-            # 52-week High / Low lives in one cell: "2,890 / 2,120"
-            if "high" in key and "/" in value_tag.get_text():
-                parts = value_tag.get_text().split("/")
-                raw["high_52w"] = _parse_number(parts[0])
-                raw["low_52w"]  = _parse_number(parts[1])
-
-    # Normalise keys that Screener.in labels inconsistently across versions
-    def _get(*candidates: str) -> float | None:
-        for k in candidates:
+    def _pick(*keys: str) -> float | None:
+        for k in keys:
             if raw.get(k) is not None:
                 return raw[k]
         return None
 
-    price   = _get("current price", "price")
-    pe      = _get("stock p/e", "p/e", "pe")
-    bv      = _get("book value", "book val")
-    pb      = round(price / bv, 2) if (price and bv and bv > 0) else _get("price to book", "p/b")
-    dy      = _get("dividend yield", "div yield")
-    roce    = _get("roce")
-    roe     = _get("roe")
-    de      = _get("debt to equity", "debt / equity", "d/e")
-    mc      = _get("market cap", "mkt cap")
-    fv      = _get("face value")
+    price  = _pick("current price", "price")
+    bv     = _pick("book value")
+    pe     = _pick("stock p/e", "p/e", "pe")
+    pb     = (round(price / bv, 2) if (price and bv and bv > 0) else _pick("price to book", "p/b"))
+    roe    = _pick("roe")
+    roce   = _pick("roce")
+    de     = _pick("debt to equity", "debt / equity", "d/e")
+    dy     = _pick("dividend yield", "div yield")
 
-    # EPS derived from P/E and current price when not directly available
-    eps: float | None = None
-    if price and pe and pe > 0:
-        eps = round(price / pe, 2)
+    return {k: v for k, v in {
+        "pe_ratio":      pe,
+        "pb_ratio":      pb,
+        "roe":           roe,
+        "roce":          roce,
+        "debt_to_equity": de,
+        "dividend_yield": dy,
+    }.items() if v is not None}
 
-    return FundamentalData(
-        symbol=symbol,
-        market_cap_cr=mc,
-        current_price=price,
-        high_52w=raw.get("high_52w", _get("high / low")),
-        low_52w=raw.get("low_52w"),
-        pe_ratio=pe,
-        pb_ratio=pb,
-        dividend_yield_pct=dy,
-        roce_pct=roce,
-        roe_pct=roe,
-        debt_to_equity=de,
-        eps=eps,
-        book_value=bv,
-        face_value=fv,
+
+def _parse_shareholding(soup: BeautifulSoup) -> dict:
+    """Extract promoter %, FII %, and pledged % from the shareholding table."""
+    result: dict = {}
+
+    section = (
+        soup.find(id="shareholding")
+        or soup.find(id="shareholding-pattern")
+        or soup.find("section", string=re.compile("shareholding", re.I))
     )
+    if not section:
+        return result
+
+    table = section.find("table")
+    if not table:
+        return result
+
+    for tr in table.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 2:
+            continue
+        label = cells[0].get_text(strip=True).lower()
+        # Second column = most recent quarter
+        val = _to_float(cells[1].get_text(strip=True))
+        if val is None:
+            continue
+
+        if "promoter" in label and "pledg" not in label:
+            result["promoter_holding"] = val
+        elif "fii" in label or ("foreign" in label and "institution" in label):
+            result["fii_holding"] = val
+        elif "pledg" in label:
+            result["pledged_pct"] = val
+
+    # Fallback: look for "Pledged" anywhere in the page if not found in table
+    if "pledged_pct" not in result:
+        for tag in soup.find_all(string=re.compile(r"pledg", re.I)):
+            parent = tag.parent
+            if parent:
+                next_num = _to_float(parent.find_next(string=re.compile(r"^\s*\d")))
+                if next_num is not None:
+                    result["pledged_pct"] = next_num
+                    break
+
+    return result
 
 
-# ── Scoring functions ─────────────────────────────────────────────────────────
+def _parse_growth_tables(soup: BeautifulSoup) -> dict:
+    """Extract 3-year revenue and profit CAGR from Screener.in growth tables."""
+    result: dict = {}
 
-def _pe_score(pe: float | None) -> float:
-    """Score: +25 (cheap) to -25 (expensive). Returns 0 when unavailable."""
-    if pe is None or pe <= 0:
-        return 0.0
-    if pe < 10:   return  25.0
-    if pe < 15:   return  20.0
-    if pe < 20:   return  10.0
-    if pe < 25:   return   0.0
-    if pe < 35:   return -15.0
-    if pe < 50:   return -20.0
-    return -25.0
-
-
-def _roe_score(roe: float | None) -> float:
-    """Score: +20 (excellent returns on equity) to -20 (very weak)."""
-    if roe is None:
-        return 0.0
-    if roe >= 25:  return  20.0
-    if roe >= 20:  return  15.0
-    if roe >= 15:  return   8.0
-    if roe >= 10:  return   0.0
-    if roe >= 5:   return -10.0
-    return -20.0
-
-
-def _debt_score(de: float | None) -> float:
-    """Score: +20 (debt-free) to -20 (over-leveraged)."""
-    if de is None or de < 0:
-        return 0.0
-    if de == 0:   return  20.0
-    if de < 0.3:  return  15.0
-    if de < 0.5:  return  10.0
-    if de < 1.0:  return   0.0
-    if de < 2.0:  return -10.0
-    return -20.0
-
-
-def _roce_score(roce: float | None) -> float:
-    """Score: +15 (strong capital efficiency) to -15 (poor)."""
-    if roce is None:
-        return 0.0
-    if roce >= 30:  return  15.0
-    if roce >= 20:  return  10.0
-    if roce >= 15:  return   5.0
-    if roce >= 10:  return   0.0
-    if roce >= 5:   return  -8.0
-    return -15.0
-
-
-def calculate_fundamental_score(data: FundamentalData) -> float:
-    """Weighted composite fundamental score in the range [-100, +100].
-
-    Weights
-    -------
-    P/E   : 35 %  — primary valuation metric
-    ROE   : 25 %  — management efficiency
-    Debt  : 25 %  — financial risk
-    ROCE  : 15 %  — capital efficiency
-    """
-    pe   = _pe_score(data.pe_ratio)
-    roe  = _roe_score(data.roe_pct)
-    debt = _debt_score(data.debt_to_equity)
-    roce = _roce_score(data.roce_pct)
-
-    # Normalise each component's max contribution by weight
-    # Max raw: pe=25, roe=20, debt=20, roce=15  →  total = 80 points
-    # We scale so 80 → 100 by multiplying by 100/80 = 1.25
-    raw    = pe * 0.35 + roe * 0.25 + debt * 0.25 + roce * 0.15
-    scaled = raw * (100.0 / 80.0 * 4)   # bring ±20 average range → ±100
-    return round(max(-100.0, min(100.0, scaled)), 2)
-
-
-def _valuation_label(score: float, data: FundamentalData) -> str:
-    has_data = any(
-        v is not None for v in (data.pe_ratio, data.roe_pct, data.roce_pct)
-    )
-    if not has_data:
-        return "INSUFFICIENT_DATA"
-    if score >= 30:
-        return "UNDERVALUED"
-    if score <= -30:
-        return "OVERVALUED"
-    return "FAIR_VALUE"
-
-
-# ── Public async API ──────────────────────────────────────────────────────────
-
-async def fetch_fundamental_data(symbol: str) -> FundamentalData | None:
-    """Fetch Screener.in page for *symbol* and return parsed fundamentals.
-
-    Tries the consolidated view first, then falls back to the standalone page.
-    *symbol* may include the `.NS` suffix — it is stripped automatically.
-    """
-    if not _BS4_AVAILABLE:
-        logger.error("fetch_fundamental_data: beautifulsoup4 not installed")
-        return None
-
-    clean = symbol.replace(".NS", "").replace(".BO", "").upper()
-    urls  = [
-        f"{_SCREENER_BASE}/{clean}/consolidated/",
-        f"{_SCREENER_BASE}/{clean}/",
-    ]
-
-    async with httpx.AsyncClient(
-        headers=_HEADERS,
-        timeout=_REQUEST_TIMEOUT,
-        follow_redirects=True,
-    ) as client:
-        for url in urls:
-            try:
-                response = await client.get(url)
-                if response.status_code == 404:
+    def _extract_3yr(heading_pattern: str) -> float | None:
+        for h in soup.find_all(["h2", "h3", "h4", "b"]):
+            if re.search(heading_pattern, h.get_text(strip=True), re.I):
+                table = h.find_next("table")
+                if not table:
                     continue
-                response.raise_for_status()
-                return _parse_screener_html(response.text, symbol)
-            except httpx.HTTPStatusError as exc:
-                logger.warning(f"fetch_fundamental_data {symbol}: HTTP {exc.response.status_code} at {url}")
-            except httpx.RequestError as exc:
-                logger.warning(f"fetch_fundamental_data {symbol}: request error — {exc}")
-            except Exception as exc:
-                logger.warning(f"fetch_fundamental_data {symbol}: parse error — {exc}")
-
-    return None
-
-
-async def analyze_fundamentals(symbol: str) -> FundamentalAnalysis | None:
-    """Fetch + score fundamentals for *symbol*."""
-    data = await fetch_fundamental_data(symbol)
-    if data is None:
+                for tr in table.find_all("tr"):
+                    cells = tr.find_all("td")
+                    if len(cells) < 2:
+                        continue
+                    if re.search(r"3\s*year", cells[0].get_text(strip=True), re.I):
+                        return _to_float(cells[1].get_text(strip=True))
         return None
 
-    pe   = _pe_score(data.pe_ratio)
-    roe  = _roe_score(data.roe_pct)
-    debt = _debt_score(data.debt_to_equity)
-    roce = _roce_score(data.roce_pct)
-    comp = calculate_fundamental_score(data)
-    label = _valuation_label(comp, data)
+    result["revenue_growth_3yr"] = _extract_3yr(r"(compounded\s+)?sales\s+growth|revenue\s+growth")
+    result["profit_growth_3yr"]  = _extract_3yr(r"(compounded\s+)?profit\s+growth|earnings\s+growth")
 
-    logger.info(
-        f"Fundamentals {symbol}  P/E={data.pe_ratio}  ROE={data.roe_pct}%  "
-        f"D/E={data.debt_to_equity}  ROCE={data.roce_pct}%  "
-        f"score={comp:+.1f}  [{label}]"
-    )
-
-    return FundamentalAnalysis(
-        symbol=symbol,
-        data=data,
-        pe_score=pe,
-        roe_score=roe,
-        debt_score=debt,
-        roce_score=roce,
-        composite_score=comp,
-        valuation_label=label,
-    )
+    return {k: v for k, v in result.items() if v is not None}
 
 
-async def analyze_all_nse_symbols(
-    symbols: list[str] | None = None,
-) -> list[FundamentalAnalysis]:
-    """Analyze fundamentals for all watchlist NSE symbols.
+# ── 3. Score calculation ──────────────────────────────────────────────────────
 
-    Falls back to settings.nse_symbols + settings.nse_mid_symbols.
-    A 1.5-second delay is inserted between requests to avoid rate-limiting.
-    Results are sorted by composite_score descending.
+def calculate_fundamental_score(data: dict) -> float:
+    """Compute weighted fundamental score normalized to 0–100.
+
+    Eight metrics each score 0–10.  Missing (None) metrics are excluded from
+    the denominator so a company with fewer data points is not penalized.
+
+    Returns 50.0 (neutral) when no metric is available.
+    """
+    metrics: dict[str, float | None] = {
+        "pe":             _score_pe(data.get("pe_ratio")),
+        "roe":            _score_roe(data.get("roe")),
+        "roce":           _score_roce(data.get("roce")),
+        "de":             _score_de(data.get("debt_to_equity")),
+        "promoter":       _score_promoter(data.get("promoter_holding")),
+        "pledged":        _score_pledged(data.get("pledged_pct")),
+        "revenue_growth": _score_revenue_growth(
+            data.get("revenue_growth_3yr") or data.get("revenue_growth_ttm")
+        ),
+        "profit_growth":  _score_profit_growth(
+            data.get("profit_growth_3yr") or data.get("profit_growth_ttm")
+        ),
+    }
+
+    available = [(k, v) for k, v in metrics.items() if v is not None]
+    if not available:
+        return 50.0
+
+    raw_score   = sum(v for _, v in available)
+    max_possible = len(available) * 10.0
+    return round(raw_score / max_possible * 100.0, 2)
+
+
+# ── 4. Signal contribution ────────────────────────────────────────────────────
+
+async def get_fundamental_contribution(
+    symbol: str,
+    session: AsyncSession,
+) -> float:
+    """Convert DB fundamental_score to the range [-30, +30].
+
+    Formula: (score - 50) × 0.6
+      score = 100  →  +30  (excellent fundamentals)
+      score =  50  →    0  (average)
+      score =   0  →  -30  (poor fundamentals)
+
+    Returns 0.0 when no DB record exists for the symbol.
+    """
+    row = (await session.execute(
+        select(FundamentalData).where(FundamentalData.symbol == symbol)
+    )).scalar_one_or_none()
+
+    if row is None or row.fundamental_score is None:
+        return 0.0
+
+    return round((row.fundamental_score - 50.0) * 0.6, 2)
+
+
+# ── 5. Full update run ────────────────────────────────────────────────────────
+
+async def run_fundamental_update(session: AsyncSession) -> None:
+    """Fetch and persist fundamentals for all NSE large + mid cap symbols.
+
+    For each symbol:
+    1. Call fetch_fundamentals_yfinance() in the thread pool (non-blocking).
+    2. Call fetch_fundamentals_screener() (async, includes 2s delay).
+    3. Screener.in values override yfinance where both are present.
+    4. Calculate fundamental_score.
+    5. UPSERT the FundamentalData row (update existing or insert new).
+
+    Designed to run weekly via Celery beat (Sunday 00:00 IST).
     """
     from utils.config import settings
 
-    all_symbols = symbols or (settings.nse_symbols + settings.nse_mid_symbols)
-    results: list[FundamentalAnalysis] = []
+    symbols = settings.nse_symbols + settings.nse_mid_symbols
+    loop    = asyncio.get_event_loop()
 
-    for sym in all_symbols:
-        analysis = await analyze_fundamentals(sym)
-        if analysis:
-            results.append(analysis)
+    logger.info(f"[fundamental_update] Starting for {len(symbols)} symbols")
+
+    for symbol in symbols:
+        bare = symbol.replace(".NS", "")
+
+        # ── Fetch yfinance (sync → executor) ─────────────────────────────────
+        try:
+            yf_data = await loop.run_in_executor(
+                None, fetch_fundamentals_yfinance, symbol
+            )
+        except Exception as exc:
+            logger.warning(f"[fundamental_update] yfinance {symbol}: {exc}")
+            yf_data = {}
+
+        # ── Fetch Screener.in (async, includes sleep) ─────────────────────────
+        try:
+            sc_data = await fetch_fundamentals_screener(bare)
+        except Exception as exc:
+            logger.warning(f"[fundamental_update] screener {bare}: {exc}")
+            sc_data = {}
+
+        # Merge: Screener.in overrides yfinance for shared keys
+        merged: dict = {**yf_data, **sc_data}
+        if not merged:
+            logger.warning(f"[fundamental_update] no data for {symbol} — skipping")
+            continue
+
+        score = calculate_fundamental_score(merged)
+
+        # ── Upsert FundamentalData ─────────────────────────────────────────────
+        existing = (await session.execute(
+            select(FundamentalData).where(FundamentalData.symbol == symbol)
+        )).scalar_one_or_none()
+
+        now = datetime.datetime.utcnow()
+        if existing:
+            existing.company_name        = merged.get("company_name", existing.company_name)
+            existing.pe_ratio            = merged.get("pe_ratio",            existing.pe_ratio)
+            existing.pb_ratio            = merged.get("pb_ratio",            existing.pb_ratio)
+            existing.roe                 = merged.get("roe",                 existing.roe)
+            existing.roce                = merged.get("roce",                existing.roce)
+            existing.debt_to_equity      = merged.get("debt_to_equity",      existing.debt_to_equity)
+            existing.current_ratio       = merged.get("current_ratio",       existing.current_ratio)
+            existing.revenue_growth_3yr  = merged.get("revenue_growth_3yr",  existing.revenue_growth_3yr)
+            existing.profit_growth_3yr   = merged.get("profit_growth_3yr",   existing.profit_growth_3yr)
+            existing.promoter_holding    = merged.get("promoter_holding",    existing.promoter_holding)
+            existing.fii_holding         = merged.get("fii_holding",         existing.fii_holding)
+            existing.pledged_pct         = merged.get("pledged_pct",         existing.pledged_pct)
+            existing.market_cap_cr       = merged.get("market_cap_cr",       existing.market_cap_cr)
+            existing.dividend_yield      = merged.get("dividend_yield",      existing.dividend_yield)
+            existing.fundamental_score   = score
+            existing.last_updated        = now
         else:
-            logger.warning(f"analyze_all_nse_symbols: skipped {sym}")
-        await asyncio.sleep(_REQUEST_DELAY)
+            session.add(FundamentalData(
+                symbol=symbol,
+                company_name=merged.get("company_name", ""),
+                pe_ratio=merged.get("pe_ratio"),
+                pb_ratio=merged.get("pb_ratio"),
+                roe=merged.get("roe"),
+                roce=merged.get("roce"),
+                debt_to_equity=merged.get("debt_to_equity"),
+                current_ratio=merged.get("current_ratio"),
+                revenue_growth_3yr=merged.get("revenue_growth_3yr"),
+                profit_growth_3yr=merged.get("profit_growth_3yr"),
+                promoter_holding=merged.get("promoter_holding"),
+                fii_holding=merged.get("fii_holding"),
+                pledged_pct=merged.get("pledged_pct"),
+                market_cap_cr=merged.get("market_cap_cr"),
+                dividend_yield=merged.get("dividend_yield"),
+                fundamental_score=score,
+                last_updated=now,
+            ))
 
-    results.sort(key=lambda a: a.composite_score, reverse=True)
-    return results
+        await session.flush()
+        logger.info(
+            f"[fundamental_update] {symbol} ({merged.get('company_name', '')[:30]})  "
+            f"score={score:.1f}  pe={merged.get('pe_ratio')}  "
+            f"roe={merged.get('roe')}%  roce={merged.get('roce')}%  "
+            f"promoter={merged.get('promoter_holding')}%  pledged={merged.get('pledged_pct')}%"
+        )
+
+    logger.info("[fundamental_update] Complete")
+
+
+# ── DB lookup helper (used by api/india.py) ───────────────────────────────────
+
+async def get_fundamentals_for_symbol(
+    symbol: str,
+    session: AsyncSession,
+) -> FundamentalData | None:
+    """Return the FundamentalData DB row for *symbol*, or None if missing.
+
+    Does NOT auto-fetch — call run_fundamental_update() to populate the DB.
+    """
+    return (await session.execute(
+        select(FundamentalData).where(FundamentalData.symbol == symbol)
+    )).scalar_one_or_none()
+
+
+# ── Optional: BSE corporate actions ──────────────────────────────────────────
+
+def fetch_bse_corporate_actions(bse_code: str) -> list[dict]:
+    """Fetch corporate actions for a BSE-listed company using bsedata.
+
+    Parameters
+    ----------
+    bse_code : BSE security ID, e.g. ``'500325'`` for Reliance Industries.
+               The BSE code must be looked up separately from the NSE symbol.
+
+    Returns
+    -------
+    list of dicts: [{'subject': str, 'ex_date': str, 'record_date': str, ...}]
+    Returns [] when bsedata is unavailable or the code is invalid.
+    """
+    if not _BSEDATA_AVAILABLE:
+        logger.debug("fetch_bse_corporate_actions: bsedata not installed")
+        return []
+    try:
+        b = _BSE()
+        actions = b.corporateActions(bse_code)
+        return actions if isinstance(actions, list) else []
+    except Exception as exc:
+        logger.warning(f"fetch_bse_corporate_actions {bse_code}: {exc}")
+        return []

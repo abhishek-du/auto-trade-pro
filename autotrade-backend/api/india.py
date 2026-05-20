@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import (
     FIIDIIFlowOut,
-    FundamentalAnalysisOut,
     FundamentalDataOut,
     FundComparisonOut,
     MutualFundNAVOut,
@@ -35,7 +34,7 @@ from crawler.india_price_feed import fetch_india_vix
 from crawler.options_chain import run_options_analysis
 from db.database import get_db
 from db.models import FIIDIIFlow, OptionsChainSnapshot, Signal
-from engine.fundamental_analyzer import analyze_fundamentals
+from engine.fundamental_analyzer import get_fundamentals_for_symbol, run_fundamental_update
 from engine.india_signal_generator import analyze_all_india_symbols
 from engine.india_specific import (
     SECTOR_MAP,
@@ -121,34 +120,25 @@ def _mf_nav_out(r: MutualFundNAV) -> MutualFundNAVOut:
     )
 
 
-def _fund_out(a) -> FundamentalAnalysisOut:
-    d = a.data
-    return FundamentalAnalysisOut(
-        symbol=a.symbol,
-        data=FundamentalDataOut(
-            symbol=d.symbol,
-            market_cap_cr=d.market_cap_cr,
-            current_price=d.current_price,
-            high_52w=d.high_52w,
-            low_52w=d.low_52w,
-            pe_ratio=d.pe_ratio,
-            pb_ratio=d.pb_ratio,
-            dividend_yield_pct=d.dividend_yield_pct,
-            roce_pct=d.roce_pct,
-            roe_pct=d.roe_pct,
-            debt_to_equity=d.debt_to_equity,
-            eps=d.eps,
-            book_value=d.book_value,
-            face_value=d.face_value,
-            fetched_at=d.fetched_at,
-        ),
-        pe_score=a.pe_score,
-        roe_score=a.roe_score,
-        debt_score=a.debt_score,
-        roce_score=a.roce_score,
-        composite_score=a.composite_score,
-        valuation_label=a.valuation_label,
-        analyzed_at=a.analyzed_at,
+def _fund_out(row) -> FundamentalDataOut:
+    return FundamentalDataOut(
+        symbol=row.symbol,
+        company_name=row.company_name,
+        pe_ratio=row.pe_ratio,
+        pb_ratio=row.pb_ratio,
+        roe=row.roe,
+        roce=row.roce,
+        debt_to_equity=row.debt_to_equity,
+        current_ratio=row.current_ratio,
+        revenue_growth_3yr=row.revenue_growth_3yr,
+        profit_growth_3yr=row.profit_growth_3yr,
+        promoter_holding=row.promoter_holding,
+        fii_holding=row.fii_holding,
+        pledged_pct=row.pledged_pct,
+        market_cap_cr=row.market_cap_cr,
+        dividend_yield=row.dividend_yield,
+        fundamental_score=row.fundamental_score,
+        last_updated=row.last_updated,
     )
 
 
@@ -527,18 +517,33 @@ async def project_sip_returns(body: SIPProjectionIn):
 
 @router.get(
     "/fundamentals/{symbol}",
-    response_model=FundamentalAnalysisOut,
-    summary="Fundamental analysis for an NSE-listed stock via Screener.in",
+    response_model=FundamentalDataOut,
+    summary="Fundamental data for an NSE-listed stock (from weekly DB snapshot)",
 )
-async def get_fundamentals(symbol: str):
+async def get_fundamentals(symbol: str, db: AsyncSession = Depends(get_db)):
     """`symbol` may include or omit the `.NS` suffix."""
-    analysis = await analyze_fundamentals(symbol)
-    if analysis is None:
+    sym = symbol.upper()
+    if not sym.endswith(".NS"):
+        sym = sym + ".NS"
+    row = await get_fundamentals_for_symbol(sym, db)
+    if row is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Could not fetch fundamentals for {symbol} — symbol may be unlisted on Screener.in",
+            detail=f"No fundamental data for {sym}. Run POST /fundamentals/refresh to populate.",
         )
-    return _fund_out(analysis)
+    return _fund_out(row)
+
+
+@router.post(
+    "/fundamentals/refresh",
+    summary="Trigger a full fundamental data refresh for all NSE symbols",
+)
+async def refresh_fundamentals(db: AsyncSession = Depends(get_db)):
+    """Runs run_fundamental_update() which fetches yfinance + Screener.in data.
+    This is network-intensive — the weekly Celery task is the normal trigger."""
+    await run_fundamental_update(db)
+    await db.commit()
+    return {"status": "ok", "message": "Fundamental update complete"}
 
 
 # ── Sector rotation ───────────────────────────────────────────────────────────

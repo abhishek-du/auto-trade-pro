@@ -12,6 +12,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from celery import Celery
+from celery.schedules import crontab
 from utils.config import settings
 
 # Build Celery broker/backend kwargs for Upstash TLS compatibility
@@ -76,5 +77,10 @@ celery_app.conf.beat_schedule = {
     "india-signals-every-5min": {
         "task":     "tasks.india_tasks.run_india_signal_scan",
         "schedule": 300,
+    },
+    # Saturday 18:30 UTC = Sunday 00:00 IST
+    "fundamentals-update-weekly": {
+        "task":     "tasks.india_tasks.run_fundamental_update_task",
+        "schedule": crontab(hour=18, minute=30, day_of_week="saturday"),
     },
 }

@@ -134,3 +134,21 @@ def run_india_signal_scan():
     """Generate confluence signals for all Indian watchlist symbols."""
     logger.info("[india_signal_scan] Starting")
     _run_async(_run_india_signal_scan())
+
+
+# ── 5. Fundamental data weekly update ────────────────────────────────────────
+
+async def _run_fundamental_update():
+    from engine.fundamental_analyzer import run_fundamental_update
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        await run_fundamental_update(session)
+        await session.commit()
+
+
+@celery_app.task(name="tasks.india_tasks.run_fundamental_update_task")
+def run_fundamental_update_task():
+    """Weekly refresh of fundamental data for all NSE large + mid cap symbols."""
+    logger.info("[fundamental_update] Starting weekly task")
+    _run_async(_run_fundamental_update())

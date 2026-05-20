@@ -45,9 +45,10 @@ websockets
 groq
 anthropic
 
-# ── HTML parsing (Screener.in scraper) ───────────────────────────────────────
+# ── HTML parsing + BSE corporate actions ─────────────────────────────────────
 beautifulsoup4
 lxml
+bsedata    # BSE corporate actions and announcements
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi
