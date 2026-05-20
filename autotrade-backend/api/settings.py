@@ -1,59 +1,118 @@
-"""
-Settings API — read/write paper-trading runtime config from a JSON file.
-Separate from .env so users can change risk params without restarting.
-"""
-import json
-import os
-from pathlib import Path
+"""Settings API — read/write runtime config from the runtime_settings DB table.
 
-from fastapi import APIRouter
+All values fall back to .env / config.py defaults when not set in the DB,
+so the system works out of the box without any manual seeding.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.database import get_db
+from utils.runtime_config import RuntimeConfig, _KNOWN_KEYS
 
 router = APIRouter(tags=["Settings"])
 
-_CONFIG_FILE = Path(__file__).parent.parent / "paper_trading_config.json"
 
-_DEFAULTS = {
-    "starting_balance":   1000.0,
-    "max_position_size":  10.0,
-    "stop_loss_pct":      2.0,
-    "take_profit_pct":    4.0,
-    "max_daily_loss_pct": 5.0,
-    "max_open_positions": 5,
-    "watchlist": ["BTC/USD", "ETH/USD", "AAPL", "TSLA", "NVDA", "EUR/USD"],
-}
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
-
-class SettingsPayload(BaseModel):
-    starting_balance:   float = 1000.0
-    max_position_size:  float = 10.0
-    stop_loss_pct:      float = 2.0
-    take_profit_pct:    float = 4.0
-    max_daily_loss_pct: float = 5.0
-    max_open_positions: int   = 5
-    watchlist:          list[str] = []
+class RuntimeSettingsOut(BaseModel):
+    paper_trading_balance:   float
+    max_risk_per_trade:      float
+    max_open_positions:      int
+    max_daily_loss:          float
+    atr_multiplier:          float
+    min_risk_reward:         float
+    indian_market_max_risk:  float
+    indian_intraday_sl_pct:  float
+    enable_fii_dii_analysis: bool
+    enable_options_chain:    bool
+    enable_india_vix:        bool
+    enable_mutual_funds:     bool
+    enable_ml_predictions:   bool
+    watchlist_forex:         list[str]
+    watchlist_stocks:        list[str]
 
 
-def _load() -> dict:
-    if _CONFIG_FILE.exists():
-        try:
-            return {**_DEFAULTS, **json.loads(_CONFIG_FILE.read_text())}
-        except Exception:
-            pass
-    return _DEFAULTS.copy()
+class SettingsPatch(BaseModel):
+    """Partial update — only supplied keys are written to the DB."""
+    paper_trading_balance:   float | None = None
+    max_risk_per_trade:      float | None = None
+    max_open_positions:      int   | None = None
+    max_daily_loss:          float | None = None
+    atr_multiplier:          float | None = None
+    min_risk_reward:         float | None = None
+    indian_market_max_risk:  float | None = None
+    indian_intraday_sl_pct:  float | None = None
+    enable_fii_dii_analysis: bool  | None = None
+    enable_options_chain:    bool  | None = None
+    enable_india_vix:        bool  | None = None
+    enable_mutual_funds:     bool  | None = None
+    enable_ml_predictions:   bool  | None = None
+    watchlist_forex:         list[str] | None = None
+    watchlist_stocks:        list[str] | None = None
 
 
-def _save(data: dict) -> None:
-    _CONFIG_FILE.write_text(json.dumps(data, indent=2))
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/",
+    response_model=RuntimeSettingsOut,
+    summary="Get all runtime settings (DB values merged with .env defaults)",
+)
+async def get_settings(db: AsyncSession = Depends(get_db)):
+    cfg = await RuntimeConfig.load(db)
+    return RuntimeSettingsOut(**cfg.to_dict())
 
 
-@router.get("/", summary="Get current paper-trading settings")
-async def get_settings():
-    return _load()
+@router.patch(
+    "/",
+    response_model=RuntimeSettingsOut,
+    summary="Partially update runtime settings — only provided keys are changed",
+)
+async def patch_settings(
+    payload: SettingsPatch,
+    db: AsyncSession = Depends(get_db),
+):
+    updates: dict[str, Any] = {
+        k: v for k, v in payload.model_dump().items() if v is not None
+    }
+    if not updates:
+        raise HTTPException(status_code=400, detail="No settings provided to update")
+
+    try:
+        await RuntimeConfig.set_many(db, updates)
+        await db.commit()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    cfg = await RuntimeConfig.load(db)
+    return RuntimeSettingsOut(**cfg.to_dict())
 
 
-@router.post("/", summary="Update paper-trading settings")
-async def save_settings(payload: SettingsPayload):
-    data = payload.model_dump()
-    _save(data)
-    return {"saved": True, **data}
+@router.delete(
+    "/{key}",
+    summary="Reset a single setting to its .env / config.py default",
+)
+async def reset_setting(key: str, db: AsyncSession = Depends(get_db)):
+    if key not in _KNOWN_KEYS:
+        raise HTTPException(status_code=404, detail=f"Unknown setting key: {key!r}")
+
+    from sqlalchemy import delete
+    from db.models import RuntimeSettings as RS
+
+    await db.execute(delete(RS).where(RS.key == key))
+    await db.commit()
+    return {"reset": key, "message": "Setting removed; .env default will be used"}
+
+
+@router.get(
+    "/keys",
+    summary="List all known configurable setting keys and their value types",
+)
+async def list_setting_keys():
+    return {k: t.__name__ for k, t in _KNOWN_KEYS.items()}
