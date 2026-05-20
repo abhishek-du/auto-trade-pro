@@ -152,3 +152,20 @@ def run_fundamental_update_task():
     """Weekly refresh of fundamental data for all NSE large + mid cap symbols."""
     logger.info("[fundamental_update] Starting weekly task")
     _run_async(_run_fundamental_update())
+
+
+# ── 6. ML model training (weekly) ────────────────────────────────────────────
+
+async def _train_ml_models():
+    from engine.ml_predictor import train_all_models
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        await train_all_models(session)
+
+
+@celery_app.task(name="tasks.india_tasks.train_ml_models_task")
+def train_ml_models_task():
+    """Weekly LSTM training for all NSE large + mid cap symbols."""
+    logger.info("[ml_training] Starting weekly model training")
+    _run_async(_train_ml_models())

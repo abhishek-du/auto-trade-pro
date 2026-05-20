@@ -1,420 +1,591 @@
-"""ML Price Predictor — LSTM direction classifier + Random Forest signal classifier.
+"""ML Price Predictor — LSTM direction classifier for NSE stocks.
 
-IN-12: LSTM predicts next-day price direction (UP / DOWN / FLAT).
-IN-13: Random Forest classifies trading signal from indicator features.
+Per-symbol models: each symbol gets its own LSTM (.h5) and scaler (.pkl).
 
-Both models are lightweight (sklearn + keras/torch optional).  When the
-heavy ML libraries are absent the functions return neutral predictions
-rather than crashing — the rest of the pipeline continues unchanged.
+Architecture
+------------
+LSTM(64, return_sequences=True) → Dropout(0.2) → BatchNormalization →
+LSTM(32) → Dropout(0.2) → Dense(16, relu) → Dense(3, softmax)
+
+3 output classes:  0 = DOWN, 1 = FLAT, 2 = UP
+Label threshold:   ±0.5% next-day change
 
 Public API
 ----------
-predict_lstm_direction(df)         -> LSTMPrediction          (sync, CPU-bound)
-predict_rf_signal(indicator_dict)  -> RFPrediction            (sync, CPU-bound)
-train_lstm(df)                     -> LSTMModel | None        (sync, CPU-bound)
-train_rf(features, labels)         -> RFModel | None          (sync)
-MLPredictor.predict(df, indicators) -> MLResult               (async dispatch)
+prepare_features(df, indicators, symbol)  -> np.ndarray    (fits + saves scaler)
+build_lstm_model(input_shape)             -> keras.Model
+train_model(symbol, df)                   -> dict
+predict_direction(symbol, df)             -> dict
+get_ml_score(symbol, df)                  -> float
+train_all_models(session)                 -> None  (async, for Celery)
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime
 import math
-import os
-import pickle
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from utils.logger import logger
 
-# ── Optional heavy ML imports ─────────────────────────────────────────────────
+# ── Optional ML imports ───────────────────────────────────────────────────────
 
 _SKLEARN_AVAILABLE = False
 _KERAS_AVAILABLE   = False
+_JOBLIB_AVAILABLE  = False
 
 try:
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score
+    from sklearn.preprocessing import MinMaxScaler
     _SKLEARN_AVAILABLE = True
 except ImportError:
     pass
 
 try:
-    # Prefer keras (TF 2.x) but accept standalone keras 3.x
-    import keras
-    from keras import layers, models
+    import joblib
+    _JOBLIB_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    from keras.models import Sequential, load_model
+    from keras.layers import LSTM, Dense, Dropout, BatchNormalization
+    from keras.callbacks import EarlyStopping
     _KERAS_AVAILABLE = True
 except ImportError:
     try:
-        from tensorflow import keras
-        from tensorflow.keras import layers, models  # type: ignore[no-redef]
+        from tensorflow.keras.models import Sequential, load_model  # type: ignore
+        from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization  # type: ignore
+        from tensorflow.keras.callbacks import EarlyStopping  # type: ignore
         _KERAS_AVAILABLE = True
     except ImportError:
         pass
 
-# ── Model persistence paths ───────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
 _MODEL_DIR = Path(__file__).parent.parent / "models"
-_LSTM_PATH = _MODEL_DIR / "lstm_model.keras"
-_RF_PATH   = _MODEL_DIR / "rf_model.pkl"
-_SCALER_PATH = _MODEL_DIR / "rf_scaler.pkl"
-
 _MODEL_DIR.mkdir(exist_ok=True)
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
-_LSTM_LOOKBACK    = 20    # days of history fed into each LSTM sample
-_LSTM_EPOCHS      = 30
-_LSTM_BATCH_SIZE  = 32
-_RF_ESTIMATORS    = 200
-_RF_MAX_DEPTH     = 8
-_LABEL_THRESHOLD  = 0.005  # ±0.5% change → FLAT; outside → UP or DOWN
+_SEQUENCE_LENGTH    = 60     # daily bars per input sequence
+_LABEL_THRESHOLD    = 0.005  # ±0.5% → FLAT; outside → UP / DOWN
+_EPOCHS             = 50
+_BATCH_SIZE         = 32
+_PATIENCE           = 10     # EarlyStopping patience
+_N_FEATURES         = 18
+_MODEL_MAX_AGE_DAYS = 7      # skip re-training if model file is newer than this
+
+_MIN_TRAIN_ROWS = _SEQUENCE_LENGTH + 60   # need at least this many bars
+
+# ── In-memory caches (avoid repeated disk I/O) ────────────────────────────────
+
+_model_cache:  dict[str, Any] = {}
+_scaler_cache: dict[str, Any] = {}
 
 
-# ── Data classes ──────────────────────────────────────────────────────────────
+# ── Low-level indicator helpers ───────────────────────────────────────────────
 
-@dataclass
-class LSTMPrediction:
-    direction: str          # 'UP' | 'DOWN' | 'FLAT'
-    confidence: float       # 0–1
-    score: float            # score contribution: UP=+15, DOWN=-15, FLAT=0
-    available: bool = True
-
-
-@dataclass
-class RFPrediction:
-    signal: str             # 'BUY' | 'SELL' | 'HOLD'
-    confidence: float       # 0–1
-    score: float            # BUY=+20, SELL=-20, HOLD=0
-    feature_importances: dict[str, float] = field(default_factory=dict)
-    available: bool = True
+def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain  = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    return 100 - 100 / (1 + gain / (loss + 1e-10))
 
 
-@dataclass
-class MLResult:
-    lstm: LSTMPrediction
-    rf:   RFPrediction
-    combined_score: float   # sum of both scores, clamped to [-35, +35]
+def _macd(close: pd.Series) -> tuple[pd.Series, pd.Series]:
+    ema12  = close.ewm(span=12, adjust=False).mean()
+    ema26  = close.ewm(span=26, adjust=False).mean()
+    line   = ema12 - ema26
+    signal = line.ewm(span=9, adjust=False).mean()
+    return line, signal
 
 
-# ── Feature engineering ───────────────────────────────────────────────────────
+def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    hi, lo, pc = df["high"], df["low"], df["close"].shift(1)
+    tr = pd.concat([hi - lo, (hi - pc).abs(), (lo - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
 
-def _ohlcv_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add technical features to OHLCV DataFrame for ML input.
 
-    Expects columns: open, high, low, close, volume.
-    Returns DataFrame with additional feature columns; original rows intact.
+def _week_of_month(dt) -> int:
+    return (dt.day - 1) // 7 + 1
+
+
+# ── Core feature builder (shared between training and prediction) ─────────────
+
+def _compute_raw_features(df: pd.DataFrame, indicators=None) -> np.ndarray:
+    """Compute the raw (unscaled) 18-column feature matrix.
+
+    Features
+    --------
+     1  close_pct_change
+     2  open_pct_change
+     3  high_pct_change
+     4  low_pct_change
+     5  log_volume
+     6  volume_ratio            (volume / volume_sma_20)
+     7  rsi                     (RSI-14, divided by 100)
+     8  macd_normalized         (macd_line / close)
+     9  bb_position             (%B: 0=lower band, 1=upper band)
+    10  atr_normalized          (ATR-14 / close)
+    11  ema20_ratio             (close / ema_20)
+    12  ema50_ratio             (close / ema_50)
+    13  ema200_ratio            (close / ema_200)
+    14  day_of_week             (0=Mon … 4=Fri, normalized ÷ 4)
+    15  week_of_month           (1–4, normalized ÷ 4)
+    16  supertrend_direction    (1=BULLISH, -1=BEARISH → mapped to 0/0.5/1)
+    17  macd_signal_normalized  (macd_signal / close)
+    18  volume_ratio_change     (pct_change of volume_ratio, clipped ±5)
     """
-    d = df.copy()
-    c = d["close"]
+    close  = df["close"]
+    volume = df["volume"]
+    n      = len(df)
 
-    d["ret_1d"]  = c.pct_change(1)
-    d["ret_3d"]  = c.pct_change(3)
-    d["ret_5d"]  = c.pct_change(5)
-    d["hl_range"] = (d["high"] - d["low"]) / c
-    d["gap"]     = (d["open"] - d["close"].shift(1)) / d["close"].shift(1)
+    # OHLCV pct changes
+    close_pct = close.pct_change().fillna(0)
+    open_pct  = df["open"].pct_change().fillna(0)
+    high_pct  = df["high"].pct_change().fillna(0)
+    low_pct   = df["low"].pct_change().fillna(0)
 
-    # Moving averages
-    d["sma_5"]   = c.rolling(5,  min_periods=1).mean()
-    d["sma_20"]  = c.rolling(20, min_periods=1).mean()
-    d["price_vs_sma5"]  = c / d["sma_5"]  - 1
-    d["price_vs_sma20"] = c / d["sma_20"] - 1
+    # Volume
+    log_vol      = np.log1p(volume.clip(lower=0))
+    vol_sma20    = volume.rolling(20, min_periods=1).mean()
+    volume_ratio = (volume / (vol_sma20 + 1e-10)).clip(0, 10)
+    vol_ratio_ch = volume_ratio.pct_change().fillna(0).clip(-5, 5)
 
-    # RSI (14)
-    delta = c.diff()
-    gain  = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-    loss  = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
-    d["rsi"] = 100 - 100 / (1 + gain / (loss + 1e-10))
+    # Momentum
+    rsi_norm        = _rsi(close) / 100.0
+    macd_line, macd_sig = _macd(close)
+    macd_norm       = (macd_line    / (close + 1e-10)).fillna(0)
+    macd_sig_norm   = (macd_sig     / (close + 1e-10)).fillna(0)
 
     # Bollinger %B
-    sma20 = c.rolling(20, min_periods=2).mean()
-    std20 = c.rolling(20, min_periods=2).std()
-    d["bb_pct_b"] = (c - (sma20 - 2 * std20)) / (4 * std20 + 1e-10)
+    bb_sma   = close.rolling(20, min_periods=2).mean()
+    bb_std   = close.rolling(20, min_periods=2).std().fillna(0)
+    bb_upper = bb_sma + 2 * bb_std
+    bb_lower = bb_sma - 2 * bb_std
+    bb_width = (bb_upper - bb_lower).clip(lower=1e-10)
+    bb_pos   = ((close - bb_lower) / bb_width).clip(0, 1)
 
-    # Volume change
-    d["vol_change"] = d["volume"].pct_change(1).fillna(0)
+    # ATR
+    atr_norm = (_atr(df) / (close + 1e-10)).fillna(0).clip(0, 0.2)
 
-    d = d.fillna(method="bfill").fillna(0)
-    return d
+    # EMA ratios
+    ema20    = close.ewm(span=20,  adjust=False).mean()
+    ema50    = close.ewm(span=50,  adjust=False).mean()
+    ema200   = close.ewm(span=200, adjust=False).mean()
+    ema20_r  = (close / (ema20  + 1e-10)).fillna(1)
+    ema50_r  = (close / (ema50  + 1e-10)).fillna(1)
+    ema200_r = (close / (ema200 + 1e-10)).fillna(1)
+
+    # Temporal
+    if hasattr(df.index, "dayofweek"):
+        dow = pd.Series(df.index.dayofweek, index=df.index).clip(0, 4) / 4.0
+        wom = pd.Series([_week_of_month(d) for d in df.index], index=df.index).clip(1, 4) / 4.0
+    else:
+        dow = pd.Series(np.zeros(n), index=df.index)
+        wom = pd.Series(np.zeros(n), index=df.index)
+
+    # Supertrend direction: {-1, 0, 1} → {0, 0.5, 1}
+    if indicators and "supertrend_direction" in indicators:
+        st_raw = indicators["supertrend_direction"]
+        if isinstance(st_raw, (int, float)):
+            st = pd.Series(float(st_raw), index=df.index)
+        else:
+            st = pd.Series(st_raw, index=df.index).reindex(df.index).fillna(0)
+    else:
+        st = pd.Series(0.0, index=df.index)
+    supertrend = (st + 1) / 2.0
+
+    return np.column_stack([
+        close_pct.values,       # 1
+        open_pct.values,        # 2
+        high_pct.values,        # 3
+        low_pct.values,         # 4
+        log_vol.values,         # 5
+        volume_ratio.values,    # 6
+        rsi_norm.values,        # 7
+        macd_norm.values,       # 8
+        bb_pos.values,          # 9
+        atr_norm.values,        # 10
+        ema20_r.values,         # 11
+        ema50_r.values,         # 12
+        ema200_r.values,        # 13
+        dow.values,             # 14
+        wom.values,             # 15
+        supertrend.values,      # 16
+        macd_sig_norm.values,   # 17
+        vol_ratio_ch.values,    # 18
+    ]).astype(np.float32)
 
 
-_FEATURE_COLS = [
-    "ret_1d", "ret_3d", "ret_5d", "hl_range", "gap",
-    "price_vs_sma5", "price_vs_sma20",
-    "rsi", "bb_pct_b", "vol_change",
-]
+# ── 1. prepare_features ───────────────────────────────────────────────────────
+
+def prepare_features(
+    df: pd.DataFrame,
+    indicators=None,
+    symbol: str | None = None,
+) -> np.ndarray:
+    """Build and normalize the 18-feature matrix from OHLCV data.
+
+    Fits a MinMaxScaler on the data and — when *symbol* is provided —
+    saves it to ``models/{symbol}_scaler.pkl`` for use during inference.
+
+    Parameters
+    ----------
+    df         : OHLCV DataFrame (columns: open, high, low, close, volume).
+    indicators : optional dict; recognized key: ``supertrend_direction``.
+    symbol     : when provided, the fitted scaler is persisted to disk.
+
+    Returns
+    -------
+    np.ndarray of shape (len(df), 18) with all values in [0, 1].
+    """
+    if not _SKLEARN_AVAILABLE:
+        raise RuntimeError("scikit-learn is required for prepare_features")
+    if not _JOBLIB_AVAILABLE:
+        raise RuntimeError("joblib is required for prepare_features")
+
+    raw       = _compute_raw_features(df, indicators)
+    scaler    = MinMaxScaler(feature_range=(0, 1))
+    normalized = scaler.fit_transform(raw).astype(np.float32)
+
+    if symbol is not None:
+        scaler_path = _MODEL_DIR / f"{symbol}_scaler.pkl"
+        joblib.dump(scaler, scaler_path)
+        logger.info(f"[ml_predictor] scaler saved → {scaler_path}")
+
+    return normalized
 
 
-def _make_labels(df: pd.DataFrame) -> np.ndarray:
-    """Create next-day direction labels: 0=DOWN, 1=FLAT, 2=UP."""
-    future_ret = df["close"].pct_change(1).shift(-1).fillna(0).values
-    labels = np.where(
-        future_ret >  _LABEL_THRESHOLD, 2,
-        np.where(future_ret < -_LABEL_THRESHOLD, 0, 1)
+# ── 2. build_lstm_model ───────────────────────────────────────────────────────
+
+def build_lstm_model(input_shape: tuple):
+    """Construct and compile the LSTM price-direction classifier.
+
+    Parameters
+    ----------
+    input_shape : (sequence_length, n_features), e.g. (60, 18).
+
+    Returns
+    -------
+    Compiled Keras Sequential model (3-class softmax output).
+    """
+    if not _KERAS_AVAILABLE:
+        raise RuntimeError("keras/tensorflow is required for build_lstm_model")
+
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.2),
+        BatchNormalization(),
+        LSTM(32, return_sequences=False),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(3, activation="softmax"),     # DOWN, FLAT, UP
+    ])
+    model.compile(
+        optimizer="adam",
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
     )
-    return labels.astype(np.int32)
-
-
-def _direction_from_label(label: int) -> str:
-    return {0: "DOWN", 1: "FLAT", 2: "UP"}.get(label, "FLAT")
-
-
-# ── LSTM model ────────────────────────────────────────────────────────────────
-
-def _build_lstm(n_features: int) -> "keras.Model":
-    inp  = layers.Input(shape=(_LSTM_LOOKBACK, n_features))
-    x    = layers.LSTM(64, return_sequences=True)(inp)
-    x    = layers.Dropout(0.2)(x)
-    x    = layers.LSTM(32)(x)
-    x    = layers.Dropout(0.2)(x)
-    out  = layers.Dense(3, activation="softmax")(x)
-    model = models.Model(inp, out)
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     return model
 
 
-def _make_lstm_sequences(
+# ── Label construction ────────────────────────────────────────────────────────
+
+def _onehot_labels(df: pd.DataFrame) -> np.ndarray:
+    """Return one-hot encoded next-bar direction labels, shape (n, 3)."""
+    fut = df["close"].pct_change(1).shift(-1).fillna(0).values
+    cls = np.where(fut >  _LABEL_THRESHOLD, 2,
+          np.where(fut < -_LABEL_THRESHOLD, 0, 1)).astype(np.int32)
+    oh  = np.zeros((len(cls), 3), dtype=np.float32)
+    oh[np.arange(len(cls)), cls] = 1.0
+    return oh
+
+
+def _make_sequences(
     features: np.ndarray, labels: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     X, y = [], []
-    for i in range(_LSTM_LOOKBACK, len(features)):
-        X.append(features[i - _LSTM_LOOKBACK : i])
+    for i in range(_SEQUENCE_LENGTH, len(features)):
+        X.append(features[i - _SEQUENCE_LENGTH : i])
         y.append(labels[i])
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int32)
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
-def train_lstm(df: pd.DataFrame) -> object | None:
-    """Train and persist an LSTM model from *df* (OHLCV DataFrame).
+# ── 3. train_model ────────────────────────────────────────────────────────────
 
-    Returns the trained Keras model, or None when Keras is unavailable
-    or the DataFrame is too short (< 200 rows).
+def train_model(symbol: str, df: pd.DataFrame) -> dict:
+    """Train and persist an LSTM model for *symbol*.
+
+    Parameters
+    ----------
+    symbol : NSE ticker, e.g. ``RELIANCE.NS``.  Used as the file stem.
+    df     : OHLCV DataFrame; needs at least ``_MIN_TRAIN_ROWS`` rows.
+
+    Returns
+    -------
+    dict: {symbol, accuracy, val_accuracy, rows_used, trained_at}
+    On failure: {symbol, error}
     """
     if not _KERAS_AVAILABLE:
-        logger.warning("train_lstm: keras/tensorflow not installed — skipping")
-        return None
+        return {"symbol": symbol, "error": "keras/tensorflow not installed"}
+    if not _SKLEARN_AVAILABLE or not _JOBLIB_AVAILABLE:
+        return {"symbol": symbol, "error": "scikit-learn / joblib not installed"}
 
-    if len(df) < _LSTM_LOOKBACK + 50:
-        logger.warning(f"train_lstm: need ≥ {_LSTM_LOOKBACK + 50} rows, got {len(df)}")
-        return None
-
-    feat_df  = _ohlcv_features(df)
-    features = feat_df[_FEATURE_COLS].values.astype(np.float32)
-    labels   = _make_labels(feat_df)
-
-    X, y = _make_lstm_sequences(features, labels)
-    split = int(len(X) * 0.8)
-    X_tr, X_val, y_tr, y_val = X[:split], X[split:], y[:split], y[split:]
-
-    model = _build_lstm(len(_FEATURE_COLS))
-    model.fit(
-        X_tr, y_tr,
-        epochs=_LSTM_EPOCHS,
-        batch_size=_LSTM_BATCH_SIZE,
-        validation_data=(X_val, y_val),
-        verbose=0,
-    )
-    model.save(str(_LSTM_PATH))
-    logger.info(f"train_lstm: saved to {_LSTM_PATH}")
-    return model
-
-
-def predict_lstm_direction(df: pd.DataFrame) -> LSTMPrediction:
-    """Predict next-day price direction using a trained LSTM.
-
-    Falls back to FLAT/unavailable when the model file is absent.
-    """
-    if not _KERAS_AVAILABLE:
-        return LSTMPrediction(direction="FLAT", confidence=0.0, score=0.0, available=False)
-
-    if not _LSTM_PATH.exists():
-        logger.debug("predict_lstm_direction: no saved model — train first")
-        return LSTMPrediction(direction="FLAT", confidence=0.0, score=0.0, available=False)
-
-    if len(df) < _LSTM_LOOKBACK:
-        return LSTMPrediction(direction="FLAT", confidence=0.0, score=0.0, available=False)
+    if len(df) < _MIN_TRAIN_ROWS:
+        msg = f"need ≥ {_MIN_TRAIN_ROWS} rows, got {len(df)}"
+        logger.warning(f"[train_model] {symbol}: {msg}")
+        return {"symbol": symbol, "error": msg}
 
     try:
-        model    = models.load_model(str(_LSTM_PATH))
-        feat_df  = _ohlcv_features(df)
-        features = feat_df[_FEATURE_COLS].values.astype(np.float32)
-        seq      = features[-_LSTM_LOOKBACK:][np.newaxis, ...]   # (1, lookback, features)
-        probs    = model.predict(seq, verbose=0)[0]               # shape (3,)
-        label    = int(np.argmax(probs))
-        conf     = float(probs[label])
-        direction = _direction_from_label(label)
-        score     = 15.0 if direction == "UP" else (-15.0 if direction == "DOWN" else 0.0)
-        logger.info(f"LSTM prediction: {direction}  confidence={conf:.2%}  score={score:+.0f}")
-        return LSTMPrediction(direction=direction, confidence=conf, score=score)
+        features = prepare_features(df, indicators=None, symbol=symbol)
+        labels   = _onehot_labels(df)
+        X, y     = _make_sequences(features, labels)
+
+        split = int(len(X) * 0.8)
+        X_tr, X_val = X[:split], X[split:]
+        y_tr, y_val = y[:split], y[split:]
+
+        model = build_lstm_model(input_shape=(X_tr.shape[1], X_tr.shape[2]))
+        es    = EarlyStopping(
+            monitor="val_loss", patience=_PATIENCE,
+            restore_best_weights=True, verbose=0,
+        )
+        hist = model.fit(
+            X_tr, y_tr,
+            epochs=_EPOCHS,
+            batch_size=_BATCH_SIZE,
+            validation_data=(X_val, y_val),
+            callbacks=[es],
+            verbose=0,
+        )
+
+        model_path = _MODEL_DIR / f"{symbol}_lstm.h5"
+        model.save(str(model_path))
+
+        accuracy     = float(hist.history["accuracy"][-1])
+        val_accuracy = float(hist.history["val_accuracy"][-1])
+
+        # Bust cache so next prediction loads the fresh model
+        _model_cache.pop(symbol, None)
+        _scaler_cache.pop(symbol, None)
+
+        logger.info(
+            f"[train_model] {symbol}: saved to {model_path}  "
+            f"acc={accuracy:.2%}  val_acc={val_accuracy:.2%}"
+        )
+        return {
+            "symbol":       symbol,
+            "accuracy":     round(accuracy, 4),
+            "val_accuracy": round(val_accuracy, 4),
+            "rows_used":    len(df),
+            "trained_at":   datetime.datetime.utcnow().isoformat(),
+        }
+
     except Exception as exc:
-        logger.warning(f"predict_lstm_direction: {exc}")
-        return LSTMPrediction(direction="FLAT", confidence=0.0, score=0.0, available=False)
+        logger.warning(f"[train_model] {symbol}: {exc}")
+        return {"symbol": symbol, "error": str(exc)}
 
 
-# ── Random Forest model ───────────────────────────────────────────────────────
+# ── 4. predict_direction ──────────────────────────────────────────────────────
 
-_RF_INDICATOR_FEATURES = [
-    "rsi",
-    "macd_signal",          # positive = bullish
-    "bb_position",          # >1 = above upper, <0 = below lower
-    "supertrend_direction", # +1 / -1
-    "vwap_score",
-    "ichimoku_score",
-    "adx",
-    "adx_direction",        # +1 bullish / -1 bearish
-    "ema_ribbon_state",     # +1 bullish, -1 bearish, 0 neutral
-    "volume_ratio",         # volume / 20d avg volume
-]
+def predict_direction(symbol: str, df: pd.DataFrame) -> dict:
+    """Predict next-day price direction using the per-symbol LSTM.
 
+    Loads model and scaler from disk on first call; results are cached.
 
-def _encode_rf_features(indicator_dict: dict) -> np.ndarray | None:
-    """Convert indicator snapshot dict to RF feature vector.
+    Parameters
+    ----------
+    symbol : NSE ticker matching saved model/scaler file stems.
+    df     : recent OHLCV history; at least ``_SEQUENCE_LENGTH`` rows required.
 
-    Missing keys become 0; string labels are encoded as ±1/0.
-    Returns None when fewer than 3 features are non-zero.
+    Returns
+    -------
+    dict: {predicted_direction, up_prob, down_prob, flat_prob, confidence, ml_score}
+
+    ml_score
+    --------
+    +15  if UP probability > 0.60
+    -15  if DOWN probability > 0.60
+      0  otherwise (FLAT or low-confidence directional call)
     """
-    def _get(key: str, default: float = 0.0) -> float:
-        v = indicator_dict.get(key, default)
-        if isinstance(v, str):
-            v = v.upper()
-            # Bullish/UP signals → +1; Bearish/DOWN → -1
-            if v in ("BUY", "STRONG_BUY", "BULLISH", "UP", "BULLISH_SPREAD"):
-                return 1.0
-            if v in ("SELL", "STRONG_SELL", "BEARISH", "DOWN", "BEARISH_SPREAD"):
-                return -1.0
-            return 0.0
-        try:
-            f = float(v)
-            return 0.0 if (math.isnan(f) or math.isinf(f)) else f
-        except (TypeError, ValueError):
-            return 0.0
+    neutral = {
+        "predicted_direction": "FLAT",
+        "up_prob":    0.0,
+        "down_prob":  0.0,
+        "flat_prob":  1.0,
+        "confidence": 0.0,
+        "ml_score":   0.0,
+    }
 
-    vec = np.array(
-        [_get(k) for k in _RF_INDICATOR_FEATURES],
-        dtype=np.float32,
-    )
-    if np.count_nonzero(vec) < 3:
-        return None
-    return vec
+    if not (_KERAS_AVAILABLE and _SKLEARN_AVAILABLE and _JOBLIB_AVAILABLE):
+        return {**neutral, "error": "ML libraries not installed"}
 
+    model_path  = _MODEL_DIR / f"{symbol}_lstm.h5"
+    scaler_path = _MODEL_DIR / f"{symbol}_scaler.pkl"
 
-def train_rf(
-    features: np.ndarray,
-    labels: np.ndarray,
-) -> object | None:
-    """Train and persist a Random Forest signal classifier.
+    if not model_path.exists() or not scaler_path.exists():
+        return {**neutral, "error": "model not trained — call train_model() first"}
 
-    *labels*: array of ints where 0=SELL, 1=HOLD, 2=BUY.
-    Returns the fitted classifier, or None when sklearn is unavailable.
-    """
-    if not _SKLEARN_AVAILABLE:
-        logger.warning("train_rf: scikit-learn not installed — skipping")
-        return None
-
-    if len(features) < 50:
-        logger.warning(f"train_rf: need ≥ 50 samples, got {len(features)}")
-        return None
-
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(features)
-
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_scaled, labels, test_size=0.2, random_state=42, stratify=labels
-    )
-    clf = RandomForestClassifier(
-        n_estimators=_RF_ESTIMATORS,
-        max_depth=_RF_MAX_DEPTH,
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    clf.fit(X_tr, y_tr)
-    acc = accuracy_score(y_val, clf.predict(X_val))
-    logger.info(f"train_rf: validation accuracy = {acc:.2%}")
-
-    with open(_RF_PATH, "wb") as f:
-        pickle.dump(clf, f)
-    with open(_SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
-
-    logger.info(f"train_rf: saved to {_RF_PATH}")
-    return clf
-
-
-def predict_rf_signal(indicator_dict: dict) -> RFPrediction:
-    """Predict BUY/SELL/HOLD from an indicator snapshot dict.
-
-    Returns HOLD/unavailable when the model file is absent.
-    """
-    if not _SKLEARN_AVAILABLE:
-        return RFPrediction(signal="HOLD", confidence=0.0, score=0.0, available=False)
-
-    if not _RF_PATH.exists() or not _SCALER_PATH.exists():
-        logger.debug("predict_rf_signal: no saved model — train first")
-        return RFPrediction(signal="HOLD", confidence=0.0, score=0.0, available=False)
-
-    vec = _encode_rf_features(indicator_dict)
-    if vec is None:
-        return RFPrediction(signal="HOLD", confidence=0.0, score=0.0, available=False)
+    if len(df) < _SEQUENCE_LENGTH:
+        return {**neutral, "error": f"need ≥ {_SEQUENCE_LENGTH} rows, got {len(df)}"}
 
     try:
-        with open(_RF_PATH, "rb") as f:
-            clf: RandomForestClassifier = pickle.load(f)
-        with open(_SCALER_PATH, "rb") as f:
-            scaler: StandardScaler = pickle.load(f)
+        if symbol not in _model_cache:
+            _model_cache[symbol]  = load_model(str(model_path))
+        if symbol not in _scaler_cache:
+            _scaler_cache[symbol] = joblib.load(scaler_path)
 
-        X       = scaler.transform(vec.reshape(1, -1))
-        probs   = clf.predict_proba(X)[0]        # shape (n_classes,)
-        label   = int(np.argmax(probs))
-        conf    = float(probs[label])
-        signal  = {0: "SELL", 1: "HOLD", 2: "BUY"}.get(label, "HOLD")
-        score   = 20.0 if signal == "BUY" else (-20.0 if signal == "SELL" else 0.0)
+        model  = _model_cache[symbol]
+        scaler = _scaler_cache[symbol]
 
-        importances = dict(zip(
-            _RF_INDICATOR_FEATURES,
-            [round(float(v), 4) for v in clf.feature_importances_],
-        ))
-        logger.info(f"RF prediction: {signal}  confidence={conf:.2%}  score={score:+.0f}")
-        return RFPrediction(
-            signal=signal,
-            confidence=conf,
-            score=score,
-            feature_importances=importances,
+        # Use extra leading rows for indicator warm-up, then take last 60
+        warmup_df = df.tail(_SEQUENCE_LENGTH + 250).copy()
+        raw    = _compute_raw_features(warmup_df, indicators=None)
+        scaled = scaler.transform(raw)
+        seq    = scaled[-_SEQUENCE_LENGTH:][np.newaxis, ...]   # (1, 60, 18)
+
+        probs     = model.predict(seq, verbose=0)[0]           # [DOWN, FLAT, UP]
+        down_prob = float(probs[0])
+        flat_prob = float(probs[1])
+        up_prob   = float(probs[2])
+
+        if up_prob >= down_prob and up_prob >= flat_prob:
+            direction  = "UP"
+            confidence = up_prob
+        elif down_prob >= flat_prob:
+            direction  = "DOWN"
+            confidence = down_prob
+        else:
+            direction  = "FLAT"
+            confidence = flat_prob
+
+        ml_score = 15.0 if up_prob > 0.60 else (-15.0 if down_prob > 0.60 else 0.0)
+
+        logger.info(
+            f"[predict_direction] {symbol}: {direction} "
+            f"up={up_prob:.2%}  down={down_prob:.2%}  flat={flat_prob:.2%}  "
+            f"ml_score={ml_score:+.0f}"
         )
+        return {
+            "predicted_direction": direction,
+            "up_prob":    round(up_prob,    4),
+            "down_prob":  round(down_prob,  4),
+            "flat_prob":  round(flat_prob,  4),
+            "confidence": round(confidence, 4),
+            "ml_score":   ml_score,
+        }
+
     except Exception as exc:
-        logger.warning(f"predict_rf_signal: {exc}")
-        return RFPrediction(signal="HOLD", confidence=0.0, score=0.0, available=False)
+        logger.warning(f"[predict_direction] {symbol}: {exc}")
+        _model_cache.pop(symbol, None)
+        _scaler_cache.pop(symbol, None)
+        return {**neutral, "error": str(exc)}
 
 
-# ── Unified predictor ─────────────────────────────────────────────────────────
+# ── 5. get_ml_score ───────────────────────────────────────────────────────────
 
-class MLPredictor:
-    """Combines LSTM and Random Forest predictions into a single result.
+def get_ml_score(symbol: str, df: pd.DataFrame) -> float:
+    """Return the ML contribution for the confluence signal engine.
 
-    Both predictions run synchronously in the default executor so the
-    async event loop is never blocked.
+    Returns 0.0 when:
+    - ``settings.ENABLE_ML_PREDICTIONS`` is False
+    - No trained model file exists for *symbol*
+    - Any internal prediction error occurs
+
+    Otherwise delegates to predict_direction() and returns ml_score
+    (+15, -15, or 0).
     """
+    from utils.config import settings
 
-    async def predict(
-        self,
-        df: pd.DataFrame,
-        indicator_dict: dict,
-    ) -> MLResult:
-        loop = asyncio.get_event_loop()
+    if not settings.ENABLE_ML_PREDICTIONS:
+        return 0.0
 
-        lstm_pred, rf_pred = await asyncio.gather(
-            loop.run_in_executor(None, predict_lstm_direction, df),
-            loop.run_in_executor(None, predict_rf_signal, indicator_dict),
-        )
+    if not (_MODEL_DIR / f"{symbol}_lstm.h5").exists():
+        return 0.0
 
-        combined = max(-35.0, min(35.0, lstm_pred.score + rf_pred.score))
-        return MLResult(lstm=lstm_pred, rf=rf_pred, combined_score=combined)
+    result = predict_direction(symbol, df)
+    return float(result.get("ml_score", 0.0))
 
 
-# Module-level singleton
-ml_predictor = MLPredictor()
+# ── 6. train_all_models (async — for Celery beat) ─────────────────────────────
+
+async def train_all_models(session) -> None:
+    """Train LSTM models for all NSE large + mid cap symbols.
+
+    Strategy
+    --------
+    - Skip a symbol when its model file is less than ``_MODEL_MAX_AGE_DAYS`` days old.
+    - Fetch the last 2 years of 1-day candles from the ``ohlcv_candles`` DB table.
+    - Run train_model() in the thread-pool executor (CPU-bound, non-blocking).
+
+    Designed to run weekly via Celery beat: Sunday 02:00 IST (Saturday 20:30 UTC).
+    """
+    from sqlalchemy import select
+    from db.models import OHLCVCandle
+    from utils.config import settings
+
+    symbols = settings.nse_symbols + settings.nse_mid_symbols
+    loop    = asyncio.get_event_loop()
+    cutoff  = datetime.datetime.utcnow() - datetime.timedelta(days=730)
+    now     = datetime.datetime.utcnow()
+
+    logger.info(f"[train_all_models] Starting for {len(symbols)} symbols")
+
+    for symbol in symbols:
+        model_path = _MODEL_DIR / f"{symbol}_lstm.h5"
+
+        if model_path.exists():
+            age_days = (now - datetime.datetime.utcfromtimestamp(
+                model_path.stat().st_mtime
+            )).days
+            if age_days < _MODEL_MAX_AGE_DAYS:
+                logger.debug(
+                    f"[train_all_models] {symbol}: model is {age_days}d old, skipping"
+                )
+                continue
+
+        rows = (await session.execute(
+            select(OHLCVCandle)
+            .where(
+                OHLCVCandle.symbol    == symbol,
+                OHLCVCandle.timeframe == "1d",
+                OHLCVCandle.timestamp >= cutoff,
+            )
+            .order_by(OHLCVCandle.timestamp)
+        )).scalars().all()
+
+        if not rows:
+            logger.warning(f"[train_all_models] {symbol}: no 1d candles in DB — skipping")
+            continue
+
+        df = pd.DataFrame([{
+            "open":   r.open,
+            "high":   r.high,
+            "low":    r.low,
+            "close":  r.close,
+            "volume": r.volume,
+        } for r in rows])
+
+        if len(df) < _MIN_TRAIN_ROWS:
+            logger.warning(
+                f"[train_all_models] {symbol}: only {len(df)} bars < {_MIN_TRAIN_ROWS} — skipping"
+            )
+            continue
+
+        result = await loop.run_in_executor(None, train_model, symbol, df)
+        if "error" in result:
+            logger.warning(f"[train_all_models] {symbol}: {result['error']}")
+        else:
+            logger.info(
+                f"[train_all_models] {symbol}  "
+                f"acc={result['accuracy']:.2%}  val_acc={result['val_accuracy']:.2%}  "
+                f"rows={result['rows_used']}"
+            )
+
+    logger.info("[train_all_models] Complete")
