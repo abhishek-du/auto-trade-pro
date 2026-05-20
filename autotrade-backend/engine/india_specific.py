@@ -1,296 +1,229 @@
-"""India-specific market analysis: VIX scoring and NSE sector rotation.
+"""India-specific market analysis: VIX scoring, sector rotation, RBI proximity.
 
-Provides two scoring inputs for the 15-algorithm confluence engine:
-  - India VIX sentiment score (contrarian: extreme fear = buy)
-  - Sector rotation score (relative strength of symbol's sector vs Nifty 50)
+Provides three scoring inputs consumed by the 15-algorithm confluence engine.
 
 Public API
 ----------
-calculate_india_vix_score(vix_value)                          -> dict
-fetch_sector_returns(lookback_days)                           -> dict  (async)
-get_symbol_sector(symbol)                                     -> str | None
-calculate_sector_rotation_score(symbol, sector_returns)       -> dict
-run_india_specific_analysis(vix_value, symbol)                -> dict  (async)
+calculate_india_vix_score(session)                -> float  (async)
+calculate_sector_rotation_score(symbol, session)  -> float  (async)
+get_rbi_event_proximity_score()                   -> float
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime
 import math
-from typing import Optional
 
-import pandas as pd
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.models import Candle
 from utils.logger import logger
 
-# ── Sector → index mapping (yfinance tickers) ────────────────────────────────
+# ── Sector maps ───────────────────────────────────────────────────────────────
 
-_SECTOR_INDICES: dict[str, str] = {
-    "IT":       "^CNXIT",
-    "BANKING":  "^NSEBANK",
-    "PHARMA":   "^CNXPHARMA",
-    "AUTO":     "^CNXAUTO",
-    "FMCG":     "^CNXFMCG",
-    "ENERGY":   "^CNXENERGY",
-    "INFRA":    "^CNXINFRA",
-    "METAL":    "^CNXMETAL",
+SECTOR_MAP: dict[str, str] = {
+    "RELIANCE.NS":   "ENERGY",
+    "TCS.NS":        "IT",
+    "INFY.NS":       "IT",
+    "HCLTECH.NS":    "IT",
+    "WIPRO.NS":      "IT",
+    "PERSISTENT.NS": "IT",
+    "HDFCBANK.NS":   "BANKING",
+    "ICICIBANK.NS":  "BANKING",
+    "SBIN.NS":       "BANKING",
+    "KOTAKBANK.NS":  "BANKING",
+    "AXISBANK.NS":   "BANKING",
+    "SUNPHARMA.NS":  "PHARMA",
+    "DRREDDY.NS":    "PHARMA",
+    "MARUTI.NS":     "AUTO",
+    "HINDUNILVR.NS": "FMCG",
+    "ITC.NS":        "FMCG",
+    "NESTLEIND.NS":  "FMCG",
+    "LT.NS":         "INFRA",
 }
 
-# Nifty 50 benchmark for relative-strength calculation
-_NIFTY50_TICKER = "^NSEI"
-
-# ── Symbol → sector mapping (NSE .NS suffix) ─────────────────────────────────
-
-_SYMBOL_SECTOR: dict[str, str] = {
-    # IT
-    "TCS.NS": "IT", "INFY.NS": "IT", "WIPRO.NS": "IT", "HCLTECH.NS": "IT",
-    "TATAELXSI.NS": "IT", "PERSISTENT.NS": "IT", "COFORGE.NS": "IT", "LTTS.NS": "IT",
-    # Banking & Finance
-    "HDFCBANK.NS": "BANKING", "SBIN.NS": "BANKING", "ICICIBANK.NS": "BANKING",
-    "AXISBANK.NS": "BANKING", "KOTAKBANK.NS": "BANKING", "BAJFINANCE.NS": "BANKING",
-    "MUTHOOTFIN.NS": "BANKING",
-    # FMCG
-    "HINDUNILVR.NS": "FMCG", "ITC.NS": "FMCG", "NESTLEIND.NS": "FMCG",
-    "PIDILITIND.NS": "FMCG", "ASTRAL.NS": "FMCG",
-    # Pharma & Healthcare
-    "SUNPHARMA.NS": "PHARMA", "DRREDDY.NS": "PHARMA",
-    "METROPOLIS.NS": "PHARMA", "LALPATHLAB.NS": "PHARMA",
-    # Auto
-    "MARUTI.NS": "AUTO",
-    # Energy
-    "RELIANCE.NS": "ENERGY", "POWERGRID.NS": "ENERGY",
-    # Infra & Industrials
-    "LT.NS": "INFRA", "ULTRACEMCO.NS": "INFRA", "VOLTAS.NS": "INFRA",
-    # Specialty / Paints
-    "ASIANPAINT.NS": "SPECIALTY",
-    # Telecom
-    "BHARTIARTL.NS": "TELECOM",
+SECTOR_INDEX: dict[str, str] = {
+    "IT":      "NIFTYIT.NS",
+    "BANKING": "^NSEBANK",
+    "PHARMA":  "NIFTYPHARMA.NS",
+    "FMCG":    "NIFTYFMCG.NS",
 }
 
+_NIFTY50 = "^NSEI"
 
-# ── India VIX scoring ─────────────────────────────────────────────────────────
+# ── RBI MPC meeting dates (2026) ──────────────────────────────────────────────
 
-def calculate_india_vix_score(vix_value: float) -> dict:
-    """Score India VIX on a contrarian basis.
+_RBI_MPC_DATES_2026: list[datetime.date] = [
+    datetime.date(2026, 2,  5),
+    datetime.date(2026, 4,  7),
+    datetime.date(2026, 6,  4),
+    datetime.date(2026, 8,  5),
+    datetime.date(2026, 10, 7),
+    datetime.date(2026, 12, 3),
+]
 
-    Extreme fear (high VIX) = buying opportunity; extreme complacency
-    (low VIX) = caution.  Returns score in [-20, +30].
 
-    Score table
-    -----------
-    VIX > 25   EXTREME_FEAR          +30  (strong contrarian buy)
-    VIX 20-25  HIGH_FEAR             +20  (buy opportunity)
-    VIX 15-20  NORMAL                  0
-    VIX 12-15  LOW_VOLATILITY        -10  (mild caution)
-    VIX < 12   EXTREME_COMPLACENCY   -20  (sell signal)
+# ── Helper: fetch latest daily close from DB ──────────────────────────────────
+
+async def _fetch_candle_prices(
+    ticker: str,
+    session: AsyncSession,
+    limit: int = 32,
+) -> tuple[float, float] | tuple[None, None]:
+    """Return (price_now, price_30d_ago) from the last `limit` daily candles.
+
+    Returns (None, None) when insufficient data is available.
     """
-    if math.isnan(vix_value) or vix_value <= 0:
-        return {"vix_value": vix_value, "vix_signal": "NORMAL", "vix_score": 0.0}
+    rows = (await session.execute(
+        select(Candle)
+        .where(Candle.symbol == ticker, Candle.timeframe == "1d")
+        .order_by(desc(Candle.timestamp))
+        .limit(limit)
+    )).scalars().all()
 
-    if vix_value > 25:
-        signal, score = "EXTREME_FEAR",        30.0
-    elif vix_value > 20:
-        signal, score = "HIGH_FEAR",           20.0
-    elif vix_value > 15:
-        signal, score = "NORMAL",               0.0
-    elif vix_value > 12:
-        signal, score = "LOW_VOLATILITY",      -10.0
-    else:
-        signal, score = "EXTREME_COMPLACENCY", -20.0
+    if len(rows) < 2:
+        return None, None
 
-    logger.info(f"India VIX: {vix_value:.2f}  │  {signal}  │  score={score:+.0f}")
-    return {"vix_value": vix_value, "vix_signal": signal, "vix_score": score}
+    price_now  = float(rows[0].close)
+    price_30d  = float(rows[-1].close)
+    return price_now, price_30d
 
 
-# ── Sector return fetcher ─────────────────────────────────────────────────────
+# ── 1. India VIX score ────────────────────────────────────────────────────────
 
-def _download_sector_returns(lookback_days: int) -> dict[str, float]:
-    """Blocking yfinance download — call via run_in_executor."""
-    import yfinance as yf
+async def calculate_india_vix_score(session: AsyncSession) -> float:
+    """Fetch India VIX and return a contrarian sentiment score.
 
-    tickers = list(_SECTOR_INDICES.values()) + [_NIFTY50_TICKER]
-    period  = f"{lookback_days + 5}d"   # buffer for weekends/holidays
+    Scoring table
+    -------------
+    VIX > 40    +25  crash territory — scale in carefully
+    VIX 30-40   +35  extreme fear — historically strong buy zone
+    VIX 25-30   +20  high fear — contrarian buy zone
+    VIX 20-25   -5   elevated uncertainty
+    VIX 15-20    0   normal conditions
+    VIX 12-15  +15   low fear — trending bull market
+    VIX < 12   -10   complacency — market may be overheated
+    """
+    from crawler.india_price_feed import fetch_india_vix  # deferred — optional dep
 
     try:
-        raw = yf.download(tickers, period=period, auto_adjust=True,
-                          progress=False, threads=True)
+        loop = asyncio.get_event_loop()
+        vix  = await loop.run_in_executor(None, fetch_india_vix)
     except Exception as exc:
-        logger.warning(f"fetch_sector_returns: yfinance download failed: {exc}")
-        return {}
+        logger.warning(f"calculate_india_vix_score: VIX fetch failed ({exc}); score=0")
+        return 0.0
 
-    # yfinance returns MultiIndex when multiple tickers
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw["Close"]
+    if not vix or math.isnan(vix) or vix <= 0:
+        logger.warning(f"calculate_india_vix_score: invalid VIX={vix}; score=0")
+        return 0.0
+
+    if vix > 40:
+        score = 25.0
+    elif vix > 30:
+        score = 35.0
+    elif vix > 25:
+        score = 20.0
+    elif vix > 20:
+        score = -5.0
+    elif vix > 15:
+        score = 0.0
+    elif vix >= 12:
+        score = 15.0
     else:
-        close = raw[["Close"]] if "Close" in raw.columns else raw
+        score = -10.0
 
-    if close.empty:
-        return {}
-
-    # 5-day return for each ticker
-    returns: dict[str, float] = {}
-    window = min(lookback_days, len(close) - 1)
-    if window < 1:
-        return {}
-
-    for ticker in tickers:
-        if ticker not in close.columns:
-            continue
-        col = close[ticker].dropna()
-        if len(col) < window + 1:
-            continue
-        ret = (float(col.iloc[-1]) - float(col.iloc[-1 - window])) / float(col.iloc[-1 - window]) * 100
-        returns[ticker] = round(ret, 4)
-
-    return returns
+    logger.info(f"India VIX: {vix:.2f}  │  score={score:+.0f}")
+    return score
 
 
-async def fetch_sector_returns(lookback_days: int = 5) -> dict[str, float]:
-    """Return {sector_name: pct_return} for each NSE sector index.
+# ── 2. Sector rotation score ──────────────────────────────────────────────────
 
-    Also includes "NIFTY50" key for the benchmark return.
-    Runs blocking yfinance download in a thread executor.
+async def calculate_sector_rotation_score(
+    symbol: str,
+    session: AsyncSession,
+) -> float:
+    """Score symbol based on its sector's 30-day relative strength vs Nifty 50.
+
+    Queries daily candles already stored in the DB (no live network call).
+
+    Score table (relative_strength = sector_return - nifty_return)
+    --------------------------------------------------------------
+    RS > +5 %    +25  (strong inflow into sector)
+    RS +2 to +5  +15
+    RS -2 to +2    0  (in line with market)
+    RS -5 to -2  -15
+    RS < -5 %    -25  (significant outflow)
     """
-    loop = asyncio.get_event_loop()
-    ticker_returns: dict[str, float] = await loop.run_in_executor(
-        None, _download_sector_returns, lookback_days
-    )
+    sector      = SECTOR_MAP.get(symbol)
+    index_ticker = SECTOR_INDEX.get(sector or "")
 
-    if not ticker_returns:
-        logger.warning("fetch_sector_returns: no data returned — using empty dict")
-        return {}
+    if not sector or not index_ticker:
+        logger.debug(f"calculate_sector_rotation_score: no sector index for {symbol} ({sector})")
+        return 0.0
 
-    # Map ticker → sector name
-    result: dict[str, float] = {}
-    for sector, ticker in _SECTOR_INDICES.items():
-        if ticker in ticker_returns:
-            result[sector] = ticker_returns[ticker]
+    # Fetch sector index prices
+    sect_now, sect_30d = await _fetch_candle_prices(index_ticker, session)
+    if sect_now is None or sect_30d is None or sect_30d == 0:
+        logger.warning(
+            f"calculate_sector_rotation_score: insufficient data for {index_ticker}"
+        )
+        return 0.0
 
-    nifty_ret = ticker_returns.get(_NIFTY50_TICKER)
-    if nifty_ret is not None:
-        result["NIFTY50"] = nifty_ret
+    # Fetch Nifty 50 benchmark prices
+    nifty_now, nifty_30d = await _fetch_candle_prices(_NIFTY50, session)
+    if nifty_now is None or nifty_30d is None or nifty_30d == 0:
+        logger.warning("calculate_sector_rotation_score: insufficient Nifty 50 data")
+        return 0.0
 
-    # Compute relative strength: sector return minus Nifty 50 return
-    if "NIFTY50" in result:
-        benchmark = result["NIFTY50"]
-        for sector in list(_SECTOR_INDICES.keys()):
-            if sector in result:
-                result[f"{sector}_RS"] = round(result[sector] - benchmark, 4)
+    sector_return = (sect_now  - sect_30d)  / sect_30d  * 100
+    nifty_return  = (nifty_now - nifty_30d) / nifty_30d * 100
+    rs            = sector_return - nifty_return
+
+    if rs > 5:
+        score = 25.0
+    elif rs > 2:
+        score = 15.0
+    elif rs >= -2:
+        score = 0.0
+    elif rs >= -5:
+        score = -15.0
+    else:
+        score = -25.0
 
     logger.info(
-        "Sector returns: "
-        + "  ".join(f"{k}={v:+.2f}%" for k, v in result.items() if not k.endswith("_RS"))
+        f"Sector rotation: {symbol} ({sector})  "
+        f"sector={sector_return:+.2f}%  nifty={nifty_return:+.2f}%  "
+        f"RS={rs:+.2f}%  score={score:+.0f}"
     )
-    return result
+    return score
 
 
-# ── Symbol sector lookup ──────────────────────────────────────────────────────
+# ── 3. RBI event proximity score ──────────────────────────────────────────────
 
-def get_symbol_sector(symbol: str) -> Optional[str]:
-    """Return the sector name for an NSE symbol, or None if unknown."""
-    return _SYMBOL_SECTOR.get(symbol)
+def get_rbi_event_proximity_score() -> float:
+    """Return a score based on proximity to an RBI MPC meeting.
 
-
-# ── Sector rotation scoring ───────────────────────────────────────────────────
-
-def calculate_sector_rotation_score(
-    symbol: str,
-    sector_returns: dict[str, float],
-) -> dict:
-    """Score a symbol based on its sector's relative strength vs Nifty 50.
-
-    Uses relative-strength keys (sector_RS) when available; falls back to
-    absolute returns sorted against other sectors.
+    Markets often price in uncertainty ahead of rate decisions.
 
     Score table
     -----------
-    Top-3 sector (strong inflow)     +15
-    Mid-range sector                   0
-    Bottom-3 sector (outflow)        -15
-    Symbol sector unknown              0
+    Within 3 days BEFORE meeting   -10  (pre-meeting uncertainty)
+    Within 3 days AFTER  meeting   +5   (post-decision clarity)
+    Otherwise                        0
     """
-    _empty = {"sector": None, "sector_rs": None,
-              "sector_rank": None, "rotation_score": 0.0}
+    today = datetime.date.today()
 
-    sector = get_symbol_sector(symbol)
-    if not sector:
-        logger.debug(f"calculate_sector_rotation_score: {symbol} sector unknown")
-        return _empty
+    for meeting in _RBI_MPC_DATES_2026:
+        days_diff = (today - meeting).days   # negative = before meeting
 
-    if not sector_returns:
-        return {**_empty, "sector": sector}
+        if -3 <= days_diff < 0:
+            logger.info(f"RBI MPC on {meeting} in {-days_diff}d  │  score=-10")
+            return -10.0
 
-    # Prefer relative-strength values; fall back to absolute returns
-    rs_key    = f"{sector}_RS"
-    rs_value  = sector_returns.get(rs_key) or sector_returns.get(sector)
-    if rs_value is None:
-        return {**_empty, "sector": sector}
+        if 0 <= days_diff <= 3:
+            logger.info(f"RBI MPC was {meeting} ({days_diff}d ago)  │  score=+5")
+            return 5.0
 
-    # Rank all sectors by relative strength
-    ranked = sorted(
-        [s for s in _SECTOR_INDICES if f"{s}_RS" in sector_returns or s in sector_returns],
-        key=lambda s: sector_returns.get(f"{s}_RS", sector_returns.get(s, 0)),
-        reverse=True,
-    )
-    n_sectors = len(ranked)
-    rank      = ranked.index(sector) + 1 if sector in ranked else None
-
-    if rank is None:
-        score = 0.0
-    elif rank <= 3:
-        score = 15.0
-    elif rank > n_sectors - 3:
-        score = -15.0
-    else:
-        score = 0.0
-
-    logger.info(
-        f"Sector rotation: {symbol} → {sector}  "
-        f"RS={rs_value:+.2f}%  rank={rank}/{n_sectors}  score={score:+.0f}"
-    )
-    return {
-        "sector": sector,
-        "sector_rs": rs_value,
-        "sector_rank": rank,
-        "rotation_score": score,
-    }
-
-
-# ── Async orchestrator ────────────────────────────────────────────────────────
-
-async def run_india_specific_analysis(
-    vix_value: float,
-    symbol: Optional[str] = None,
-) -> dict:
-    """Combine VIX score and sector rotation score for a symbol.
-
-    Parameters
-    ----------
-    vix_value : current India VIX (from fetch_india_vix or DB)
-    symbol    : NSE symbol with .NS suffix, e.g. 'RELIANCE.NS'
-
-    Returns
-    -------
-    {
-        'vix_value': float,  'vix_signal': str,   'vix_score': float,
-        'sector': str|None,  'sector_rs': float|None, 'sector_rank': int|None,
-        'rotation_score': float,
-        'combined_score': float,   # vix_score + rotation_score
-    }
-    """
-    vix_result = calculate_india_vix_score(vix_value)
-
-    sector_returns = await fetch_sector_returns(lookback_days=5)
-    rotation_result = calculate_sector_rotation_score(symbol or "", sector_returns)
-
-    combined = vix_result["vix_score"] + rotation_result["rotation_score"]
-    combined = max(-100.0, min(100.0, combined))
-
-    return {
-        **vix_result,
-        "sector":         rotation_result["sector"],
-        "sector_rs":      rotation_result["sector_rs"],
-        "sector_rank":    rotation_result["sector_rank"],
-        "rotation_score": rotation_result["rotation_score"],
-        "combined_score": combined,
-    }
+    return 0.0
