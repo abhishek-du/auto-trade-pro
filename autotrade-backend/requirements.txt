@@ -26,6 +26,11 @@ nselib    # FPI data fallback only -- v2.5.1 May 2026
 # ta-lib requires the C library — see Dockerfile
 ta-lib
 
+# ── Machine Learning (LSTM + per-symbol models) ───────────────────────────────
+tensorflow          # keras is bundled as tensorflow.keras in TF 2.x
+scikit-learn
+joblib
+
 # ── NLP / sentiment (FinBERT) ─────────────────────────────────────────────────
 transformers
 torch

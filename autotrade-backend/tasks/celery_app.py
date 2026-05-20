@@ -83,4 +83,9 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_tasks.run_fundamental_update_task",
         "schedule": crontab(hour=18, minute=30, day_of_week="saturday"),
     },
+    # Saturday 20:30 UTC = Sunday 02:00 IST  (after fundamentals run)
+    "ml-model-training-weekly": {
+        "task":     "tasks.india_tasks.train_ml_models_task",
+        "schedule": crontab(hour=20, minute=30, day_of_week="saturday"),
+    },
 }
