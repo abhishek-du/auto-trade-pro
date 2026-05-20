@@ -30,6 +30,7 @@ celery_app = Celery(
         "tasks.market_scan",
         "tasks.news_scan",
         "tasks.paper_trade_loop",
+        "tasks.india_tasks",
     ],
 )
 
@@ -58,5 +59,22 @@ celery_app.conf.beat_schedule = {
     "paper-trade-loop-every-minute": {
         "task":     "tasks.paper_trade_loop.run_paper_trade_loop",
         "schedule": 60,
+    },
+    # ── Indian market tasks ───────────────────────────────────────────────────
+    "india-price-crawl-every-5min": {
+        "task":     "tasks.india_tasks.crawl_india_prices",
+        "schedule": 300,
+    },
+    "india-fii-dii-every-15min": {
+        "task":     "tasks.india_tasks.crawl_fii_dii",
+        "schedule": 900,
+    },
+    "india-options-every-10min": {
+        "task":     "tasks.india_tasks.crawl_options_chain",
+        "schedule": 600,
+    },
+    "india-signals-every-5min": {
+        "task":     "tasks.india_tasks.run_india_signal_scan",
+        "schedule": 300,
     },
 }
