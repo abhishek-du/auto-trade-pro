@@ -238,7 +238,7 @@ async def list_fii_dii(
 )
 async def trigger_fii_dii(db: AsyncSession = Depends(get_db)):
     try:
-        data = await asyncio.get_event_loop().run_in_executor(None, fetch_fii_dii_data)
+        data = await fetch_fii_dii_data(db)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"FII/DII fetch failed: {exc}")
 
@@ -276,25 +276,24 @@ async def get_options_snapshot(
 @router.post(
     "/options/{symbol}/trigger",
     response_model=OptionsSnapshotOut,
-    summary="Fetch a fresh NSE options chain snapshot and persist",
+    summary="Fetch a fresh NSE options chain snapshot and persist (runs for all symbols)",
 )
 async def trigger_options_fetch(
     symbol: str,
     db: AsyncSession = Depends(get_db),
 ):
+    """Triggers a full options-chain fetch for NIFTY + BANKNIFTY; returns the
+    latest snapshot for the requested symbol after the run completes.
+    """
     sym = symbol.upper()
     if sym not in ("NIFTY", "BANKNIFTY"):
         raise HTTPException(status_code=400, detail="symbol must be NIFTY or BANKNIFTY")
 
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, run_options_analysis, sym, db
-        )
+        await run_options_analysis(db)
+        await db.commit()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Options fetch failed: {exc}")
-
-    if result is None:
-        raise HTTPException(status_code=502, detail="Options analysis returned no result")
 
     row = await db.execute(
         select(OptionsChainSnapshot)
@@ -304,7 +303,7 @@ async def trigger_options_fetch(
     )
     snap = row.scalar_one_or_none()
     if snap is None:
-        raise HTTPException(status_code=502, detail="Snapshot not saved to DB")
+        raise HTTPException(status_code=502, detail=f"No snapshot found for {sym} after fetch")
     return _options_out(snap)
 
 
