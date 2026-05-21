@@ -532,7 +532,7 @@ async def train_all_models(session) -> None:
     Designed to run weekly via Celery beat: Sunday 02:00 IST (Saturday 20:30 UTC).
     """
     from sqlalchemy import select
-    from db.models import OHLCVCandle
+    from db.models import Candle
     from utils.config import settings
 
     symbols = settings.nse_symbols + settings.nse_mid_symbols
@@ -556,13 +556,13 @@ async def train_all_models(session) -> None:
                 continue
 
         rows = (await session.execute(
-            select(OHLCVCandle)
+            select(Candle)
             .where(
-                OHLCVCandle.symbol    == symbol,
-                OHLCVCandle.timeframe == "1d",
-                OHLCVCandle.timestamp >= cutoff,
+                Candle.symbol    == symbol,
+                Candle.timeframe == "1d",
+                Candle.timestamp >= cutoff,
             )
-            .order_by(OHLCVCandle.timestamp)
+            .order_by(Candle.timestamp)
         )).scalars().all()
 
         if not rows:
