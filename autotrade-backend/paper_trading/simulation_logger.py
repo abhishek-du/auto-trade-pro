@@ -186,8 +186,9 @@ class SimLogger:
     ) -> list[dict]:
         """Retrieve the analysis log for post-run review.
 
-        Shows how the AI has been thinking about each symbol — every signal
-        generated, whether traded or not, and why.
+        Always returns ALL accepted (trade_taken=true) entries so the
+        "AI Accepted Trades" panel is never empty due to pagination.
+        Fills the remainder of `limit` with the most recent rejections.
 
         Parameters
         ----------
@@ -199,17 +200,35 @@ class SimLogger:
         list[dict] — each entry contains all fields from the ANALYSIS_CYCLE data
                      plus ``timestamp`` and ``id`` from the SimulationLog row.
         """
-        conditions = [SimulationLog.event_type == "ANALYSIS_CYCLE"]
+        base_cond = [SimulationLog.event_type == "ANALYSIS_CYCLE"]
         if symbol:
-            conditions.append(SimulationLog.symbol == symbol)
+            base_cond.append(SimulationLog.symbol == symbol)
 
-        result = await session.execute(
+        # Always fetch all accepted trades regardless of limit
+        accepted_rows = (await session.execute(
             select(SimulationLog)
-            .where(and_(*conditions))
+            .where(and_(*base_cond, SimulationLog.data["trade_taken"].as_boolean() == True))  # noqa: E712
             .order_by(SimulationLog.timestamp.desc())
-            .limit(limit)
-        )
-        rows = result.scalars().all()
+        )).scalars().all()
+
+        # Fill remaining slots with most recent rejections
+        reject_limit = max(limit - len(accepted_rows), 10)
+        rejected_rows = (await session.execute(
+            select(SimulationLog)
+            .where(and_(*base_cond, SimulationLog.data["trade_taken"].as_boolean() != True))  # noqa: E712
+            .order_by(SimulationLog.timestamp.desc())
+            .limit(reject_limit)
+        )).scalars().all()
+
+        # Merge and sort newest-first, deduplicating by id
+        seen: set[int] = set()
+        merged = []
+        for row in sorted(list(accepted_rows) + list(rejected_rows),
+                          key=lambda r: r.timestamp or 0, reverse=True):
+            if row.id not in seen:
+                seen.add(row.id)
+                merged.append(row)
+        rows = merged
 
         return [
             {
