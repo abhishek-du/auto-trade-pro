@@ -4,14 +4,79 @@ import { AlertTriangle, TrendingUp, TrendingDown } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
 
 const PAGE_TITLES = {
-  '/':           'Dashboard',
-  '/trades':     'Trades',
-  '/analytics':  'Analytics',
-  '/news':       'News Feed',
-  '/simulation': 'Simulation',
-  '/settings':   'Settings',
-  '/documentation': 'Documentation',
+  '/':                 'Dashboard',
+  '/trades':           'Trades',
+  '/analytics':        'Analytics',
+  '/news':             'News Feed',
+  '/simulation':       'Simulation',
+  '/settings':         'Settings',
+  '/documentation':    'Documentation',
+  '/india':            'India Overview',
+  '/india/signals':    'NSE Signals',
+  '/mutual-funds':     'Mutual Funds',
+  '/fundamentals':     'Fundamentals',
 };
+
+// ── Market status dots ────────────────────────────────────────────────────────
+
+function MarketStatusDots() {
+  const [s, setS] = useState({ nseOpen: false, nyseOpen: false, ist: '', et: '' });
+
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+
+      // NSE: Mon–Fri 9:15–15:30 IST (Asia/Kolkata)
+      const istParts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Kolkata',
+          weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        }).formatToParts(now).map(p => [p.type, p.value])
+      );
+      const ih = +istParts.hour, im = +istParts.minute;
+      const nseOpen =
+        !['Sat', 'Sun'].includes(istParts.weekday) &&
+        ((ih > 9) || (ih === 9 && im >= 15)) &&
+        ((ih < 15) || (ih === 15 && im <= 30));
+      const ist = `${String(ih).padStart(2, '0')}:${String(im).padStart(2, '0')}`;
+
+      // NYSE: Mon–Fri 9:30–16:00 ET (America/New_York handles DST)
+      const etParts = Object.fromEntries(
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: 'America/New_York',
+          weekday: 'short', hour: 'numeric', minute: 'numeric',
+          hour12: false, timeZoneName: 'short',
+        }).formatToParts(now).map(p => [p.type, p.value])
+      );
+      const eh = +etParts.hour, em = +etParts.minute;
+      const nyseOpen =
+        !['Sat', 'Sun'].includes(etParts.weekday) &&
+        ((eh > 9) || (eh === 9 && em >= 30)) &&
+        eh < 16;
+      const et = `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')} ${etParts.timeZoneName ?? 'ET'}`;
+
+      setS({ nseOpen, nyseOpen, ist, et });
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="flex items-center gap-4">
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${s.nseOpen ? 'bg-profit' : 'bg-loss'}`} />
+        <span className="text-muted text-xs font-mono">NSE {s.ist}</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${s.nyseOpen ? 'bg-profit' : 'bg-loss'}`} />
+        <span className="text-muted text-xs font-mono">{s.et}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Live clock ────────────────────────────────────────────────────────────────
 
 function LiveClock() {
   const [time, setTime] = useState(new Date());
@@ -30,6 +95,8 @@ function LiveClock() {
     </div>
   );
 }
+
+// ── Balance ticker ────────────────────────────────────────────────────────────
 
 function BalanceTicker({ portfolio }) {
   if (!portfolio) return <span className="text-muted text-sm">Loading…</span>;
@@ -56,6 +123,8 @@ function BalanceTicker({ portfolio }) {
   );
 }
 
+// ── Navbar ────────────────────────────────────────────────────────────────────
+
 export default function Navbar() {
   const { pathname } = useLocation();
   const { portfolio } = usePortfolio();
@@ -63,7 +132,7 @@ export default function Navbar() {
 
   return (
     <header className="shrink-0 border-b border-border" style={{ background: '#0A1120' }}>
-      {/* Disclaimer banner */}
+      {/* Disclaimer */}
       <div className="flex items-center justify-center gap-2 px-4 py-1.5 border-b border-warn/15"
         style={{ background: 'rgba(245,158,11,0.05)' }}>
         <AlertTriangle size={11} className="text-warn/70 shrink-0" />
@@ -77,12 +146,15 @@ export default function Navbar() {
       <div className="flex items-center justify-between px-6 py-3">
         <div className="flex items-center gap-3">
           <h1 className="text-slate-100 font-bold text-lg">{title}</h1>
-          <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest rounded-md border border-cyan/20 text-cyan/70"
+          <span
+            className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest rounded-md border border-cyan/20 text-cyan/70"
             style={{ background: 'rgba(6,182,212,0.07)' }}>
             Live
           </span>
         </div>
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-5">
+          <MarketStatusDots />
+          <div className="w-px h-8 bg-border" />
           <BalanceTicker portfolio={portfolio} />
           <div className="w-px h-8 bg-border" />
           <LiveClock />
