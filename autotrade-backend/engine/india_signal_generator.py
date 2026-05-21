@@ -244,10 +244,9 @@ async def generate_india_signal(
     now = datetime.utcnow()
 
     # ── Fallback for empty / insufficient data ────────────────────────────────
-    if candles_df.empty or len(candles_df) < 5:
+    if candles_df.empty or len(candles_df) < 20:
         logger.warning(
-            f"generate_india_signal: insufficient candles for {symbol} "
-            f"({len(candles_df)} rows)"
+            f"Skipping {symbol} — only {len(candles_df)} candles, need 20+"
         )
         entry = float(candles_df["close"].iloc[-1]) if not candles_df.empty else 0.0
         return TradingSignal(
@@ -257,7 +256,7 @@ async def generate_india_signal(
             pattern_score=0.0, indicator_score=0.0,
             sentiment_score=0.0, final_score=0.0,
             patterns_detected=[],
-            reasoning_points=["Insufficient price data — defaulting to HOLD"],
+            reasoning_points=[f"Insufficient candle data ({len(candles_df)} rows, need 20+) — defaulting to HOLD"],
             timestamp=now,
         )
 
@@ -428,10 +427,9 @@ async def analyze_all_india_symbols(
         try:
             candle_rows = await get_latest_candles(symbol, timeframe, 200, session)
 
-            if len(candle_rows) < 10:
+            if len(candle_rows) < 20:
                 logger.warning(
-                    f"analyze_all_india_symbols: skipping {symbol} — "
-                    f"only {len(candle_rows)} candles (need ≥ 10)"
+                    f"Skipping {symbol} — only {len(candle_rows)} candles, need 20+"
                 )
                 continue
 

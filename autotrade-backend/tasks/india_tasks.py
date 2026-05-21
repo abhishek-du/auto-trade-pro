@@ -219,7 +219,13 @@ async def _india_trade_loop():
     from paper_trading.virtual_wallet import VirtualWallet
     from tasks._db import celery_session
 
-    if not _is_india_trading_window():
+    now_ist   = datetime.datetime.now(_IST)
+    is_window = _is_india_trading_window()
+    logger.info(
+        f"[india_trade_loop] NSE market status: {'OPEN' if is_window else 'CLOSED'} "
+        f"— IST time: {now_ist.strftime('%H:%M:%S')}"
+    )
+    if not is_window:
         return
 
     async with celery_session() as session:
