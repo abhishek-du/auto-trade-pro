@@ -492,7 +492,10 @@ def fetch_fpi_investment_data() -> dict:
 
 # ── 9. Orchestrator ──────────────────────────────────────────────────────────
 
-async def run_india_price_crawl(session: AsyncSession) -> dict:
+async def run_india_price_crawl(
+    session: AsyncSession,
+    ignore_market_hours: bool = False,
+) -> dict:
     """Fetch OHLCV candles for all Indian watchlist symbols and persist to DB.
 
     Scope
@@ -503,19 +506,23 @@ async def run_india_price_crawl(session: AsyncSession) -> dict:
     Indian forex pairs     — settings.WATCHLIST_INDIAN_FOREX  (USDINR=X …)
     Commodities            — settings.WATCHLIST_COMMODITIES   (GC=F, SI=F, CL=F)
 
-    The crawl only runs when NSE is open; returns early otherwise.
+    yfinance returns historical data 24/7 regardless of market hours, so the
+    market-hours guard only applies when called from the Celery beat task.
+    Pass ignore_market_hours=True (e.g. from the seed endpoint) to always fetch.
 
     Returns
     -------
-    dict with keys: symbols_fetched, candles_saved, vix, market_open.
+    dict with keys: total_symbols, total_candles_saved, market_open, errors.
     """
-    if not is_nse_market_open():
-        logger.info("NSE closed -- skipping India crawl")
+    market_open = is_nse_market_open()
+
+    if not ignore_market_hours and not market_open:
+        logger.info("NSE closed -- skipping India crawl (pass ignore_market_hours=True to override)")
         return {
-            "symbols_fetched": 0,
-            "candles_saved":   0,
-            "vix":             None,
-            "market_open":     False,
+            "total_symbols":      0,
+            "total_candles_saved": 0,
+            "market_open":        False,
+            "errors":             [],
         }
 
     # Build full symbol list — large-cap + mid-cap + indices + INR forex + commodities
@@ -529,6 +536,7 @@ async def run_india_price_crawl(session: AsyncSession) -> dict:
 
     logger.info(
         f"━━ India price crawl START ━━  {len(all_symbols)} symbols  "
+        f"market_open={market_open}  ignore_market_hours={ignore_market_hours}  "
         f"({len(settings.nse_symbols)} large-cap  "
         f"{len(settings.nse_mid_symbols)} mid-cap  "
         f"{len(settings.WATCHLIST_NIFTY_INDICES)} indices  "
@@ -537,24 +545,26 @@ async def run_india_price_crawl(session: AsyncSession) -> dict:
     )
 
     all_candles:    list[dict] = []
-    symbols_fetched: int       = 0
-    errors:          list[str] = []
+    total_symbols:  int        = 0
+    errors:         list[str]  = []
 
     # Step 1 — fetch candles for every symbol sequentially (avoids yfinance flood)
     for symbol in all_symbols:
+        logger.info(f"  →  Fetching candles for {symbol} ...")
         try:
             candles = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda s=symbol: fetch_nse_candles(s, interval="1h"),
             )
             if candles:
-                symbols_fetched += 1
+                total_symbols += 1
                 all_candles.extend(candles)
+                logger.info(f"  ✓  {symbol}: {len(candles)} candles")
             else:
-                logger.warning(f"  ✗  {symbol}: no candle data -- continuing")
+                logger.warning(f"  ✗  {symbol}: no candle data returned")
                 errors.append(f"{symbol}: empty response")
         except Exception as exc:
-            logger.warning(f"  ✗  {symbol}: {exc} -- continuing")
+            logger.warning(f"  ✗  Failed to fetch {symbol}: {exc}")
             errors.append(f"{symbol}: {exc}")
 
     # Step 2 — fetch index snapshots (non-DB, informational / dashboard use)
@@ -564,18 +574,18 @@ async def run_india_price_crawl(session: AsyncSession) -> dict:
     vix = fetch_india_vix()
 
     # Step 4 — persist new candles to DB (chunked upsert, 3 000 rows per statement)
-    candles_saved = await save_candles_to_db(all_candles, session)
+    total_candles_saved = await save_candles_to_db(all_candles, session)
 
     result = {
-        "symbols_fetched": symbols_fetched,
-        "candles_saved":   candles_saved,
-        "vix":             vix,
-        "market_open":     True,
+        "total_symbols":       total_symbols,
+        "total_candles_saved": total_candles_saved,
+        "market_open":         market_open,
+        "errors":              errors,
     }
     logger.info(
         f"━━ India price crawl DONE  ━━  "
-        f"symbols={symbols_fetched}/{len(all_symbols)}  "
-        f"candles_saved={candles_saved}  "
+        f"symbols={total_symbols}/{len(all_symbols)}  "
+        f"candles_saved={total_candles_saved}  "
         f"vix={vix:.2f}  "
         f"errors={len(errors)}"
     )

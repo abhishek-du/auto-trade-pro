@@ -984,14 +984,21 @@ async def seed_india_data(
 
     t0 = _time.monotonic()
 
-    # ── 1. Candles ────────────────────────────────────────────────────────────
+    logger.info(
+        f"[seed] Starting — force={force}  "
+        f"symbols={len(settings.all_indian_symbols)}  "
+        f"sample={settings.all_indian_symbols[:3]}"
+    )
+
+    # ── 1. Candles — always fetch regardless of market hours ──────────────────
     symbols_fetched = 0
     candles_saved   = 0
     try:
-        price_result  = await run_india_price_crawl(db)
+        price_result = await run_india_price_crawl(db, ignore_market_hours=True)
         await db.commit()
         symbols_fetched = price_result.get("total_symbols", 0)
         candles_saved   = price_result.get("total_candles_saved", 0)
+        logger.info(f"[seed] Price crawl result: {price_result}")
     except Exception as exc:
         logger.warning(f"[seed] price crawl error: {exc}")
 
@@ -1010,19 +1017,26 @@ async def seed_india_data(
     except Exception as exc:
         logger.warning(f"[seed] options error: {exc}")
 
-    # ── 4. Signals — skipped outside market hours unless force=True ───────────
+    # ── 4. Signals — always run when force=True; uses whatever candles are in DB ─
     signals: list = []
     symbols_analysed: int | None = None
     market_open = is_nse_market_open()
     if force or market_open:
-        if not market_open:
-            logger.info("[seed] force=True — running signal scan outside market hours")
+        logger.info(
+            f"[seed] Running signal scan — force={force}  market_open={market_open}  "
+            f"(uses existing DB candles regardless of symbols_fetched)"
+        )
         try:
             signals = await analyze_all_india_symbols(db)
             symbols_analysed = len(signals)
             for sig in signals:
                 await save_signal(sig, db)
             await db.commit()
+            logger.info(
+                f"[seed] Signal scan done — "
+                f"actionable={len([s for s in signals if s.action in ('BUY','SELL')])}  "
+                f"total={len(signals)}"
+            )
         except Exception as exc:
             logger.warning(f"[seed] signal scan error: {exc}")
     else:
