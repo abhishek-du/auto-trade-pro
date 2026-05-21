@@ -28,7 +28,7 @@ export const saveSettings             = (body) => api.post('/api/v1/settings/', 
 
 // ── Indian market ─────────────────────────────────────────────────────────────
 export const getIndiaMarketStatus  = ()              => api.get('/api/v1/india/market-status');
-export const getIndiaVix           = ()              => api.get('/api/v1/india/india-vix');
+export const getIndiaVix           = ()              => api.get('/api/v1/india/vix');
 export const getIndiaFiiDii        = ()              => api.get('/api/v1/india/fii-dii');
 export const getIndiaOptionsChain  = (symbol)        => api.get(`/api/v1/india/options-chain/${symbol}`);
 export const getIndiaMutualFunds   = ()              => api.get('/api/v1/india/mutual-funds');
