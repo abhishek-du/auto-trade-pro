@@ -368,3 +368,119 @@ class FundComparisonOut(BaseModel):
     consistency_std:   Optional[float]
     composite_score:   float
     best_fund:         bool
+
+
+# ── Market status ─────────────────────────────────────────────────────────────
+
+class MarketIndexOut(BaseModel):
+    price:      Optional[float]
+    change:     Optional[float]
+    change_pct: Optional[float]
+
+
+class MarketStatusOut(BaseModel):
+    nse_open:      bool
+    ist_time:      str
+    nifty:         MarketIndexOut
+    bank_nifty:    MarketIndexOut
+    sensex:        MarketIndexOut
+    india_vix:     Optional[float]
+    today_holiday: bool
+    holiday_name:  str
+
+
+# ── FII/DII summary ───────────────────────────────────────────────────────────
+
+class FIIDIITodayOut(BaseModel):
+    fii_net:          float
+    dii_net:          float
+    market_direction: str
+
+
+class FIIDIIAvgOut(BaseModel):
+    fii_avg: float
+    dii_avg: float
+
+
+class FIIDIIChartPoint(BaseModel):
+    date:    date
+    fii_net: float
+    dii_net: float
+
+
+class FIIDIISummaryOut(BaseModel):
+    today:        Optional[FIIDIITodayOut]
+    five_day_avg: Optional[FIIDIIAvgOut]
+    trend:        str   # ACCUMULATION | DISTRIBUTION | MIXED
+    score:        float
+    chart_data:   list[FIIDIIChartPoint]
+
+
+# ── Options chain detail ──────────────────────────────────────────────────────
+
+class OptionsStrikeOut(BaseModel):
+    strike:   float
+    call_oi:  int
+    put_oi:   int
+    call_ltp: Optional[float]
+    put_ltp:  Optional[float]
+
+
+class OptionsChainDetailOut(BaseModel):
+    spot_price:        Optional[float]
+    expiry_date:       Optional[date]
+    pcr:               Optional[float]
+    max_pain:          Optional[float]
+    support_levels:    Optional[list]
+    resistance_levels: Optional[list]
+    options_score:     Optional[float]
+    chain_data:        list[OptionsStrikeOut]
+
+
+# ── Mutual fund list (simplified) ─────────────────────────────────────────────
+
+class MutualFundBriefOut(BaseModel):
+    scheme_code:   str
+    name:          str
+    nav:           float
+    change_pct:    float
+    one_yr_return: Optional[float]
+    signal:        str
+    category:      str
+
+
+class MutualFundListOut(BaseModel):
+    funds: list[MutualFundBriefOut]
+
+
+# ── SIP brief ─────────────────────────────────────────────────────────────────
+
+class SIPBriefOut(BaseModel):
+    total_invested:  float
+    current_value:   float
+    cagr:            float
+    absolute_return: float
+
+
+# ── Sector performance ────────────────────────────────────────────────────────
+
+class SectorPerfItem(BaseModel):
+    name:         str
+    return_30d:   Optional[float]
+    vs_nifty_pct: Optional[float]
+    signal:       str   # OUTPERFORM | UNDERPERFORM | NEUTRAL
+
+
+class SectorPerfOut(BaseModel):
+    sectors: list[SectorPerfItem]
+
+
+# ── Seed result ───────────────────────────────────────────────────────────────
+
+class SeedResultOut(BaseModel):
+    status:             str
+    symbols_fetched:    int
+    candles_saved:      int
+    signals_generated:  int
+    actionable_signals: int
+    duration_seconds:   float
