@@ -13,6 +13,7 @@ import IndiaMarket      from './pages/IndiaMarket';
 import IndiaSignals     from './pages/IndiaSignals';
 import MutualFunds      from './pages/MutualFunds';
 import IndiaFundamentals from './pages/IndiaFundamentals';
+import Backtest          from './pages/Backtest';
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
               <Route path="/india/signals" element={<IndiaSignals />}      />
               <Route path="/mutual-funds"  element={<MutualFunds />}       />
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
+              <Route path="/backtest"      element={<Backtest />}          />
             </Routes>
           </main>
         </div>
