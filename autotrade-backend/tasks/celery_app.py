@@ -44,6 +44,12 @@ celery_app.conf.update(
     # Upstash has a 1 MB command-size limit — keep task payloads small
     task_soft_time_limit=300,
     task_time_limit=600,
+    # Do not fire missed tasks on startup — prevents queue flood on restart
+    beat_max_loop_interval=5,
+    worker_prefetch_multiplier=1,
+    # Ensure tasks are not lost if the worker disconnects from Upstash
+    task_acks_late=True,
+    worker_cancel_long_running_tasks_on_connection_loss=True,
     **_ssl_kwargs,
 )
 
@@ -71,6 +77,7 @@ celery_app.conf.beat_schedule = {
     "india-price-scan-every-30s": {
         "task":     "tasks.india_price_scan",
         "schedule": 30,
+        "options":  {"countdown": 5},
     },
 
     # Daily 13:00 UTC = 6:30 PM IST: FII/DII flow from NSE
@@ -83,6 +90,7 @@ celery_app.conf.beat_schedule = {
     "india-options-every-15min": {
         "task":     "tasks.india_options_analysis",
         "schedule": 900,
+        "options":  {"countdown": 10},
     },
 
     # Daily 14:30 UTC = 8:00 PM IST: AMFI NAV bulk fetch (publishes after 7 PM IST)
@@ -101,6 +109,7 @@ celery_app.conf.beat_schedule = {
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",
         "schedule": 60,
+        "options":  {"countdown": 15},
     },
 
     # Weekly Saturday 20:30 UTC = Sunday 02:00 IST: LSTM + RF model training

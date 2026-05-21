@@ -20,6 +20,7 @@ from api.schemas import (
     BacktestRequestIn,
     BacktestResultOut,
     BacktestSymbolResultOut,
+    SignalDetail,
     FIIDIIChartPoint,
     FIIDIIFlowOut,
     FIIDIISummaryOut,
@@ -411,11 +412,11 @@ async def list_fii_dii_history(
 
 
 @router.post(
-    "/fii-dii/trigger",
+    "/fii-dii/fetch",
     response_model=FIIDIIFlowOut,
-    summary="Fetch fresh FII/DII data from NSE and persist",
+    summary="Manually fetch fresh FII/DII data from NSE and persist immediately",
 )
-async def trigger_fii_dii(db: AsyncSession = Depends(get_db)):
+async def fetch_fii_dii_now(db: AsyncSession = Depends(get_db)):
     try:
         data = await fetch_fii_dii_data(db)
     except Exception as exc:
@@ -931,6 +932,11 @@ async def list_india_signals(
     summary="Trigger a full India signal generation pass",
 )
 async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
+    """Always runs the full India signal scan regardless of market hours.
+
+    Use this endpoint to verify the signal pipeline works outside NSE trading hours.
+    Returns all actionable (BUY/SELL) signals with per-signal detail.
+    """
     signals = await analyze_all_india_symbols(db)
     for sig in signals:
         await save_signal(sig, db)
@@ -939,6 +945,16 @@ async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
         signals_generated=len(signals),
         actionable=sum(1 for s in signals if s.action in ("BUY", "SELL")),
         symbols=[s.symbol for s in signals],
+        signal_details=[
+            SignalDetail(
+                symbol=s.symbol,
+                action=s.action,
+                confidence=s.confidence,
+                final_score=s.final_score,
+                reasoning_points=s.reasoning_points,
+            )
+            for s in signals
+        ],
     )
 
 
@@ -951,15 +967,20 @@ async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
     response_model=SeedResultOut,
     summary="Seed all Indian market data: candles → FII/DII → options → signals",
 )
-async def seed_india_data(db: AsyncSession = Depends(get_db)):
+async def seed_india_data(
+    db:    AsyncSession = Depends(get_db),
+    force: bool        = Query(False, description="Bypass market-hours check for signal scan"),
+):
     """Runs a full data refresh in sequence:
     1. Fetch OHLCV candles for all NSE symbols via yfinance.
     2. Fetch latest FII/DII flow data from NSE.
     3. Fetch NIFTY + BANKNIFTY options chain snapshots.
     4. Run the full India confluence signal scan.
-    Returns a summary of everything that was fetched/generated.
+
+    Pass ?force=true to run the signal scan even when NSE is closed (useful for testing).
     """
     from crawler.india_price_feed import run_india_price_crawl
+    from sqlalchemy import func as sa_func
 
     t0 = _time.monotonic()
 
@@ -989,15 +1010,34 @@ async def seed_india_data(db: AsyncSession = Depends(get_db)):
     except Exception as exc:
         logger.warning(f"[seed] options error: {exc}")
 
-    # ── 4. Signals ────────────────────────────────────────────────────────────
+    # ── 4. Signals — skipped outside market hours unless force=True ───────────
     signals: list = []
+    symbols_analysed: int | None = None
+    market_open = is_nse_market_open()
+    if force or market_open:
+        if not market_open:
+            logger.info("[seed] force=True — running signal scan outside market hours")
+        try:
+            signals = await analyze_all_india_symbols(db)
+            symbols_analysed = len(signals)
+            for sig in signals:
+                await save_signal(sig, db)
+            await db.commit()
+        except Exception as exc:
+            logger.warning(f"[seed] signal scan error: {exc}")
+    else:
+        logger.info("[seed] NSE closed and force=False — skipping signal scan")
+
+    # ── Candles count for response ────────────────────────────────────────────
+    from db.models import Candle as CandleModel
+    candles_available: int | None = None
     try:
-        signals = await analyze_all_india_symbols(db)
-        for sig in signals:
-            await save_signal(sig, db)
-        await db.commit()
-    except Exception as exc:
-        logger.warning(f"[seed] signal scan error: {exc}")
+        result = await db.execute(
+            select(sa_func.count()).select_from(CandleModel)
+        )
+        candles_available = result.scalar_one()
+    except Exception:
+        pass
 
     actionable = [s for s in signals if s.action in ("BUY", "SELL")]
     duration   = round(_time.monotonic() - t0, 2)
@@ -1005,7 +1045,7 @@ async def seed_india_data(db: AsyncSession = Depends(get_db)):
     logger.info(
         f"[seed] symbols={symbols_fetched}  candles={candles_saved}  "
         f"signals={len(signals)}  actionable={len(actionable)}  "
-        f"duration={duration}s"
+        f"duration={duration}s  force={force}"
     )
     return SeedResultOut(
         status="ok",
@@ -1014,6 +1054,8 @@ async def seed_india_data(db: AsyncSession = Depends(get_db)):
         signals_generated=len(signals),
         actionable_signals=len(actionable),
         duration_seconds=duration,
+        symbols_analysed=symbols_analysed,
+        candles_available=candles_available,
     )
 
 

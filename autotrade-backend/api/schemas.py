@@ -113,10 +113,19 @@ class SignalOut(BaseModel):
     created_at:     datetime
 
 
+class SignalDetail(BaseModel):
+    symbol:           str
+    action:           str
+    confidence:       float
+    final_score:      float
+    reasoning_points: list[str]
+
+
 class TriggerResult(BaseModel):
     signals_generated: int
     actionable:        int
     symbols:           list[str]
+    signal_details:    list[SignalDetail] = []
 
 
 # ── News ──────────────────────────────────────────────────────────────────────
@@ -486,6 +495,8 @@ class SeedResultOut(BaseModel):
     signals_generated:  int
     actionable_signals: int
     duration_seconds:   float
+    symbols_analysed:   Optional[int] = None
+    candles_available:  Optional[int] = None
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────

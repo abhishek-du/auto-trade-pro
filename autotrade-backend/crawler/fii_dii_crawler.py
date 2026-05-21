@@ -278,10 +278,10 @@ async def fetch_fii_dii_data(session: AsyncSession | None = None) -> dict:
     fii_gross_sell, dii_gross_buy, dii_gross_sell, market_direction.
     """
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             # Step 1 — acquire NSE session cookie
             await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
-            await asyncio.sleep(1)   # brief pause; avoids bot-detection 429s
+            await asyncio.sleep(2)   # NSE bot-detection requires a pause after homepage hit
 
             # Step 2 — call the actual JSON API
             response = await client.get(_FIIDII_URL, headers=BROWSER_HEADERS)

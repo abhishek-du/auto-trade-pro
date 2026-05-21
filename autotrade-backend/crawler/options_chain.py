@@ -179,13 +179,10 @@ async def fetch_options_chain(symbol: str = "NIFTY") -> dict:
 
     url = _CHAIN_URL.format(symbol=normalized)
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(15.0, connect=5.0),
-        follow_redirects=True,
-    ) as client:
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         # Step 1 — get session cookie from NSE homepage
         await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
-        await asyncio.sleep(1)   # avoid bot-detection 429
+        await asyncio.sleep(2)   # NSE bot-detection requires a pause after homepage hit
 
         # Step 2 — call the options-chain JSON API
         response = await client.get(url, headers=BROWSER_HEADERS)
