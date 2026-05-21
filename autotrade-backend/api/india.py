@@ -158,17 +158,21 @@ def _fetch_index_prices() -> dict[str, dict]:
 async def _get_candle_return_30d(
     symbol: str, session: AsyncSession
 ) -> float | None:
-    """Return approximate 30-day % return from the Candle table."""
+    """Return approximate 30-day % return from the Candle table.
+
+    Uses 1h candles (the timeframe saved by the India price crawl).
+    30 trading days × ~6.5 h/day ≈ 195 bars — fetch up to 210 to be safe.
+    """
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=40)
     rows = (await session.execute(
         select(Candle.close, Candle.timestamp)
         .where(
             Candle.symbol    == symbol,
-            Candle.timeframe == "1d",
+            Candle.timeframe == "1h",
             Candle.timestamp >= cutoff,
         )
         .order_by(Candle.timestamp)
-        .limit(35)
+        .limit(210)
     )).all()
     if len(rows) < 5:
         return None
