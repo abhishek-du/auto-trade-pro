@@ -937,7 +937,7 @@ async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
     Use this endpoint to verify the signal pipeline works outside NSE trading hours.
     Returns all actionable (BUY/SELL) signals with per-signal detail.
     """
-    signals = await analyze_all_india_symbols(db)
+    signals = await analyze_all_india_symbols(db, ignore_market_hours=True)
     for sig in signals:
         await save_signal(sig, db)
     await db.commit()
@@ -1027,7 +1027,7 @@ async def seed_india_data(
             f"(uses existing DB candles regardless of symbols_fetched)"
         )
         try:
-            signals = await analyze_all_india_symbols(db)
+            signals = await analyze_all_india_symbols(db, ignore_market_hours=force)
             symbols_analysed = len(signals)
             for sig in signals:
                 await save_signal(sig, db)
@@ -1038,7 +1038,7 @@ async def seed_india_data(
                 f"total={len(signals)}"
             )
         except Exception as exc:
-            logger.warning(f"[seed] signal scan error: {exc}")
+            logger.error(f"[seed] signal scan error: {exc}", exc_info=True)
     else:
         logger.info("[seed] NSE closed and force=False — skipping signal scan")
 

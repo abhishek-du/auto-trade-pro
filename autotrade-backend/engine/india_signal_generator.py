@@ -28,6 +28,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.fii_dii_crawler import calculate_fii_dii_score
+from crawler.india_price_feed import is_nse_market_open
 from crawler.news_crawler import get_market_sentiment
 from crawler.options_chain import calculate_options_score
 from crawler.price_feed import get_latest_candles
@@ -46,8 +47,8 @@ from utils.logger import logger
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_BUY_THRESHOLD:    float = 35.0
-_SELL_THRESHOLD:   float = -35.0
+_BUY_THRESHOLD:    float = 25.0
+_SELL_THRESHOLD:   float = -25.0
 _MAX_PATTERN_SCORE: float = 9.0   # mirrors signal_generator normalisation ceiling
 
 # yfinance ticker → NSE options chain symbol name
@@ -403,24 +404,31 @@ async def generate_india_signal(
 
 async def analyze_all_india_symbols(
     session: AsyncSession,
+    ignore_market_hours: bool = False,
 ) -> list[TradingSignal]:
     """Run India signal generation for every symbol in all_indian_symbols.
 
     For each symbol:
-      1. Fetches the last 200 daily candles from the DB.
-      2. Skips symbols with fewer than 10 candles.
+      1. Fetches the last 200 hourly candles from the DB.
+      2. Skips symbols with fewer than 20 candles.
       3. Generates a signal via generate_india_signal, saves it, continues on error.
 
-    Returns only BUY and SELL signals sorted by abs(final_score) descending.
+    Returns ALL signals (HOLD + BUY + SELL) sorted by abs(final_score) descending.
+    Callers should filter for s.action in ("BUY", "SELL") when they need only
+    actionable signals. Returning all signals lets the seed endpoint report
+    accurate symbols_analysed counts even when no symbol crosses the threshold.
     The caller owns the transaction (no commit here).
+    Pass ignore_market_hours=True to run outside NSE trading hours (e.g. seed/test).
     """
-    timeframe   = "1d"
+    timeframe   = "1h"
     all_symbols = settings.all_indian_symbols
-    actionable: list[TradingSignal] = []
+    all_signals: list[TradingSignal] = []
+    skipped     = 0
 
     logger.info(
-        f"━━ analyze_all_india_symbols START ━━  "
-        f"{len(all_symbols)} symbols  timeframe={timeframe}"
+        f"[india_signals] Starting analysis — "
+        f"{len(all_symbols)} symbols  timeframe={timeframe}  "
+        f"market_open={is_nse_market_open()}  ignore_hours={ignore_market_hours}"
     )
 
     for symbol in all_symbols:
@@ -431,6 +439,7 @@ async def analyze_all_india_symbols(
                 logger.warning(
                     f"Skipping {symbol} — only {len(candle_rows)} candles, need 20+"
                 )
+                skipped += 1
                 continue
 
             # get_latest_candles returns newest-first; reverse for chronological order
@@ -448,23 +457,26 @@ async def analyze_all_india_symbols(
             ])
 
             signal = await generate_india_signal(symbol, timeframe, df, session)
+            logger.info(
+                f"[india_signals] {symbol:<20}  action={signal.action:<4}  "
+                f"score={signal.final_score:+.3f}  confidence={signal.confidence:.2f}"
+            )
             await save_signal(signal, session)
-
-            if signal.action in ("BUY", "SELL"):
-                actionable.append(signal)
+            all_signals.append(signal)
 
         except Exception as exc:
             logger.error(
                 f"analyze_all_india_symbols: error processing {symbol}: {exc}"
             )
 
-    actionable.sort(key=lambda s: abs(s.final_score), reverse=True)
+    all_signals.sort(key=lambda s: abs(s.final_score), reverse=True)
+    actionable = [s for s in all_signals if s.action in ("BUY", "SELL")]
 
     logger.info(
         f"━━ analyze_all_india_symbols DONE ━━  "
-        f"processed={len(all_symbols)}  "
+        f"processed={len(all_signals)}  skipped={skipped}  "
         f"actionable={len(actionable)}  "
         f"(BUY={sum(1 for s in actionable if s.action == 'BUY')}  "
         f"SELL={sum(1 for s in actionable if s.action == 'SELL')})"
     )
-    return actionable
+    return all_signals
