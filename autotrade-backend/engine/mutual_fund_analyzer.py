@@ -58,18 +58,28 @@ def _normalize_hist_df(raw) -> pd.DataFrame:
 
     Accepts either a dict (as_Dataframe=False) or a DataFrame (as_Dataframe=True).
     Returns columns: date (datetime64[ns]), nav (float64).
+
+    mftool returns a DataFrame with the date as the index and columns
+    ["nav", "dayChange"]. After reset_index() that becomes three columns:
+    ["date", "nav", "dayChange"]. We select only "date" and "nav".
     """
     if isinstance(raw, pd.DataFrame):
         df = raw.copy()
-        # Reset index in case date is the index
-        if df.index.name == "date" or not {"date", "nav"}.issubset(df.columns):
+        # Move date from index to column if needed
+        if df.index.name == "date" or "date" not in df.columns:
             df = df.reset_index()
-        if len(df.columns) >= 2:
-            df.columns = list(df.columns[:2])
-            df = df.rename(columns={df.columns[0]: "date", df.columns[1]: "nav"})
+        # Rename first column to "date" if it isn't already
+        if df.columns[0] != "date":
+            df = df.rename(columns={df.columns[0]: "date"})
+        # Keep only date + nav; ignore dayChange and any other extras
+        if "nav" not in df.columns and len(df.columns) >= 2:
+            df = df.rename(columns={df.columns[1]: "nav"})
+        df = df[["date", "nav"]]
     elif isinstance(raw, dict) and raw.get("status") == "SUCCESS":
         records = raw.get("data", [])
         df = pd.DataFrame(records)
+        if df.empty:
+            return pd.DataFrame(columns=["date", "nav"])
     else:
         return pd.DataFrame(columns=["date", "nav"])
 
@@ -143,6 +153,27 @@ async def fetch_and_save_nav(
     nav          = _parse_nav_float(quote.get("nav") or quote.get("Net Asset Value"))
     scheme_name  = quote.get("scheme_name", "")
     category     = quote.get("scheme_category") or quote.get("mutual_fund_family", "")
+    # mftool doesn't return category — infer from scheme name
+    if not category:
+        name_lower = scheme_name.lower()
+        if "elss" in name_lower or "tax saver" in name_lower:
+            category = "ELSS"
+        elif "index" in name_lower or "nifty 50" in name_lower:
+            category = "Index"
+        elif "mid cap" in name_lower or "midcap" in name_lower:
+            category = "Mid Cap"
+        elif "large cap" in name_lower or "largecap" in name_lower:
+            category = "Large Cap"
+        elif "small cap" in name_lower or "smallcap" in name_lower:
+            category = "Small Cap"
+        elif "equity & debt" in name_lower or "hybrid" in name_lower:
+            category = "Hybrid"
+        elif "liquid" in name_lower or "overnight" in name_lower:
+            category = "Liquid"
+        elif "debt" in name_lower or "bond" in name_lower:
+            category = "Debt"
+        else:
+            category = "Equity"
 
     if nav <= 0:
         logger.warning(f"fetch_and_save_nav {scheme_code}: invalid NAV={nav}")
