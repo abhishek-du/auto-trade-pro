@@ -486,3 +486,45 @@ class SeedResultOut(BaseModel):
     signals_generated:  int
     actionable_signals: int
     duration_seconds:   float
+
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+
+class BacktestRequestIn(BaseModel):
+    symbols:          Optional[list[str]] = None   # None → all NSE watchlist symbols
+    timeframe:        str                 = "1d"
+    atr_multiplier:   float               = 2.0
+    risk_reward:      float               = 2.0
+    commission_pct:   float               = 0.001
+    slippage_pct:     float               = 0.0005
+    initial_capital:  float               = 100_000.0
+    lookback_candles: int                 = 200
+
+
+class BacktestSymbolResultOut(BaseModel):
+    symbol:           str
+    timeframe:        str
+    total_trades:     int
+    winning_trades:   int
+    losing_trades:    int
+    win_rate:         float
+    total_return_pct: float
+    max_drawdown_pct: float
+    sharpe_ratio:     Optional[float]
+    avg_win_pct:      float
+    avg_loss_pct:     float
+    profit_factor:    Optional[float]
+    equity_curve:     list[float]
+
+
+class BacktestResultOut(BaseModel):
+    symbols_tested:   int
+    timeframe:        str
+    total_trades:     int
+    avg_win_rate:     float
+    avg_return_pct:   float
+    avg_sharpe:       float
+    best_symbols:     list[BacktestSymbolResultOut]
+    worst_symbols:    list[BacktestSymbolResultOut]
+    all_results:      list[BacktestSymbolResultOut]
+    duration_seconds: float

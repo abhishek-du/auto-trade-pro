@@ -17,6 +17,9 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import (
+    BacktestRequestIn,
+    BacktestResultOut,
+    BacktestSymbolResultOut,
     FIIDIIChartPoint,
     FIIDIIFlowOut,
     FIIDIISummaryOut,
@@ -1011,4 +1014,84 @@ async def seed_india_data(db: AsyncSession = Depends(get_db)):
         signals_generated=len(signals),
         actionable_signals=len(actionable),
         duration_seconds=duration,
+    )
+
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/backtest",
+    response_model=BacktestResultOut,
+    summary="Run walk-forward backtest on India watchlist symbols",
+)
+async def run_india_backtest(
+    body: BacktestRequestIn,
+    db: AsyncSession = Depends(get_db),
+):
+    """Replay the India signal engine over historical OHLCV data.
+
+    Signal at bar *i* → execute at bar *i+1* open.  SL/TP checked intra-bar.
+    If both SL and TP are hit in the same bar, SL takes precedence (conservative).
+
+    PAPER TRADING ONLY — all results are simulated; no real money involved.
+    """
+    import time as _time2
+    from engine.backtester import BacktestConfig, run_backtest_all
+
+    t0 = _time2.monotonic()
+
+    cfg = BacktestConfig(
+        atr_multiplier=body.atr_multiplier,
+        risk_reward=body.risk_reward,
+        commission_pct=body.commission_pct,
+        slippage_pct=body.slippage_pct,
+        initial_capital=body.initial_capital,
+        lookback_candles=body.lookback_candles,
+    )
+
+    results = await run_backtest_all(
+        symbols=body.symbols,
+        timeframe=body.timeframe,
+        config=cfg,
+        session=db,
+    )
+
+    if not results:
+        raise HTTPException(status_code=404, detail="No backtest results — insufficient data")
+
+    def _to_out(r) -> BacktestSymbolResultOut:
+        return BacktestSymbolResultOut(
+            symbol=r.symbol,
+            timeframe=r.timeframe,
+            total_trades=r.total_trades,
+            winning_trades=r.winning_trades,
+            losing_trades=r.losing_trades,
+            win_rate=r.win_rate,
+            total_return_pct=r.total_return_pct,
+            max_drawdown_pct=r.max_drawdown_pct,
+            sharpe_ratio=r.sharpe_ratio,
+            avg_win_pct=r.avg_win_pct,
+            avg_loss_pct=r.avg_loss_pct,
+            profit_factor=r.profit_factor,
+            equity_curve=r.equity_curve[:500],  # cap payload size
+        )
+
+    all_out = [_to_out(r) for r in results]
+    sharpe_vals = [r.sharpe_ratio for r in results if r.sharpe_ratio is not None]
+
+    return BacktestResultOut(
+        symbols_tested=len(results),
+        timeframe=body.timeframe,
+        total_trades=sum(r.total_trades for r in results),
+        avg_win_rate=round(
+            sum(r.win_rate for r in results) / len(results), 2
+        ) if results else 0.0,
+        avg_return_pct=round(
+            sum(r.total_return_pct for r in results) / len(results), 2
+        ) if results else 0.0,
+        avg_sharpe=round(sum(sharpe_vals) / len(sharpe_vals), 2) if sharpe_vals else 0.0,
+        best_symbols=all_out[:5],
+        worst_symbols=list(reversed(all_out[-5:])),
+        all_results=all_out,
+        duration_seconds=round(_time2.monotonic() - t0, 2),
     )

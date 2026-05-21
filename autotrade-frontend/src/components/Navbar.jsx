@@ -15,6 +15,7 @@ const PAGE_TITLES = {
   '/india/signals':    'NSE Signals',
   '/mutual-funds':     'Mutual Funds',
   '/fundamentals':     'Fundamentals',
+  '/backtest':         'Backtest',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────

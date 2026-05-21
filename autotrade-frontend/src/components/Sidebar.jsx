@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
-  Globe, Zap, Wallet, LineChart,
+  Globe, Zap, Wallet, LineChart, TestTube2,
 } from 'lucide-react';
 
 const MAIN_NAV = [
@@ -20,6 +20,7 @@ const INDIA_NAV = [
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
+  { to: '/backtest',        label: 'Backtest',       Icon: TestTube2  },
 ];
 
 function NavItem({ to, label, Icon, end }) {

@@ -42,5 +42,6 @@ export const getIndiaSignals       = (category)      => api.get('/api/v1/india/s
     params: category ? { category } : {},
 });
 export const seedIndiaData         = ()              => api.post('/api/v1/india/seed');
+export const runBacktest           = (body = {})     => api.post('/api/v1/india/backtest', body, { timeout: 120_000 });
 
 export default api;
