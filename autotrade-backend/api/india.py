@@ -598,7 +598,9 @@ async def list_mutual_funds(
             name=latest.scheme_name,
             nav=latest.nav,
             change_pct=latest.change_pct,
+            one_month_return=latest.one_month_return,
             one_yr_return=latest.one_year_return,
+            three_year_return=latest.three_year_return,
             signal=sig.get("signal", "HOLD"),
             category=latest.category,
         ))
@@ -739,6 +741,19 @@ async def project_sip_returns(body: SIPProjectionIn):
 # ═════════════════════════════════════════════════════════════════════════════
 # 6. FUNDAMENTALS
 # ═════════════════════════════════════════════════════════════════════════════
+
+@router.get(
+    "/fundamentals",
+    response_model=list[FundamentalDataOut],
+    summary="All fundamental data rows — used by the screener UI",
+)
+async def list_fundamentals(db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(
+        select(FundamentalData)
+        .order_by(FundamentalData.fundamental_score.desc().nullslast())
+    )).scalars().all()
+    return [_fund_out(r) for r in rows]
+
 
 @router.get(
     "/fundamentals/{symbol}",

@@ -1,14 +1,18 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
-import Sidebar from './components/Sidebar';
-import Navbar  from './components/Navbar';
-import Dashboard  from './pages/Dashboard';
-import Trades     from './pages/Trades';
-import Analytics  from './pages/Analytics';
-import News       from './pages/News';
-import Simulation from './pages/Simulation';
-import Settings   from './pages/Settings';
-import Documentation from './pages/Documentation';
+import Sidebar    from './components/Sidebar';
+import Navbar     from './components/Navbar';
+import Dashboard        from './pages/Dashboard';
+import Trades           from './pages/Trades';
+import Analytics        from './pages/Analytics';
+import News             from './pages/News';
+import Simulation       from './pages/Simulation';
+import Settings         from './pages/Settings';
+import Documentation    from './pages/Documentation';
+import IndiaMarket      from './pages/IndiaMarket';
+import IndiaSignals     from './pages/IndiaSignals';
+import MutualFunds      from './pages/MutualFunds';
+import IndiaFundamentals from './pages/IndiaFundamentals';
 
 export default function App() {
   return (
@@ -19,13 +23,17 @@ export default function App() {
           <Navbar />
           <main className="flex-1 overflow-y-auto p-6">
             <Routes>
-              <Route path="/"           element={<Dashboard />}  />
-              <Route path="/trades"     element={<Trades />}     />
-              <Route path="/analytics"  element={<Analytics />}  />
-              <Route path="/news"       element={<News />}       />
-              <Route path="/simulation" element={<Simulation />} />
-              <Route path="/settings"   element={<Settings />}   />
-              <Route path="/documentation" element={<Documentation />} />
+              <Route path="/"              element={<Dashboard />}         />
+              <Route path="/trades"        element={<Trades />}            />
+              <Route path="/analytics"     element={<Analytics />}         />
+              <Route path="/news"          element={<News />}              />
+              <Route path="/simulation"    element={<Simulation />}        />
+              <Route path="/settings"      element={<Settings />}          />
+              <Route path="/documentation" element={<Documentation />}     />
+              <Route path="/india"         element={<IndiaMarket />}       />
+              <Route path="/india/signals" element={<IndiaSignals />}      />
+              <Route path="/mutual-funds"  element={<MutualFunds />}       />
+              <Route path="/fundamentals"  element={<IndiaFundamentals />} />
             </Routes>
           </main>
         </div>

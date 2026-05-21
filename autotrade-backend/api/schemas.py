@@ -440,13 +440,15 @@ class OptionsChainDetailOut(BaseModel):
 # ── Mutual fund list (simplified) ─────────────────────────────────────────────
 
 class MutualFundBriefOut(BaseModel):
-    scheme_code:   str
-    name:          str
-    nav:           float
-    change_pct:    float
-    one_yr_return: Optional[float]
-    signal:        str
-    category:      str
+    scheme_code:        str
+    name:               str
+    nav:                float
+    change_pct:         float
+    one_month_return:   Optional[float]
+    one_yr_return:      Optional[float]
+    three_year_return:  Optional[float]
+    signal:             str
+    category:           str
 
 
 class MutualFundListOut(BaseModel):

@@ -26,4 +26,21 @@ export const triggerSignals           = ()     => api.post('/api/v1/signals/trig
 export const getSettings              = ()     => api.get('/api/v1/settings/');
 export const saveSettings             = (body) => api.post('/api/v1/settings/', body);
 
+// ── Indian market ─────────────────────────────────────────────────────────────
+export const getIndiaMarketStatus  = ()              => api.get('/api/v1/india/market-status');
+export const getIndiaVix           = ()              => api.get('/api/v1/india/india-vix');
+export const getIndiaFiiDii        = ()              => api.get('/api/v1/india/fii-dii');
+export const getIndiaOptionsChain  = (symbol)        => api.get(`/api/v1/india/options-chain/${symbol}`);
+export const getIndiaMutualFunds   = ()              => api.get('/api/v1/india/mutual-funds');
+export const getIndiaMFSip         = (code, amt = 5000, months = 12) =>
+    api.get(`/api/v1/india/mutual-funds/${code}/sip`, { params: { monthly_amount: amt, months } });
+export const projectSip            = (body)          => api.post('/api/v1/india/sip/project', body);
+export const listIndiaFundamentals = ()              => api.get('/api/v1/india/fundamentals');
+export const getIndiaFundamentals  = (symbol)        => api.get(`/api/v1/india/fundamentals/${symbol}`);
+export const getIndiaSectorPerf    = ()              => api.get('/api/v1/india/sector-performance');
+export const getIndiaSignals       = (category)      => api.get('/api/v1/india/signals', {
+    params: category ? { category } : {},
+});
+export const seedIndiaData         = ()              => api.post('/api/v1/india/seed');
+
 export default api;
