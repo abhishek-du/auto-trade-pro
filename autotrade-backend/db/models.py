@@ -2,7 +2,7 @@ from datetime import date, datetime
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
-    BigInteger, Date, DateTime, Enum, Float, ForeignKey,
+    BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey,
     Index, Integer, JSON, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -423,4 +423,69 @@ class FundamentalData(Base):
         return (
             f"<FundamentalData {self.symbol} score={self.fundamental_score} "
             f"pe={self.pe_ratio} roe={self.roe}% roce={self.roce}%>"
+        )
+
+
+# ── 14. KiteSession ───────────────────────────────────────────────────────────
+
+class KiteSession(Base):
+    """Zerodha KiteConnect OAuth session — read-only portfolio tracking.
+
+    One active row per user (default='default').  Access tokens expire daily
+    at 06:00 IST; the `is_active` flag is set to False on expiry or disconnect.
+    """
+    __tablename__ = "kite_sessions"
+
+    id:           Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id:      Mapped[str]      = mapped_column(String(50),  nullable=False, default="default")
+    access_token: Mapped[str]      = mapped_column(String(500), nullable=False)
+    public_token: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    login_time:   Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at:   Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    is_active:    Mapped[bool]     = mapped_column(Boolean,  nullable=False, default=True)
+    created_at:   Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<KiteSession id={self.id} user={self.user_id!r} "
+            f"active={self.is_active} expires={self.expires_at}>"
+        )
+
+
+# ── 15. PortfolioHolding ──────────────────────────────────────────────────────
+
+class PortfolioHolding(Base):
+    """Zerodha Kite portfolio holding — synced from the user's real Demat account.
+
+    NOTE: This stores READ-ONLY reference data from a real account for
+    analysis and display purposes.  No orders are ever placed by this system.
+    """
+    __tablename__ = "portfolio_holdings"
+    __table_args__ = (
+        UniqueConstraint("tradingsymbol", "exchange", name="uq_holding"),
+        Index("ix_holding_symbol", "tradingsymbol"),
+    )
+
+    id:              Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tradingsymbol:   Mapped[str]          = mapped_column(String(30),  nullable=False)
+    exchange:        Mapped[str]          = mapped_column(String(10),  nullable=False)
+    isin:            Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    quantity:        Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
+    avg_price:       Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    last_price:      Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    current_value:   Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    pnl:             Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    pnl_pct:         Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    day_change:      Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    day_change_pct:  Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    sector:          Mapped[str]          = mapped_column(String(80),  nullable=False, default="")
+    buy_date:        Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    xirr:            Mapped[float | None] = mapped_column(Float,       nullable=True)
+    synced_at:       Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<PortfolioHolding {self.tradingsymbol} qty={self.quantity} "
+            f"avg={self.avg_price:.2f} ltp={self.last_price:.2f} "
+            f"pnl={self.pnl:+.2f} ({self.pnl_pct:+.1f}%)>"
         )

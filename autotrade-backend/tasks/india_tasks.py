@@ -321,3 +321,33 @@ def train_ml_models_task():
     """Weekly LSTM + RF training for all NSE large + mid cap symbols."""
     logger.info("[ml_training] Starting weekly model training")
     _run_async(_train_ml_models())
+
+
+# ── 8. Kite portfolio sync — every 15 min during NSE hours ───────────────────
+
+async def _sync_kite_holdings():
+    from services.kite_service import KiteService
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        token = await KiteService.get_access_token(session)
+        if not token:
+            return  # not connected — skip silently
+        try:
+            raw = await KiteService.sync_holdings(session)
+            await KiteService.update_xirr_for_all(session)
+            await session.commit()
+            logger.info(f"[kite_sync] Synced {len(raw)} holdings")
+        except Exception as exc:
+            logger.warning(f"[kite_sync] Sync failed: {exc}")
+
+
+@celery_app.task(name="tasks.india_tasks.sync_kite_holdings")
+def sync_kite_holdings():
+    """Sync Zerodha Kite portfolio holdings every 15 min during NSE hours.
+
+    Read-only — no orders are placed.
+    """
+    if not _is_india_trading_window():
+        return
+    _run_async(_sync_kite_holdings())

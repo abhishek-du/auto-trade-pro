@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # Claude: detailed explanations — strategy breakdowns, deeper reasoning
     ANTHROPIC_API_KEY: str = ""
 
+    # ── Zerodha Kite (read-only portfolio tracking) ───────────────────────────
+    KITE_API_KEY:      str = ""
+    KITE_API_SECRET:   str = ""
+    KITE_REDIRECT_URL: str = "http://localhost:8000/api/v1/kite/callback"
+
     # ── Paper trading parameters ──────────────────────────────────────────────
     PAPER_TRADING_BALANCE: float = 1000.0
     MAX_RISK_PER_TRADE: float = 0.02       # fraction of balance risked per trade
@@ -81,6 +86,10 @@ class Settings(BaseSettings):
     # ── Risk / trade sizing ───────────────────────────────────────────────────
     ATR_MULTIPLIER: float = 2.0       # stop = entry ± ATR × this
     MIN_RISK_REWARD: float = 2.0      # take-profit = entry ± risk × this
+
+    @property
+    def kite_available(self) -> bool:
+        return bool(self.KITE_API_KEY and self.KITE_API_SECRET)
 
     @property
     def groq_available(self) -> bool:

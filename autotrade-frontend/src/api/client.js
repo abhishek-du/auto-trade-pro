@@ -44,4 +44,12 @@ export const getIndiaSignals       = (category)      => api.get('/api/v1/india/s
 export const seedIndiaData         = ()              => api.post('/api/v1/india/seed');
 export const runBacktest           = (body = {})     => api.post('/api/v1/india/backtest', body, { timeout: 120_000 });
 
+// ── Zerodha Kite portfolio tracker ────────────────────────────────────────────
+export const getKiteStatus         = ()     => api.get('/api/v1/kite/status');
+export const getKiteLoginUrl       = ()     => api.get('/api/v1/kite/login-url');
+export const getKiteHoldings       = ()     => api.get('/api/v1/kite/holdings');
+export const syncKiteHoldings      = ()     => api.post('/api/v1/kite/sync');
+export const disconnectKite        = ()     => api.post('/api/v1/kite/disconnect');
+export const addManualHolding      = (body) => api.post('/api/v1/kite/holdings/manual', body);
+
 export default api;
