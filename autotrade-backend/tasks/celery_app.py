@@ -19,7 +19,7 @@ from utils.config import settings
 _ssl_kwargs: dict = {}
 if settings.redis_uses_tls:
     _ssl_kwargs = {
-        "broker_use_ssl":  {"ssl_cert_reqs": ssl.CERT_NONE},
+        "broker_use_ssl":        {"ssl_cert_reqs": ssl.CERT_NONE},
         "redis_backend_use_ssl": {"ssl_cert_reqs": ssl.CERT_NONE},
     }
 
@@ -49,6 +49,9 @@ celery_app.conf.update(
 
 # ── Beat schedule ─────────────────────────────────────────────────────────────
 celery_app.conf.beat_schedule = {
+
+    # ── US / global market tasks ──────────────────────────────────────────────
+
     "scan-prices-every-30s": {
         "task":     "tasks.market_scan.scan_watchlist",
         "schedule": 30,
@@ -61,29 +64,46 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.paper_trade_loop.run_paper_trade_loop",
         "schedule": 60,
     },
+
     # ── Indian market tasks ───────────────────────────────────────────────────
-    "india-price-crawl-every-5min": {
-        "task":     "tasks.india_tasks.crawl_india_prices",
-        "schedule": 300,
+
+    # Every 30 s during NSE hours: OHLCV candles + index snapshots + VIX
+    "india-price-scan-every-30s": {
+        "task":     "tasks.india_price_scan",
+        "schedule": 30,
     },
-    "india-fii-dii-every-15min": {
-        "task":     "tasks.india_tasks.crawl_fii_dii",
+
+    # Daily 13:00 UTC = 6:30 PM IST: FII/DII flow from NSE
+    "india-fii-dii-daily": {
+        "task":     "tasks.india_fii_dii_fetch",
+        "schedule": crontab(hour=13, minute=0),
+    },
+
+    # Every 15 min during NSE hours: NIFTY + BANKNIFTY options chain
+    "india-options-every-15min": {
+        "task":     "tasks.india_options_analysis",
         "schedule": 900,
     },
-    "india-options-every-10min": {
-        "task":     "tasks.india_tasks.crawl_options_chain",
-        "schedule": 600,
+
+    # Daily 14:30 UTC = 8:00 PM IST: AMFI NAV bulk fetch (publishes after 7 PM IST)
+    "india-mf-nav-daily": {
+        "task":     "tasks.india_mutual_fund_nav",
+        "schedule": crontab(hour=14, minute=30),
     },
-    "india-signals-every-5min": {
-        "task":     "tasks.india_tasks.run_india_signal_scan",
-        "schedule": 300,
+
+    # Weekly Sunday 18:30 UTC: fundamental data refresh (PE, ROE, promoter holding…)
+    "india-fundamentals-weekly": {
+        "task":     "tasks.india_fundamental_update",
+        "schedule": crontab(day_of_week=0, hour=18, minute=30),
     },
-    # Saturday 18:30 UTC = Sunday 00:00 IST
-    "fundamentals-update-weekly": {
-        "task":     "tasks.india_tasks.run_fundamental_update_task",
-        "schedule": crontab(hour=18, minute=30, day_of_week="saturday"),
+
+    # Every 60 s during NSE hours + 30 min: full India paper-trading cycle
+    "india-trade-loop-every-60s": {
+        "task":     "tasks.india_trade_loop",
+        "schedule": 60,
     },
-    # Saturday 20:30 UTC = Sunday 02:00 IST  (after fundamentals run)
+
+    # Weekly Saturday 20:30 UTC = Sunday 02:00 IST: LSTM + RF model training
     "ml-model-training-weekly": {
         "task":     "tasks.india_tasks.train_ml_models_task",
         "schedule": crontab(hour=20, minute=30, day_of_week="saturday"),
