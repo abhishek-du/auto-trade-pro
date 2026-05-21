@@ -19,8 +19,7 @@ from db.models import (
 )
 from utils.config import settings
 from utils.logger import logger
-
-_START = settings.PAPER_TRADING_BALANCE
+from utils.runtime_config import RuntimeConfig
 
 # Every wallet event is logged in this fixed-width format for easy grepping.
 _FMT = (
@@ -67,6 +66,15 @@ class VirtualWallet:
         ))
         await session.flush()
 
+    @staticmethod
+    async def _start_balance(session: AsyncSession) -> float:
+        """Return the configured paper-trading starting balance from RuntimeSettings.
+
+        Falls back to the .env default if the key has not been set in the DB.
+        """
+        cfg = await RuntimeConfig.load(session)
+        return cfg.paper_trading_balance
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -79,10 +87,11 @@ class VirtualWallet:
         wallet = await VirtualWallet._fetch(session)
 
         if wallet is None:
+            start = await VirtualWallet._start_balance(session)
             wallet = WalletRow(
-                balance=_START,
-                equity=_START,
-                peak_balance=_START,
+                balance=start,
+                equity=start,
+                peak_balance=start,
                 realised_pnl=0.0,
                 unrealised_pnl=0.0,
                 total_trades=0,
@@ -91,11 +100,11 @@ class VirtualWallet:
             )
             session.add(wallet)
             await session.flush()
-            VirtualWallet._log("WALLET_CREATED", "—", _START, wallet.balance)
+            VirtualWallet._log("WALLET_CREATED", "—", start, wallet.balance)
             await VirtualWallet._simlog(
                 session, "WALLET_CREATED", "—",
-                f"Paper-trading wallet initialised with ${_START:,.2f} virtual balance",
-                {"starting_balance": _START},
+                f"Paper-trading wallet initialised with ${start:,.2f} virtual balance",
+                {"starting_balance": start},
             )
 
         # Seed today's snapshot row (noop if already exists)
@@ -231,12 +240,13 @@ class VirtualWallet:
     async def get_summary(session: AsyncSession) -> dict:
         """Return the full wallet state as a JSON-serialisable dict."""
         wallet = await VirtualWallet.get_or_create(session)
+        start  = await VirtualWallet._start_balance(session)
 
         win_rate = (
             wallet.winning_trades / wallet.total_trades * 100
             if wallet.total_trades > 0 else 0.0
         )
-        roi = (wallet.equity - _START) / _START * 100
+        roi = (wallet.equity - start) / start * 100 if start else 0.0
 
         return {
             "balance":        round(wallet.balance, 2),
@@ -294,7 +304,8 @@ class VirtualWallet:
             )
         ).scalar_one_or_none()
 
-        prev_equity = prev_snap.equity if prev_snap else _START
+        start = await VirtualWallet._start_balance(session)
+        prev_equity = prev_snap.equity if prev_snap else start
         daily_pnl = wallet.equity - prev_equity
 
         # Upsert
@@ -364,18 +375,19 @@ class VirtualWallet:
         await session.flush()
 
         # 3 — Reset the wallet row
+        start  = await VirtualWallet._start_balance(session)
         wallet = await VirtualWallet._fetch(session)
         if wallet is None:
             wallet = WalletRow()
             session.add(wallet)
 
-        wallet.balance        = _START
-        wallet.equity         = _START
+        wallet.balance        = start
+        wallet.equity         = start
         wallet.realised_pnl   = 0.0
         wallet.unrealised_pnl = 0.0
         wallet.total_trades   = 0
         wallet.winning_trades = 0
-        wallet.peak_balance   = _START
+        wallet.peak_balance   = start
         wallet.max_drawdown   = 0.0
         await session.flush()
 
@@ -384,14 +396,14 @@ class VirtualWallet:
             _FMT.format(
                 event="WALLET_RESET",
                 symbol="—",
-                amount=_START,
+                amount=start,
                 balance=wallet.balance,
             )
         )
         await VirtualWallet._simlog(
             session, "WALLET_RESET", "—",
-            f"WALLET RESET — starting fresh with ${_START:,.2f} virtual balance",
-            {"starting_balance": _START, "reset_at": now.isoformat()},
+            f"WALLET RESET — starting fresh with ${start:,.2f} virtual balance",
+            {"starting_balance": start, "reset_at": now.isoformat()},
         )
 
         return await VirtualWallet.get_summary(session)

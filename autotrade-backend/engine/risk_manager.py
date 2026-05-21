@@ -19,6 +19,7 @@ from db.models import OpenPosition, PaperTrade, TradeStatus
 from engine.signal_generator import TradingSignal
 from utils.config import settings
 from utils.logger import logger
+from utils.runtime_config import RuntimeConfig
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -70,10 +71,16 @@ async def validate_signal(
     (False, '<reason string>')    — check failed; reason is human-readable.
     """
 
+    # Load live settings once (falls back to .env defaults if key not in DB)
+    cfg = await RuntimeConfig.load(session)
+    max_pos       = cfg.max_open_positions
+    max_dl        = cfg.max_daily_loss
+    min_rr        = cfg.min_risk_reward
+
     # ── Check 1: Maximum concurrent open positions ────────────────────────────
-    if len(open_positions) >= settings.MAX_OPEN_POSITIONS:
+    if len(open_positions) >= max_pos:
         reason = (
-            f"Max {settings.MAX_OPEN_POSITIONS} positions limit reached "
+            f"Max {max_pos} positions limit reached "
             f"({len(open_positions)} currently open)"
         )
         _log_rejection(signal.symbol, reason)
@@ -82,12 +89,12 @@ async def validate_signal(
     # ── Check 2: Daily loss circuit-breaker ───────────────────────────────────
     today_pnl = await _today_closed_pnl(session)
     if today_pnl < 0:
-        limit = wallet_balance * settings.MAX_DAILY_LOSS
+        limit = wallet_balance * max_dl
         if abs(today_pnl) >= limit:
             reason = (
                 f"Daily loss limit reached "
                 f"(lost ${abs(today_pnl):.2f} today, "
-                f"limit is {settings.MAX_DAILY_LOSS * 100:.0f}% of balance "
+                f"limit is {max_dl * 100:.0f}% of balance "
                 f"= ${limit:.2f})"
             )
             _log_rejection(signal.symbol, reason)
@@ -113,16 +120,16 @@ async def validate_signal(
         return False, reason
 
     rr = reward / risk
-    if rr < settings.MIN_RISK_REWARD:
+    if rr < min_rr:
         reason = (
-            f"R:R ratio {rr:.2f} below minimum {settings.MIN_RISK_REWARD:.1f} "
+            f"R:R ratio {rr:.2f} below minimum {min_rr:.1f} "
             f"(risk=${risk:.5f}  reward=${reward:.5f})"
         )
         _log_rejection(signal.symbol, reason)
         return False, reason
 
     # ── Check 5: Sufficient virtual balance ───────────────────────────────────
-    pos = calculate_position_size(signal, wallet_balance)
+    pos = calculate_position_size(signal, wallet_balance, cfg=cfg)
     # Require that the 10% margin for this position doesn't exceed
     # 50% of the available balance (leaves room for other positions).
     required_margin = pos["usd_value"] * 0.1
@@ -147,7 +154,7 @@ async def validate_signal(
         f"conf={signal.confidence:.0f}%  "
         f"RR={rr:.2f}  "
         f"size=${pos['usd_value']:.2f}  "
-        f"open={len(open_positions)}/{settings.MAX_OPEN_POSITIONS}"
+        f"open={len(open_positions)}/{max_pos}"
     )
     return True, "OK"
 
@@ -160,7 +167,7 @@ def _log_rejection(symbol: str, reason: str) -> None:
 # 2. Position sizing
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calculate_position_size(signal: TradingSignal, balance: float) -> dict:
+def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> dict:
     """Compute virtual position size using fixed fractional risk.
 
     Sizes the trade so that a stop-loss hit costs exactly
@@ -179,7 +186,8 @@ def calculate_position_size(signal: TradingSignal, balance: float) -> dict:
         risk_amount  — virtual dollars at risk on this trade
         risk_percent — risk as a percentage of balance (e.g. 2.0 for 2%)
     """
-    risk_amount   = balance * settings.MAX_RISK_PER_TRADE
+    max_risk      = cfg.max_risk_per_trade if cfg is not None else settings.MAX_RISK_PER_TRADE
+    risk_amount   = balance * max_risk
     risk_per_unit = abs(signal.entry_price - signal.stop_loss)
 
     units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
@@ -189,7 +197,7 @@ def calculate_position_size(signal: TradingSignal, balance: float) -> dict:
         "units":        round(units, 6),
         "usd_value":    round(usd_value, 4),
         "risk_amount":  round(risk_amount, 4),
-        "risk_percent": round(settings.MAX_RISK_PER_TRADE * 100, 2),
+        "risk_percent": round(max_risk * 100, 2),
     }
 
     logger.debug(
