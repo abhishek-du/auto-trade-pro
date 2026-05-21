@@ -7,6 +7,7 @@ All data is OHLCV only — no real trading signals are generated here.
 """
 
 import asyncio
+import datetime as _dt
 import time
 from datetime import datetime
 
@@ -286,6 +287,20 @@ async def fetch_candles(symbol: str, timeframe: str = "1h") -> list[dict]:
 
 # ── 4. DB upsert ──────────────────────────────────────────────────────────────
 
+def _to_naive_utc(ts) -> datetime:
+    """Convert any datetime to a UTC-naive datetime (TIMESTAMP WITHOUT TIME ZONE).
+
+    asyncpg requires naive datetimes for TIMESTAMP WITHOUT TIME ZONE columns.
+    yfinance can return timezone-aware timestamps in IST, US/Eastern, or UTC
+    depending on the ticker and interval — always normalise before DB insert.
+    """
+    if ts is None:
+        return ts
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    return ts
+
+
 async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
     """Batch-insert candles, skipping any that already exist.
 
@@ -294,6 +309,9 @@ async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
 
     Rows are sent in chunks of 3 000 to stay under asyncpg's 32 767 parameter
     limit (3 000 rows × 8 columns = 24 000 params per statement).
+
+    Timestamps are normalised to UTC-naive before insert to avoid asyncpg
+    DataError when callers pass timezone-aware datetimes.
     """
     if not candles:
         return 0
@@ -307,7 +325,7 @@ async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
             "low":       c["low"],
             "close":     c["close"],
             "volume":    c["volume"],
-            "timestamp": c["timestamp"],
+            "timestamp": _to_naive_utc(c["timestamp"]),
         }
         for c in candles
     ]
@@ -315,10 +333,15 @@ async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
     _CHUNK = 3_000
     total  = 0
     for i in range(0, len(rows), _CHUNK):
-        chunk  = rows[i : i + _CHUNK]
-        stmt   = pg_insert(Candle).values(chunk).on_conflict_do_nothing(constraint="uq_candle_bar")
-        result = await session.execute(stmt)
-        total += result.rowcount
+        chunk = rows[i : i + _CHUNK]
+        try:
+            stmt   = pg_insert(Candle).values(chunk).on_conflict_do_nothing(constraint="uq_candle_bar")
+            result = await session.execute(stmt)
+            total += result.rowcount
+        except Exception as exc:
+            logger.error(f"save_candles_to_db error (chunk {i}–{i+len(chunk)}): {exc}")
+            await session.rollback()
+            return total
 
     await session.flush()
     return total
