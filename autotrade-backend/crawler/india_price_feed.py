@@ -237,38 +237,30 @@ def fetch_india_vix() -> float:
     Returns a float (default 15.0 when both sources fail — neutral level).
     Logs the final value regardless of source.
     """
-    value: float = 0.0
-
-    # Primary: yfinance — single call, no key required
+    # Primary: yfinance history — more reliable than fast_info for index tickers
     try:
-        value = _fast_info_float(
-            yf.Ticker("^INDIAVIX").fast_info, "last_price", 0.0
-        )
-    except Exception as exc:
-        logger.warning(f"yfinance India VIX failed: {exc}")
-
-    if value:
-        logger.info(f"India VIX: {value:.2f}  (source: yfinance)")
-        return value
-
-    # Fallback: nselib capital_market module
-    try:
-        from nselib import capital_market  # noqa: PLC0415
-
-        df = capital_market.india_vix_data(period="1W")
+        df = yf.Ticker("^INDIAVIX").history(period="5d", interval="1d", auto_adjust=False)
         if not df.empty:
-            # Column name varies by nselib version
-            col = next(
-                (c for c in ("Close", "CLOSE", "close") if c in df.columns),
-                df.columns[-1],
-            )
-            value = float(df[col].iloc[-1])
-            logger.info(f"India VIX: {value:.2f}  (source: nselib fallback)")
-            return value
+            value = float(df["Close"].dropna().iloc[-1])
+            if value > 0:
+                logger.info(f"India VIX: {value:.2f}  (source: yfinance history)")
+                return value
     except Exception as exc:
-        logger.warning(f"nselib India VIX fallback failed: {exc}")
+        logger.warning(f"yfinance India VIX history failed: {exc}")
 
-    logger.warning("India VIX: both sources failed — using neutral default 15.0")
+    # Fallback: yfinance download (different code path, sometimes succeeds when Ticker fails)
+    try:
+        df2 = yf.download("^INDIAVIX", period="5d", interval="1d",
+                          progress=False, auto_adjust=False)
+        if not df2.empty:
+            value = float(df2["Close"].dropna().iloc[-1])
+            if value > 0:
+                logger.info(f"India VIX: {value:.2f}  (source: yfinance download)")
+                return value
+    except Exception as exc:
+        logger.warning(f"yfinance India VIX download failed: {exc}")
+
+    logger.warning("India VIX: yfinance unavailable — using neutral default 15.0")
     return 15.0
 
 
