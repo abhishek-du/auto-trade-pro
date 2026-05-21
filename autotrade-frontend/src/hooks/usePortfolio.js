@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getPortfolio } from '../api/client';
+import { getPortfolio, getPortfolioPositions } from '../api/client';
 
 export function usePortfolio(pollInterval = 10000) {
   const [portfolio, setPortfolio] = useState(null);
@@ -8,8 +8,11 @@ export function usePortfolio(pollInterval = 10000) {
 
   const fetch = useCallback(async () => {
     try {
-      const data = await getPortfolio();
-      setPortfolio(data);
+      const [summary, positions] = await Promise.all([
+        getPortfolio(),
+        getPortfolioPositions(),
+      ]);
+      setPortfolio({ ...summary, positions });
       setError(null);
     } catch (err) {
       setError(err);
