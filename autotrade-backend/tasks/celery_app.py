@@ -117,4 +117,11 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_tasks.train_ml_models_task",
         "schedule": crontab(hour=20, minute=30, day_of_week="saturday"),
     },
+
+    # Every 15 min: Zerodha Kite portfolio holdings sync (NSE hours only)
+    "kite-portfolio-sync-15min": {
+        "task":     "tasks.india_tasks.sync_kite_holdings",
+        "schedule": 900,
+        "options":  {"countdown": 20},
+    },
 }

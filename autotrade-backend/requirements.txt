@@ -57,3 +57,7 @@ bsedata    # BSE corporate actions and announcements
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi
+
+# ── Zerodha Kite portfolio tracker ───────────────────────────────────────────
+kiteconnect   # Zerodha KiteConnect v4 — read-only portfolio tracking
+scipy         # XIRR calculation via brentq root solver
