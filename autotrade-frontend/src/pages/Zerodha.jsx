@@ -9,6 +9,7 @@ import {
   getZerodhaStatus, getZerodhaLoginUrl, logoutZerodha,
   getZerodhaHoldings, getZerodhaOrders, getZerodhaTrades,
   getZerodhaPnl, getZerodhaLivePrices, getZerodhaWatchlistAnalysis,
+  getZerodhaDeepAnalysis,
 } from '../api/client';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -377,27 +378,27 @@ function LivePricesPanel({ prices }) {
   );
 }
 
-// ── Section 6 — Watchlist & Analysis ─────────────────────────────────────────
+// ── Section 6 — Watchlist & Deep Analysis ────────────────────────────────────
 
 const SIGNAL_CFG = {
-  STRONG_BUY:  { color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', short: '▲▲ Strong Buy'  },
-  BUY:         { color: 'bg-teal-500/15 text-teal-300 border-teal-500/30',          short: '▲ Buy'          },
-  NEUTRAL:     { color: 'bg-slate-500/15 text-slate-400 border-slate-500/30',       short: '— Neutral'      },
-  SELL:        { color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',       short: '▼ Sell'         },
-  STRONG_SELL: { color: 'bg-rose-500/15 text-rose-300 border-rose-500/30',          short: '▼▼ Strong Sell' },
+  STRONG_BUY:  { color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', short: '▲▲ Strong Buy',  bg: 'rgba(16,185,129,0.08)', border: '#10b98133' },
+  BUY:         { color: 'bg-teal-500/15 text-teal-300 border-teal-500/30',          short: '▲ Buy',          bg: 'rgba(20,184,166,0.08)', border: '#14b8a633' },
+  NEUTRAL:     { color: 'bg-slate-500/15 text-slate-400 border-slate-500/30',       short: '— Neutral',      bg: 'rgba(100,116,139,0.06)', border: '#64748b33' },
+  SELL:        { color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',       short: '▼ Sell',         bg: 'rgba(245,158,11,0.08)', border: '#f59e0b33' },
+  STRONG_SELL: { color: 'bg-rose-500/15 text-rose-300 border-rose-500/30',          short: '▼▼ Strong Sell', bg: 'rgba(244,63,94,0.08)',  border: '#f43f5e33' },
 };
 
 const TREND_COLOR = {
   STRONG_BULL: 'text-emerald-400', BULL: 'text-teal-400',
-  NEUTRAL:     'text-slate-400',
-  BEAR:        'text-amber-400',   STRONG_BEAR: 'text-rose-400',
+  NEUTRAL: 'text-slate-400',
+  BEAR: 'text-amber-400', STRONG_BEAR: 'text-rose-400',
 };
 
 const STORAGE_KEY = 'zerodha_watchlist_v1';
 
 function ScoreBar({ score }) {
   if (score == null) return <span className="text-muted">—</span>;
-  const pct   = Math.min(100, Math.max(0, (score + 100) / 2));  // map -100…+100 → 0…100
+  const pct   = Math.min(100, Math.max(0, (score + 100) / 2));
   const color = score >= 25 ? 'bg-emerald-500' : score >= -25 ? 'bg-slate-500' : 'bg-rose-500';
   return (
     <div className="flex items-center gap-2 min-w-[90px]">
@@ -411,30 +412,215 @@ function ScoreBar({ score }) {
   );
 }
 
+// Renders bold text from **text** markdown
+function Md({ text }) {
+  if (!text) return null;
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.startsWith('**') && p.endsWith('**')
+          ? <strong key={i} className="text-slate-200 font-semibold">{p.slice(2, -2)}</strong>
+          : <span key={i}>{p}</span>
+      )}
+    </>
+  );
+}
+
+function DeepPanel({ data, loading }) {
+  if (loading) {
+    return (
+      <div className="p-8 text-center border-t border-border bg-[#060d1a]">
+        <RefreshCw size={16} className="animate-spin text-cyan mx-auto mb-2" />
+        <p className="text-muted text-sm">Fetching deep analysis, news &amp; AI commentary…</p>
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  const sigCfg = SIGNAL_CFG[data.signal] || SIGNAL_CFG.NEUTRAL;
+  const s      = data.trade_setup || {};
+  const r      = data.reasoning   || {};
+  const ind    = data.indicators  || {};
+
+  const BulletList = ({ items, color }) => (
+    items?.length ? (
+      <ul className="space-y-1.5">
+        {items.map((it, i) => (
+          <li key={i} className="flex items-start gap-2 text-xs text-slate-400 leading-relaxed">
+            <span className={`mt-0.5 shrink-0 text-[10px] ${color}`}>●</span>
+            <span>{it}</span>
+          </li>
+        ))}
+      </ul>
+    ) : <p className="text-slate-600 text-xs italic">None</p>
+  );
+
+  return (
+    <div className="border-t border-border" style={{ background: '#060d1a' }}>
+      <div className="p-5 space-y-5">
+
+        {/* AI summary */}
+        {data.ai_summary && (
+          <div className="p-4 rounded-xl border" style={{ background: sigCfg.bg, borderColor: sigCfg.border }}>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">AI Analysis</p>
+            <p className="text-slate-300 text-sm leading-relaxed">{data.ai_summary}</p>
+          </div>
+        )}
+
+        {/* Trade setup + When to buy/sell */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+          {/* Key levels */}
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted mb-3">Key Levels</p>
+            <div className="space-y-2 text-xs">
+              {[
+                { label: 'Entry Zone',  val: `₹${s.entry_low} – ₹${s.entry_high}`,  color: 'text-cyan' },
+                { label: 'Stop Loss',   val: `₹${s.stop_loss} (${s.stop_loss_pct}%)`, color: 'text-rose-400' },
+                { label: 'Target 1',    val: `₹${s.target_1} (+${s.target_1_pct}%)`,  color: 'text-emerald-400' },
+                { label: 'Target 2',    val: `₹${s.target_2} (+${s.target_2_pct}%)`,  color: 'text-emerald-300' },
+                { label: 'Risk/Reward', val: `${s.risk_reward}x`,                      color: s.risk_reward >= 2 ? 'text-emerald-400' : 'text-amber-400' },
+                { label: 'Support',     val: `₹${s.support}`,                          color: 'text-slate-300' },
+                { label: 'Resistance',  val: `₹${s.resistance}`,                       color: 'text-slate-300' },
+              ].map(({ label, val, color }) => (
+                <div key={label} className="flex justify-between items-center">
+                  <span className="text-muted">{label}</span>
+                  <span className={`font-semibold tabular-nums ${color}`}>{val}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* When to buy */}
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/70 mb-3">When to Buy</p>
+            <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-line">
+              <Md text={s.when_to_buy} />
+            </p>
+          </div>
+
+          {/* When to sell + hold */}
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500/70 mb-3">When to Sell / Hold</p>
+            <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-line mb-3">
+              <Md text={s.when_to_sell} />
+            </p>
+            {s.hold_strategy && (
+              <>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-600 mb-1.5">Hold Strategy</p>
+                <p className="text-xs text-slate-500 leading-relaxed">{s.hold_strategy}</p>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Technical Reasons */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/70 mb-3">
+              Bullish Factors ({r.bullish?.length || 0})
+            </p>
+            <BulletList items={r.bullish} color="text-emerald-500" />
+          </div>
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-rose-500/70 mb-3">
+              Bearish Factors ({r.bearish?.length || 0})
+            </p>
+            <BulletList items={r.bearish} color="text-rose-500" />
+          </div>
+          <div className="card p-4">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">
+              Neutral / Context ({r.neutral?.length || 0})
+            </p>
+            <BulletList items={r.neutral} color="text-slate-500" />
+          </div>
+        </div>
+
+        {/* Indicator snapshot */}
+        <div className="card p-4">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-muted mb-3">Indicator Snapshot</p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {[
+              { label: 'RSI',       val: ind.rsi != null ? ind.rsi.toFixed(1) : '—',  tag: ind.rsi_signal },
+              { label: 'MACD',      val: ind.macd_cross?.replace('_', ' ') || '—',     tag: null },
+              { label: 'EMA Trend', val: ind.ema_trend?.replace('_', ' ') || '—',      tag: null },
+              { label: 'Supertrend',val: ind.supertrend_dir || '—',                     tag: null },
+              { label: 'ADX',       val: ind.adx != null ? ind.adx.toFixed(1) : '—',   tag: ind.adx_strength },
+              { label: 'Stoch %K',  val: ind.stoch_k != null ? ind.stoch_k.toFixed(1) : '—', tag: ind.stoch_signal },
+            ].map(({ label, val, tag }) => (
+              <div key={label} className="bg-white/[0.03] rounded-lg px-3 py-2.5 border border-white/5">
+                <p className="text-[10px] text-muted mb-1">{label}</p>
+                <p className="text-sm font-semibold text-slate-200 leading-none">{val}</p>
+                {tag && tag !== 'NEUTRAL' && tag !== 'NONE' && (
+                  <p className={`text-[10px] mt-1 ${
+                    tag.includes('BUY') || tag.includes('BULL') || tag.includes('OVERSOLD') ? 'text-emerald-400' :
+                    tag.includes('SELL') || tag.includes('BEAR') || tag.includes('OVERBOUGHT') ? 'text-rose-400' :
+                    'text-slate-500'
+                  }`}>{tag}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* News */}
+        {data.news?.length > 0 && (
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-muted mb-3">Recent News</p>
+            <div className="space-y-2">
+              {data.news.map((n, i) => (
+                <a key={i} href={n.url} target="_blank" rel="noreferrer"
+                  className="block p-3 rounded-lg border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
+                  <p className="text-sm text-slate-200 leading-snug">{n.headline}</p>
+                  <div className="flex items-center gap-3 mt-1.5">
+                    <span className="text-[11px] text-slate-500">{n.source}</span>
+                    {n.published_at && (
+                      <span className="text-[11px] text-slate-600">
+                        {new Date(n.published_at).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' })}
+                      </span>
+                    )}
+                    {n.summary && <span className="text-[11px] text-slate-500 truncate flex-1">{n.summary}</span>}
+                  </div>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+        {!data.news?.length && (
+          <p className="text-slate-600 text-xs">
+            No recent news found. Add <code className="bg-white/5 px-1 rounded">FINNHUB_KEY</code> to .env for stock-specific news.
+          </p>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
 function WatchlistAnalysis({ connectedHoldings }) {
-  const [symbols,   setSymbols]   = useState(() => {
+  const [symbols,     setSymbols]     = useState(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
   });
-  const [input,     setInput]     = useState('');
-  const [results,   setResults]   = useState([]);
-  const [loading,   setLoading]   = useState(false);
-  const [source,    setSource]    = useState('');
-  const [asOf,      setAsOf]      = useState('');
+  const [input,       setInput]       = useState('');
+  const [results,     setResults]     = useState([]);
+  const [loading,     setLoading]     = useState(false);
+  const [source,      setSource]      = useState('');
+  const [asOf,        setAsOf]        = useState('');
+  const [selected,    setSelected]    = useState(null);   // expanded symbol
+  const [deepData,    setDeepData]    = useState({});     // symbol → deep response
+  const [deepLoading, setDeepLoading] = useState(null);  // symbol being loaded
 
-  // Persist watchlist to localStorage
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(symbols));
   }, [symbols]);
 
-  // Fetch analysis whenever symbols list changes
   useEffect(() => {
     if (!symbols.length) { setResults([]); return; }
     let cancelled = false;
     setLoading(true);
     getZerodhaWatchlistAnalysis(symbols)
-      .then(d => {
-        if (!cancelled) { setResults(d.results || []); setSource(d.source || ''); setAsOf(d.as_of || ''); }
-      })
+      .then(d => { if (!cancelled) { setResults(d.results || []); setSource(d.source || ''); setAsOf(d.as_of || ''); } })
       .catch(() => {})
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -450,23 +636,32 @@ function WatchlistAnalysis({ connectedHoldings }) {
   function removeSymbol(sym) {
     setSymbols(prev => prev.filter(s => s !== sym));
     setResults(prev => prev.filter(r => r.symbol !== sym));
+    if (selected === sym) setSelected(null);
   }
 
   function addHoldings() {
-    const newSyms = (connectedHoldings || [])
-      .map(h => h.tradingsymbol)
-      .filter(s => s && !symbols.includes(s));
+    const newSyms = (connectedHoldings || []).map(h => h.tradingsymbol).filter(s => s && !symbols.includes(s));
     if (newSyms.length) setSymbols(prev => [...prev, ...newSyms]);
   }
 
   function refresh() {
     if (!symbols.length) return;
-    setLoading(true);
-    setResults([]);
+    setLoading(true); setResults([]);
     getZerodhaWatchlistAnalysis(symbols)
       .then(d => { setResults(d.results || []); setSource(d.source || ''); setAsOf(d.as_of || ''); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      .catch(() => {}).finally(() => setLoading(false));
+  }
+
+  async function handleRowClick(sym) {
+    if (selected === sym) { setSelected(null); return; }
+    setSelected(sym);
+    if (deepData[sym]) return;   // already fetched
+    setDeepLoading(sym);
+    try {
+      const d = await getZerodhaDeepAnalysis(sym);
+      setDeepData(prev => ({ ...prev, [sym]: d }));
+    } catch { /* show empty panel */ }
+    finally { setDeepLoading(null); }
   }
 
   return (
@@ -476,18 +671,10 @@ function WatchlistAnalysis({ connectedHoldings }) {
         <div className="flex items-center gap-2">
           <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
             <Zap size={14} className="text-cyan" />
-            Watchlist &amp; Analysis
+            Watchlist &amp; Deep Analysis
           </h2>
-          {source && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 text-slate-500">
-              {source === 'kite' ? 'Kite data' : 'yfinance fallback'}
-            </span>
-          )}
-          {asOf && (
-            <span className="text-[10px] text-slate-600">
-              {new Date(asOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          )}
+          {source && <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 text-slate-500">{source === 'kite' ? 'Kite data' : 'yfinance'}</span>}
+          {asOf && <span className="text-[10px] text-slate-600">{new Date(asOf).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>}
         </div>
         <button onClick={refresh} disabled={loading || !symbols.length}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-xs text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-40 transition-all">
@@ -496,14 +683,12 @@ function WatchlistAnalysis({ connectedHoldings }) {
         </button>
       </div>
 
-      {/* Add symbol + chips */}
+      {/* Add symbol row */}
       <div className="card p-4 mb-4">
         <div className="flex gap-2 mb-3">
-          <input
-            value={input}
-            onChange={e => setInput(e.target.value.toUpperCase())}
+          <input value={input} onChange={e => setInput(e.target.value.toUpperCase())}
             onKeyDown={e => e.key === 'Enter' && addSymbol()}
-            placeholder="Add NSE symbol… (e.g. RELIANCE)"
+            placeholder="Add NSE symbol… (e.g. RELIANCE, TCS, HDFCBANK)"
             className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan/40"
           />
           <button onClick={addSymbol}
@@ -513,97 +698,105 @@ function WatchlistAnalysis({ connectedHoldings }) {
           {connectedHoldings?.length > 0 && (
             <button onClick={addHoldings}
               className="px-3 py-2 rounded-lg border border-white/10 text-xs text-slate-400 hover:text-white hover:bg-white/5 transition-all whitespace-nowrap">
-              + Add my holdings
+              + My holdings
             </button>
           )}
         </div>
-
         {symbols.length === 0 ? (
-          <p className="text-slate-600 text-xs text-center py-2">
-            Add NSE symbols to get technical analysis. Zerodha's API doesn't expose watchlists, so manage yours here — saved in browser.
-          </p>
+          <p className="text-slate-600 text-xs text-center py-1">Add NSE symbols — click any row to see full deep analysis, reasons, news &amp; AI commentary. Saved in browser.</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {symbols.map(sym => (
-              <span key={sym}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-300">
+              <span key={sym} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-xs text-slate-300">
                 {sym}
-                <button onClick={() => removeSymbol(sym)}
-                  className="ml-0.5 text-slate-600 hover:text-rose-400 transition-colors">×</button>
+                <button onClick={() => removeSymbol(sym)} className="ml-0.5 text-slate-600 hover:text-rose-400 transition-colors">×</button>
               </span>
             ))}
           </div>
         )}
       </div>
 
-      {/* Analysis table */}
+      {/* Table */}
       {loading && (
         <div className="card p-8 text-center">
           <RefreshCw size={18} className="animate-spin text-cyan mx-auto mb-2" />
-          <p className="text-muted text-sm">Fetching candles &amp; computing indicators…</p>
+          <p className="text-muted text-sm">Computing technical indicators for {symbols.length} symbol{symbols.length !== 1 ? 's' : ''}…</p>
         </div>
       )}
 
       {!loading && results.length > 0 && (
-        <div className="card overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-muted text-xs uppercase tracking-wider">
-                {['Symbol','LTP','Change','Signal','Score','RSI','Trend','Ichimoku','Support','Resistance'].map(h => (
-                  <th key={h} className={`px-4 py-3 ${h === 'Symbol' ? 'text-left' : 'text-right'}`}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {results.map(r => {
-                if (r.error) {
+        <div className="card overflow-hidden">
+          <p className="px-4 pt-3 pb-1 text-[11px] text-slate-600">Click any row for full analysis, trade setup, news &amp; AI commentary</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-muted text-xs uppercase tracking-wider">
+                  {['Symbol','LTP','Change','Signal','Score','RSI','Trend','Ichimoku','Support','Resistance'].map(h => (
+                    <th key={h} className={`px-4 py-3 ${h === 'Symbol' ? 'text-left' : 'text-right'}`}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {results.map(r => {
+                  const isOpen = selected === r.symbol;
+                  if (r.error) {
+                    return (
+                      <tr key={r.symbol} className="border-b border-border/50 opacity-50">
+                        <td className="px-4 py-3 text-slate-400 font-semibold">{r.symbol}</td>
+                        <td colSpan={9} className="px-4 py-3 text-rose-400 text-xs">{r.error}</td>
+                      </tr>
+                    );
+                  }
+                  const sig    = SIGNAL_CFG[r.signal] || SIGNAL_CFG.NEUTRAL;
+                  const chgPos = (r.change_pct ?? 0) >= 0;
                   return (
-                    <tr key={r.symbol} className="opacity-50">
-                      <td className="px-4 py-3 font-semibold text-slate-400">{r.symbol}</td>
-                      <td colSpan={9} className="px-4 py-3 text-rose-400 text-xs">{r.error}</td>
-                    </tr>
+                    <>
+                      <tr key={r.symbol}
+                        onClick={() => handleRowClick(r.symbol)}
+                        className={`border-b border-border/50 cursor-pointer transition-colors ${isOpen ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'}`}>
+                        <td className="px-4 py-3 font-bold text-slate-100 flex items-center gap-2">
+                          <span className={`w-1 h-5 rounded-full ${isOpen ? 'bg-cyan' : 'bg-white/10'}`} />
+                          {r.symbol}
+                        </td>
+                        <td className="px-4 py-3 text-right font-medium text-slate-100">{inr(r.ltp)}</td>
+                        <td className={`px-4 py-3 text-right text-xs font-semibold ${chgPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {chgPos ? '+' : ''}{r.change_pct?.toFixed(2)}%
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold ${sig.color}`}>
+                            {sig.short}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3"><ScoreBar score={r.composite_score} /></td>
+                        <td className={`px-4 py-3 text-right text-xs ${r.rsi_signal === 'OVERSOLD' ? 'text-emerald-400' : r.rsi_signal === 'OVERBOUGHT' ? 'text-rose-400' : 'text-slate-300'}`}>
+                          {r.rsi != null ? r.rsi.toFixed(1) : '—'}
+                          {r.rsi_signal !== 'NEUTRAL' && <div className="text-[10px] opacity-70">{r.rsi_signal}</div>}
+                        </td>
+                        <td className={`px-4 py-3 text-right text-xs font-semibold ${TREND_COLOR[r.ema_trend] || 'text-slate-400'}`}>
+                          {r.ema_trend?.replace(/_/g, ' ')}
+                        </td>
+                        <td className={`px-4 py-3 text-right text-xs font-semibold ${r.ichimoku_signal?.includes('BUY') ? 'text-emerald-400' : r.ichimoku_signal?.includes('SELL') ? 'text-rose-400' : 'text-slate-400'}`}>
+                          {r.ichimoku_signal?.replace(/_/g, ' ')}
+                        </td>
+                        <td className="px-4 py-3 text-right text-xs text-slate-400">{inr(r.support)}</td>
+                        <td className="px-4 py-3 text-right text-xs text-slate-400">{inr(r.resistance)}</td>
+                      </tr>
+                      {isOpen && (
+                        <tr key={`${r.symbol}-deep`}>
+                          <td colSpan={10} className="p-0">
+                            <DeepPanel
+                              data={deepData[r.symbol] || null}
+                              loading={deepLoading === r.symbol}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </>
                   );
-                }
-                const sig = SIGNAL_CFG[r.signal] || SIGNAL_CFG.NEUTRAL;
-                const chgPos = (r.change_pct ?? 0) >= 0;
-                return (
-                  <tr key={r.symbol} className="hover:bg-white/[0.02] transition-colors">
-                    <td className="px-4 py-3 font-bold text-slate-100">{r.symbol}</td>
-                    <td className="px-4 py-3 text-right font-medium text-slate-100">{inr(r.ltp)}</td>
-                    <td className={`px-4 py-3 text-right text-xs font-semibold ${chgPos ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {chgPos ? '+' : ''}{r.change_pct?.toFixed(2)}%
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold ${sig.color}`}>
-                        {sig.short}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <ScoreBar score={r.composite_score} />
-                    </td>
-                    <td className={`px-4 py-3 text-right text-xs ${
-                      r.rsi_signal === 'OVERSOLD' ? 'text-emerald-400' :
-                      r.rsi_signal === 'OVERBOUGHT' ? 'text-rose-400' : 'text-slate-300'
-                    }`}>
-                      {r.rsi != null ? r.rsi.toFixed(1) : '—'}
-                      {r.rsi_signal !== 'NEUTRAL' && <div className="text-[10px] opacity-70">{r.rsi_signal}</div>}
-                    </td>
-                    <td className={`px-4 py-3 text-right text-xs font-semibold ${TREND_COLOR[r.ema_trend] || 'text-slate-400'}`}>
-                      {r.ema_trend?.replace('_', ' ')}
-                    </td>
-                    <td className={`px-4 py-3 text-right text-xs font-semibold ${
-                      r.ichimoku_signal?.includes('BUY') ? 'text-emerald-400' :
-                      r.ichimoku_signal?.includes('SELL') ? 'text-rose-400' : 'text-slate-400'
-                    }`}>
-                      {r.ichimoku_signal?.replace('_', ' ')}
-                    </td>
-                    <td className="px-4 py-3 text-right text-xs text-slate-400">{inr(r.support)}</td>
-                    <td className="px-4 py-3 text-right text-xs text-slate-400">{inr(r.resistance)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

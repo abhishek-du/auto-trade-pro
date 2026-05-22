@@ -74,7 +74,9 @@ export const cancelZerodhaOrder         = (id)      => api.delete(`/api/v1/zerod
 export const getZerodhaWatchlistAnalysis = (symbols) =>
     api.get('/api/v1/zerodha/watchlist-analysis', {
         params: { symbols: symbols.join(',') },
-        timeout: 60_000,   // analysis can take ~5 s for 10+ symbols
+        timeout: 60_000,
     });
+export const getZerodhaDeepAnalysis = (symbol) =>
+    api.get(`/api/v1/zerodha/deep-analysis/${symbol}`, { timeout: 30_000 });
 
 export default api;
