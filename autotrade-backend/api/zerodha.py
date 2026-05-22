@@ -75,7 +75,15 @@ def _html_success(user_name: str, user_id: str) -> HTMLResponse:
   <p>Portfolio and live prices are now active.</p>
   <p class="note">Access token expires at 6:00 AM tomorrow (SEBI regulation).</p>
   <button class="close-btn" onclick="window.close()">Close Window</button>
-  <script>setTimeout(()=>{{window.close()}},4000)</script>
+  <script>
+    // Notify the opener (parent tab) that login succeeded, then close.
+    try {{
+      if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage('zerodha_connected', '*');
+      }}
+    }} catch(e) {{}}
+    setTimeout(() => {{ window.close(); }}, 3000);
+  </script>
 </div></body></html>"""
     return HTMLResponse(content=html)
 

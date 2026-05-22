@@ -332,7 +332,11 @@ export default function Zerodha() {
   const wsRef = useRef(null);
 
   const fetchStatus = useCallback(async () => {
-    try { setStatus(await getZerodhaStatus()); } catch { /* not configured */ }
+    try {
+      const s = await getZerodhaStatus();
+      setStatus(s);
+      return s;
+    } catch { return null; }
   }, []);
 
   const fetchAll = useCallback(async (connected) => {
@@ -354,6 +358,34 @@ export default function Zerodha() {
     }
   }, []);
 
+  // Fast-poll interval ref — used after user clicks Connect
+  const fastPollRef = useRef(null);
+  const stopFastPoll = useCallback(() => {
+    if (fastPollRef.current) {
+      clearInterval(fastPollRef.current);
+      fastPollRef.current = null;
+    }
+  }, []);
+
+  // Start a 2-second poll for up to 3 minutes waiting for OAuth callback
+  const startFastPoll = useCallback(() => {
+    stopFastPoll();
+    let attempts = 0;
+    fastPollRef.current = setInterval(async () => {
+      attempts++;
+      try {
+        const s = await getZerodhaStatus();
+        setStatus(s);
+        if (s?.connected) {
+          stopFastPoll();
+          toast.success(`Zerodha connected — welcome ${s.user_name || ''}!`);
+          fetchAll(true);
+        }
+      } catch { /* ignore */ }
+      if (attempts >= 90) stopFastPoll(); // give up after 3 min
+    }, 2000);
+  }, [stopFastPoll, fetchAll]);
+
   useEffect(() => {
     const init = async () => {
       await fetchStatus();
@@ -361,8 +393,8 @@ export default function Zerodha() {
     };
     init();
     const id = setInterval(fetchStatus, 20_000);
-    return () => clearInterval(id);
-  }, [fetchStatus]);
+    return () => { clearInterval(id); stopFastPoll(); };
+  }, [fetchStatus, stopFastPoll]);
 
   // When connected, load portfolio data + start price polling
   useEffect(() => {
@@ -374,13 +406,32 @@ export default function Zerodha() {
     }
   }, [status?.connected, fetchAll]);
 
+  // Listen for postMessage from the OAuth callback popup
+  useEffect(() => {
+    const handleMessage = (e) => {
+      if (e.data === 'zerodha_connected') {
+        stopFastPoll();
+        fetchStatus().then((s) => {
+          if (s?.connected) {
+            toast.success(`Zerodha connected — welcome ${s.user_name || ''}!`);
+            fetchAll(true);
+          }
+        });
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [fetchStatus, fetchAll, stopFastPoll]);
+
   async function handleConnect() {
     try {
       const { url } = await getZerodhaLoginUrl();
-      window.open(url, '_blank', 'noopener');
-      toast('Login in the popup window — this page will update automatically.');
+      // Do NOT use 'noopener' — the popup needs window.opener to send postMessage back
+      window.open(url, 'zerodha_login', 'width=600,height=700,left=200,top=100');
+      toast('Complete login in the popup window…');
+      startFastPoll(); // also poll in case postMessage is blocked
     } catch (err) {
-      toast.error(err?.response?.data?.detail || 'Could not fetch login URL');
+      toast.error(err?.response?.data?.detail || 'Could not fetch login URL — check ZERODHA_API_KEY in .env');
     }
   }
 
