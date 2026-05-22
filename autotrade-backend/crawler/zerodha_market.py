@@ -25,9 +25,20 @@ from utils.logger import logger
 
 _IST = ZoneInfo("Asia/Kolkata")
 
-# Set to False after the first 403 — skips Kite historical for the rest of the session
-# (Zerodha historical API requires a paid Kite Connect subscription)
+# These are set to False after the first 403 — Zerodha market-data APIs
+# (quotes, LTP, historical) require a paid Kite Connect subscription.
+# Free plan: OAuth, portfolio, orders only.
 _kite_historical_available: bool = True
+_kite_quotes_available:     bool = True
+
+
+def _handle_market_data_403(api_name: str) -> None:
+    """Log a single clear message when Kite returns 403 on a market-data endpoint."""
+    logger.info(
+        f"[zerodha_market] Kite {api_name} API returned 403 — "
+        "market data requires a paid Kite Connect subscription (₹2000/month). "
+        "Falling back to yfinance for this session."
+    )
 
 # ── Static token map (last-resort fallback if DB refresh hasn't run yet) ──────
 
@@ -197,13 +208,22 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
 
     Returns {symbol: {price, last_price, change, change_pct}}
     """
+    global _kite_quotes_available
+
     kite = get_kite_client()
-    if not kite.access_token:
+    if not kite.access_token or not _kite_quotes_available:
         return {}
 
     instruments = [_symbol_to_kite(s) for s in symbols]
     try:
         raw: dict = await kite.get_ltp(instruments)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            _kite_quotes_available = False
+            _handle_market_data_403("LTP/quote")
+        else:
+            logger.warning(f"[zerodha_market] LTP fetch failed: {exc}")
+        return {}
     except Exception as exc:
         logger.warning(f"[zerodha_market] LTP fetch failed: {exc}")
         return {}
@@ -227,10 +247,22 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
 
 async def get_full_quote(symbol: str) -> dict:
     """Full quote for one symbol — includes OHLC, volume, bid/ask, OI."""
-    kite  = get_kite_client()
+    global _kite_quotes_available
+
+    kite = get_kite_client()
+    if not kite.access_token or not _kite_quotes_available:
+        return {}
+
     instr = _symbol_to_kite(symbol)
     try:
         raw = await kite.get_quote([instr])
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            _kite_quotes_available = False
+            _handle_market_data_403("quote")
+        else:
+            logger.warning(f"[zerodha_market] Quote fetch failed for {symbol}: {exc}")
+        return {}
     except Exception as exc:
         logger.warning(f"[zerodha_market] Quote fetch failed for {symbol}: {exc}")
         return {}
