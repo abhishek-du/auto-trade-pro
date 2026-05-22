@@ -216,3 +216,66 @@ async def ws_logs(ws: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         broadcaster.disconnect("logs", ws)
+
+
+# ── /ws/live-prices — NSE live price broadcast ────────────────────────────────
+
+class LivePriceManager:
+    def __init__(self):
+        self.connections: set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket):
+        from crawler.live_prices import get_all_cached_prices, get_market_summary
+        await ws.accept()
+        self.connections.add(ws)
+        await self._send_to(ws, {
+            "type":           "full_snapshot",
+            "data":           get_all_cached_prices(),
+            "market_summary": get_market_summary(),
+            "timestamp":      datetime.utcnow().isoformat(),
+        })
+
+    def disconnect(self, ws: WebSocket):
+        self.connections.discard(ws)
+
+    async def _send_to(self, ws: WebSocket, data: dict):
+        try:
+            await ws.send_json(data)
+        except Exception:
+            self.connections.discard(ws)
+
+    async def broadcast_prices(self, updated_prices: dict):
+        if not self.connections:
+            return
+        from crawler.live_prices import get_market_summary
+        message = {
+            "type":           "price_update",
+            "data":           updated_prices,
+            "market_summary": get_market_summary(),
+            "timestamp":      datetime.utcnow().isoformat(),
+        }
+        dead: set[WebSocket] = set()
+        for ws in set(self.connections):
+            try:
+                await ws.send_json(message)
+            except Exception:
+                dead.add(ws)
+        self.connections -= dead
+
+
+live_price_manager = LivePriceManager()
+
+
+@router.websocket("/live-prices")
+async def live_prices_ws(websocket: WebSocket):
+    """Streams live NSE prices to the Live Market page."""
+    await live_price_manager.connect(websocket)
+    try:
+        while True:
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+            if data == "ping":
+                await websocket.send_text("pong")
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        live_price_manager.disconnect(websocket)
+    except Exception:
+        live_price_manager.disconnect(websocket)

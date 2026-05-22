@@ -136,4 +136,11 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_tasks.check_zerodha_token",
         "schedule": crontab(hour=0, minute=35),
     },
+
+    # Live price cache — every 15 s (supplements FastAPI background task)
+    "refresh-live-prices-15s": {
+        "task":     "tasks.refresh_live_prices",
+        "schedule": 15,
+        "options":  {"countdown": 3},
+    },
 }

@@ -83,4 +83,12 @@ export const getZerodhaAutoScan      = (minScore = 25) =>
 export const getZerodhaMfAnalysis    = () =>
     api.get('/api/v1/zerodha/mf-analysis', { timeout: 30_000 });
 
+// ── Live NSE Market ───────────────────────────────────────────────────────────
+export const getLivePrices     = ()       => api.get('/api/v1/india/live-prices');
+export const getLivePrice      = (symbol) => api.get(`/api/v1/india/live-prices/${symbol}`);
+export const getMarketSummary  = ()       => api.get('/api/v1/india/market-summary');
+export const getIndices        = ()       => api.get('/api/v1/india/indices');
+export const getTopMovers      = ()       => api.get('/api/v1/india/top-movers');
+export const refreshLivePrices = ()       => api.post('/api/v1/india/live-prices/refresh');
+
 export default api;

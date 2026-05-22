@@ -3,9 +3,9 @@ import { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
-  Globe, Zap, Wallet, LineChart, TestTube2, Briefcase,
+  Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio,
 } from 'lucide-react';
-import { getZerodhaStatus } from '../api/client';
+import { getZerodhaStatus, getIndiaMarketStatus } from '../api/client';
 
 const MAIN_NAV = [
   { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
@@ -18,9 +18,10 @@ const MAIN_NAV = [
 ];
 
 const INDIA_NAV = [
+  { to: '/live-market',     label: 'Live Market',    Icon: Radio,     liveMarket: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
-  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap, zerodha: true },
+  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,       zerodha: true },
   { to: '/portfolio',       label: 'My Portfolio',   Icon: Briefcase  },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
@@ -52,6 +53,24 @@ function NavItem({ to, label, Icon, end }) {
         </>
       )}
     </NavLink>
+  );
+}
+
+function MarketDot() {
+  const [status, setStatus] = useState(null);
+  useEffect(() => {
+    const check = () =>
+      getIndiaMarketStatus()
+        .then(s => setStatus(s?.market_open ? 'OPEN' : 'CLOSED'))
+        .catch(() => setStatus('CLOSED'));
+    check();
+    const id = setInterval(check, 60_000);
+    return () => clearInterval(id);
+  }, []);
+  if (status === null) return null;
+  const isOpen = status === 'OPEN';
+  return (
+    <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${isOpen ? 'bg-profit animate-pulse' : 'bg-loss'}`} />
   );
 }
 
@@ -107,35 +126,37 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha }) => (
-          isZerodha ? (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) => [
-                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
-                isActive
-                  ? 'text-white border border-accent/20'
-                  : 'text-muted hover:text-slate-200 hover:bg-white/5',
-              ].join(' ')}
-              style={({ isActive }) =>
-                isActive
-                  ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
-                  : {}
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon size={16} className={isActive ? 'text-cyan' : ''} />
-                  {label}
-                  <ZerodhaDot />
-                </>
-              )}
-            </NavLink>
-          ) : (
-            <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/india'} />
-          )
-        ))}
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket }) => {
+          if (isZerodha || isLiveMarket) {
+            const Dot = isZerodha ? ZerodhaDot : MarketDot;
+            return (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) => [
+                  'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
+                  isActive
+                    ? 'text-white border border-accent/20'
+                    : 'text-muted hover:text-slate-200 hover:bg-white/5',
+                ].join(' ')}
+                style={({ isActive }) =>
+                  isActive
+                    ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
+                    : {}
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <Icon size={16} className={isActive ? 'text-cyan' : ''} />
+                    {label}
+                    <Dot />
+                  </>
+                )}
+              </NavLink>
+            );
+          }
+          return <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/india'} />;
+        })}
       </nav>
 
       {/* Paper Mode badge */}

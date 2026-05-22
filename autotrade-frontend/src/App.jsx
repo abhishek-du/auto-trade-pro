@@ -16,6 +16,7 @@ import IndiaFundamentals from './pages/IndiaFundamentals';
 import Backtest          from './pages/Backtest';
 import Portfolio         from './pages/Portfolio';
 import Zerodha          from './pages/Zerodha';
+import LiveMarket       from './pages/LiveMarket';
 
 export default function App() {
   return (
@@ -39,7 +40,8 @@ export default function App() {
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
               <Route path="/backtest"      element={<Backtest />}          />
               <Route path="/portfolio"    element={<Portfolio />}         />
-              <Route path="/zerodha"     element={<Zerodha />}           />
+              <Route path="/zerodha"      element={<Zerodha />}           />
+              <Route path="/live-market"  element={<LiveMarket />}        />
             </Routes>
           </main>
         </div>

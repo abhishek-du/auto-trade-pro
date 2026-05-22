@@ -402,3 +402,17 @@ async def _check_zerodha_token():
 def check_zerodha_token():
     """Check token validity at 6:05 AM IST (right after daily expiry)."""
     _run_async(_check_zerodha_token())
+
+
+# ── 11. Live price cache refresh — every 15 s ─────────────────────────────────
+
+@celery_app.task(name="tasks.refresh_live_prices")
+def refresh_live_prices_task():
+    """Refreshes the in-process PRICE_CACHE. Note: cannot broadcast WebSocket
+    from Celery (different process). Broadcasting is handled by the FastAPI
+    background task in main.py. This task keeps the cache warm for REST callers."""
+    async def _run():
+        from crawler.live_prices import refresh_all_prices
+        await refresh_all_prices()
+
+    _run_async(_run())

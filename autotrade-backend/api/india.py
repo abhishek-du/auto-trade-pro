@@ -1170,3 +1170,69 @@ async def run_india_backtest(
         all_results=all_out,
         duration_seconds=round(_time2.monotonic() - t0, 2),
     )
+
+
+# ── Live price cache endpoints ────────────────────────────────────────────────
+
+@router.get("/live-prices", summary="Full live price cache")
+async def get_live_prices():
+    """Returns the full in-memory price cache (all symbols)."""
+    from crawler.live_prices import get_all_cached_prices
+    return get_all_cached_prices()
+
+
+@router.get("/live-prices/{symbol:path}", summary="Single symbol live price")
+async def get_live_price_symbol(symbol: str):
+    """Returns cached price for one symbol; fetches live if not cached."""
+    from crawler.live_prices import (
+        fetch_prices_batch,
+        get_cached_price,
+        PRICE_CACHE,
+        _SYMBOL_META,
+    )
+    cached = get_cached_price(symbol)
+    if cached:
+        return cached
+    # Not in cache — fetch on demand
+    result = await fetch_prices_batch([symbol])
+    if symbol in result:
+        PRICE_CACHE[symbol] = result[symbol]
+        return result[symbol]
+    raise HTTPException(status_code=404, detail=f"Symbol {symbol!r} not found")
+
+
+@router.get("/market-summary", summary="NIFTY / SENSEX / VIX + breadth")
+async def get_market_summary_endpoint():
+    """Market summary: top indices, VIX, advances/declines, IST time."""
+    from crawler.live_prices import get_market_summary
+    return get_market_summary()
+
+
+@router.get("/indices", summary="All index prices from cache")
+async def get_indices():
+    """Returns only index-type symbols from the live price cache."""
+    from crawler.live_prices import get_all_cached_prices
+    return {k: v for k, v in get_all_cached_prices().items() if v.get("type") == "index"}
+
+
+@router.get("/top-movers", summary="Top gainers, losers, most active")
+async def get_top_movers():
+    """Returns top 5 gainers, losers, and most active stocks."""
+    from crawler.live_prices import get_all_cached_prices
+    stocks = [v for v in get_all_cached_prices().values() if v.get("type") == "stock"]
+    top_gainers  = sorted(stocks, key=lambda x: x.get("change_pct", 0), reverse=True)[:5]
+    top_losers   = sorted(stocks, key=lambda x: x.get("change_pct", 0))[:5]
+    most_active  = sorted(stocks, key=lambda x: x.get("volume", 0), reverse=True)[:5]
+    return {
+        "top_gainers": top_gainers,
+        "top_losers":  top_losers,
+        "most_active": most_active,
+    }
+
+
+@router.post("/live-prices/refresh", summary="Force immediate price cache refresh")
+async def force_refresh_live_prices():
+    """Forces an immediate refresh of the price cache. Returns updated prices."""
+    from crawler.live_prices import refresh_all_prices
+    updated = await refresh_all_prices()
+    return {"refreshed": len(updated), "prices": updated}
