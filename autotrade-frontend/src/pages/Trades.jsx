@@ -1,13 +1,20 @@
-import { useState, useMemo } from 'react';
-import { Search, ChevronLeft, ChevronRight, TrendingUp, TrendingDown, DollarSign, Activity } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import {
+  Search, ChevronLeft, ChevronRight,
+  TrendingUp, TrendingDown, DollarSign, Activity,
+  Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
+} from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
-import MetricCard   from '../components/MetricCard';
+import { getPortfolio } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 const PAGE_SIZE = 20;
 
-const fmtUSD = (n) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n ?? 0);
+const fmt = (n, dec = 2) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency', currency: 'USD', minimumFractionDigits: dec,
+  }).format(n ?? 0);
+
 const fmtDate = (s) => {
   if (!s) return '—';
   try { return new Date(s).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }); }
@@ -26,17 +33,110 @@ function DirectionBadge({ direction }) {
   );
 }
 
-function PnLCell({ value }) {
+function PnLCell({ value, showSign = true }) {
   const n = Number(value ?? 0);
   return (
     <span className={`tabular-nums font-semibold text-sm ${n >= 0 ? 'text-profit' : 'text-loss'}`}>
-      {n >= 0 ? '+' : ''}{fmtUSD(n)}
+      {showSign && n >= 0 ? '+' : ''}{fmt(n)}
     </span>
   );
 }
 
+function PnLPct({ value }) {
+  const n = Number(value ?? 0);
+  return (
+    <span className={`tabular-nums text-xs font-semibold px-1.5 py-0.5 rounded ${n >= 0 ? 'bg-profit/15 text-profit' : 'bg-loss/15 text-loss'}`}>
+      {n >= 0 ? '+' : ''}{n.toFixed(2)}%
+    </span>
+  );
+}
+
+// ── Investment Summary Banner ─────────────────────────────────────────────────
+
+function InvestmentSummary({ wallet, trades }) {
+  const totalInvested  = trades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
+  const realisedPnl    = wallet?.realised_pnl   ?? 0;
+  const unrealisedPnl  = wallet?.unrealised_pnl ?? 0;
+  const totalPnl       = realisedPnl + unrealisedPnl;
+  const currentValue   = wallet?.equity ?? (totalInvested + totalPnl);
+  const roiPct         = wallet?.roi_percent ?? (totalInvested ? (totalPnl / totalInvested) * 100 : 0);
+  const isGain         = totalPnl >= 0;
+
+  const cards = [
+    {
+      label:    'Capital Deployed',
+      value:    fmt(totalInvested),
+      sub:      `${trades.length} trade${trades.length !== 1 ? 's' : ''}`,
+      icon:     Wallet,
+      color:    'text-cyan',
+      bg:       'bg-cyan/10',
+    },
+    {
+      label:    'Portfolio Value',
+      value:    fmt(currentValue),
+      sub:      'Cash + open positions',
+      icon:     BarChart2,
+      color:    'text-blue-400',
+      bg:       'bg-blue-500/10',
+    },
+    {
+      label:    'Total Return',
+      value:    (isGain ? '+' : '') + fmt(totalPnl),
+      sub:      `Realised ${fmt(realisedPnl)}  ·  Unrealised ${fmt(unrealisedPnl)}`,
+      icon:     isGain ? ArrowUpRight : ArrowDownRight,
+      color:    isGain ? 'text-profit' : 'text-loss',
+      bg:       isGain ? 'bg-profit/10' : 'bg-loss/10',
+    },
+    {
+      label:    'Return on Investment',
+      value:    `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
+      sub:      `On ${fmt(totalInvested)} deployed`,
+      icon:     roiPct >= 0 ? TrendingUp : TrendingDown,
+      color:    roiPct >= 0 ? 'text-profit' : 'text-loss',
+      bg:       roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+      {cards.map(({ label, value, sub, icon: Icon, color, bg }) => (
+        <div key={label} className="bg-panel border border-border rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-muted text-xs font-medium">{label}</span>
+            <span className={`w-8 h-8 rounded-lg ${bg} flex items-center justify-center`}>
+              <Icon size={15} className={color} />
+            </span>
+          </div>
+          <p className={`text-xl font-bold ${color} tabular-nums`}>{value}</p>
+          <p className="text-muted text-xs mt-1 truncate">{sub}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Per-trade stats pills ─────────────────────────────────────────────────────
+
+function TradeStat({ label, value, color }) {
+  return (
+    <div className="flex flex-col items-end">
+      <span className="text-muted text-[10px] leading-none mb-0.5">{label}</span>
+      <span className={`tabular-nums text-xs font-semibold ${color}`}>{value}</span>
+    </div>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
 export default function Trades() {
   const { trades, loading } = useTrades();
+  const [wallet, setWallet] = useState(null);
+
+  useEffect(() => {
+    getPortfolio().then(setWallet).catch(() => {});
+    const id = setInterval(() => getPortfolio().then(setWallet).catch(() => {}), 15_000);
+    return () => clearInterval(id);
+  }, []);
 
   const [search,    setSearch]    = useState('');
   const [direction, setDirection] = useState('All');
@@ -57,12 +157,11 @@ export default function Trades() {
   const safePage   = Math.min(page, totalPages);
   const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  /* ── summary stats ── */
-  const closed    = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'CLOSED');
-  const wins      = closed.filter((t) => (t.pnl ?? 0) > 0);
-  const totalPnl  = closed.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const winRate   = closed.length ? (wins.length / closed.length) * 100 : 0;
-  const bestTrade = closed.reduce((b, t) => Math.max(b, t.pnl ?? 0), 0);
+  /* ── secondary stats ── */
+  const closed     = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'CLOSED');
+  const wins       = closed.filter((t) => (t.pnl ?? 0) > 0);
+  const winRate    = closed.length ? (wins.length / closed.length) * 100 : 0;
+  const bestTrade  = closed.reduce((b, t) => Math.max(b, t.pnl ?? 0), 0);
   const worstTrade = closed.reduce((b, t) => Math.min(b, t.pnl ?? 0), 0);
 
   if (loading) return <LoadingSpinner />;
@@ -70,15 +169,45 @@ export default function Trades() {
   return (
     <div className="space-y-6">
 
-      {/* Summary cards */}
+      {/* ── Investment summary ── */}
+      <InvestmentSummary wallet={wallet} trades={trades} />
+
+      {/* ── Secondary stats row ── */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-        <MetricCard title="Total Trades"    value={trades.length}      subtitle="All time"                      icon={Activity}    />
-        <MetricCard title="Win Rate"        value={`${winRate.toFixed(1)}%`} subtitle="Closed profitable trades" trend={winRate - 50} icon={TrendingUp} />
-        <MetricCard title="Total P&L"       value={totalPnl}           subtitle="Sum of all closed trade P&L"   trend={totalPnl > 0 ? 1 : -1} icon={DollarSign} />
-        <MetricCard title="Best / Worst"    value={fmtUSD(bestTrade)}  subtitle={`Worst: ${fmtUSD(worstTrade)}`} icon={TrendingDown} />
+        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+          <Activity size={18} className="text-muted shrink-0" />
+          <div>
+            <p className="text-muted text-xs">Total Trades</p>
+            <p className="text-slate-100 font-bold text-lg">{trades.length}</p>
+          </div>
+        </div>
+        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+          <TrendingUp size={18} className={winRate >= 50 ? 'text-profit' : 'text-muted'} />
+          <div>
+            <p className="text-muted text-xs">Win Rate</p>
+            <p className={`font-bold text-lg ${winRate >= 50 ? 'text-profit' : 'text-loss'}`}>
+              {winRate.toFixed(1)}%
+            </p>
+            <p className="text-muted text-xs">{wins.length}W / {closed.length - wins.length}L</p>
+          </div>
+        </div>
+        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+          <DollarSign size={18} className="text-profit shrink-0" />
+          <div>
+            <p className="text-muted text-xs">Best Trade</p>
+            <p className="text-profit font-bold text-lg">{fmt(bestTrade)}</p>
+          </div>
+        </div>
+        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+          <DollarSign size={18} className="text-loss shrink-0" />
+          <div>
+            <p className="text-muted text-xs">Worst Trade</p>
+            <p className="text-loss font-bold text-lg">{fmt(worstTrade)}</p>
+          </div>
+        </div>
       </div>
 
-      {/* Filters */}
+      {/* ── Filters ── */}
       <div className="bg-panel border border-border rounded-xl p-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-40">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
@@ -115,13 +244,17 @@ export default function Trades() {
         <span className="text-muted text-xs ml-auto">{filtered.length} trades</span>
       </div>
 
-      {/* Table */}
+      {/* ── Trade table ── */}
       <div className="bg-panel border border-border rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border">
-                {['Date', 'Symbol', 'Direction', 'Entry', 'Exit', 'Qty', 'P&L', 'P&L %', 'Status'].map((h) => (
+                {[
+                  'Date', 'Symbol', 'Direction',
+                  'Invested', 'Entry Price', 'Exit Price',
+                  'Current Value', 'P&L', 'P&L %', 'Status',
+                ].map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-muted text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
                     {h}
                   </th>
@@ -131,30 +264,91 @@ export default function Trades() {
             <tbody>
               {pageRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="text-center py-12 text-muted text-sm">
+                  <td colSpan={10} className="text-center py-12 text-muted text-sm">
                     No trades match the current filters.
                   </td>
                 </tr>
               ) : (
                 pageRows.map((t, i) => {
-                  const pnl    = t.pnl ?? 0;
-                  const pnlPct = t.pnl_pct ?? 0;
+                  const pnl        = t.pnl ?? 0;
+                  const pnlPct     = t.pnl_percent ?? t.pnl_pct ?? 0;
+                  const invested   = t.size_usd ?? 0;
+                  const isOpen     = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
+                  /* current value = what you'd get back today */
+                  const currentVal = isOpen ? invested : invested + pnl;
+
                   return (
                     <tr key={t.id ?? i} className="border-b border-border/50 hover:bg-surface/50 transition-colors">
-                      <td className="px-4 py-3 text-muted text-xs tabular-nums whitespace-nowrap">{fmtDate(t.closed_at ?? t.opened_at)}</td>
-                      <td className="px-4 py-3 text-slate-200 font-medium">{t.symbol ?? t.ticker ?? '—'}</td>
-                      <td className="px-4 py-3"><DirectionBadge direction={t.direction ?? t.side} /></td>
-                      <td className="px-4 py-3 text-slate-300 tabular-nums">{fmtUSD(t.entry_price)}</td>
-                      <td className="px-4 py-3 text-slate-300 tabular-nums">{t.exit_price ? fmtUSD(t.exit_price) : '—'}</td>
-                      <td className="px-4 py-3 text-slate-300 tabular-nums">{t.quantity ?? '—'}</td>
-                      <td className="px-4 py-3"><PnLCell value={pnl} /></td>
-                      <td className={`px-4 py-3 tabular-nums text-sm font-semibold ${pnlPct >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                      {/* Date */}
+                      <td className="px-4 py-3 text-muted text-xs tabular-nums whitespace-nowrap">
+                        {fmtDate(t.closed_at ?? t.opened_at)}
                       </td>
+
+                      {/* Symbol */}
+                      <td className="px-4 py-3 text-slate-200 font-medium">
+                        {t.symbol ?? t.ticker ?? '—'}
+                      </td>
+
+                      {/* Direction */}
+                      <td className="px-4 py-3">
+                        <DirectionBadge direction={t.direction ?? t.side} />
+                      </td>
+
+                      {/* Invested */}
+                      <td className="px-4 py-3">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-slate-200 tabular-nums font-medium text-sm">{fmt(invested)}</span>
+                          {t.size_units != null && (
+                            <span className="text-muted text-[10px]">{t.size_units} units</span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Entry price */}
+                      <td className="px-4 py-3 text-slate-300 tabular-nums">{fmt(t.entry_price)}</td>
+
+                      {/* Exit price */}
+                      <td className="px-4 py-3 text-slate-300 tabular-nums">
+                        {t.exit_price ? fmt(t.exit_price) : <span className="text-muted">open</span>}
+                      </td>
+
+                      {/* Current value */}
+                      <td className="px-4 py-3">
+                        {isOpen ? (
+                          <span className="text-accent tabular-nums font-medium text-sm">
+                            {fmt(invested)}<span className="text-muted text-[10px] ml-1">+live</span>
+                          </span>
+                        ) : (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`tabular-nums font-semibold text-sm ${currentVal >= invested ? 'text-profit' : 'text-loss'}`}>
+                              {fmt(currentVal)}
+                            </span>
+                            <span className="text-muted text-[10px]">
+                              {currentVal >= invested ? '▲' : '▼'} {fmt(Math.abs(currentVal - invested))}
+                            </span>
+                          </div>
+                        )}
+                      </td>
+
+                      {/* P&L */}
+                      <td className="px-4 py-3">
+                        <PnLCell value={pnl} />
+                      </td>
+
+                      {/* P&L % */}
+                      <td className="px-4 py-3">
+                        {isOpen ? (
+                          <span className="text-muted text-xs">—</span>
+                        ) : (
+                          <PnLPct value={pnlPct} />
+                        )}
+                      </td>
+
+                      {/* Status */}
                       <td className="px-4 py-3">
                         <span className={[
                           'text-xs font-medium px-2 py-0.5 rounded',
-                          (t.status ?? 'CLOSED').toUpperCase() === 'OPEN'
+                          isOpen
                             ? 'bg-accent/20 text-accent'
                             : 'bg-surface text-muted',
                         ].join(' ')}>
