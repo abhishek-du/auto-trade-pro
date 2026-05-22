@@ -610,3 +610,121 @@ async def watchlist_analysis(
         "source":  "kite" if has_token else "yfinance",
         "as_of":   datetime.datetime.utcnow().isoformat() + "Z",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deep analysis — full breakdown for a single symbol
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/deep-analysis/{symbol}")
+async def deep_analysis(symbol: str):
+    """Full deep analysis for one NSE symbol.
+
+    Returns indicator reasoning, trade setup (entry/SL/targets/R:R),
+    when-to-buy/sell guidance, Finnhub news, and Groq AI commentary.
+    Falls back to yfinance when Zerodha not connected.
+    """
+    from crawler.india_price_feed import fetch_nse_candles
+    from engine.deep_analysis import (
+        build_trade_setup,
+        fetch_stock_news,
+        generate_reasoning,
+        groq_commentary,
+    )
+
+    sym       = symbol.strip().upper().replace(".NS", "")
+    kite      = get_kite_client()
+    has_token = bool(kite.access_token)
+
+    to_date   = datetime.date.today().strftime("%Y-%m-%d")
+    from_date = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+
+    # ── Fetch historical candles ──────────────────────────────────────────────
+    candles = []
+    if has_token:
+        candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
+
+    if not candles:
+        loop = asyncio.get_event_loop()
+        candles = await loop.run_in_executor(
+            None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+        )
+
+    if not candles:
+        raise HTTPException(status_code=404, detail=f"No historical data for {sym}")
+
+    df = pd.DataFrame(candles).sort_values("timestamp").reset_index(drop=True)
+    if len(df) < 15:
+        raise HTTPException(status_code=422, detail=f"Insufficient data for {sym} ({len(df)} rows)")
+
+    # ── Compute indicators ────────────────────────────────────────────────────
+    sig = compute_indicators(df)
+
+    # ── LTP ───────────────────────────────────────────────────────────────────
+    ltp = float(df["close"].iloc[-1])
+    if has_token:
+        try:
+            raw = await kite.get_ltp([f"NSE:{sym}"])
+            ltp = float(raw.get(f"NSE:{sym}", {}).get("last_price", ltp))
+        except Exception:
+            pass
+
+    prev      = float(df["close"].iloc[-2]) if len(df) >= 2 else ltp
+    chg_pct   = ((ltp - prev) / prev * 100) if prev else 0.0
+
+    score = sig.composite_score
+    signal_label = _score_to_signal(score)
+
+    def _n(v: float):
+        return None if math.isnan(v) else round(v, 2)
+
+    # ── Reasoning, trade setup, news, AI — run news+AI in parallel ───────────
+    reasoning = generate_reasoning(sig, ltp)
+    setup     = build_trade_setup(sig, ltp, signal_label)
+
+    news, ai_text = await asyncio.gather(
+        fetch_stock_news(sym),
+        groq_commentary(sym, ltp, chg_pct, sig, reasoning, setup),
+    )
+
+    return {
+        "symbol":          sym,
+        "ltp":             round(ltp, 2),
+        "change_pct":      round(chg_pct, 2),
+        "signal":          signal_label,
+        "composite_score": round(score, 1),
+        "data_source":     "kite" if has_token else "yfinance",
+        "as_of":           datetime.datetime.utcnow().isoformat() + "Z",
+
+        "indicators": {
+            "rsi":              _n(sig.rsi),
+            "rsi_signal":       sig.rsi_signal,
+            "macd":             _n(sig.macd),
+            "macd_signal":      _n(sig.macd_signal),
+            "macd_histogram":   _n(sig.macd_histogram),
+            "macd_cross":       sig.macd_cross,
+            "ema_20":           _n(sig.ema_20),
+            "ema_50":           _n(sig.ema_50),
+            "ema_200":          _n(sig.ema_200),
+            "ema_trend":        sig.ema_trend,
+            "bb_upper":         _n(sig.bb_upper),
+            "bb_middle":        _n(sig.bb_middle),
+            "bb_lower":         _n(sig.bb_lower),
+            "bb_position":      sig.bb_position,
+            "supertrend":       _n(sig.supertrend),
+            "supertrend_dir":   sig.supertrend_direction,
+            "ichimoku_signal":  sig.ichimoku_signal,
+            "adx":              _n(sig.adx),
+            "adx_strength":     sig.adx_trend_strength,
+            "adx_direction":    sig.adx_direction,
+            "vwap":             _n(sig.vwap),
+            "stoch_k":          _n(sig.stoch_k),
+            "stoch_d":          _n(sig.stoch_d),
+            "stoch_signal":     sig.stoch_signal,
+        },
+
+        "reasoning":  reasoning,
+        "trade_setup": setup,
+        "news":        news,
+        "ai_summary":  ai_text,
+    }
