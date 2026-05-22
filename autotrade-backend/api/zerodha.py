@@ -28,17 +28,21 @@ PAPER TRADING ONLY — real order endpoints require explicit header
 
 from __future__ import annotations
 
+import asyncio
 import datetime
+import math
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.zerodha_client import clear_kite_token, get_kite_client, update_kite_token
-from crawler.zerodha_market import get_live_prices, get_market_depth
+from crawler.zerodha_market import get_kite_historical, get_live_prices, get_market_depth
 from crawler.zerodha_websocket import LIVE_PRICES
 from db.database import get_db
+from engine.indicators import compute_indicators
 from engine.zerodha_portfolio import (
     get_zerodha_pnl_summary,
     sync_zerodha_holdings,
@@ -496,4 +500,113 @@ async def token_status():
         "expires_at":      exp_ist.strftime("%-I:%M %p IST %d %b"),
         "hours_remaining": round(hours_left, 2),
         "login_url":       kite.get_login_url() if not valid and settings.zerodha_available else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchlist analysis — technical signals for any NSE symbols
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _score_to_signal(score: float) -> str:
+    if score >= 60:  return "STRONG_BUY"
+    if score >= 25:  return "BUY"
+    if score >= -25: return "NEUTRAL"
+    if score >= -60: return "SELL"
+    return "STRONG_SELL"
+
+
+async def _analyse_symbol(sym: str, has_token: bool, ltp_map: dict, from_date: str, to_date: str) -> dict:
+    """Fetch 120d daily candles + compute indicators for one NSE symbol."""
+    from crawler.india_price_feed import fetch_nse_candles
+
+    try:
+        candles = []
+        if has_token:
+            candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
+
+        if not candles:
+            loop = asyncio.get_event_loop()
+            candles = await loop.run_in_executor(
+                None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+            )
+
+        if not candles:
+            return {"symbol": sym, "error": "No historical data"}
+
+        df = pd.DataFrame(candles).sort_values("timestamp").reset_index(drop=True)
+        if len(df) < 15:
+            return {"symbol": sym, "error": "Insufficient data"}
+
+        sig = compute_indicators(df)
+
+        ltp       = ltp_map.get(sym) or float(df["close"].iloc[-1])
+        prev      = float(df["close"].iloc[-2]) if len(df) >= 2 else ltp
+        chg_pct   = ((ltp - prev) / prev * 100) if prev else 0.0
+
+        def _n(v: float) -> float | None:
+            return None if math.isnan(v) else round(v, 2)
+
+        return {
+            "symbol":           sym,
+            "ltp":              round(ltp, 2),
+            "change_pct":       round(chg_pct, 2),
+            "signal":           _score_to_signal(sig.composite_score),
+            "composite_score":  round(sig.composite_score, 1),
+            "rsi":              _n(sig.rsi),
+            "rsi_signal":       sig.rsi_signal,
+            "macd_cross":       sig.macd_cross,
+            "macd_histogram":   _n(sig.macd_histogram),
+            "ema_trend":        sig.ema_trend,
+            "supertrend":       sig.supertrend_direction,
+            "bb_position":      sig.bb_position,
+            "adx":              _n(sig.adx),
+            "adx_strength":     sig.adx_trend_strength,
+            "ichimoku_signal":  sig.ichimoku_signal,
+            "support":          _n(sig.bb_lower),
+            "resistance":       _n(sig.bb_upper),
+            "vwap":             _n(sig.vwap),
+            "error":            None,
+        }
+    except Exception as exc:
+        logger.warning(f"[zerodha] Analysis failed for {sym}: {exc}")
+        return {"symbol": sym, "error": str(exc)}
+
+
+@router.get("/watchlist-analysis")
+async def watchlist_analysis(
+    symbols: str = Query(..., description="Comma-separated NSE symbols, e.g. RELIANCE,TCS,HDFCBANK"),
+):
+    """Compute technical analysis (RSI, MACD, EMA, Ichimoku, composite score) for watchlist symbols.
+
+    Uses Kite historical data when connected; falls back to yfinance automatically.
+    Runs all symbols in parallel — typical response time 2–5 s for 10 symbols.
+    """
+    sym_list = [s.strip().upper().replace(".NS", "") for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        return {"results": [], "source": "none"}
+
+    kite      = get_kite_client()
+    has_token = bool(kite.access_token)
+
+    to_date   = datetime.date.today().strftime("%Y-%m-%d")
+    from_date = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+
+    # Batch-fetch LTP for all symbols in one API call
+    ltp_map: dict[str, float] = {}
+    if has_token:
+        try:
+            raw_ltp = await kite.get_ltp([f"NSE:{s}" for s in sym_list])
+            for inst, data in raw_ltp.items():
+                ltp_map[inst.replace("NSE:", "")] = float(data.get("last_price", 0.0))
+        except Exception as exc:
+            logger.warning(f"[zerodha] Batch LTP failed: {exc}")
+
+    results = await asyncio.gather(
+        *[_analyse_symbol(s, has_token, ltp_map, from_date, to_date) for s in sym_list]
+    )
+
+    return {
+        "results": list(results),
+        "source":  "kite" if has_token else "yfinance",
+        "as_of":   datetime.datetime.utcnow().isoformat() + "Z",
     }
