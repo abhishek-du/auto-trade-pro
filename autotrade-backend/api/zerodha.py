@@ -728,3 +728,224 @@ async def deep_analysis(symbol: str):
         "news":        news,
         "ai_summary":  ai_text,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-scanner — scan full NSE universe, return all BUY+ signals
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Extra popular NSE stocks beyond the configured watchlists
+_EXTRA_NSE = [
+    "TITAN", "BAJAJFINSV", "INDUSINDBK", "TATAMOTORS", "JSWSTEEL",
+    "TATASTEEL", "TECHM", "HINDALCO", "DIVISLAB", "CIPLA",
+    "ADANIPORTS", "BPCL", "HEROMOTOCO", "EICHERMOT", "ONGC",
+    "CHOLAFIN", "MARICO", "DABUR", "LUPIN", "TORNTPHARM",
+    "FEDERALBNK", "DLF", "GODREJPROP", "LTIM", "MPHASIS",
+    "TATAPOWER", "BANKBARODA", "CANBK", "AUROPHARMA", "BIOCON",
+    "ESCORTS", "SUZLON", "IRCTC", "HAL", "BEL", "BHEL",
+    "RECLTD", "PFC", "IRFC", "NHPC",
+]
+
+
+@router.get("/auto-scan")
+async def auto_scan(min_score: float = Query(default=25.0, description="Minimum composite score; 25=BUY, 60=STRONG_BUY")):
+    """Scan all configured + extended NSE stocks and return those with BUY or better signals.
+
+    Runs all symbols in parallel — typical time: 4–10 s (yfinance) or 2–4 s (Kite).
+    Returns buy_signals sorted by score descending.
+    """
+    # Build deduplicated universe
+    raw_universe = (
+        list(settings.WATCHLIST_NSE_LARGE_CAP)
+        + list(settings.WATCHLIST_NSE_MID_CAP)
+        + _EXTRA_NSE
+    )
+    seen: set[str] = set()
+    universe: list[str] = []
+    for s in raw_universe:
+        if s not in seen:
+            seen.add(s)
+            universe.append(s)
+
+    kite      = get_kite_client()
+    has_token = bool(kite.access_token)
+    to_date   = datetime.date.today().strftime("%Y-%m-%d")
+    from_date = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+
+    # Batch LTP fetch
+    ltp_map: dict[str, float] = {}
+    if has_token:
+        try:
+            raw_ltp = await kite.get_ltp([f"NSE:{s}" for s in universe])
+            for inst, data in raw_ltp.items():
+                ltp_map[inst.replace("NSE:", "")] = float(data.get("last_price", 0.0))
+        except Exception as exc:
+            logger.warning(f"[zerodha] Auto-scan batch LTP failed: {exc}")
+
+    all_results = await asyncio.gather(
+        *[_analyse_symbol(s, has_token, ltp_map, from_date, to_date) for s in universe],
+        return_exceptions=False,
+    )
+
+    valid   = [r for r in all_results if not r.get("error")]
+    signals = {
+        "STRONG_BUY": [],
+        "BUY":        [],
+        "NEUTRAL":    [],
+        "SELL":       [],
+        "STRONG_SELL":[],
+    }
+    for r in valid:
+        signals.setdefault(r.get("signal", "NEUTRAL"), []).append(r)
+
+    for k in signals:
+        signals[k].sort(key=lambda r: r.get("composite_score", 0), reverse=True)
+
+    buy_signals = signals["STRONG_BUY"] + signals["BUY"]
+
+    return {
+        "buy_signals":      buy_signals,
+        "all_signals":      signals,
+        "total_scanned":    len(universe),
+        "valid_count":      len(valid),
+        "error_count":      len(all_results) - len(valid),
+        "strong_buy_count": len(signals["STRONG_BUY"]),
+        "buy_count":        len(signals["BUY"]),
+        "neutral_count":    len(signals["NEUTRAL"]),
+        "sell_count":       len(signals["SELL"]) + len(signals["STRONG_SELL"]),
+        "source":           "kite" if has_token else "yfinance",
+        "scanned_at":       datetime.datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mutual-fund scanner — NAV trend analysis + momentum signals
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MF_SCHEME_NAMES: dict[str, str] = {
+    "120503": "Mirae Asset Large Cap Fund – Regular Growth",
+    "119598": "Axis Bluechip Fund – Regular Growth",
+    "100356": "SBI Bluechip Fund – Regular Growth",
+    "120716": "HDFC Top 100 Fund – Regular Growth",
+    "118989": "ICICI Pru Bluechip Fund – Regular Growth",
+}
+
+
+async def _analyse_mf(code: str) -> dict:
+    """Fetch NAV history from MFAPI and compute momentum signal."""
+    import httpx as _httpx
+
+    try:
+        async with _httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"https://api.mfapi.in/mf/{code}")
+            if r.status_code != 200:
+                return {"scheme_code": code, "error": f"MFAPI HTTP {r.status_code}"}
+            body = r.json()
+
+        meta     = body.get("meta", {})
+        nav_raw  = body.get("data", [])  # newest-first
+
+        entries: list[tuple[datetime.date, float]] = []
+        for item in nav_raw:
+            try:
+                d = datetime.datetime.strptime(item["date"], "%d-%m-%Y").date()
+                n = float(item["nav"])
+                entries.append((d, n))
+            except (KeyError, ValueError):
+                continue
+
+        if len(entries) < 30:
+            return {"scheme_code": code, "error": "Insufficient NAV history"}
+
+        entries.sort(key=lambda x: x[0])   # oldest first
+        latest_date, latest_nav = entries[-1]
+
+        def _nav_n_days_ago(n: int) -> float | None:
+            target = latest_date - datetime.timedelta(days=n)
+            for d, v in reversed(entries[:-1]):
+                if d <= target:
+                    return v
+            return None
+
+        nav_7  = _nav_n_days_ago(7)
+        nav_30 = _nav_n_days_ago(30)
+        nav_90 = _nav_n_days_ago(90)
+        nav_365= _nav_n_days_ago(365)
+
+        def _ret(old: float | None) -> float | None:
+            return round((latest_nav - old) / old * 100, 2) if old else None
+
+        ret_1w = _ret(nav_7)
+        ret_1m = _ret(nav_30)
+        ret_3m = _ret(nav_90)
+        ret_1y = _ret(nav_365)
+
+        # Simple SMA-5 vs SMA-20 trend
+        sma5  = sum(v for _, v in entries[-5:])  / 5
+        sma20 = sum(v for _, v in entries[-20:]) / 20
+        nav_trend = "UP" if sma5 > sma20 else "DOWN"
+
+        # Signal logic
+        if ret_3m is not None and ret_1m is not None:
+            if ret_3m >= 15 and ret_1m >= 4 and nav_trend == "UP":
+                signal = "STRONG_BUY"
+                reason = f"Exceptional momentum: +{ret_3m:.1f}% (3M) +{ret_1m:.1f}% (1M), NAV trending up"
+            elif ret_3m >= 8 and nav_trend == "UP":
+                signal = "BUY"
+                reason = f"Good 3M returns (+{ret_3m:.1f}%) with positive NAV trend"
+            elif ret_3m >= 4 or (ret_1m and ret_1m > 0):
+                signal = "BUY"
+                reason = f"Moderate positive momentum: +{ret_3m:.1f}% (3M)"
+            elif ret_3m and ret_3m >= 0:
+                signal = "HOLD"
+                reason = f"Low but positive 3M returns (+{ret_3m:.1f}%)"
+            else:
+                signal = "REVIEW"
+                reason = f"Negative 3M return ({ret_3m:.1f}%) — review before investing"
+        else:
+            signal = "HOLD"
+            reason = "Insufficient return history"
+
+        return {
+            "scheme_code":  code,
+            "scheme_name":  meta.get("scheme_name") or _MF_SCHEME_NAMES.get(code, code),
+            "fund_house":   meta.get("fund_house", ""),
+            "category":     meta.get("scheme_category", ""),
+            "latest_nav":   round(latest_nav, 4),
+            "nav_date":     latest_date.isoformat(),
+            "nav_trend":    nav_trend,
+            "returns": {
+                "1w": ret_1w,
+                "1m": ret_1m,
+                "3m": ret_3m,
+                "1y": ret_1y,
+            },
+            "signal":       signal,
+            "reason":       reason,
+            "error":        None,
+        }
+    except Exception as exc:
+        logger.warning(f"[zerodha] MF analysis failed for {code}: {exc}")
+        return {"scheme_code": code, "error": str(exc)}
+
+
+@router.get("/mf-analysis")
+async def mf_analysis():
+    """Analyze NAV momentum for all configured mutual fund schemes.
+
+    Returns all funds sorted by 3-month return, with BUY/STRONG_BUY at top.
+    """
+    schemes = list(settings.WATCHLIST_MUTUAL_FUND_SCHEMES)
+    results = await asyncio.gather(*[_analyse_mf(code) for code in schemes])
+
+    valid = sorted(
+        [r for r in results if not r.get("error")],
+        key=lambda r: r.get("returns", {}).get("3m") or -999,
+        reverse=True,
+    )
+
+    return {
+        "funds":        list(results),
+        "buy_count":    sum(1 for r in valid if r.get("signal") in ("BUY", "STRONG_BUY")),
+        "scanned_at":   datetime.datetime.utcnow().isoformat() + "Z",
+    }

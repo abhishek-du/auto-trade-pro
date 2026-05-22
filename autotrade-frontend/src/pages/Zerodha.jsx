@@ -9,7 +9,7 @@ import {
   getZerodhaStatus, getZerodhaLoginUrl, logoutZerodha,
   getZerodhaHoldings, getZerodhaOrders, getZerodhaTrades,
   getZerodhaPnl, getZerodhaLivePrices, getZerodhaWatchlistAnalysis,
-  getZerodhaDeepAnalysis,
+  getZerodhaDeepAnalysis, getZerodhaAutoScan, getZerodhaMfAnalysis,
 } from '../api/client';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -377,6 +377,330 @@ function LivePricesPanel({ prices }) {
     </div>
   );
 }
+
+// ── Section 5b — Auto Scanner ────────────────────────────────────────────────
+
+const MF_SIGNAL_CFG = {
+  STRONG_BUY: { color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30', label: '▲▲ Strong Buy' },
+  BUY:        { color: 'bg-teal-500/15 text-teal-300 border-teal-500/30',          label: '▲ Buy'         },
+  HOLD:       { color: 'bg-slate-500/15 text-slate-400 border-slate-500/30',       label: '⏸ Hold'        },
+  REVIEW:     { color: 'bg-amber-500/15 text-amber-300 border-amber-500/30',       label: '⚠ Review'      },
+};
+
+function ReturnBadge({ value, label }) {
+  if (value == null) return <div><div className="text-[10px] text-muted">{label}</div><div className="text-xs text-slate-600">—</div></div>;
+  const pos = value >= 0;
+  return (
+    <div>
+      <div className="text-[10px] text-muted">{label}</div>
+      <div className={`text-xs font-semibold tabular-nums ${pos ? 'text-emerald-400' : 'text-rose-400'}`}>
+        {pos ? '+' : ''}{value.toFixed(2)}%
+      </div>
+    </div>
+  );
+}
+
+function AutoScanner() {
+  const [scanData,    setScanData]    = useState(null);
+  const [mfData,      setMfData]      = useState(null);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [mfLoading,   setMfLoading]   = useState(false);
+  const [scanError,   setScanError]   = useState('');
+  const [deepSym,     setDeepSym]     = useState(null);
+  const [deepData,    setDeepData]    = useState({});
+  const [deepLoading, setDeepLoading] = useState(null);
+  const [tab,         setTab]         = useState('stocks');  // 'stocks' | 'mf'
+  const [scannedAt,   setScannedAt]   = useState('');
+
+  const runScan = async () => {
+    setScanLoading(true); setScanError(''); setScanData(null);
+    try {
+      const d = await getZerodhaAutoScan(25);
+      setScanData(d);
+      setScannedAt(d.scanned_at);
+    } catch (e) {
+      setScanError(e?.response?.data?.detail || 'Scan failed');
+    } finally { setScanLoading(false); }
+  };
+
+  const runMfScan = async () => {
+    setMfLoading(true);
+    try {
+      const d = await getZerodhaMfAnalysis();
+      setMfData(d);
+    } catch { } finally { setMfLoading(false); }
+  };
+
+  // Auto-run on mount
+  useEffect(() => { runScan(); runMfScan(); }, []);
+
+  async function handleStockClick(sym) {
+    if (deepSym === sym) { setDeepSym(null); return; }
+    setDeepSym(sym);
+    if (deepData[sym]) return;
+    setDeepLoading(sym);
+    try {
+      const d = await getZerodhaDeepAnalysis(sym);
+      setDeepData(prev => ({ ...prev, [sym]: d }));
+    } catch { } finally { setDeepLoading(null); }
+  }
+
+  const buySignals = scanData?.buy_signals || [];
+  const allSignals = scanData?.all_signals || {};
+  const mfFunds    = (mfData?.funds || []).filter(f => !f.error);
+  const buyMfs     = mfFunds.filter(f => ['BUY','STRONG_BUY'].includes(f.signal));
+
+  return (
+    <div className="space-y-4">
+
+      {/* Header + stats */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+            <Zap size={18} className="text-cyan" />
+            Market Scanner
+          </h2>
+          {scannedAt && (
+            <span className="text-[11px] text-slate-600">
+              Last scan: {new Date(scannedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+          {scanData && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 text-slate-500">
+              {scanData.source === 'kite' ? 'Kite live data' : 'yfinance'}
+            </span>
+          )}
+        </div>
+        <button onClick={() => { runScan(); runMfScan(); }} disabled={scanLoading}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-600 text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-all">
+          <RefreshCw size={13} className={scanLoading ? 'animate-spin' : ''} />
+          {scanLoading ? 'Scanning…' : 'Re-scan Now'}
+        </button>
+      </div>
+
+      {/* Stats bar */}
+      {scanData && (
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {[
+            { label: 'Stocks Scanned',  val: scanData.total_scanned,   color: 'text-slate-200' },
+            { label: 'Strong Buy',       val: scanData.strong_buy_count, color: 'text-emerald-400' },
+            { label: 'Buy',              val: scanData.buy_count,        color: 'text-teal-400' },
+            { label: 'Neutral',          val: scanData.neutral_count,    color: 'text-slate-400' },
+            { label: 'Sell / Avoid',     val: scanData.sell_count,       color: 'text-rose-400' },
+          ].map(({ label, val, color }) => (
+            <div key={label} className="card p-3 text-center">
+              <div className={`text-2xl font-bold tabular-nums ${color}`}>{val}</div>
+              <div className="text-muted text-[11px] mt-0.5">{label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-border">
+        {[
+          { key: 'stocks', label: `Buy Signals (${buySignals.length})` },
+          { key: 'mf',     label: `Mutual Funds (${buyMfs.length} buy)` },
+          { key: 'all',    label: 'All Signals' },
+        ].map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px ${
+              tab === t.key ? 'border-cyan text-cyan' : 'border-transparent text-muted hover:text-slate-300'
+            }`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* STOCKS TAB */}
+      {tab === 'stocks' && (
+        <div>
+          {scanLoading && (
+            <div className="card p-10 text-center">
+              <RefreshCw size={22} className="animate-spin text-cyan mx-auto mb-3" />
+              <p className="text-slate-300 font-semibold">Scanning NSE universe…</p>
+              <p className="text-muted text-sm mt-1">Fetching candles and computing indicators for ~60 stocks</p>
+            </div>
+          )}
+          {scanError && <div className="card p-6 text-center text-rose-400 text-sm">{scanError}</div>}
+          {!scanLoading && buySignals.length === 0 && scanData && (
+            <div className="card p-8 text-center">
+              <p className="text-muted text-sm">No buy signals found in current market conditions.</p>
+              <p className="text-slate-600 text-xs mt-1">Try lowering the min score threshold.</p>
+            </div>
+          )}
+          {!scanLoading && buySignals.length > 0 && (
+            <div className="space-y-0 rounded-xl border border-border overflow-hidden">
+              {buySignals.map((r, idx) => {
+                const isOpen = deepSym === r.symbol;
+                const sigCfg = SIGNAL_CFG[r.signal] || SIGNAL_CFG.NEUTRAL;
+                const chgPos = (r.change_pct ?? 0) >= 0;
+                return (
+                  <div key={r.symbol}>
+                    <div
+                      onClick={() => handleStockClick(r.symbol)}
+                      className={`flex items-center gap-4 px-5 py-3.5 cursor-pointer transition-colors border-b border-border/50
+                        ${isOpen ? 'bg-white/[0.05]' : idx % 2 === 0 ? 'bg-white/[0.01] hover:bg-white/[0.03]' : 'hover:bg-white/[0.03]'}`}
+                    >
+                      {/* Rank */}
+                      <span className="text-[11px] text-slate-600 w-5 text-center shrink-0">{idx + 1}</span>
+
+                      {/* Symbol */}
+                      <div className="w-28 shrink-0">
+                        <div className="font-bold text-slate-100 text-sm">{r.symbol}</div>
+                        <div className={`text-[11px] font-semibold ${chgPos ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {chgPos ? '+' : ''}{r.change_pct?.toFixed(2)}%
+                        </div>
+                      </div>
+
+                      {/* Price */}
+                      <div className="w-24 shrink-0 text-right">
+                        <div className="text-sm font-semibold text-slate-100">{inr(r.ltp)}</div>
+                      </div>
+
+                      {/* Signal chip */}
+                      <span className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full border text-[11px] font-semibold ${sigCfg.color}`}>
+                        {sigCfg.short}
+                      </span>
+
+                      {/* Score bar */}
+                      <div className="flex-1 min-w-[100px]">
+                        <ScoreBar score={r.composite_score} />
+                      </div>
+
+                      {/* RSI */}
+                      <div className="w-16 text-right shrink-0">
+                        <div className="text-xs text-muted">RSI</div>
+                        <div className={`text-sm font-semibold ${
+                          r.rsi_signal === 'OVERSOLD' ? 'text-emerald-400' :
+                          r.rsi_signal === 'OVERBOUGHT' ? 'text-rose-400' : 'text-slate-300'
+                        }`}>{r.rsi != null ? r.rsi.toFixed(1) : '—'}</div>
+                      </div>
+
+                      {/* Trend */}
+                      <div className="w-24 text-right shrink-0">
+                        <div className="text-xs text-muted">Trend</div>
+                        <div className={`text-xs font-semibold ${TREND_COLOR[r.ema_trend] || 'text-slate-400'}`}>
+                          {r.ema_trend?.replace(/_/g, ' ')}
+                        </div>
+                      </div>
+
+                      {/* Ichimoku */}
+                      <div className="w-24 text-right shrink-0 hidden lg:block">
+                        <div className="text-xs text-muted">Ichimoku</div>
+                        <div className={`text-xs font-semibold ${
+                          r.ichimoku_signal?.includes('BUY') ? 'text-emerald-400' :
+                          r.ichimoku_signal?.includes('SELL') ? 'text-rose-400' : 'text-slate-400'
+                        }`}>{r.ichimoku_signal?.replace(/_/g, ' ')}</div>
+                      </div>
+
+                      {/* Expand arrow */}
+                      <span className="text-slate-600 text-xs ml-auto shrink-0">{isOpen ? '▲' : '▼'}</span>
+                    </div>
+
+                    {/* Deep panel */}
+                    {isOpen && (
+                      <DeepPanel
+                        data={deepData[r.symbol] || null}
+                        loading={deepLoading === r.symbol}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* MUTUAL FUNDS TAB */}
+      {tab === 'mf' && (
+        <div>
+          {mfLoading && (
+            <div className="card p-8 text-center">
+              <RefreshCw size={18} className="animate-spin text-cyan mx-auto mb-2" />
+              <p className="text-muted text-sm">Fetching NAV history from MFAPI…</p>
+            </div>
+          )}
+          {!mfLoading && mfFunds.length === 0 && (
+            <div className="card p-8 text-center text-muted text-sm">No mutual fund data available.</div>
+          )}
+          {!mfLoading && mfFunds.length > 0 && (
+            <div className="space-y-3">
+              {mfFunds.sort((a, b) => (b.returns?.['3m'] || -999) - (a.returns?.['3m'] || -999)).map(f => {
+                const sigCfg = MF_SIGNAL_CFG[f.signal] || MF_SIGNAL_CFG.HOLD;
+                const trendUp = f.nav_trend === 'UP';
+                return (
+                  <div key={f.scheme_code} className="card p-4">
+                    <div className="flex items-start justify-between gap-4 flex-wrap">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full border text-[11px] font-semibold ${sigCfg.color}`}>
+                            {sigCfg.label}
+                          </span>
+                          <span className={`text-[11px] font-semibold ${trendUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {trendUp ? '↗ NAV Trending Up' : '↘ NAV Trending Down'}
+                          </span>
+                        </div>
+                        <p className="text-sm font-semibold text-slate-200 leading-snug">{f.scheme_name}</p>
+                        <p className="text-xs text-muted mt-0.5">{f.fund_house}</p>
+                        <p className="text-xs text-slate-600 mt-0.5">{f.category}</p>
+                        <p className="text-xs text-slate-400 mt-2">{f.reason}</p>
+                      </div>
+                      <div className="flex items-center gap-6 shrink-0">
+                        <div className="text-right">
+                          <div className="text-xs text-muted">Latest NAV</div>
+                          <div className="text-base font-bold text-slate-100">₹{f.latest_nav}</div>
+                          <div className="text-[10px] text-slate-600">{f.nav_date}</div>
+                        </div>
+                        <div className="flex gap-4">
+                          <ReturnBadge value={f.returns?.['1w']}  label="1W" />
+                          <ReturnBadge value={f.returns?.['1m']}  label="1M" />
+                          <ReturnBadge value={f.returns?.['3m']}  label="3M" />
+                          <ReturnBadge value={f.returns?.['1y']}  label="1Y" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ALL SIGNALS TAB */}
+      {tab === 'all' && (
+        <div className="space-y-4">
+          {['STRONG_BUY','BUY','NEUTRAL','SELL','STRONG_SELL'].map(sig => {
+            const items = allSignals[sig] || [];
+            if (!items.length) return null;
+            const cfg = SIGNAL_CFG[sig] || SIGNAL_CFG.NEUTRAL;
+            return (
+              <div key={sig}>
+                <p className="text-xs font-semibold uppercase tracking-widest text-muted mb-2">
+                  {sig.replace('_', ' ')} ({items.length})
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {items.map(r => (
+                    <button key={r.symbol} onClick={() => { setTab('stocks'); setTimeout(() => handleStockClick(r.symbol), 50); }}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all hover:opacity-80 ${cfg.color}`}>
+                      {r.symbol}
+                      <span className="font-mono text-[10px] opacity-70">{r.composite_score > 0 ? '+' : ''}{r.composite_score}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {scanLoading && <div className="text-muted text-sm text-center py-4">Scanning…</div>}
+        </div>
+      )}
+
+    </div>
+  );
+}
+
 
 // ── Section 6 — Watchlist & Deep Analysis ────────────────────────────────────
 
@@ -971,6 +1295,11 @@ export default function Zerodha() {
         )}
       </div>
 
+      {/* Auto Scanner — always visible, runs on mount */}
+      <AutoScanner />
+
+      <div className="border-t border-border pt-6 space-y-6">
+
       {/* Section 4 — always visible paper mode warning */}
       <PaperModeBanner />
 
@@ -1023,6 +1352,8 @@ export default function Zerodha() {
       <div className="border-t border-border pt-6">
         <WatchlistAnalysis connectedHoldings={status?.connected ? holdings : []} />
       </div>
+
+      </div>{/* end portfolio section */}
 
     </div>
   );
