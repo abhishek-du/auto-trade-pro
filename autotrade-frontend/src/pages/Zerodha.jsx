@@ -467,7 +467,12 @@ function AutoScanner() {
           )}
           {scanData && (
             <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 text-slate-500">
-              {scanData.source === 'kite' ? 'Kite live data' : 'yfinance'}
+              {scanData.source === 'kite' ? 'Kite live + history' : scanData.source === 'kite_live+yfinance_history' ? 'Kite LTP + yfinance history' : 'yfinance'}
+            </span>
+          )}
+          {scanData?.kite_historical_available === false && (
+            <span className="text-[10px] px-2 py-0.5 rounded border border-amber-500/30 text-amber-400/80">
+              Historical API needs paid Kite plan — using yfinance ✓
             </span>
           )}
         </div>
