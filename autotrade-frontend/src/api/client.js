@@ -70,6 +70,11 @@ export const getZerodhaMarketDepth = (sym)  => api.get(`/api/v1/zerodha/market-d
 export const placeZerodhaOrder     = (body) => api.post('/api/v1/zerodha/orders', body, {
     headers: { 'X-Confirm-Real-Order': 'yes' },
 });
-export const cancelZerodhaOrder    = (id)   => api.delete(`/api/v1/zerodha/orders/${id}`);
+export const cancelZerodhaOrder         = (id)      => api.delete(`/api/v1/zerodha/orders/${id}`);
+export const getZerodhaWatchlistAnalysis = (symbols) =>
+    api.get('/api/v1/zerodha/watchlist-analysis', {
+        params: { symbols: symbols.join(',') },
+        timeout: 60_000,   // analysis can take ~5 s for 10+ symbols
+    });
 
 export default api;
