@@ -89,6 +89,8 @@ def _html_success(user_name: str, user_id: str) -> HTMLResponse:
 
 
 def _html_error(detail: str) -> HTMLResponse:
+    # Escape for JS string — replace ' with \'
+    js_detail = detail.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Zerodha Login Failed</title>
@@ -96,14 +98,29 @@ def _html_error(detail: str) -> HTMLResponse:
   body{{font-family:system-ui,sans-serif;background:#0a1120;color:#e2e8f0;
         display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
   .card{{background:#0f1829;border:1px solid #f43f5e44;border-radius:16px;
-          padding:40px 48px;text-align:center;max-width:440px}}
+          padding:40px 48px;text-align:center;max-width:500px}}
   h1{{color:#f43f5e;font-size:1.75rem;margin:0 0 8px}}
   p{{color:#94a3b8;margin:6px 0;font-size:0.95rem}}
+  .err{{background:#1e0a0a;border:1px solid #f43f5e33;border-radius:8px;
+         padding:12px 16px;margin:16px 0;font-size:0.82rem;color:#fca5a5;
+         text-align:left;word-break:break-all;font-family:monospace}}
 </style></head>
 <body><div class="card">
   <h1>✗ Login Failed</h1>
-  <p>{detail}</p>
-  <p>Please close this window and try again.</p>
+  <p>AutoTrade Pro could not complete the Zerodha session exchange.</p>
+  <div class="err">{detail}</div>
+  <p style="font-size:0.82rem;color:#64748b">Check that ZERODHA_API_KEY and ZERODHA_API_SECRET are correct,<br>
+  and that the redirect URL registered in Zerodha Developer Console<br>
+  matches exactly: <strong style="color:#94a3b8">http://localhost:8000/api/v1/zerodha/callback</strong></p>
+  <script>
+    // Notify the opener of the failure so it can show a toast.
+    try {{
+      if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage('zerodha_error:{js_detail}', '*');
+      }}
+    }} catch(e) {{}}
+    setTimeout(() => {{ window.close(); }}, 8000);
+  </script>
 </div></body></html>"""
     return HTMLResponse(content=html, status_code=400)
 
@@ -134,7 +151,8 @@ async def get_login_url():
         )
     kite = get_kite_client()
     return {
-        "url": kite.get_login_url(),
+        "url":          kite.get_login_url(),
+        "redirect_url": settings.ZERODHA_REDIRECT_URL,
         "instructions": [
             "1. Click the URL to open Zerodha login in your browser",
             "2. Log in with your Zerodha credentials and TOTP",

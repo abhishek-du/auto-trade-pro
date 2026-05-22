@@ -64,7 +64,9 @@ function Badge({ status }) {
 
 // ── Section 1 — Connection Status ─────────────────────────────────────────────
 
-function ConnectionCard({ status, onConnect, onDisconnect }) {
+function ConnectionCard({ status, onConnect, onDisconnect, redirectUrl }) {
+  const [showDebug, setShowDebug] = useState(false);
+
   if (!status) return null;
 
   if (status.connected) {
@@ -100,6 +102,10 @@ function ConnectionCard({ status, onConnect, onDisconnect }) {
     );
   }
 
+  // Not connected — show why
+  const hasError = Boolean(status.error && status.error !== 'No access token — please login');
+  const tokenPresent = status.access_token_present;
+
   return (
     <div className="rounded-xl border border-amber-500/20 p-5"
       style={{ background: 'rgba(245,158,11,0.06)' }}>
@@ -109,9 +115,28 @@ function ConnectionCard({ status, onConnect, onDisconnect }) {
         </div>
         <div className="flex-1">
           <p className="text-amber-400 font-bold text-base mb-1">Zerodha Not Connected</p>
-          <p className="text-slate-400 text-sm mb-4">
-            Connect your Zerodha account to see your real portfolio, live prices, and enable real trading.
-          </p>
+
+          {/* Error reason — most useful diagnostic */}
+          {hasError && (
+            <div className="flex items-start gap-2 p-3 rounded-lg border border-rose-500/20 bg-rose-500/10 mb-3">
+              <AlertTriangle size={13} className="text-rose-400 shrink-0 mt-0.5" />
+              <p className="text-rose-300 text-xs font-mono break-all">{status.error}</p>
+            </div>
+          )}
+
+          {tokenPresent && !status.connected && (
+            <p className="text-slate-500 text-xs mb-3">
+              Access token is saved but Zerodha profile verification failed.
+              The token may have expired or the API credentials are incorrect.
+            </p>
+          )}
+
+          {!tokenPresent && !hasError && (
+            <p className="text-slate-400 text-sm mb-4">
+              Connect your Zerodha account to see your real portfolio, live prices, and enable real trading.
+            </p>
+          )}
+
           {status.api_key_configured === false ? (
             <p className="text-muted text-sm">
               Set <code className="text-cyan bg-white/5 px-1 rounded">ZERODHA_API_KEY</code> and{' '}
@@ -125,12 +150,46 @@ function ConnectionCard({ status, onConnect, onDisconnect }) {
                 <ExternalLink size={14} />
                 Connect Zerodha Account
               </button>
-              <ol className="text-slate-500 text-xs space-y-1">
+              <ol className="text-slate-500 text-xs space-y-1 mb-4">
                 <li>1. Click the button above to open Zerodha login</li>
                 <li>2. Log in with your Zerodha ID and TOTP</li>
                 <li>3. You will be redirected back automatically</li>
                 <li>4. This page will refresh when connected</li>
               </ol>
+
+              {/* Setup checklist */}
+              <button
+                onClick={() => setShowDebug(d => !d)}
+                className="text-xs text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
+              >
+                <RefreshCw size={10} />
+                {showDebug ? 'Hide' : 'Show'} setup info &amp; diagnostics
+              </button>
+
+              {showDebug && (
+                <div className="mt-3 space-y-3">
+                  {/* Redirect URL for Zerodha developer console */}
+                  <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                    <p className="text-blue-300 text-xs font-semibold mb-1">
+                      Required: Redirect URL in Zerodha Developer Console
+                    </p>
+                    <code className="text-cyan text-xs break-all">
+                      {redirectUrl || 'http://localhost:8000/api/v1/zerodha/callback'}
+                    </code>
+                    <p className="text-slate-500 text-[11px] mt-1">
+                      Go to kite.zerodha.com → My Apps → your app → set this exact URL as the Redirect URL.
+                    </p>
+                  </div>
+
+                  {/* Raw status JSON */}
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10">
+                    <p className="text-slate-400 text-xs font-semibold mb-1">Raw status response</p>
+                    <pre className="text-[11px] text-slate-400 overflow-x-auto whitespace-pre-wrap">
+                      {JSON.stringify(status, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -321,13 +380,14 @@ function LivePricesPanel({ prices }) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Zerodha() {
-  const [status,   setStatus]   = useState(null);
-  const [holdings, setHoldings] = useState([]);
-  const [orders,   setOrders]   = useState([]);
-  const [pnl,      setPnl]      = useState(null);
-  const [prices,   setPrices]   = useState({});
-  const [loading,  setLoading]  = useState(true);
-  const [hlLoading, setHlLoading] = useState(false);
+  const [status,      setStatus]      = useState(null);
+  const [holdings,    setHoldings]    = useState([]);
+  const [orders,      setOrders]      = useState([]);
+  const [pnl,         setPnl]         = useState(null);
+  const [prices,      setPrices]      = useState({});
+  const [loading,     setLoading]     = useState(true);
+  const [hlLoading,   setHlLoading]   = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState('');
 
   const wsRef = useRef(null);
 
@@ -417,6 +477,10 @@ export default function Zerodha() {
             fetchAll(true);
           }
         });
+      } else if (typeof e.data === 'string' && e.data.startsWith('zerodha_error:')) {
+        stopFastPoll();
+        const errMsg = e.data.slice('zerodha_error:'.length);
+        toast.error(`Zerodha login failed: ${errMsg}`, { duration: 8000 });
       }
     };
     window.addEventListener('message', handleMessage);
@@ -425,9 +489,10 @@ export default function Zerodha() {
 
   async function handleConnect() {
     try {
-      const { url } = await getZerodhaLoginUrl();
+      const res = await getZerodhaLoginUrl();
+      if (res.redirect_url) setRedirectUrl(res.redirect_url);
       // Do NOT use 'noopener' — the popup needs window.opener to send postMessage back
-      window.open(url, 'zerodha_login', 'width=600,height=700,left=200,top=100');
+      window.open(res.url, 'zerodha_login', 'width=600,height=700,left=200,top=100');
       toast('Complete login in the popup window…');
       startFastPoll(); // also poll in case postMessage is blocked
     } catch (err) {
@@ -487,6 +552,7 @@ export default function Zerodha() {
         status={status}
         onConnect={handleConnect}
         onDisconnect={handleDisconnect}
+        redirectUrl={redirectUrl}
       />
 
       {status?.connected && (
