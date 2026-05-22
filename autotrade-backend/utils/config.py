@@ -71,10 +71,17 @@ class Settings(BaseSettings):
     # Claude: detailed explanations — strategy breakdowns, deeper reasoning
     ANTHROPIC_API_KEY: str = ""
 
-    # ── Zerodha Kite (read-only portfolio tracking) ───────────────────────────
+    # ── Zerodha Kite (read-only portfolio tracking — legacy kiteconnect lib) ────
     KITE_API_KEY:      str = ""
     KITE_API_SECRET:   str = ""
     KITE_REDIRECT_URL: str = "http://localhost:8000/api/v1/kite/callback"
+
+    # ── Zerodha KiteConnect v3 (raw HTTP — full integration) ─────────────────
+    ZERODHA_API_KEY:      str  = ""
+    ZERODHA_API_SECRET:   str  = ""
+    ZERODHA_ACCESS_TOKEN: str  = ""
+    ZERODHA_REDIRECT_URL: str  = "http://localhost:8000/api/v1/zerodha/callback"
+    ZERODHA_ENABLED:      bool = False
 
     # ── Paper trading parameters ──────────────────────────────────────────────
     PAPER_TRADING_BALANCE: float = 1000.0
@@ -90,6 +97,10 @@ class Settings(BaseSettings):
     @property
     def kite_available(self) -> bool:
         return bool(self.KITE_API_KEY and self.KITE_API_SECRET)
+
+    @property
+    def zerodha_available(self) -> bool:
+        return bool(self.ZERODHA_API_KEY and self.ZERODHA_API_SECRET)
 
     @property
     def groq_available(self) -> bool:

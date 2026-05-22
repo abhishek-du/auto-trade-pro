@@ -1,9 +1,11 @@
 import { NavLink } from 'react-router-dom';
+import { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase,
 } from 'lucide-react';
+import { getZerodhaStatus } from '../api/client';
 
 const MAIN_NAV = [
   { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
@@ -18,6 +20,7 @@ const MAIN_NAV = [
 const INDIA_NAV = [
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
+  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap, zerodha: true },
   { to: '/portfolio',       label: 'My Portfolio',   Icon: Briefcase  },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
@@ -49,6 +52,25 @@ function NavItem({ to, label, Icon, end }) {
         </>
       )}
     </NavLink>
+  );
+}
+
+function ZerodhaDot() {
+  const [connected, setConnected] = useState(null);
+  useEffect(() => {
+    getZerodhaStatus()
+      .then(s => setConnected(s?.connected ?? false))
+      .catch(() => setConnected(false));
+    const id = setInterval(() => {
+      getZerodhaStatus()
+        .then(s => setConnected(s?.connected ?? false))
+        .catch(() => setConnected(false));
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
+  if (connected === null) return null;
+  return (
+    <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${connected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
   );
 }
 
@@ -85,8 +107,34 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon }) => (
-          <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/india'} />
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha }) => (
+          isZerodha ? (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) => [
+                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
+                isActive
+                  ? 'text-white border border-accent/20'
+                  : 'text-muted hover:text-slate-200 hover:bg-white/5',
+              ].join(' ')}
+              style={({ isActive }) =>
+                isActive
+                  ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
+                  : {}
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon size={16} className={isActive ? 'text-cyan' : ''} />
+                  {label}
+                  <ZerodhaDot />
+                </>
+              )}
+            </NavLink>
+          ) : (
+            <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/india'} />
+          )
         ))}
       </nav>
 

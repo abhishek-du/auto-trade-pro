@@ -15,6 +15,7 @@ import MutualFunds      from './pages/MutualFunds';
 import IndiaFundamentals from './pages/IndiaFundamentals';
 import Backtest          from './pages/Backtest';
 import Portfolio         from './pages/Portfolio';
+import Zerodha          from './pages/Zerodha';
 
 export default function App() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
               <Route path="/backtest"      element={<Backtest />}          />
               <Route path="/portfolio"    element={<Portfolio />}         />
+              <Route path="/zerodha"     element={<Zerodha />}           />
             </Routes>
           </main>
         </div>

@@ -124,4 +124,16 @@ celery_app.conf.beat_schedule = {
         "schedule": 900,
         "options":  {"countdown": 20},
     },
+
+    # Daily 02:35 UTC = 08:05 IST: download fresh NSE instrument master before open
+    "zerodha-instrument-refresh-daily": {
+        "task":     "tasks.india_tasks.refresh_zerodha_instruments",
+        "schedule": crontab(hour=2, minute=35),
+    },
+
+    # Daily 00:35 UTC = 06:05 IST: check if Kite token expired at 6 AM
+    "zerodha-token-expiry-check": {
+        "task":     "tasks.india_tasks.check_zerodha_token",
+        "schedule": crontab(hour=0, minute=35),
+    },
 }

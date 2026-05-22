@@ -351,3 +351,54 @@ def sync_kite_holdings():
     if not _is_india_trading_window():
         return
     _run_async(_sync_kite_holdings())
+
+
+# ── 9. Zerodha instrument token refresh — daily 08:00 IST ────────────────────
+
+async def _refresh_zerodha_instruments():
+    from crawler.zerodha_client import get_kite_client
+    from crawler.zerodha_market import refresh_instrument_tokens
+    from tasks._db import celery_session
+
+    kite = get_kite_client()
+    if not kite.access_token:
+        logger.info("[zerodha] Instrument refresh skipped — no access token")
+        return
+
+    async with celery_session() as session:
+        count = await refresh_instrument_tokens(session)
+        await session.commit()
+        logger.info(f"[zerodha] Instrument tokens refreshed: {count} rows")
+
+
+@celery_app.task(name="tasks.india_tasks.refresh_zerodha_instruments")
+def refresh_zerodha_instruments():
+    """Download fresh NSE instrument master from Kite daily before market open."""
+    _run_async(_refresh_zerodha_instruments())
+
+
+# ── 10. Zerodha token expiry check — daily 06:05 IST ─────────────────────────
+
+async def _check_zerodha_token():
+    from crawler.zerodha_client import clear_kite_token, get_kite_client
+    from utils.config import settings
+
+    if not settings.ZERODHA_ACCESS_TOKEN:
+        return
+
+    kite = get_kite_client()
+    try:
+        await kite.get_profile()
+        logger.info("[zerodha] Token still valid")
+    except Exception:
+        clear_kite_token()
+        logger.warning(
+            "[zerodha] Token expired at 6 AM — user must re-login via "
+            "/api/v1/zerodha/login-url"
+        )
+
+
+@celery_app.task(name="tasks.india_tasks.check_zerodha_token")
+def check_zerodha_token():
+    """Check token validity at 6:05 AM IST (right after daily expiry)."""
+    _run_async(_check_zerodha_token())
