@@ -489,3 +489,76 @@ class PortfolioHolding(Base):
             f"avg={self.avg_price:.2f} ltp={self.last_price:.2f} "
             f"pnl={self.pnl:+.2f} ({self.pnl_pct:+.1f}%)>"
         )
+
+
+# ── 16. ZerodhaPosition ───────────────────────────────────────────────────────
+
+class ZerodhaPosition(Base):
+    """Intraday and overnight positions from Zerodha KiteConnect API.
+
+    Synced from GET /portfolio/positions. One row per tradingsymbol/product.
+    Completely replaced on each sync (positions change through the day).
+    """
+    __tablename__ = "zerodha_positions"
+    __table_args__ = (
+        UniqueConstraint("tradingsymbol", "exchange", "product", "position_type", name="uq_zerodha_pos"),
+        Index("ix_zerodha_pos_symbol", "tradingsymbol"),
+    )
+
+    id:              Mapped[int]   = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tradingsymbol:   Mapped[str]   = mapped_column(String(30),  nullable=False)
+    exchange:        Mapped[str]   = mapped_column(String(10),  nullable=False)
+    product:         Mapped[str]   = mapped_column(String(10),  nullable=False)  # CNC, MIS, NRML
+    position_type:   Mapped[str]   = mapped_column(String(10),  nullable=False)  # day | net
+    quantity:        Mapped[int]   = mapped_column(Integer,     nullable=False, default=0)
+    buy_quantity:    Mapped[int]   = mapped_column(Integer,     nullable=False, default=0)
+    sell_quantity:   Mapped[int]   = mapped_column(Integer,     nullable=False, default=0)
+    average_price:   Mapped[float] = mapped_column(Float,       nullable=False, default=0.0)
+    last_price:      Mapped[float] = mapped_column(Float,       nullable=False, default=0.0)
+    pnl:             Mapped[float] = mapped_column(Float,       nullable=False, default=0.0)
+    m2m:             Mapped[float] = mapped_column(Float,       nullable=False, default=0.0)  # mark-to-market
+    value:           Mapped[float] = mapped_column(Float,       nullable=False, default=0.0)
+    multiplier:      Mapped[float] = mapped_column(Float,       nullable=False, default=1.0)
+    synced_at:       Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ZerodhaPosition {self.tradingsymbol} {self.position_type} "
+            f"qty={self.quantity} pnl={self.pnl:+.2f}>"
+        )
+
+
+# ── 17. KiteInstrument ────────────────────────────────────────────────────────
+
+class KiteInstrument(Base):
+    """Instrument master downloaded daily from GET /instruments/NSE.
+
+    Used to resolve trading_symbol → instrument_token for historical data
+    and WebSocket subscriptions.  Refreshed daily at 08:00 IST before market open.
+    """
+    __tablename__ = "kite_instruments"
+    __table_args__ = (
+        UniqueConstraint("instrument_token", name="uq_kite_instrument_token"),
+        Index("ix_kite_instrument_symbol", "tradingsymbol"),
+    )
+
+    id:               Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
+    instrument_token: Mapped[int]          = mapped_column(Integer,     nullable=False)
+    exchange_token:   Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
+    tradingsymbol:    Mapped[str]          = mapped_column(String(30),  nullable=False)
+    name:             Mapped[str]          = mapped_column(String(200), nullable=False, default="")
+    last_price:       Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    expiry:           Mapped[str]          = mapped_column(String(20),  nullable=False, default="")
+    strike:           Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    tick_size:        Mapped[float]        = mapped_column(Float,       nullable=False, default=0.05)
+    lot_size:         Mapped[int]          = mapped_column(Integer,     nullable=False, default=1)
+    instrument_type:  Mapped[str]          = mapped_column(String(10),  nullable=False, default="EQ")
+    segment:          Mapped[str]          = mapped_column(String(10),  nullable=False, default="NSE")
+    exchange:         Mapped[str]          = mapped_column(String(10),  nullable=False, default="NSE")
+    refreshed_at:     Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<KiteInstrument {self.exchange}:{self.tradingsymbol} "
+            f"token={self.instrument_token} type={self.instrument_type}>"
+        )

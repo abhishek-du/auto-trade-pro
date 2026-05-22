@@ -44,12 +44,32 @@ export const getIndiaSignals       = (category)      => api.get('/api/v1/india/s
 export const seedIndiaData         = ()              => api.post('/api/v1/india/seed');
 export const runBacktest           = (body = {})     => api.post('/api/v1/india/backtest', body, { timeout: 120_000 });
 
-// ── Zerodha Kite portfolio tracker ────────────────────────────────────────────
+// ── Zerodha Kite portfolio tracker (legacy) ───────────────────────────────────
 export const getKiteStatus         = ()     => api.get('/api/v1/kite/status');
 export const getKiteLoginUrl       = ()     => api.get('/api/v1/kite/login-url');
 export const getKiteHoldings       = ()     => api.get('/api/v1/kite/holdings');
 export const syncKiteHoldings      = ()     => api.post('/api/v1/kite/sync');
 export const disconnectKite        = ()     => api.post('/api/v1/kite/disconnect');
 export const addManualHolding      = (body) => api.post('/api/v1/kite/holdings/manual', body);
+
+// ── Zerodha KiteConnect v3 (full integration) ─────────────────────────────────
+export const getZerodhaLoginUrl    = ()     => api.get('/api/v1/zerodha/login-url');
+export const getZerodhaStatus      = ()     => api.get('/api/v1/zerodha/status');
+export const getZerodhaTokenStatus = ()     => api.get('/api/v1/zerodha/token-status');
+export const getZerodhaMargins     = ()     => api.get('/api/v1/zerodha/margins');
+export const logoutZerodha         = ()     => api.post('/api/v1/zerodha/logout');
+export const getZerodhaHoldings    = ()     => api.get('/api/v1/zerodha/holdings');
+export const getZerodhaPositions   = ()     => api.get('/api/v1/zerodha/positions');
+export const getZerodhaOrders      = ()     => api.get('/api/v1/zerodha/orders');
+export const getZerodhaTrades      = ()     => api.get('/api/v1/zerodha/trades');
+export const getZerodhaPnl         = ()     => api.get('/api/v1/zerodha/pnl');
+export const getZerodhaLivePrices  = (syms) => api.get('/api/v1/zerodha/live-prices', {
+    params: syms ? { symbols: syms } : {},
+});
+export const getZerodhaMarketDepth = (sym)  => api.get(`/api/v1/zerodha/market-depth/${sym}`);
+export const placeZerodhaOrder     = (body) => api.post('/api/v1/zerodha/orders', body, {
+    headers: { 'X-Confirm-Real-Order': 'yes' },
+});
+export const cancelZerodhaOrder    = (id)   => api.delete(`/api/v1/zerodha/orders/${id}`);
 
 export default api;

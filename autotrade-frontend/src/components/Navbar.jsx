@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { AlertTriangle, TrendingUp, TrendingDown } from 'lucide-react';
+import { AlertTriangle, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
+import { getZerodhaTokenStatus, getZerodhaLoginUrl } from '../api/client';
 
 const PAGE_TITLES = {
   '/':                 'Dashboard',
@@ -16,6 +17,8 @@ const PAGE_TITLES = {
   '/mutual-funds':     'Mutual Funds',
   '/fundamentals':     'Fundamentals',
   '/backtest':         'Backtest',
+  '/portfolio':        'My Portfolio',
+  '/zerodha':          'Zerodha KiteConnect',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────
@@ -124,6 +127,44 @@ function BalanceTicker({ portfolio }) {
   );
 }
 
+// ── Zerodha token expiry warning ──────────────────────────────────────────────
+
+function ZerodhaTokenBanner() {
+  const [token, setToken] = useState(null);
+
+  useEffect(() => {
+    const check = () =>
+      getZerodhaTokenStatus()
+        .then(setToken)
+        .catch(() => setToken(null));
+    check();
+    const id = setInterval(check, 5 * 60 * 1000); // every 5 min
+    return () => clearInterval(id);
+  }, []);
+
+  // Only show warning if token valid but expires within 60 min
+  if (!token?.valid || token.hours_remaining > 1) return null;
+
+  const mins = Math.round(token.hours_remaining * 60);
+
+  async function handleClick() {
+    try {
+      const { url } = await getZerodhaLoginUrl();
+      window.open(url, '_blank', 'noopener');
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-amber-500/30 text-amber-400 text-xs font-semibold hover:bg-amber-500/10 transition-all"
+    >
+      <Zap size={12} />
+      Zerodha token expires in {mins} min — re-login
+    </button>
+  );
+}
+
 // ── Navbar ────────────────────────────────────────────────────────────────────
 
 export default function Navbar() {
@@ -154,6 +195,7 @@ export default function Navbar() {
           </span>
         </div>
         <div className="flex items-center gap-5">
+          <ZerodhaTokenBanner />
           <MarketStatusDots />
           <div className="w-px h-8 bg-border" />
           <BalanceTicker portfolio={portfolio} />
