@@ -193,6 +193,12 @@ async def fetch_options_chain(symbol: str = "NIFTY") -> dict:
         )
 
     payload = response.json()
+    if not payload:
+        raise ValueError(
+            f"NSE options chain returned empty response for {normalized} "
+            f"(market likely closed — stale snapshot will be used)"
+        )
+
     options_data, spot, total_call_oi, total_put_oi, expiry_date = _parse_chain_payload(payload)
 
     logger.info(
@@ -392,6 +398,11 @@ async def run_options_analysis(session: AsyncSession) -> dict:
             spot         = chain["spot_price"]
             total_call_oi = chain["total_call_oi"]
             total_put_oi  = chain["total_put_oi"]
+
+            if not options_data or spot == 0:
+                logger.info(f"[options] {symbol}: empty chain data — skipping snapshot")
+                results[symbol] = {"error": "empty chain — market closed or NSE unavailable"}
+                continue
 
             # PCR: use pre-computed aggregate totals when available (more accurate
             # than re-summing per-strike rows which may cover multiple expiries)

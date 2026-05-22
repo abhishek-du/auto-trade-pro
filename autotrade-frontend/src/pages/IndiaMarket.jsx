@@ -22,7 +22,7 @@ function fmtIdx(n) {
 }
 
 function pcrLabel(pcr) {
-  if (pcr == null) return '—';
+  if (pcr == null) return 'Data available during NSE hours';
   if (pcr > 1.5)  return 'Strong Bullish Sentiment';
   if (pcr > 1.2)  return 'Moderately Bullish';
   if (pcr > 0.8)  return 'Neutral';
@@ -127,9 +127,11 @@ export default function IndiaMarket() {
   const todayDii   = fiiDii?.today?.dii_net ?? null;
   const trend      = fiiDii?.trend ?? 'MIXED';
 
-  const pcr      = optionsNifty?.pcr;
-  const maxPain  = optionsNifty?.max_pain;
-  const spot     = optionsNifty?.spot_price;
+  // Treat pcr/spot of 0 same as null — NSE returns {} after market hours and
+  // zero-snapshots should never be displayed as real data.
+  const pcr      = optionsNifty?.pcr    || null;
+  const maxPain  = optionsNifty?.max_pain || null;
+  const spot     = optionsNifty?.spot_price || null;
   const support  = optionsNifty?.support_levels ?? [];
   const resist   = optionsNifty?.resistance_levels ?? [];
   const mpDiff   = spot != null && maxPain != null ? spot - maxPain : null;

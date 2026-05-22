@@ -451,14 +451,22 @@ async def get_options_chain_detail(
     if sym not in ("NIFTY", "BANKNIFTY"):
         raise HTTPException(status_code=400, detail="symbol must be NIFTY or BANKNIFTY")
 
+    # Prefer the most recent snapshot that has real data (pcr > 0 and atm_strike > 0).
+    # NSE returns {} after market hours; the crawler now skips saving those, but
+    # any zero-snapshots already in the DB need to be skipped here too.
     snap = (await db.execute(
         select(OptionsChainSnapshot)
-        .where(OptionsChainSnapshot.symbol == sym)
+        .where(
+            OptionsChainSnapshot.symbol == sym,
+            OptionsChainSnapshot.pcr > 0,
+            OptionsChainSnapshot.atm_strike > 0,
+        )
         .order_by(desc(OptionsChainSnapshot.snapshot_at))
         .limit(1)
     )).scalar_one_or_none()
 
     if snap is None:
+        # No valid snapshot — try a live fetch (will only succeed during market hours)
         try:
             await run_options_analysis(db)
             await db.commit()
@@ -466,16 +474,23 @@ async def get_options_chain_detail(
             raise HTTPException(status_code=502, detail=f"Options fetch failed: {exc}")
         snap = (await db.execute(
             select(OptionsChainSnapshot)
-            .where(OptionsChainSnapshot.symbol == sym)
+            .where(
+                OptionsChainSnapshot.symbol == sym,
+                OptionsChainSnapshot.pcr > 0,
+                OptionsChainSnapshot.atm_strike > 0,
+            )
             .order_by(desc(OptionsChainSnapshot.snapshot_at))
             .limit(1)
         )).scalar_one_or_none()
 
     if snap is None:
-        raise HTTPException(status_code=404, detail=f"No options data for {sym}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No valid options data for {sym} — will populate during NSE market hours (09:15–15:30 IST)",
+        )
 
     return OptionsChainDetailOut(
-        spot_price=snap.atm_strike,         # closest available proxy for spot
+        spot_price=snap.atm_strike,         # ATM strike is the closest proxy for spot
         expiry_date=snap.expiry_date,
         pcr=snap.pcr,
         max_pain=snap.max_pain,
