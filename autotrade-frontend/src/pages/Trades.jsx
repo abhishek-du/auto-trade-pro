@@ -3,9 +3,10 @@ import {
   Search, ChevronLeft, ChevronRight,
   TrendingUp, TrendingDown, DollarSign, Activity,
   Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
+  Zap, Target, ShieldAlert, Clock,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
-import { getPortfolio } from '../api/client';
+import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 
 const PAGE_SIZE = 20;
@@ -21,6 +22,16 @@ const fmtDate = (s) => {
   catch { return s; }
 };
 
+function elapsed(openedAt) {
+  if (!openedAt) return '—';
+  const ms   = Date.now() - new Date(openedAt).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60)  return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs  < 24)  return `${hrs}h ${mins % 60}m`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
 function DirectionBadge({ direction }) {
   const isBuy = direction?.toUpperCase() === 'BUY';
   return (
@@ -29,15 +40,6 @@ function DirectionBadge({ direction }) {
       isBuy ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss',
     ].join(' ')}>
       {isBuy ? '▲ BUY' : '▼ SELL'}
-    </span>
-  );
-}
-
-function PnLCell({ value, showSign = true }) {
-  const n = Number(value ?? 0);
-  return (
-    <span className={`tabular-nums font-semibold text-sm ${n >= 0 ? 'text-profit' : 'text-loss'}`}>
-      {showSign && n >= 0 ? '+' : ''}{fmt(n)}
     </span>
   );
 }
@@ -54,46 +56,46 @@ function PnLPct({ value }) {
 // ── Investment Summary Banner ─────────────────────────────────────────────────
 
 function InvestmentSummary({ wallet, trades }) {
-  const totalInvested  = trades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
-  const realisedPnl    = wallet?.realised_pnl   ?? 0;
-  const unrealisedPnl  = wallet?.unrealised_pnl ?? 0;
-  const totalPnl       = realisedPnl + unrealisedPnl;
-  const currentValue   = wallet?.equity ?? (totalInvested + totalPnl);
-  const roiPct         = wallet?.roi_percent ?? (totalInvested ? (totalPnl / totalInvested) * 100 : 0);
-  const isGain         = totalPnl >= 0;
+  const totalInvested = trades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
+  const realisedPnl   = wallet?.realised_pnl   ?? 0;
+  const unrealisedPnl = wallet?.unrealised_pnl ?? 0;
+  const totalPnl      = realisedPnl + unrealisedPnl;
+  const currentValue  = wallet?.equity ?? (totalInvested + totalPnl);
+  const roiPct        = wallet?.roi_percent ?? (totalInvested ? (totalPnl / totalInvested) * 100 : 0);
+  const isGain        = totalPnl >= 0;
 
   const cards = [
     {
-      label:    'Capital Deployed',
-      value:    fmt(totalInvested),
-      sub:      `${trades.length} trade${trades.length !== 1 ? 's' : ''}`,
-      icon:     Wallet,
-      color:    'text-cyan',
-      bg:       'bg-cyan/10',
+      label: 'Capital Deployed',
+      value: fmt(totalInvested),
+      sub:   `${trades.length} trade${trades.length !== 1 ? 's' : ''}`,
+      icon:  Wallet,
+      color: 'text-cyan',
+      bg:    'bg-cyan/10',
     },
     {
-      label:    'Portfolio Value',
-      value:    fmt(currentValue),
-      sub:      'Cash + open positions',
-      icon:     BarChart2,
-      color:    'text-blue-400',
-      bg:       'bg-blue-500/10',
+      label: 'Portfolio Value',
+      value: fmt(currentValue),
+      sub:   'Cash + open positions',
+      icon:  BarChart2,
+      color: 'text-blue-400',
+      bg:    'bg-blue-500/10',
     },
     {
-      label:    'Total Return',
-      value:    (isGain ? '+' : '') + fmt(totalPnl),
-      sub:      `Realised ${fmt(realisedPnl)}  ·  Unrealised ${fmt(unrealisedPnl)}`,
-      icon:     isGain ? ArrowUpRight : ArrowDownRight,
-      color:    isGain ? 'text-profit' : 'text-loss',
-      bg:       isGain ? 'bg-profit/10' : 'bg-loss/10',
+      label: 'Total Return',
+      value: (isGain ? '+' : '') + fmt(totalPnl),
+      sub:   `Realised ${fmt(realisedPnl)}  ·  Unrealised ${fmt(unrealisedPnl)}`,
+      icon:  isGain ? ArrowUpRight : ArrowDownRight,
+      color: isGain ? 'text-profit' : 'text-loss',
+      bg:    isGain ? 'bg-profit/10' : 'bg-loss/10',
     },
     {
-      label:    'Return on Investment',
-      value:    `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
-      sub:      `On ${fmt(totalInvested)} deployed`,
-      icon:     roiPct >= 0 ? TrendingUp : TrendingDown,
-      color:    roiPct >= 0 ? 'text-profit' : 'text-loss',
-      bg:       roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',
+      label: 'Return on Investment',
+      value: `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
+      sub:   `On ${fmt(totalInvested)} deployed`,
+      icon:  roiPct >= 0 ? TrendingUp : TrendingDown,
+      color: roiPct >= 0 ? 'text-profit' : 'text-loss',
+      bg:    roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',
     },
   ];
 
@@ -115,13 +117,137 @@ function InvestmentSummary({ wallet, trades }) {
   );
 }
 
-// ── Per-trade stats pills ─────────────────────────────────────────────────────
+// ── Open Positions (live) ─────────────────────────────────────────────────────
 
-function TradeStat({ label, value, color }) {
+function OpenPositionsSection({ positions }) {
+  if (!positions || positions.length === 0) return null;
+
+  const totalInvested   = positions.reduce((s, p) => s + (p.size_usd ?? 0), 0);
+  const totalUnrealised = positions.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0);
+  const isGain          = totalUnrealised >= 0;
+
   return (
-    <div className="flex flex-col items-end">
-      <span className="text-muted text-[10px] leading-none mb-0.5">{label}</span>
-      <span className={`tabular-nums text-xs font-semibold ${color}`}>{value}</span>
+    <div className="space-y-3">
+      {/* Section header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-profit animate-pulse" />
+          <h2 className="text-sm font-semibold text-slate-200">
+            Open Positions
+            <span className="ml-2 text-xs font-normal text-muted">
+              {positions.length} active · live P&amp;L
+            </span>
+          </h2>
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          <span className="text-muted">Total at risk: <span className="text-slate-300 font-medium">{fmt(totalInvested)}</span></span>
+          <span className={`font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
+            {isGain ? '+' : ''}{fmt(totalUnrealised)} unrealised
+          </span>
+        </div>
+      </div>
+
+      {/* Position cards */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
+        {positions.map((pos) => {
+          const pnl         = pos.unrealised_pnl ?? 0;
+          const pct         = pos.unrealised_pct ?? 0;
+          const currentVal  = (pos.size_usd ?? 0) + pnl;
+          const isProfit    = pnl >= 0;
+          const priceMove   = pos.current_price - pos.entry_price;
+          const isBuy       = pos.direction?.toUpperCase() === 'BUY';
+
+          /* distance to SL and TP as % */
+          const slDist = pos.stop_loss
+            ? Math.abs((pos.current_price - pos.stop_loss) / pos.current_price * 100)
+            : null;
+          const tpDist = pos.take_profit
+            ? Math.abs((pos.take_profit - pos.current_price) / pos.current_price * 100)
+            : null;
+
+          return (
+            <div
+              key={pos.id}
+              className={`bg-panel border rounded-xl p-4 space-y-3 ${
+                isProfit ? 'border-profit/30' : 'border-loss/30'
+              }`}
+            >
+              {/* Row 1: symbol + direction + timer */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-100 text-base">{pos.symbol}</span>
+                  <DirectionBadge direction={pos.direction} />
+                </div>
+                <div className="flex items-center gap-1 text-muted text-[11px]">
+                  <Clock size={11} />
+                  {elapsed(pos.opened_at)}
+                </div>
+              </div>
+
+              {/* Row 2: Unrealised P&L hero */}
+              <div className="flex items-end justify-between">
+                <div>
+                  <p className="text-muted text-[10px] uppercase tracking-wide mb-0.5">Unrealised P&amp;L</p>
+                  <p className={`text-2xl font-extrabold tabular-nums ${isProfit ? 'text-profit' : 'text-loss'}`}>
+                    {isProfit ? '+' : ''}{fmt(pnl)}
+                  </p>
+                </div>
+                <PnLPct value={pct} />
+              </div>
+
+              {/* Row 3: price line */}
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex flex-col">
+                  <span className="text-muted text-[10px]">Entry</span>
+                  <span className="text-slate-300 tabular-nums font-medium">{fmt(pos.entry_price)}</span>
+                </div>
+                <div className={`flex items-center gap-1 text-xs font-bold ${priceMove >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {priceMove >= 0 ? '▲' : '▼'} {fmt(Math.abs(priceMove))}
+                </div>
+                <div className="flex flex-col items-end">
+                  <span className="text-muted text-[10px]">Current</span>
+                  <span className="text-slate-100 tabular-nums font-bold">{fmt(pos.current_price)}</span>
+                </div>
+              </div>
+
+              {/* Row 4: invested → current value */}
+              <div className="flex items-center justify-between bg-surface/50 rounded-lg px-3 py-2 text-xs">
+                <div>
+                  <p className="text-muted text-[10px]">Invested</p>
+                  <p className="text-slate-300 tabular-nums font-medium">{fmt(pos.size_usd)}</p>
+                </div>
+                <ArrowUpRight size={14} className="text-muted" />
+                <div className="text-right">
+                  <p className="text-muted text-[10px]">Current Value</p>
+                  <p className={`tabular-nums font-semibold ${isProfit ? 'text-profit' : 'text-loss'}`}>
+                    {fmt(currentVal)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Row 5: SL / TP */}
+              <div className="flex items-center justify-between text-[11px]">
+                <div className="flex items-center gap-1 text-rose-400">
+                  <ShieldAlert size={11} />
+                  <span className="text-muted">SL</span>
+                  <span className="tabular-nums font-medium">{pos.stop_loss ? fmt(pos.stop_loss) : '—'}</span>
+                  {slDist != null && (
+                    <span className="text-muted">({slDist.toFixed(1)}% away)</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 text-profit">
+                  <Target size={11} />
+                  <span className="text-muted">TP</span>
+                  <span className="tabular-nums font-medium">{pos.take_profit ? fmt(pos.take_profit) : '—'}</span>
+                  {tpDist != null && (
+                    <span className="text-muted">({tpDist.toFixed(1)}% away)</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -130,13 +256,26 @@ function TradeStat({ label, value, color }) {
 
 export default function Trades() {
   const { trades, loading } = useTrades();
-  const [wallet, setWallet] = useState(null);
+  const [wallet,    setWallet]    = useState(null);
+  const [positions, setPositions] = useState([]);
 
+  /* poll wallet + positions every 10 s for live P&L */
   useEffect(() => {
-    getPortfolio().then(setWallet).catch(() => {});
-    const id = setInterval(() => getPortfolio().then(setWallet).catch(() => {}), 15_000);
+    function refresh() {
+      getPortfolio().then(setWallet).catch(() => {});
+      getPortfolioPositions().then(setPositions).catch(() => {});
+    }
+    refresh();
+    const id = setInterval(refresh, 10_000);
     return () => clearInterval(id);
   }, []);
+
+  /* build trade_id → position map for fast lookup */
+  const positionByTradeId = useMemo(() => {
+    const m = {};
+    positions.forEach((p) => { if (p.trade_id) m[p.trade_id] = p; });
+    return m;
+  }, [positions]);
 
   const [search,    setSearch]    = useState('');
   const [direction, setDirection] = useState('All');
@@ -157,7 +296,6 @@ export default function Trades() {
   const safePage   = Math.min(page, totalPages);
   const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  /* ── secondary stats ── */
   const closed     = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'CLOSED');
   const wins       = closed.filter((t) => (t.pnl ?? 0) > 0);
   const winRate    = closed.length ? (wins.length / closed.length) * 100 : 0;
@@ -171,6 +309,9 @@ export default function Trades() {
 
       {/* ── Investment summary ── */}
       <InvestmentSummary wallet={wallet} trades={trades} />
+
+      {/* ── Open positions (live) ── */}
+      <OpenPositionsSection positions={positions} />
 
       {/* ── Secondary stats row ── */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
@@ -252,7 +393,7 @@ export default function Trades() {
               <tr className="border-b border-border">
                 {[
                   'Date', 'Symbol', 'Direction',
-                  'Invested', 'Entry Price', 'Exit Price',
+                  'Invested', 'Entry', 'Current / Exit',
                   'Current Value', 'P&L', 'P&L %', 'Status',
                 ].map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-muted text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
@@ -270,23 +411,35 @@ export default function Trades() {
                 </tr>
               ) : (
                 pageRows.map((t, i) => {
-                  const pnl        = t.pnl ?? 0;
-                  const pnlPct     = t.pnl_percent ?? t.pnl_pct ?? 0;
-                  const invested   = t.size_usd ?? 0;
-                  const isOpen     = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
-                  /* current value = what you'd get back today */
-                  const currentVal = isOpen ? invested : invested + pnl;
+                  const isOpen   = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
+                  const pos      = isOpen ? positionByTradeId[t.id] : null;
+
+                  /* P&L: use live unrealised for open, realised pnl for closed */
+                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
+                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
+                  const invested = t.size_usd ?? 0;
+                  const curPrice = isOpen ? (pos?.current_price ?? null) : (t.exit_price ?? null);
+                  const curVal   = invested + pnl;
+                  const isGain   = pnl >= 0;
 
                   return (
-                    <tr key={t.id ?? i} className="border-b border-border/50 hover:bg-surface/50 transition-colors">
+                    <tr
+                      key={t.id ?? i}
+                      className={`border-b border-border/50 hover:bg-surface/50 transition-colors ${
+                        isOpen ? 'bg-profit/[0.03]' : ''
+                      }`}
+                    >
                       {/* Date */}
                       <td className="px-4 py-3 text-muted text-xs tabular-nums whitespace-nowrap">
                         {fmtDate(t.closed_at ?? t.opened_at)}
                       </td>
 
                       {/* Symbol */}
-                      <td className="px-4 py-3 text-slate-200 font-medium">
-                        {t.symbol ?? t.ticker ?? '—'}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          {isOpen && <Zap size={11} className="text-profit shrink-0" />}
+                          <span className="text-slate-200 font-medium">{t.symbol ?? t.ticker ?? '—'}</span>
+                        </div>
                       </td>
 
                       {/* Direction */}
@@ -297,51 +450,56 @@ export default function Trades() {
                       {/* Invested */}
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-0.5">
-                          <span className="text-slate-200 tabular-nums font-medium text-sm">{fmt(invested)}</span>
+                          <span className="text-slate-200 tabular-nums font-medium">{fmt(invested)}</span>
                           {t.size_units != null && (
                             <span className="text-muted text-[10px]">{t.size_units} units</span>
                           )}
                         </div>
                       </td>
 
-                      {/* Entry price */}
+                      {/* Entry */}
                       <td className="px-4 py-3 text-slate-300 tabular-nums">{fmt(t.entry_price)}</td>
 
-                      {/* Exit price */}
-                      <td className="px-4 py-3 text-slate-300 tabular-nums">
-                        {t.exit_price ? fmt(t.exit_price) : <span className="text-muted">open</span>}
+                      {/* Current / Exit price */}
+                      <td className="px-4 py-3">
+                        {isOpen && pos ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`tabular-nums font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
+                              {fmt(pos.current_price)}
+                            </span>
+                            <span className={`text-[10px] ${isGain ? 'text-profit/70' : 'text-loss/70'}`}>
+                              {isGain ? '▲' : '▼'} {fmt(Math.abs(pos.current_price - t.entry_price))}
+                            </span>
+                          </div>
+                        ) : curPrice ? (
+                          <span className="text-slate-300 tabular-nums">{fmt(curPrice)}</span>
+                        ) : (
+                          <span className="text-muted text-xs">—</span>
+                        )}
                       </td>
 
                       {/* Current value */}
                       <td className="px-4 py-3">
-                        {isOpen ? (
-                          <span className="text-accent tabular-nums font-medium text-sm">
-                            {fmt(invested)}<span className="text-muted text-[10px] ml-1">+live</span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`tabular-nums font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
+                            {fmt(curVal)}
                           </span>
-                        ) : (
-                          <div className="flex flex-col gap-0.5">
-                            <span className={`tabular-nums font-semibold text-sm ${currentVal >= invested ? 'text-profit' : 'text-loss'}`}>
-                              {fmt(currentVal)}
-                            </span>
-                            <span className="text-muted text-[10px]">
-                              {currentVal >= invested ? '▲' : '▼'} {fmt(Math.abs(currentVal - invested))}
-                            </span>
-                          </div>
-                        )}
+                          <span className="text-muted text-[10px]">
+                            {isGain ? '▲' : '▼'} {fmt(Math.abs(pnl))}
+                          </span>
+                        </div>
                       </td>
 
                       {/* P&L */}
                       <td className="px-4 py-3">
-                        <PnLCell value={pnl} />
+                        <span className={`tabular-nums font-semibold text-sm ${isGain ? 'text-profit' : 'text-loss'}`}>
+                          {isGain ? '+' : ''}{fmt(pnl)}
+                        </span>
                       </td>
 
                       {/* P&L % */}
                       <td className="px-4 py-3">
-                        {isOpen ? (
-                          <span className="text-muted text-xs">—</span>
-                        ) : (
-                          <PnLPct value={pnlPct} />
-                        )}
+                        <PnLPct value={pnlPct} />
                       </td>
 
                       {/* Status */}
@@ -349,10 +507,10 @@ export default function Trades() {
                         <span className={[
                           'text-xs font-medium px-2 py-0.5 rounded',
                           isOpen
-                            ? 'bg-accent/20 text-accent'
+                            ? 'bg-profit/20 text-profit animate-pulse'
                             : 'bg-surface text-muted',
                         ].join(' ')}>
-                          {t.status ?? 'CLOSED'}
+                          {isOpen ? 'LIVE' : (t.status ?? 'CLOSED')}
                         </span>
                       </td>
                     </tr>
@@ -377,9 +535,9 @@ export default function Trades() {
               >
                 <ChevronLeft size={16} />
               </button>
-              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+              {Array.from({ length: Math.min(5, totalPages) }, (_, ix) => {
                 const start = Math.max(1, Math.min(safePage - 2, totalPages - 4));
-                const n = start + i;
+                const n = start + ix;
                 return (
                   <button
                     key={n}
