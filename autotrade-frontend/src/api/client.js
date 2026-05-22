@@ -76,7 +76,11 @@ export const getZerodhaWatchlistAnalysis = (symbols) =>
         params: { symbols: symbols.join(',') },
         timeout: 60_000,
     });
-export const getZerodhaDeepAnalysis = (symbol) =>
+export const getZerodhaDeepAnalysis  = (symbol) =>
     api.get(`/api/v1/zerodha/deep-analysis/${symbol}`, { timeout: 30_000 });
+export const getZerodhaAutoScan      = (minScore = 25) =>
+    api.get('/api/v1/zerodha/auto-scan', { params: { min_score: minScore }, timeout: 120_000 });
+export const getZerodhaMfAnalysis    = () =>
+    api.get('/api/v1/zerodha/mf-analysis', { timeout: 30_000 });
 
 export default api;
