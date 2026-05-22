@@ -17,11 +17,17 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import httpx
+
 from crawler.zerodha_client import get_kite_client
 from db.models import KiteInstrument
 from utils.logger import logger
 
 _IST = ZoneInfo("Asia/Kolkata")
+
+# Set to False after the first 403 — skips Kite historical for the rest of the session
+# (Zerodha historical API requires a paid Kite Connect subscription)
+_kite_historical_available: bool = True
 
 # ── Static token map (last-resort fallback if DB refresh hasn't run yet) ──────
 
@@ -269,9 +275,14 @@ async def get_kite_historical(
         logger.warning(f"[zerodha_market] No instrument token for {symbol}")
         return []
 
+    global _kite_historical_available
+
     kite = get_kite_client()
     if not kite.access_token:
         return []
+
+    if not _kite_historical_available:
+        return []  # plan doesn't include historical API — use yfinance fallback
 
     kite_interval = _to_kite_interval(interval)
     # Map interval back to our timeframe string for the candles table
@@ -280,6 +291,17 @@ async def get_kite_historical(
 
     try:
         raw = await kite.get_historical_data(token, from_date, to_date, kite_interval)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            _kite_historical_available = False
+            logger.info(
+                "[zerodha_market] Kite historical API returned 403 — "
+                "historical data requires a paid Kite Connect subscription. "
+                "Falling back to yfinance for all historical requests this session."
+            )
+        else:
+            logger.warning(f"[zerodha_market] Historical fetch failed for {symbol}: {exc}")
+        return []
     except Exception as exc:
         logger.warning(f"[zerodha_market] Historical fetch failed for {symbol}: {exc}")
         return []

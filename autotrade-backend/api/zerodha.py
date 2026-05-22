@@ -39,6 +39,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.zerodha_client import clear_kite_token, get_kite_client, update_kite_token
+import crawler.zerodha_market as _zm
 from crawler.zerodha_market import get_kite_historical, get_live_prices, get_market_depth
 from crawler.zerodha_websocket import LIVE_PRICES
 from db.database import get_db
@@ -227,17 +228,18 @@ async def get_status():
         )
         exp_ist = _token_expiry_ist()
         return {
-            "connected":            True,
-            "api_key_configured":   True,
-            "access_token_present": True,
-            "user_name":            profile.get("user_name"),
-            "user_id":              profile.get("user_id"),
-            "email":                profile.get("email"),
-            "available_margins_inr": available_cash,
-            "token_expires_at":     "6:00 AM tomorrow",
-            "expires_datetime_ist": exp_ist.strftime("%Y-%m-%d %H:%M IST"),
-            "last_connected":       datetime.datetime.utcnow().isoformat(),
-            "error":                None,
+            "connected":                True,
+            "api_key_configured":       True,
+            "access_token_present":     True,
+            "user_name":                profile.get("user_name"),
+            "user_id":                  profile.get("user_id"),
+            "email":                    profile.get("email"),
+            "available_margins_inr":    available_cash,
+            "token_expires_at":         "6:00 AM tomorrow",
+            "expires_datetime_ist":     exp_ist.strftime("%Y-%m-%d %H:%M IST"),
+            "last_connected":           datetime.datetime.utcnow().isoformat(),
+            "kite_historical_available": _zm._kite_historical_available,
+            "error":                    None,
         }
     except Exception as exc:
         return {
@@ -813,8 +815,9 @@ async def auto_scan(min_score: float = Query(default=25.0, description="Minimum 
         "buy_count":        len(signals["BUY"]),
         "neutral_count":    len(signals["NEUTRAL"]),
         "sell_count":       len(signals["SELL"]) + len(signals["STRONG_SELL"]),
-        "source":           "kite" if has_token else "yfinance",
-        "scanned_at":       datetime.datetime.utcnow().isoformat() + "Z",
+        "source":                    "kite_live+yfinance_history" if (has_token and not _zm._kite_historical_available) else ("kite" if has_token else "yfinance"),
+        "kite_historical_available": _zm._kite_historical_available,
+        "scanned_at":                datetime.datetime.utcnow().isoformat() + "Z",
     }
 
 
