@@ -275,7 +275,7 @@ def calculate_vwap(df: pd.DataFrame) -> dict:
     if len(ts_ist) >= 2:
         median_min = ts_ist.diff().dropna().median().total_seconds() / 60
         if median_min > 30:
-            logger.warning(
+            logger.debug(
                 f"calculate_vwap: bar interval ~{median_min:.0f} min — "
                 "VWAP is not meaningful on daily/weekly data; score set to 0"
             )
