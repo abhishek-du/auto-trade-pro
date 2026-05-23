@@ -65,6 +65,19 @@ async def lifespan(app: FastAPI):
 
     _bg_task = _asyncio.create_task(_live_price_loop())
 
+    # Warm up INFO_CACHE (PE, market cap, beta…) in the background so first
+    # watchlist page load has fundamental data without waiting 24 h.
+    async def _warmup_info_cache():
+        await _asyncio.sleep(10)  # let the price loop do its first fetch first
+        try:
+            from crawler.live_prices import refresh_info_cache
+            nse = settings.nse_symbols + settings.nse_mid_symbols
+            await refresh_info_cache(nse)
+        except Exception as exc:
+            logger.warning(f"[info_cache] Warmup failed: {exc}")
+
+    _asyncio.create_task(_warmup_info_cache())
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────

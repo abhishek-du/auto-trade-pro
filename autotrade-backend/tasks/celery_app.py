@@ -143,4 +143,10 @@ celery_app.conf.beat_schedule = {
         "schedule": 15,
         "options":  {"countdown": 3},
     },
+
+    # Daily 02:30 UTC = 08:00 IST: refresh PE/market-cap/beta fundamentals
+    "refresh-stock-info-daily": {
+        "task":     "tasks.refresh_stock_info_cache",
+        "schedule": crontab(hour=2, minute=30),
+    },
 }

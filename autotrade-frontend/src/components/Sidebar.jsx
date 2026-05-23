@@ -3,9 +3,9 @@ import { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
-  Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio,
+  Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
 } from 'lucide-react';
-import { getZerodhaStatus, getIndiaMarketStatus } from '../api/client';
+import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
 const MAIN_NAV = [
   { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
@@ -18,10 +18,11 @@ const MAIN_NAV = [
 ];
 
 const INDIA_NAV = [
-  { to: '/live-market',     label: 'Live Market',    Icon: Radio,     liveMarket: true },
+  { to: '/live-market',     label: 'Live Market',    Icon: Radio,       liveMarket: true  },
+  { to: '/watchlist',       label: 'Watchlist',      Icon: BookMarked,  watchlist: true   },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
-  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,       zerodha: true },
+  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
   { to: '/portfolio',       label: 'My Portfolio',   Icon: Briefcase  },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
@@ -71,6 +72,28 @@ function MarketDot() {
   const isOpen = status === 'OPEN';
   return (
     <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${isOpen ? 'bg-profit animate-pulse' : 'bg-loss'}`} />
+  );
+}
+
+function WatchlistBadge() {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      getWatchlist()
+        .then(data => {
+          const n = (data.stocks || []).filter(s => s.signal === 'BUY').length;
+          setCount(n > 0 ? n : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 60_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!count) return null;
+  return (
+    <span className="ml-auto text-[10px] font-bold bg-profit/20 text-profit px-1.5 py-0.5 rounded-full shrink-0">
+      {count}
+    </span>
   );
 }
 
@@ -126,9 +149,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket }) => {
-          if (isZerodha || isLiveMarket) {
-            const Dot = isZerodha ? ZerodhaDot : MarketDot;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist }) => {
+          if (isZerodha || isLiveMarket || isWatchlist) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : WatchlistBadge;
             return (
               <NavLink
                 key={to}
