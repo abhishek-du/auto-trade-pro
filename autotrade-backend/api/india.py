@@ -1236,3 +1236,212 @@ async def force_refresh_live_prices():
     from crawler.live_prices import refresh_all_prices
     updated = await refresh_all_prices()
     return {"refreshed": len(updated), "prices": updated}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WATCHLIST — enriched NSE stock data
+# IMPORTANT: static sub-paths (/alerts, /sector/…) MUST be registered
+# before the /{symbol:path} catch-all route.
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _compute_technical_summary(symbol: str, session: AsyncSession) -> dict:
+    """Run indicator engine on stored 1h candles and return a compact summary."""
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+    rows = (await session.execute(
+        select(Candle)
+        .where(Candle.symbol == symbol, Candle.timeframe == "1h", Candle.timestamp >= cutoff)
+        .order_by(Candle.timestamp)
+        .limit(200)
+    )).scalars().all()
+
+    _neutral = {
+        "overall": "NEUTRAL", "rsi": None, "rsi_signal": "NEUTRAL",
+        "macd_signal": "NONE", "supertrend": "NEUTRAL",
+        "vwap_position": "NEAR_VWAP", "ema_trend": "NEUTRAL",
+    }
+
+    if len(rows) < 30:
+        return _neutral
+
+    try:
+        import math as _math
+        import pandas as pd
+        from engine.indicators import compute_indicators
+
+        df = pd.DataFrame([{
+            "open": float(r.open), "high": float(r.high), "low": float(r.low),
+            "close": float(r.close), "volume": float(r.volume),
+            "timestamp": r.timestamp,
+        } for r in rows])
+
+        ind = compute_indicators(df)
+
+        bullish = sum([
+            ind.rsi_signal == "OVERSOLD",
+            ind.macd_cross == "BULLISH_CROSS",
+            ind.supertrend_direction == "BULLISH",
+            ind.vwap_position == "ABOVE_VWAP",
+        ])
+        bearish = sum([
+            ind.rsi_signal == "OVERBOUGHT",
+            ind.macd_cross == "BEARISH_CROSS",
+            ind.supertrend_direction == "BEARISH",
+            ind.vwap_position == "BELOW_VWAP",
+        ])
+
+        overall = "BULLISH" if bullish >= 3 else "BEARISH" if bearish >= 3 else "NEUTRAL"
+        return {
+            "rsi":          None if _math.isnan(ind.rsi) else round(ind.rsi, 1),
+            "rsi_signal":   ind.rsi_signal,
+            "macd_signal":  ind.macd_cross,
+            "supertrend":   ind.supertrend_direction,
+            "vwap_position": ind.vwap_position,
+            "ema_trend":    ind.ema_trend,
+            "overall":      overall,
+        }
+    except Exception as exc:
+        logger.debug(f"[watchlist] technical summary failed for {symbol}: {exc}")
+        return _neutral
+
+
+@router.get("/watchlist", summary="Full NSE watchlist with enriched data")
+async def get_watchlist():
+    """Returns all stock-type symbols from PRICE_CACHE with fundamental enrichment."""
+    from crawler.live_prices import get_all_cached_prices, get_market_summary
+
+    all_prices = get_all_cached_prices()
+    stocks = [v for v in all_prices.values() if v.get("type") == "stock"]
+
+    summary   = get_market_summary()
+    advances  = sum(1 for s in stocks if (s.get("change") or 0) > 0)
+    declines  = sum(1 for s in stocks if (s.get("change") or 0) < 0)
+
+    return {
+        "stocks":          stocks,
+        "last_refreshed":  summary.get("last_refreshed"),
+        "market_status":   summary.get("market_status"),
+        "total_advances":  advances,
+        "total_declines":  declines,
+    }
+
+
+@router.get("/watchlist/alerts", summary="Watchlist alert conditions")
+async def get_watchlist_alerts():
+    """Returns stocks grouped by alert condition: near 52W high/low, high volume, strong signals."""
+    from crawler.live_prices import get_all_cached_prices
+
+    stocks = [v for v in get_all_cached_prices().values() if v.get("type") == "stock"]
+
+    def _near_high(s):
+        v = s.get("from_52w_high")
+        return v is not None and v <= 2.0
+
+    def _near_low(s):
+        v = s.get("from_52w_low")
+        return v is not None and v <= 2.0
+
+    def _high_vol(s):
+        v = s.get("volume_ratio")
+        return v is not None and v > 2.0
+
+    def _strong_sig(s):
+        return s.get("signal") in ("BUY", "SELL") and (s.get("signal_confidence") or 0) > 65
+
+    def _oversold(s):
+        v = s.get("from_52w_high")
+        return v is not None and v >= 20.0
+
+    return {
+        "near_52w_high":  [s for s in stocks if _near_high(s)],
+        "near_52w_low":   [s for s in stocks if _near_low(s)],
+        "high_volume":    [s for s in stocks if _high_vol(s)],
+        "strong_signals": [s for s in stocks if _strong_sig(s)],
+        "overbought":     [s for s in stocks if _near_high(s) and (s.get("change_pct") or 0) > 2],
+        "oversold":       [s for s in stocks if _oversold(s)],
+    }
+
+
+@router.get("/watchlist/sector/{sector_name}", summary="Watchlist filtered by sector")
+async def get_watchlist_sector(sector_name: str):
+    """Returns watchlist stocks belonging to the named sector (case-insensitive)."""
+    from crawler.live_prices import get_all_cached_prices
+
+    sector_upper = sector_name.upper()
+    stocks = [
+        v for v in get_all_cached_prices().values()
+        if v.get("type") == "stock"
+        and (v.get("sector") or "").upper() == sector_upper
+    ]
+    return {"sector": sector_name, "stocks": stocks, "count": len(stocks)}
+
+
+@router.post("/watchlist/refresh", summary="Force refresh prices + signal enrichment")
+async def refresh_watchlist(db: AsyncSession = Depends(get_db)):
+    """Refreshes PRICE_CACHE and re-injects latest signal data. Returns timing stats."""
+    import time as _t
+    from crawler.live_prices import enrich_cache_with_signals, refresh_all_prices
+
+    t0      = _t.monotonic()
+    updated = await refresh_all_prices()
+    await enrich_cache_with_signals(db)
+    duration_ms = int((_t.monotonic() - t0) * 1000)
+
+    stocks = [v for v in updated.values() if v.get("type") == "stock"]
+    return {"refreshed_count": len(stocks), "duration_ms": duration_ms}
+
+
+@router.get("/watchlist/{symbol:path}", summary="Single stock deep data for detail panel")
+async def get_watchlist_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Returns enriched data + technical summary + recent signals/news for one stock."""
+    from crawler.live_prices import get_cached_price
+
+    sym = symbol.upper()
+    if not sym.endswith(".NS"):
+        sym = sym + ".NS"
+
+    cached = get_cached_price(sym)
+    if not cached:
+        raise HTTPException(status_code=404, detail=f"Symbol {sym!r} not found in cache")
+
+    # ── Recent signals ────────────────────────────────────────────────────────
+    recent_sigs = (await db.execute(
+        select(Signal)
+        .where(Signal.symbol == sym)
+        .order_by(desc(Signal.created_at))
+        .limit(5)
+    )).scalars().all()
+
+    # ── Recent news mentioning this ticker ────────────────────────────────────
+    from db.models import NewsItem
+    short = sym.replace(".NS", "")
+    recent_news_rows = (await db.execute(
+        select(NewsItem)
+        .where(NewsItem.headline.ilike(f"%{short}%"))
+        .order_by(desc(NewsItem.published_at))
+        .limit(3)
+    )).scalars().all()
+
+    recent_news = [
+        {
+            "headline":     n.headline,
+            "source":       n.source,
+            "sentiment":    n.sentiment,
+            "score":        n.score,
+            "published_at": n.published_at,
+        }
+        for n in recent_news_rows
+    ]
+
+    # ── Technical summary ─────────────────────────────────────────────────────
+    tech = await _compute_technical_summary(sym, db)
+
+    # ── AI analysis from most recent signal ───────────────────────────────────
+    ai_analysis = recent_sigs[0].indicators_data if recent_sigs else None
+
+    return {
+        **cached,
+        "recent_signals":    [_signal_out(s) for s in recent_sigs],
+        "recent_news":       recent_news,
+        "technical_summary": tech,
+        "ai_analysis":       ai_analysis,
+    }

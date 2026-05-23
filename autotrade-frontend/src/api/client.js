@@ -91,4 +91,11 @@ export const getIndices        = ()       => api.get('/api/v1/india/indices');
 export const getTopMovers      = ()       => api.get('/api/v1/india/top-movers');
 export const refreshLivePrices = ()       => api.post('/api/v1/india/live-prices/refresh');
 
+// ── NSE Watchlist ─────────────────────────────────────────────────────────────
+export const getWatchlist        = ()       => api.get('/api/v1/india/watchlist');
+export const getWatchlistAlerts  = ()       => api.get('/api/v1/india/watchlist/alerts');
+export const getWatchlistSector  = (sector) => api.get(`/api/v1/india/watchlist/sector/${sector}`);
+export const getWatchlistSymbol  = (symbol) => api.get(`/api/v1/india/watchlist/${symbol}`);
+export const refreshWatchlist    = ()       => api.post('/api/v1/india/watchlist/refresh');
+
 export default api;

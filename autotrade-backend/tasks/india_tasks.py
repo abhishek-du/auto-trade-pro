@@ -416,3 +416,20 @@ def refresh_live_prices_task():
         await refresh_all_prices()
 
     _run_async(_run())
+
+
+# ── 12. Stock info cache refresh — daily 8 AM IST ────────────────────────────
+
+@celery_app.task(name="tasks.refresh_stock_info_cache")
+def refresh_stock_info_cache():
+    """Refreshes INFO_CACHE (PE, market cap, beta…) for all NSE stocks once daily.
+    Runs at 8 AM IST = 2:30 AM UTC.  Separate from the 15-second price refresh.
+    """
+    async def _run():
+        from crawler.live_prices import refresh_info_cache
+        from utils.config import settings
+        await refresh_info_cache(settings.nse_symbols + settings.nse_mid_symbols)
+
+    logger.info("[stock_info_cache] Starting daily refresh")
+    _run_async(_run())
+    logger.info("[stock_info_cache] Done")

@@ -17,6 +17,7 @@ import Backtest          from './pages/Backtest';
 import Portfolio         from './pages/Portfolio';
 import Zerodha          from './pages/Zerodha';
 import LiveMarket       from './pages/LiveMarket';
+import Watchlist        from './pages/Watchlist';
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
               <Route path="/portfolio"    element={<Portfolio />}         />
               <Route path="/zerodha"      element={<Zerodha />}           />
               <Route path="/live-market"  element={<LiveMarket />}        />
+              <Route path="/watchlist"   element={<Watchlist />}         />
             </Routes>
           </main>
         </div>
