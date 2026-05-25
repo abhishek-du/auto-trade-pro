@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { ChevronDown, Plus, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -6,19 +6,39 @@ export default function PortfolioSelector({ portfolios, activeId, onSelect, onCr
   const [open, setOpen]     = useState(false)
   const [adding, setAdding] = useState(false)
   const [name, setName]     = useState('')
+  const [creating, setCreating] = useState(false)
+  const containerRef = useRef(null)
 
   const active = portfolios.find(p => p.id === activeId)
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!open) return
+    function onOutside(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false)
+        setAdding(false)
+      }
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [open])
+
   async function handleCreate(e) {
     e.preventDefault()
-    if (!name.trim()) return
+    const trimmed = name.trim()
+    if (!trimmed) return
+    setCreating(true)
     try {
-      await onCreate(name.trim())
+      await onCreate(trimmed)
       setName('')
       setAdding(false)
-      toast.success(`Portfolio "${name.trim()}" created`)
-    } catch {
-      toast.error('Failed to create portfolio')
+      setOpen(false)
+      toast.success(`Portfolio "${trimmed}" created`)
+    } catch (err) {
+      toast.error(err.message || 'Failed to create portfolio')
+    } finally {
+      setCreating(false)
     }
   }
 
@@ -35,7 +55,7 @@ export default function PortfolioSelector({ portfolios, activeId, onSelect, onCr
   }
 
   return (
-    <div className="relative">
+    <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen(o => !o)}
         className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-panel text-slate-200 text-sm font-medium hover:border-accent/40 transition-colors"
@@ -79,7 +99,7 @@ export default function PortfolioSelector({ portfolios, activeId, onSelect, onCr
                   placeholder="Portfolio name…"
                   className="flex-1 bg-bg border border-border rounded px-2 py-1 text-xs text-slate-200 outline-none focus:border-accent/50"
                 />
-                <button type="submit" className="px-2 py-1 rounded bg-accent/20 text-accent text-xs font-semibold">Add</button>
+                <button type="submit" disabled={creating || !name.trim()} className="px-2 py-1 rounded bg-accent/20 text-accent text-xs font-semibold disabled:opacity-50">{creating ? '…' : 'Add'}</button>
                 <button type="button" onClick={() => setAdding(false)} className="px-2 py-1 rounded text-muted text-xs">✕</button>
               </form>
             ) : (

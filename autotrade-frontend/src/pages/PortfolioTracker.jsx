@@ -16,7 +16,7 @@ const TABS = [
   { id: 'holdings',     label: 'Holdings',     icon: List       },
   { id: 'allocation',   label: 'Allocation',   icon: PieIcon    },
   { id: 'tax',          label: 'Tax Summary',  icon: Receipt    },
-  { id: 'transactions', label: 'Transactions', icon: BarChart2  },
+  { id: 'transactions', label: 'Trade History', icon: BarChart2  },
 ]
 
 export default function PortfolioTracker() {

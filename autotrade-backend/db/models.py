@@ -682,3 +682,120 @@ class TrackerTransaction(Base):
 
     def __repr__(self) -> str:
         return f"<TrackerTransaction {self.tx_type} {self.symbol} qty={self.quantity} @{self.price:.2f} on {self.trade_date}>"
+
+
+# ── 22. UserMutualFund ────────────────────────────────────────────────────────
+
+class UserMutualFund(Base):
+    """A mutual fund scheme the user has added to their personal tracker."""
+    __tablename__ = "user_mutual_funds"
+
+    id:          Mapped[str]      = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    scheme_code: Mapped[str]      = mapped_column(String(30),  nullable=False, unique=True)
+    scheme_name: Mapped[str]      = mapped_column(String(300), nullable=False)
+    category:    Mapped[str]      = mapped_column(String(80),  nullable=False, default="")
+    added_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    sips: Mapped[list["UserSIP"]] = relationship("UserSIP", back_populates="fund", cascade="all, delete-orphan")
+
+
+# ── 23. UserSIP ───────────────────────────────────────────────────────────────
+
+class UserSIP(Base):
+    """A Systematic Investment Plan entry linked to a user-tracked fund."""
+    __tablename__ = "user_sips"
+
+    id:             Mapped[str]        = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    fund_id:        Mapped[str]        = mapped_column(String(36), ForeignKey("user_mutual_funds.id", ondelete="CASCADE"), nullable=False)
+    scheme_code:    Mapped[str]        = mapped_column(String(30), nullable=False)
+    monthly_amount: Mapped[float]      = mapped_column(Float, nullable=False)
+    start_date:     Mapped[date]       = mapped_column(Date,  nullable=False)
+    status:         Mapped[str]        = mapped_column(String(10), nullable=False, default="active")  # active | paused
+    notes:          Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    fund: Mapped["UserMutualFund"] = relationship("UserMutualFund", back_populates="sips")
+
+
+# ── 24. SIPGoal ───────────────────────────────────────────────────────────────
+
+class SIPGoal(Base):
+    """A financial goal linked to one or more SIP funds."""
+    __tablename__ = "sip_goals"
+
+    id:              Mapped[str]          = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    name:            Mapped[str]          = mapped_column(String(200), nullable=False)
+    goal_type:       Mapped[str]          = mapped_column(String(30),  nullable=False, default="wealth")   # retirement | education | house | vehicle | emergency | travel | wedding | wealth
+    target_amount:   Mapped[float]        = mapped_column(Float,       nullable=False)
+    target_date:     Mapped[date]         = mapped_column(Date,        nullable=False)
+    monthly_sip:     Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    expected_return: Mapped[float]        = mapped_column(Float,       nullable=False, default=12.0)  # % per annum
+    sip_date:        Mapped[int]          = mapped_column(Integer,     nullable=False, default=1)     # day-of-month
+    notes:           Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    is_active:       Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=True)
+    created_at:      Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at:      Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    funds:        Mapped[list["SIPFund"]]        = relationship("SIPFund",        back_populates="goal", cascade="all, delete-orphan")
+    investments:  Mapped[list["SIPInvestment"]]  = relationship("SIPInvestment",  back_populates="goal", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<SIPGoal {self.name!r} target=₹{self.target_amount:,.0f} by {self.target_date}>"
+
+
+# ── 25. SIPFund ───────────────────────────────────────────────────────────────
+
+class SIPFund(Base):
+    """A mutual fund allocation within a SIP Goal."""
+    __tablename__ = "sip_funds"
+    __table_args__ = (
+        Index("ix_sip_funds_goal",   "goal_id"),
+        Index("ix_sip_funds_scheme", "scheme_code"),
+    )
+
+    id:             Mapped[str]        = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    goal_id:        Mapped[str]        = mapped_column(String(36),  ForeignKey("sip_goals.id", ondelete="CASCADE"), nullable=False)
+    scheme_code:    Mapped[str]        = mapped_column(String(30),  nullable=False)
+    scheme_name:    Mapped[str]        = mapped_column(String(300), nullable=False)
+    fund_house:     Mapped[str]        = mapped_column(String(200), nullable=False, default="")
+    category:       Mapped[str]        = mapped_column(String(80),  nullable=False, default="")
+    monthly_amount: Mapped[float]      = mapped_column(Float,       nullable=False)
+    start_date:     Mapped[date]       = mapped_column(Date,        nullable=False)
+    is_active:      Mapped[bool]       = mapped_column(Boolean,     nullable=False, default=True)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    goal:        Mapped["SIPGoal"]             = relationship("SIPGoal", back_populates="funds")
+    investments: Mapped[list["SIPInvestment"]] = relationship("SIPInvestment", back_populates="fund", cascade="all, delete-orphan", foreign_keys="SIPInvestment.fund_id")
+
+    def __repr__(self) -> str:
+        return f"<SIPFund {self.scheme_name[:40]!r} ₹{self.monthly_amount:,.0f}/mo>"
+
+
+# ── 26. SIPInvestment ─────────────────────────────────────────────────────────
+
+class SIPInvestment(Base):
+    """A single SIP installment — records NAV at purchase and tracks current value."""
+    __tablename__ = "sip_investments"
+    __table_args__ = (
+        Index("ix_sip_investments_goal_date",   "goal_id",    "investment_date"),
+        Index("ix_sip_investments_scheme_date", "scheme_code","investment_date"),
+    )
+
+    id:               Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    goal_id:          Mapped[str]          = mapped_column(String(36), ForeignKey("sip_goals.id",  ondelete="CASCADE"), nullable=False)
+    fund_id:          Mapped[str | None]   = mapped_column(String(36), ForeignKey("sip_funds.id",  ondelete="SET NULL"), nullable=True)
+    scheme_code:      Mapped[str]          = mapped_column(String(30), nullable=False)
+    scheme_name:      Mapped[str]          = mapped_column(String(300),nullable=False, default="")
+    investment_date:  Mapped[date]         = mapped_column(Date,       nullable=False)
+    amount:           Mapped[float]        = mapped_column(Float,      nullable=False)
+    nav_at_purchase:  Mapped[float]        = mapped_column(Float,      nullable=False, default=0.0)
+    units_purchased:  Mapped[float]        = mapped_column(Float,      nullable=False, default=0.0)
+    current_nav:      Mapped[float | None] = mapped_column(Float,      nullable=True)
+    current_value:    Mapped[float | None] = mapped_column(Float,      nullable=True)
+    created_at:       Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    goal: Mapped["SIPGoal"]        = relationship("SIPGoal", back_populates="investments")
+    fund: Mapped["SIPFund | None"] = relationship("SIPFund", back_populates="investments", foreign_keys=[fund_id])
+
+    def __repr__(self) -> str:
+        return f"<SIPInvestment {self.scheme_code} ₹{self.amount:,.0f} on {self.investment_date} units={self.units_purchased:.4f}>"

@@ -23,6 +23,7 @@ import MarketBreadth   from './pages/MarketBreadth';
 import SectorHeatmap   from './pages/SectorHeatmap';
 import MarketCalendar    from './pages/MarketCalendar';
 import PortfolioTracker  from './pages/PortfolioTracker';
+import SIPTracker        from './pages/SIPTracker';
 
 export default function App() {
   return (
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="/sector-heatmap" element={<SectorHeatmap />}   />
               <Route path="/calendar"           element={<MarketCalendar />}    />
               <Route path="/portfolio-tracker" element={<PortfolioTracker />}  />
+              <Route path="/sip"             element={<SIPTracker />}         />
             </Routes>
           </main>
         </div>
