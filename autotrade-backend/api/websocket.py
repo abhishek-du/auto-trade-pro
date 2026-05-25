@@ -356,13 +356,18 @@ async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h"):
                 if candle:
                     is_new = last_bar_time is None or candle["time"] > last_bar_time
                     last_bar_time = candle["time"]
-                    await ws.send_json({
-                        "type":      "candle_update",
-                        "symbol":    sym,
-                        "timeframe": timeframe,
-                        "candle":    candle,
-                        "is_new_bar": is_new,
-                    })
+                    try:
+                        await ws.send_json({
+                            "type":      "candle_update",
+                            "symbol":    sym,
+                            "timeframe": timeframe,
+                            "candle":    candle,
+                            "is_new_bar": is_new,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        return  # client disconnected — stop polling
+            except (WebSocketDisconnect, RuntimeError):
+                return  # bubble up disconnects from sleep or init send
             except Exception as exc:
                 logger.debug(f"[ws/candles] tick failed for {sym}: {exc}")
 
