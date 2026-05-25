@@ -1931,3 +1931,183 @@ async def refresh_sectors():
     from crawler.sector_data import refresh_sector_data, get_sector_summary
     await refresh_sector_data()
     return get_sector_summary()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Market Calendar endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ev_dict(ev) -> dict:
+    from engine.calendar_engine import _event_to_dict
+    return _event_to_dict(ev)
+
+
+@router.get("/calendar")
+async def get_calendar(
+    from_date: Optional[str] = None,
+    to_date:   Optional[str] = None,
+    types:     Optional[str] = None,
+    symbol:    Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    from engine.calendar_engine import get_events_for_range, get_events_by_date, _event_to_dict
+    import datetime as _dt
+
+    today = datetime.date.today()
+    fd = datetime.date.fromisoformat(from_date) if from_date else today
+    td = datetime.date.fromisoformat(to_date)   if to_date   else today + datetime.timedelta(days=30)
+    ev_types = [t.strip() for t in types.split(",")] if types else None
+
+    events = await get_events_for_range(db, fd, td, ev_types, symbol)
+    by_date = {k: [_event_to_dict(e) for e in v] for k, v in get_events_by_date(events).items()}
+    return {
+        "events_by_date": by_date,
+        "total_events":   len(events),
+        "date_range":     {"from": str(fd), "to": str(td)},
+    }
+
+
+@router.get("/calendar/upcoming")
+async def get_calendar_upcoming(
+    days:  int = 14,
+    db: AsyncSession = Depends(get_db),
+):
+    from engine.calendar_engine import get_upcoming_events, _event_to_dict
+    import datetime as _dt
+
+    events = await get_upcoming_events(db, days=days)
+    today  = datetime.date.today()
+
+    def _days_away(ev_date_str: str) -> int:
+        return (datetime.date.fromisoformat(ev_date_str) - today).days
+
+    by_type: dict[str, int] = {}
+    for ev in events:
+        by_type[ev.event_type] = by_type.get(ev.event_type, 0) + 1
+
+    next_expiry = next(
+        ({"date": str(e.event_date), "days_away": _days_away(str(e.event_date)), "title": e.title}
+         for e in events if e.event_type == "FNO_EXPIRY"),
+        None
+    )
+    next_rbi = next(
+        ({"date": str(e.event_date), "days_away": _days_away(str(e.event_date)), "title": e.title}
+         for e in events if e.event_type == "RBI_MPC"),
+        None
+    )
+    next_ipo = next(
+        ({"date": str(e.event_date), "days_away": _days_away(str(e.event_date)), "title": e.title}
+         for e in events if e.event_type == "IPO"),
+        None
+    )
+    next_earnings = next(
+        ({"date": str(e.event_date), "days_away": _days_away(str(e.event_date)), "title": e.title}
+         for e in events if e.event_type == "EARNINGS"),
+        None
+    )
+
+    return {
+        "events":        [_event_to_dict(e) for e in events],
+        "by_type":       by_type,
+        "next_expiry":   next_expiry,
+        "next_rbi":      next_rbi,
+        "next_ipo":      next_ipo,
+        "next_earnings": next_earnings,
+    }
+
+
+@router.get("/calendar/today")
+async def get_calendar_today(db: AsyncSession = Depends(get_db)):
+    from engine.calendar_engine import get_events_for_range, _event_to_dict
+    today  = datetime.date.today()
+    events = await get_events_for_range(db, today, today)
+    return {"date": str(today), "events": [_event_to_dict(e) for e in events]}
+
+
+@router.get("/calendar/month/{year}/{month}")
+async def get_calendar_month(
+    year: int,
+    month: int,
+    db: AsyncSession = Depends(get_db),
+):
+    from engine.calendar_engine import get_events_for_range, get_events_by_date, _event_to_dict
+    import calendar as _cal
+    _, last_day = _cal.monthrange(year, month)
+    fd = datetime.date(year, month, 1)
+    td = datetime.date(year, month, last_day)
+    events  = await get_events_for_range(db, fd, td)
+    by_date = {k: [_event_to_dict(e) for e in v] for k, v in get_events_by_date(events).items()}
+    return {
+        "year": year,
+        "month": month,
+        "events_by_date": by_date,
+        "total_events": len(events),
+    }
+
+
+@router.get("/calendar/expiry")
+async def get_calendar_expiry(db: AsyncSession = Depends(get_db)):
+    from engine.calendar_engine import get_events_for_range, _event_to_dict
+    today  = datetime.date.today()
+    ahead  = today + datetime.timedelta(days=60)
+    events = await get_events_for_range(db, today, ahead, ["FNO_EXPIRY"])
+
+    def _pick(exchange: str, monthly: bool | None = None):
+        for e in events:
+            meta = e.event_metadata or {}
+            if exchange == "NSE" and meta.get("exchange", "NSE") == "NSE":
+                if monthly is None or meta.get("is_monthly") == monthly:
+                    return {"date": str(e.event_date), "days_away": (e.event_date - today).days, "title": e.title}
+            if exchange == "BSE" and meta.get("exchange") == "BSE":
+                if monthly is None or meta.get("is_monthly") == monthly:
+                    return {"date": str(e.event_date), "days_away": (e.event_date - today).days, "title": e.title}
+        return None
+
+    return {
+        "next_weekly_nifty":   _pick("NSE", False),
+        "next_monthly_nifty":  _pick("NSE", True),
+        "next_weekly_sensex":  _pick("BSE", False),
+        "next_monthly_sensex": _pick("BSE", True),
+        "upcoming_expiries":   [_event_to_dict(e) for e in events[:8]],
+    }
+
+
+@router.get("/calendar/rbi")
+async def get_calendar_rbi(db: AsyncSession = Depends(get_db)):
+    from engine.calendar_engine import get_events_for_range, _event_to_dict
+    today  = datetime.date.today()
+    ahead  = today + datetime.timedelta(days=365)
+    events = await get_events_for_range(db, today, ahead, ["RBI_MPC"])
+
+    decisions = [e for e in events if "Decision" in e.title]
+    next_mtg  = decisions[0] if decisions else None
+
+    return {
+        "next_meeting":     {
+            "start_date":    str(next_mtg.start_date) if next_mtg else None,
+            "decision_date": str(next_mtg.event_date) if next_mtg else None,
+            "days_away":     (next_mtg.event_date - today).days if next_mtg else None,
+        } if next_mtg else None,
+        "current_repo_rate": 5.25,
+        "all_meetings":      [_event_to_dict(e) for e in events],
+    }
+
+
+@router.get("/calendar/ipos")
+async def get_calendar_ipos(db: AsyncSession = Depends(get_db)):
+    from engine.calendar_engine import get_events_for_range, _event_to_dict
+    today    = datetime.date.today()
+    past_30  = today - datetime.timedelta(days=30)
+    ahead_90 = today + datetime.timedelta(days=90)
+
+    all_ipo  = await get_events_for_range(db, past_30, ahead_90, ["IPO"])
+    upcoming = [_event_to_dict(e) for e in all_ipo if e.event_date >= today]
+    recent   = [_event_to_dict(e) for e in all_ipo if e.event_date < today]
+    return {"upcoming": upcoming, "recently_listed": recent}
+
+
+@router.post("/calendar/seed")
+async def seed_calendar(db: AsyncSession = Depends(get_db)):
+    from engine.calendar_engine import seed_calendar_events
+    result = await seed_calendar_events(db, months_ahead=3)
+    return result
