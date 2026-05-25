@@ -1887,3 +1887,47 @@ async def refresh_breadth():
         "source":             result.get("source", "COMPUTED"),
         "last_updated":       result.get("last_updated"),
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Sector Heatmap endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/sectors")
+async def get_sectors_full():
+    """Return full SECTOR_CACHE dict keyed by sector name."""
+    from crawler.sector_data import get_sector_cache
+    return get_sector_cache()
+
+
+@router.get("/sectors/summary")
+async def get_sectors_summary():
+    """Compact sorted list for heatmap rendering."""
+    from crawler.sector_data import get_sector_summary
+    return get_sector_summary()
+
+
+@router.get("/sectors/rotation")
+async def get_sector_rotation():
+    """Sector rotation signal — outperforming/underperforming vs NIFTY 50."""
+    from crawler.sector_data import get_sector_rotation_signal
+    return get_sector_rotation_signal()
+
+
+@router.get("/sectors/{sector_key}")
+async def get_sector_detail(sector_key: str):
+    """Full data for one sector including all stocks."""
+    from crawler.sector_data import get_sector_cache
+    cache = get_sector_cache()
+    data  = cache.get(sector_key)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Sector '{sector_key}' not found")
+    return data
+
+
+@router.post("/sectors/refresh")
+async def refresh_sectors():
+    """Force immediate sector data refresh."""
+    from crawler.sector_data import refresh_sector_data, get_sector_summary
+    await refresh_sector_data()
+    return get_sector_summary()

@@ -418,7 +418,19 @@ def refresh_live_prices_task():
     _run_async(_run())
 
 
-# ── 12. Market breadth refresh — every 2 minutes ────────────────────────────
+# ── 12. Sector data refresh — every 60 s ─────────────────────────────────────
+
+@celery_app.task(name="tasks.refresh_sector_data")
+def refresh_sector_data_task():
+    """Refresh sector performance data from PRICE_CACHE. Every 60 s."""
+    async def _run():
+        from crawler.sector_data import refresh_sector_data
+        result = await refresh_sector_data()
+        logger.info(f"[sector_data] {len(result)} sectors updated")
+    _run_async(_run())
+
+
+# ── 13. Market breadth refresh — every 2 minutes ────────────────────────────
 
 @celery_app.task(name="tasks.refresh_market_breadth")
 def refresh_market_breadth_task():

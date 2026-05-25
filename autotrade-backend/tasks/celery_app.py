@@ -150,6 +150,13 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=30),
     },
 
+    # Every 60 s: sector performance from PRICE_CACHE
+    "refresh-sector-data-60s": {
+        "task":    "tasks.refresh_sector_data",
+        "schedule": 60,
+        "options": {"countdown": 12},
+    },
+
     # Every 2 minutes: market breadth advances/declines + gainers/losers
     "refresh-market-breadth-2min": {
         "task":    "tasks.refresh_market_breadth",
