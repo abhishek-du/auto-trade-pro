@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon, Activity, LayoutGrid,
+  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -24,6 +24,7 @@ const INDIA_NAV = [
   { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
   { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
   { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
+  { to: '/calendar',       label: 'Market Calendar', Icon: CalendarDays, calendar: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
@@ -151,6 +152,29 @@ function BreadthDot() {
   return <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${cls}`} />;
 }
 
+function CalendarBadge() {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/india/calendar/upcoming?days=7')
+        .then(r => r.json())
+        .then(d => {
+          const n = (d.events || []).length;
+          setCount(n > 0 ? n : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 300_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!count) return null;
+  return (
+    <span className="ml-auto text-[10px] font-bold bg-cyan/20 text-cyan px-1.5 py-0.5 rounded-full shrink-0">
+      {count}
+    </span>
+  );
+}
+
 function ZerodhaDot() {
   const [connected, setConnected] = useState(null);
   useEffect(() => {
@@ -203,9 +227,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : SectorStrip;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : CalendarBadge;
             return (
               <NavLink
                 key={to}

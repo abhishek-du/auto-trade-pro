@@ -163,4 +163,10 @@ celery_app.conf.beat_schedule = {
         "schedule": 120,
         "options": {"countdown": 8},
     },
+
+    # Daily 1:30 AM UTC = 7:00 AM IST: seed market calendar (expiries, RBI, IPOs, earnings)
+    "seed-calendar-daily": {
+        "task":     "tasks.seed_calendar_events",
+        "schedule": crontab(hour=1, minute=30),
+    },
 }

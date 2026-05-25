@@ -1,3 +1,4 @@
+import uuid
 from datetime import date, datetime
 from enum import Enum as PyEnum
 
@@ -561,4 +562,39 @@ class KiteInstrument(Base):
         return (
             f"<KiteInstrument {self.exchange}:{self.tradingsymbol} "
             f"token={self.instrument_token} type={self.instrument_type}>"
+        )
+
+
+# ── 18. MarketEvent ───────────────────────────────────────────────────────────
+
+class MarketEvent(Base):
+    """Indian market calendar event — IPO, earnings, RBI MPC, F&O expiry, holidays."""
+    __tablename__ = "market_events"
+    __table_args__ = (
+        Index("ix_market_events_date",        "event_date"),
+        Index("ix_market_events_type_date",   "event_type", "event_date"),
+        Index("ix_market_events_symbol_date", "symbol",     "event_date"),
+    )
+
+    id:           Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    event_type:   Mapped[str]          = mapped_column(String(30),  nullable=False, index=True)
+    title:        Mapped[str]          = mapped_column(String(200), nullable=False)
+    symbol:       Mapped[str | None]   = mapped_column(String(30),  nullable=True,  index=True)
+    company_name: Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    event_date:   Mapped[date]         = mapped_column(Date,        nullable=False)
+    start_date:   Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    end_date:     Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    time_ist:     Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    description:  Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    importance:   Mapped[str]          = mapped_column(String(10),  nullable=False, default="MEDIUM")
+    source:       Mapped[str]          = mapped_column(String(30),  nullable=False, default="HARDCODED")
+    event_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+    is_confirmed: Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=True)
+    created_at:   Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at:   Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<MarketEvent {self.event_type} {self.event_date} "
+            f"{self.title[:40]!r} importance={self.importance}>"
         )

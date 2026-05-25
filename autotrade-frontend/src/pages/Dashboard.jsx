@@ -6,6 +6,7 @@ import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { BreadthCompact }    from '../components/breadth/BreadthWidget';
 import SectorHeatmapWidget from '../components/heatmap/SectorHeatmapWidget';
+import UpcomingEventsWidget from '../components/calendar/UpcomingEventsWidget';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { useSignals }   from '../hooks/useSignals';
 
@@ -93,6 +94,9 @@ export default function Dashboard() {
         <p className="text-slate-200 text-sm font-semibold mb-3">Sector Performance</p>
         <SectorHeatmapWidget compact={true} maxSectors={8} />
       </div>
+
+      {/* Upcoming market events */}
+      <UpcomingEventsWidget maxItems={5} compact={false} />
     </div>
   );
 }

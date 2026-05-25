@@ -446,6 +446,23 @@ def refresh_market_breadth_task():
     _run_async(_run())
 
 
+# ── 14. Calendar seed — daily 7 AM IST ───────────────────────────────────────
+
+@celery_app.task(name="tasks.seed_calendar_events")
+def seed_calendar_events_task():
+    """Seeds market calendar with F&O expiries, RBI, holidays, IPOs, earnings.
+    Runs daily at 7 AM IST = 1:30 AM UTC.
+    """
+    async def _run():
+        from engine.calendar_engine import seed_calendar_events
+        from tasks._db import celery_session
+        async with celery_session() as session:
+            result = await seed_calendar_events(session, months_ahead=3)
+            logger.info(f"[calendar_seed] {result}")
+    logger.info("[calendar_seed] Starting")
+    _run_async(_run())
+
+
 # ── 13. Stock info cache refresh — daily 8 AM IST ────────────────────────────
 
 @celery_app.task(name="tasks.refresh_stock_info_cache")

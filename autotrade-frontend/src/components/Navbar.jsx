@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { AlertTriangle, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { getZerodhaTokenStatus, getZerodhaLoginUrl } from '../api/client';
+import ExpiryCountdown from './calendar/ExpiryCountdown';
 
 const PAGE_TITLES = {
   '/':                 'Dashboard',
@@ -19,6 +20,7 @@ const PAGE_TITLES = {
   '/backtest':         'Backtest',
   '/portfolio':        'My Portfolio',
   '/zerodha':          'Zerodha KiteConnect',
+  '/calendar':         'Market Calendar',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────
@@ -196,6 +198,7 @@ export default function Navbar() {
         </div>
         <div className="flex items-center gap-5">
           <ZerodhaTokenBanner />
+          <ExpiryCountdown />
           <MarketStatusDots />
           <div className="w-px h-8 bg-border" />
           <BalanceTicker portfolio={portfolio} />
