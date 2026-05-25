@@ -25,6 +25,7 @@ import MarketCalendar    from './pages/MarketCalendar';
 import PortfolioTracker  from './pages/PortfolioTracker';
 import SIPTracker        from './pages/SIPTracker';
 import TaxCalculator     from './pages/TaxCalculator';
+import AssetAllocation   from './pages/AssetAllocation';
 
 export default function App() {
   return (
@@ -58,6 +59,7 @@ export default function App() {
               <Route path="/portfolio-tracker" element={<PortfolioTracker />}  />
               <Route path="/sip"             element={<SIPTracker />}         />
               <Route path="/tax"             element={<TaxCalculator />}      />
+              <Route path="/allocation"     element={<AssetAllocation />}    />
             </Routes>
           </main>
         </div>
