@@ -19,6 +19,7 @@ import Zerodha          from './pages/Zerodha';
 import LiveMarket       from './pages/LiveMarket';
 import Watchlist        from './pages/Watchlist';
 import Chart           from './pages/Chart';
+import MarketBreadth   from './pages/MarketBreadth';
 
 export default function App() {
   return (
@@ -44,8 +45,9 @@ export default function App() {
               <Route path="/portfolio"    element={<Portfolio />}         />
               <Route path="/zerodha"      element={<Zerodha />}           />
               <Route path="/live-market"  element={<LiveMarket />}        />
-              <Route path="/watchlist"   element={<Watchlist />}         />
-              <Route path="/chart"      element={<Chart />}             />
+              <Route path="/watchlist"       element={<Watchlist />}         />
+              <Route path="/chart"          element={<Chart />}             />
+              <Route path="/market-breadth" element={<MarketBreadth />}    />
             </Routes>
           </main>
         </div>

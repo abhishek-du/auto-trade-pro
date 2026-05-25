@@ -6,7 +6,7 @@ import MarketStatusBar  from '../components/market/MarketStatusBar';
 import IndexCard        from '../components/market/IndexCard';
 import StockTickerRow   from '../components/market/StockTickerRow';
 import TopMoversPanel   from '../components/market/TopMoversPanel';
-import MarketBreadthBar from '../components/market/MarketBreadthBar';
+import { BreadthWidget } from '../components/breadth/BreadthWidget';
 import SectorHeatmap    from '../components/market/SectorHeatmap';
 import toast            from 'react-hot-toast';
 
@@ -121,11 +121,7 @@ export default function LiveMarket() {
               <p className="text-muted text-xs mt-1">Fear gauge — lower is calmer</p>
             </div>
           )}
-          <MarketBreadthBar
-            advances={summary?.advances  ?? 0}
-            declines={summary?.declines  ?? 0}
-            unchanged={summary?.unchanged ?? 0}
-          />
+          <BreadthWidget compact={false} />
         </div>
         <div className="lg:col-span-3">
           <SectorHeatmap prices={prices} />

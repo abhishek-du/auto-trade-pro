@@ -1782,3 +1782,108 @@ async def get_watchlist_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
         "technical_summary": tech,
         "ai_analysis":       ai_analysis,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Market Breadth endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/breadth")
+async def get_market_breadth():
+    """Return full BREADTH_CACHE — advances/declines, gainers/losers, 52W movers."""
+    from crawler.market_breadth import get_breadth_cache
+    return get_breadth_cache()
+
+
+@router.get("/breadth/summary")
+async def get_breadth_summary():
+    """Compact breadth summary for dashboard widgets."""
+    from crawler.market_breadth import get_breadth_cache
+    data = get_breadth_cache()
+    nse  = data.get("nse", {})
+    bse  = data.get("bse", {})
+    wl   = data.get("watchlist", {})
+    tg   = data.get("top_gainers", [])
+    tl   = data.get("top_losers", [])
+    return {
+        "nse_advances":         nse.get("advances", 0),
+        "nse_declines":         nse.get("declines", 0),
+        "nse_unchanged":        nse.get("unchanged", 0),
+        "nse_ad_ratio":         nse.get("ad_ratio", 1.0),
+        "nse_market_mood":      nse.get("market_mood", "NEUTRAL"),
+        "bse_advances":         bse.get("advances", 0),
+        "bse_declines":         bse.get("declines", 0),
+        "watchlist_advances":   wl.get("advances", 0),
+        "watchlist_declines":   wl.get("declines", 0),
+        "week52_high_count":    len(data.get("week52_high", [])),
+        "week52_low_count":     len(data.get("week52_low", [])),
+        "top_gainer": (
+            {"symbol": tg[0].get("symbol"), "name": tg[0].get("name"), "change_pct": tg[0].get("change_pct")}
+            if tg else None
+        ),
+        "top_loser": (
+            {"symbol": tl[0].get("symbol"), "name": tl[0].get("name"), "change_pct": tl[0].get("change_pct")}
+            if tl else None
+        ),
+        "last_updated": data.get("last_updated"),
+        "source":       data.get("source", "COMPUTED"),
+    }
+
+
+@router.get("/breadth/gainers")
+async def get_breadth_gainers(limit: int = Query(default=10, ge=1, le=50)):
+    """Top gainers list."""
+    from crawler.market_breadth import get_breadth_cache
+    data = get_breadth_cache()
+    return data.get("top_gainers", [])[:limit]
+
+
+@router.get("/breadth/losers")
+async def get_breadth_losers(limit: int = Query(default=10, ge=1, le=50)):
+    """Top losers list."""
+    from crawler.market_breadth import get_breadth_cache
+    data = get_breadth_cache()
+    return data.get("top_losers", [])[:limit]
+
+
+@router.get("/breadth/active")
+async def get_breadth_active(limit: int = Query(default=10, ge=1, le=50)):
+    """Most active stocks by volume."""
+    from crawler.market_breadth import get_breadth_cache
+    data = get_breadth_cache()
+    return data.get("most_active", [])[:limit]
+
+
+@router.get("/breadth/52week")
+async def get_breadth_52week():
+    """Stocks at/near 52-week highs and lows."""
+    from crawler.market_breadth import get_breadth_cache
+    data = get_breadth_cache()
+    high = data.get("week52_high", [])
+    low  = data.get("week52_low",  [])
+    return {"high": high, "low": low, "high_count": len(high), "low_count": len(low)}
+
+
+@router.get("/breadth/history")
+async def get_breadth_history():
+    """Intraday breadth timeline (last 50 readings, ~100 minutes)."""
+    from crawler.market_breadth import BREADTH_HISTORY
+    return list(BREADTH_HISTORY)
+
+
+@router.post("/breadth/refresh")
+async def refresh_breadth():
+    """Force immediate breadth data refresh."""
+    from crawler.market_breadth import refresh_breadth_data
+    result = await refresh_breadth_data()
+    nse = result.get("nse", {})
+    wl  = result.get("watchlist", {})
+    return {
+        "nse_advances":       nse.get("advances", 0),
+        "nse_declines":       nse.get("declines", 0),
+        "nse_market_mood":    nse.get("market_mood", "NEUTRAL"),
+        "watchlist_advances": wl.get("advances", 0),
+        "watchlist_declines": wl.get("declines", 0),
+        "source":             result.get("source", "COMPUTED"),
+        "last_updated":       result.get("last_updated"),
+    }

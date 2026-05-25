@@ -418,7 +418,23 @@ def refresh_live_prices_task():
     _run_async(_run())
 
 
-# ── 12. Stock info cache refresh — daily 8 AM IST ────────────────────────────
+# ── 12. Market breadth refresh — every 2 minutes ────────────────────────────
+
+@celery_app.task(name="tasks.refresh_market_breadth")
+def refresh_market_breadth_task():
+    """Refreshes advances/declines, gainers/losers, 52W movers. Every 2 minutes."""
+    async def _run():
+        from crawler.market_breadth import refresh_breadth_data
+        result = await refresh_breadth_data()
+        logger.info(
+            f"[breadth] NSE adv={result.get('nse', {}).get('advances', 0)} "
+            f"dec={result.get('nse', {}).get('declines', 0)} "
+            f"source={result.get('source', '?')}"
+        )
+    _run_async(_run())
+
+
+# ── 13. Stock info cache refresh — daily 8 AM IST ────────────────────────────
 
 @celery_app.task(name="tasks.refresh_stock_info_cache")
 def refresh_stock_info_cache():

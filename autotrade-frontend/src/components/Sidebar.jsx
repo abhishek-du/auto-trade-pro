@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon,
+  CandlestickChart as ChartIcon, Activity,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -22,6 +22,7 @@ const INDIA_NAV = [
   { to: '/live-market',     label: 'Live Market',    Icon: Radio,       liveMarket: true  },
   { to: '/watchlist',       label: 'Watchlist',      Icon: BookMarked,  watchlist: true   },
   { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
+  { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true     },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
@@ -99,6 +100,25 @@ function WatchlistBadge() {
   );
 }
 
+function BreadthDot() {
+  const [mood, setMood] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/india/breadth/summary')
+        .then(r => r.json())
+        .then(d => setMood(d?.nse_market_mood || null))
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 120_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!mood) return null;
+  const cls =
+    mood === 'STRONGLY_BULLISH' || mood === 'BULLISH'   ? 'bg-profit' :
+    mood === 'STRONGLY_BEARISH' || mood === 'BEARISH'   ? 'bg-loss'   : 'bg-slate-500';
+  return <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${cls}`} />;
+}
+
 function ZerodhaDot() {
   const [connected, setConnected] = useState(null);
   useEffect(() => {
@@ -151,9 +171,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist }) => {
-          if (isZerodha || isLiveMarket || isWatchlist) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : WatchlistBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : BreadthDot;
             return (
               <NavLink
                 key={to}

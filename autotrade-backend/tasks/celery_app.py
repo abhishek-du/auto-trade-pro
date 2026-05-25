@@ -149,4 +149,11 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.refresh_stock_info_cache",
         "schedule": crontab(hour=2, minute=30),
     },
+
+    # Every 2 minutes: market breadth advances/declines + gainers/losers
+    "refresh-market-breadth-2min": {
+        "task":    "tasks.refresh_market_breadth",
+        "schedule": 120,
+        "options": {"countdown": 8},
+    },
 }
