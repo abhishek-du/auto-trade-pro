@@ -20,7 +20,8 @@ const PAGE_TITLES = {
   '/backtest':         'Backtest',
   '/portfolio':        'My Portfolio',
   '/zerodha':          'Zerodha KiteConnect',
-  '/calendar':         'Market Calendar',
+  '/calendar':          'Market Calendar',
+  '/portfolio-tracker': 'My Holdings',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────

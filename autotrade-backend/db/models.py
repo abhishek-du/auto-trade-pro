@@ -598,3 +598,87 @@ class MarketEvent(Base):
             f"<MarketEvent {self.event_type} {self.event_date} "
             f"{self.title[:40]!r} importance={self.importance}>"
         )
+
+
+# ── 19. TrackerPortfolio ──────────────────────────────────────────────────────
+
+class TrackerPortfolio(Base):
+    """User-defined personal portfolio for tracking real stock holdings and XIRR."""
+    __tablename__ = "tracker_portfolios"
+
+    id:          Mapped[str]      = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name:        Mapped[str]      = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    currency:    Mapped[str]      = mapped_column(String(5),  nullable=False, default="INR")
+    is_active:   Mapped[bool]     = mapped_column(Boolean,    nullable=False, default=True)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    holdings:     Mapped[list["TrackerHolding"]]     = relationship("TrackerHolding",     back_populates="portfolio", cascade="all, delete-orphan")
+    transactions: Mapped[list["TrackerTransaction"]] = relationship("TrackerTransaction", back_populates="portfolio", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<TrackerPortfolio id={self.id} name={self.name!r}>"
+
+
+# ── 20. TrackerHolding ────────────────────────────────────────────────────────
+
+class TrackerHolding(Base):
+    """Current holding in a personal tracker portfolio — one row per symbol."""
+    __tablename__ = "tracker_holdings"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "symbol", name="uq_tracker_holding_portfolio_symbol"),
+        Index("ix_tracker_holding_portfolio", "portfolio_id"),
+        Index("ix_tracker_holding_symbol",    "symbol"),
+    )
+
+    id:             Mapped[str]        = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    portfolio_id:   Mapped[str]        = mapped_column(String(36),  ForeignKey("tracker_portfolios.id", ondelete="CASCADE"), nullable=False)
+    symbol:         Mapped[str]        = mapped_column(String(30),  nullable=False)
+    company_name:   Mapped[str]        = mapped_column(String(200), nullable=False, default="")
+    sector:         Mapped[str]        = mapped_column(String(80),  nullable=False, default="")
+    quantity:       Mapped[float]      = mapped_column(Float,       nullable=False)
+    avg_buy_price:  Mapped[float]      = mapped_column(Float,       nullable=False)
+    first_buy_date: Mapped[date]       = mapped_column(Date,        nullable=False)
+    notes:          Mapped[str | None] = mapped_column(Text,        nullable=True)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at:     Mapped[datetime]   = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    portfolio:    Mapped["TrackerPortfolio"]         = relationship("TrackerPortfolio", back_populates="holdings")
+    transactions: Mapped[list["TrackerTransaction"]] = relationship("TrackerTransaction", back_populates="holding", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<TrackerHolding {self.symbol} qty={self.quantity} avg={self.avg_buy_price:.2f}>"
+
+
+# ── 21. TrackerTransaction ────────────────────────────────────────────────────
+
+class TrackerTransaction(Base):
+    """Buy/sell transaction record for a personal portfolio holding."""
+    __tablename__ = "tracker_transactions"
+    __table_args__ = (
+        Index("ix_tracker_tx_portfolio", "portfolio_id"),
+        Index("ix_tracker_tx_symbol",    "symbol"),
+        Index("ix_tracker_tx_date",      "trade_date"),
+    )
+
+    id:           Mapped[str]        = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    portfolio_id: Mapped[str]        = mapped_column(String(36),  ForeignKey("tracker_portfolios.id", ondelete="CASCADE"), nullable=False)
+    holding_id:   Mapped[str | None] = mapped_column(String(36),  ForeignKey("tracker_holdings.id",   ondelete="SET NULL"), nullable=True)
+    symbol:       Mapped[str]        = mapped_column(String(30),  nullable=False)
+    company_name: Mapped[str]        = mapped_column(String(200), nullable=False, default="")
+    tx_type:      Mapped[str]        = mapped_column(String(10),  nullable=False)   # BUY | SELL
+    quantity:     Mapped[float]      = mapped_column(Float,       nullable=False)
+    price:        Mapped[float]      = mapped_column(Float,       nullable=False)
+    total_amount: Mapped[float]      = mapped_column(Float,       nullable=False)
+    brokerage:    Mapped[float]      = mapped_column(Float,       nullable=False, default=0.0)
+    stt:          Mapped[float]      = mapped_column(Float,       nullable=False, default=0.0)
+    trade_date:   Mapped[date]       = mapped_column(Date,        nullable=False)
+    notes:        Mapped[str | None] = mapped_column(Text,        nullable=True)
+    created_at:   Mapped[datetime]   = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    portfolio: Mapped["TrackerPortfolio"]      = relationship("TrackerPortfolio", back_populates="transactions")
+    holding:   Mapped["TrackerHolding | None"] = relationship("TrackerHolding",   back_populates="transactions")
+
+    def __repr__(self) -> str:
+        return f"<TrackerTransaction {self.tx_type} {self.symbol} qty={self.quantity} @{self.price:.2f} on {self.trade_date}>"

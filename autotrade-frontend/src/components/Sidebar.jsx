@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays,
+  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -24,7 +24,8 @@ const INDIA_NAV = [
   { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
   { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
   { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
-  { to: '/calendar',       label: 'Market Calendar', Icon: CalendarDays, calendar: true },
+  { to: '/portfolio-tracker', label: 'My Holdings',     Icon: Briefcase,   portfolioTracker: true },
+  { to: '/calendar',          label: 'Market Calendar', Icon: CalendarDays, calendar: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
@@ -175,6 +176,31 @@ function CalendarBadge() {
   );
 }
 
+function PortfolioValueBadge() {
+  const [value, setValue] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/portfolios/')
+        .then(r => r.json())
+        .then(portfolios => {
+          if (!Array.isArray(portfolios) || portfolios.length === 0) { setValue(null); return; }
+          const total = portfolios.reduce((s, p) => s + (p.summary?.current_value || 0), 0);
+          setValue(total > 0 ? total : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 60_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!value) return null;
+  const fmt = value >= 100000 ? '₹' + (value / 100000).toFixed(1) + 'L' : '₹' + Math.round(value / 1000) + 'K';
+  return (
+    <span className="ml-auto text-[10px] font-bold bg-profit/15 text-profit px-1.5 py-0.5 rounded-full shrink-0">
+      {fmt}
+    </span>
+  );
+}
+
 function ZerodhaDot() {
   const [connected, setConnected] = useState(null);
   useEffect(() => {
@@ -227,9 +253,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : CalendarBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : PortfolioValueBadge;
             return (
               <NavLink
                 key={to}
