@@ -4,6 +4,7 @@ import CandlestickChart from '../components/CandlestickChart';
 import OpenPositions  from '../components/OpenPositions';
 import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { BreadthCompact } from '../components/breadth/BreadthWidget';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { useSignals }   from '../hooks/useSignals';
 
@@ -33,6 +34,11 @@ export default function Dashboard() {
           subtitle="Closed profitable trades" trend={winRate - 50} icon={Activity} />
         <MetricCard title="Total Trades" value={totalTrades}
           subtitle="All time paper trades" icon={BarChart2} />
+      </div>
+
+      {/* Breadth strip */}
+      <div className="bg-panel border border-border rounded-xl px-4 py-3">
+        <BreadthCompact />
       </div>
 
       {/* Equity chart + Latest Signals */}
