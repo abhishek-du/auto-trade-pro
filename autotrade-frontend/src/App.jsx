@@ -21,7 +21,8 @@ import Watchlist        from './pages/Watchlist';
 import Chart           from './pages/Chart';
 import MarketBreadth   from './pages/MarketBreadth';
 import SectorHeatmap   from './pages/SectorHeatmap';
-import MarketCalendar  from './pages/MarketCalendar';
+import MarketCalendar    from './pages/MarketCalendar';
+import PortfolioTracker  from './pages/PortfolioTracker';
 
 export default function App() {
   return (
@@ -51,7 +52,8 @@ export default function App() {
               <Route path="/chart"          element={<Chart />}             />
               <Route path="/market-breadth"  element={<MarketBreadth />}   />
               <Route path="/sector-heatmap" element={<SectorHeatmap />}   />
-              <Route path="/calendar"       element={<MarketCalendar />}  />
+              <Route path="/calendar"           element={<MarketCalendar />}    />
+              <Route path="/portfolio-tracker" element={<PortfolioTracker />}  />
             </Routes>
           </main>
         </div>
