@@ -7,6 +7,7 @@ No real money is ever involved at any stage.
 from datetime import date, datetime
 
 from sqlalchemy import and_, delete, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import (
@@ -107,24 +108,21 @@ class VirtualWallet:
                 {"starting_balance": start},
             )
 
-        # Seed today's snapshot row (noop if already exists)
+        # Seed today's snapshot row — DO NOTHING if row already exists.
         today = date.today()
-        exists = (
-            await session.execute(
-                select(PerformanceSnapshot.id).where(PerformanceSnapshot.date == today)
-            )
-        ).scalar_one_or_none()
-
-        if exists is None:
-            session.add(PerformanceSnapshot(
+        await session.execute(
+            pg_insert(PerformanceSnapshot)
+            .values(
                 date=today,
                 balance=wallet.balance,
                 equity=wallet.equity,
                 daily_pnl=0.0,
                 trades_today=0,
                 win_rate_today=0.0,
-            ))
-            await session.flush()
+            )
+            .on_conflict_do_nothing(constraint="uq_perf_date")
+        )
+        await session.flush()
 
         return wallet
 
@@ -308,29 +306,31 @@ class VirtualWallet:
         prev_equity = prev_snap.equity if prev_snap else start
         daily_pnl = wallet.equity - prev_equity
 
-        # Upsert
-        existing = (
-            await session.execute(
-                select(PerformanceSnapshot).where(PerformanceSnapshot.date == today)
-            )
-        ).scalar_one_or_none()
-
-        if existing:
-            existing.balance        = wallet.balance
-            existing.equity         = wallet.equity
-            existing.daily_pnl      = daily_pnl
-            existing.trades_today   = closed_today
-            existing.win_rate_today = win_rate_today
-        else:
-            session.add(PerformanceSnapshot(
+        # Atomic upsert — avoids race condition when multiple workers call
+        # take_daily_snapshot on the same day (two concurrent SELECTs both
+        # return None, then both INSERT → unique-constraint violation).
+        stmt = (
+            pg_insert(PerformanceSnapshot)
+            .values(
                 date=today,
                 balance=wallet.balance,
                 equity=wallet.equity,
                 daily_pnl=daily_pnl,
                 trades_today=closed_today,
                 win_rate_today=win_rate_today,
-            ))
-
+            )
+            .on_conflict_do_update(
+                constraint="uq_perf_date",
+                set_={
+                    "balance":        wallet.balance,
+                    "equity":         wallet.equity,
+                    "daily_pnl":      daily_pnl,
+                    "trades_today":   closed_today,
+                    "win_rate_today": win_rate_today,
+                },
+            )
+        )
+        await session.execute(stmt)
         await session.flush()
 
         sign = "+" if daily_pnl >= 0 else ""
