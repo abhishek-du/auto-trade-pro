@@ -20,6 +20,7 @@ import LiveMarket       from './pages/LiveMarket';
 import Watchlist        from './pages/Watchlist';
 import Chart           from './pages/Chart';
 import MarketBreadth   from './pages/MarketBreadth';
+import SectorHeatmap   from './pages/SectorHeatmap';
 
 export default function App() {
   return (
@@ -47,7 +48,8 @@ export default function App() {
               <Route path="/live-market"  element={<LiveMarket />}        />
               <Route path="/watchlist"       element={<Watchlist />}         />
               <Route path="/chart"          element={<Chart />}             />
-              <Route path="/market-breadth" element={<MarketBreadth />}    />
+              <Route path="/market-breadth"  element={<MarketBreadth />}   />
+              <Route path="/sector-heatmap" element={<SectorHeatmap />}   />
             </Routes>
           </main>
         </div>

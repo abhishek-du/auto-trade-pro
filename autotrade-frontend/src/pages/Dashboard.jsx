@@ -4,7 +4,8 @@ import CandlestickChart from '../components/CandlestickChart';
 import OpenPositions  from '../components/OpenPositions';
 import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { BreadthCompact } from '../components/breadth/BreadthWidget';
+import { BreadthCompact }    from '../components/breadth/BreadthWidget';
+import SectorHeatmapWidget from '../components/heatmap/SectorHeatmapWidget';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { useSignals }   from '../hooks/useSignals';
 
@@ -86,6 +87,12 @@ export default function Dashboard() {
 
       {/* Open Positions */}
       <OpenPositions positions={portfolio?.positions ?? []} />
+
+      {/* Compact sector heatmap */}
+      <div className="bg-panel border border-border rounded-xl p-4">
+        <p className="text-slate-200 text-sm font-semibold mb-3">Sector Performance</p>
+        <SectorHeatmapWidget compact={true} maxSectors={8} />
+      </div>
     </div>
   );
 }

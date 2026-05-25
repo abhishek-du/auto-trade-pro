@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon, Activity,
+  CandlestickChart as ChartIcon, Activity, LayoutGrid,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -22,7 +22,8 @@ const INDIA_NAV = [
   { to: '/live-market',     label: 'Live Market',    Icon: Radio,       liveMarket: true  },
   { to: '/watchlist',       label: 'Watchlist',      Icon: BookMarked,  watchlist: true   },
   { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
-  { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true     },
+  { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
+  { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
@@ -100,6 +101,37 @@ function WatchlistBadge() {
   );
 }
 
+function SectorStrip() {
+  const [sectors, setSectors] = useState([]);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/india/sectors/summary')
+        .then(r => r.json())
+        .then(d => setSectors(Array.isArray(d) ? d.slice(0, 4) : []))
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 60_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!sectors.length) return null;
+  // Inline color lookup (can't import utils in sidebar easily — simple version)
+  const dotColor = (pct) => {
+    if (pct == null) return '#475569';
+    if (pct >= 2)  return '#14532D';
+    if (pct > 0)   return '#15803D';
+    if (pct > -2)  return '#B91C1C';
+    return '#7F1D1D';
+  };
+  return (
+    <div className="ml-auto flex items-center gap-0.5 shrink-0">
+      {sectors.map(s => (
+        <div key={s.sector_key} title={`${s.short}: ${s.avg_change_pct > 0 ? '+' : ''}${s.avg_change_pct?.toFixed(1)}%`}
+          style={{ width: 4, height: 14, background: dotColor(s.avg_change_pct), borderRadius: 2 }} />
+      ))}
+    </div>
+  );
+}
+
 function BreadthDot() {
   const [mood, setMood] = useState(null);
   useEffect(() => {
@@ -171,9 +203,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : BreadthDot;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : SectorStrip;
             return (
               <NavLink
                 key={to}

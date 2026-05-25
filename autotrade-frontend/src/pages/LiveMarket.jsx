@@ -7,7 +7,7 @@ import IndexCard        from '../components/market/IndexCard';
 import StockTickerRow   from '../components/market/StockTickerRow';
 import TopMoversPanel   from '../components/market/TopMoversPanel';
 import { BreadthWidget } from '../components/breadth/BreadthWidget';
-import SectorHeatmap    from '../components/market/SectorHeatmap';
+import SectorHeatmapWidget from '../components/heatmap/SectorHeatmapWidget';
 import toast            from 'react-hot-toast';
 
 const FILTERS = ['All', 'Stocks', 'Commodities', 'Forex'];
@@ -124,7 +124,10 @@ export default function LiveMarket() {
           <BreadthWidget compact={false} />
         </div>
         <div className="lg:col-span-3">
-          <SectorHeatmap prices={prices} />
+          <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+            <p className="text-slate-200 text-sm font-semibold">Sector Heatmap</p>
+            <SectorHeatmapWidget compact={false} maxSectors={10} />
+          </div>
         </div>
       </div>
 
