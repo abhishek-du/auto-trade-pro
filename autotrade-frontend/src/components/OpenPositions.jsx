@@ -1,5 +1,5 @@
-const fmtUSD = (n) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n ?? 0);
+import { formatINR } from '../utils/indianFormat';
+const fmtUSD = (n) => formatINR(n ?? 0);
 
 export default function OpenPositions({ positions = [] }) {
   return (

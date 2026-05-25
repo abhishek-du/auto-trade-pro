@@ -1,4 +1,4 @@
-import { DollarSign, TrendingUp, Activity, BarChart2, Zap } from 'lucide-react';
+import { IndianRupee, TrendingUp, Activity, BarChart2, Zap } from 'lucide-react';
 import MetricCard     from '../components/MetricCard';
 import CandlestickChart from '../components/CandlestickChart';
 import OpenPositions  from '../components/OpenPositions';
@@ -26,7 +26,7 @@ export default function Dashboard() {
       {/* KPI row */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
         <MetricCard title="Portfolio Value" value={balance}
-          subtitle="Current virtual balance" trend={roi} icon={DollarSign} />
+          subtitle="Current virtual balance" trend={roi} icon={IndianRupee} />
         <MetricCard title="Total P&L" value={totalPnl}
           subtitle="Realised + unrealised" trend={roi} icon={TrendingUp} />
         <MetricCard title="Win Rate" value={`${winRate.toFixed(1)}%`}

@@ -1,20 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   Search, ChevronLeft, ChevronRight,
-  TrendingUp, TrendingDown, DollarSign, Activity,
+  TrendingUp, TrendingDown, IndianRupee, Activity,
   Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
   Zap, Target, ShieldAlert, Clock,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
+import { formatINR } from '../utils/indianFormat';
 
 const PAGE_SIZE = 20;
 
-const fmt = (n, dec = 2) =>
-  new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', minimumFractionDigits: dec,
-  }).format(n ?? 0);
+const fmt = (n, dec = 2) => formatINR(n ?? 0, dec);
 
 const fmtDate = (s) => {
   if (!s) return '—';
@@ -56,7 +54,8 @@ function PnLPct({ value }) {
 // ── Investment Summary Banner ─────────────────────────────────────────────────
 
 function InvestmentSummary({ wallet, trades }) {
-  const totalInvested = trades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
+  const openTrades    = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
+  const totalInvested = openTrades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
   const realisedPnl   = wallet?.realised_pnl   ?? 0;
   const unrealisedPnl = wallet?.unrealised_pnl ?? 0;
   const totalPnl      = realisedPnl + unrealisedPnl;
@@ -68,7 +67,7 @@ function InvestmentSummary({ wallet, trades }) {
     {
       label: 'Capital Deployed',
       value: fmt(totalInvested),
-      sub:   `${trades.length} trade${trades.length !== 1 ? 's' : ''}`,
+      sub:   `${openTrades.length} open trade${openTrades.length !== 1 ? 's' : ''}`,
       icon:  Wallet,
       color: 'text-cyan',
       bg:    'bg-cyan/10',
@@ -333,14 +332,14 @@ export default function Trades() {
           </div>
         </div>
         <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <DollarSign size={18} className="text-profit shrink-0" />
+          <IndianRupee size={18} className="text-profit shrink-0" />
           <div>
             <p className="text-muted text-xs">Best Trade</p>
             <p className="text-profit font-bold text-lg">{fmt(bestTrade)}</p>
           </div>
         </div>
         <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <DollarSign size={18} className="text-loss shrink-0" />
+          <IndianRupee size={18} className="text-loss shrink-0" />
           <div>
             <p className="text-muted text-xs">Worst Trade</p>
             <p className="text-loss font-bold text-lg">{fmt(worstTrade)}</p>

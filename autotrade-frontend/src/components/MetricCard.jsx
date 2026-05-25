@@ -1,8 +1,10 @@
 function fmt(value) {
   if (typeof value === 'number') {
-    if (Math.abs(value) >= 1000)
-      return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(value);
-    return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const abs  = Math.abs(value);
+    const sign = value < 0 ? '-' : '';
+    if (abs >= 10_000_000) return sign + '₹' + (abs / 10_000_000).toFixed(2) + ' Cr';
+    if (abs >= 100_000)    return sign + '₹' + (abs / 100_000).toFixed(2) + ' L';
+    return sign + '₹' + abs.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
   return value;
 }
