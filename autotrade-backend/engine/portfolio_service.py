@@ -529,6 +529,7 @@ async def sell_holding(
 # ── Stock search ──────────────────────────────────────────────────────────────
 
 def search_stocks(query: str) -> list[dict]:
+    """Fast dict search for the known ~60 stocks."""
     q = query.lower().strip()
     results = []
     for name, symbol in NSE_STOCK_LOOKUP.items():
@@ -541,6 +542,35 @@ def search_stocks(query: str) -> list[dict]:
                 "sector": NSE_SECTOR_MAP.get(symbol, "Other"),
             })
     return results[:10]
+
+
+def search_stocks_live(query: str) -> list[dict]:
+    """Direct yfinance lookup for any NSE ticker not in the hardcoded dict.
+
+    Tries '{QUERY}.NS' and returns one result if the ticker has a valid price.
+    Blocking — must be called via run_in_executor from async context.
+    """
+    ticker_str = query.strip().upper()
+    if not ticker_str:
+        return []
+    symbol = ticker_str + ".NS"
+    try:
+        t = yf.Ticker(symbol)
+        fast = t.fast_info
+        price = getattr(fast, "last_price", None) or getattr(fast, "regularMarketPrice", None)
+        if not price or float(price) <= 0:
+            return []
+        # Try to get long name / sector from .info (may be slow; tolerate failure)
+        try:
+            info   = t.info
+            name   = info.get("longName") or info.get("shortName") or ticker_str
+            sector = info.get("sector") or "Other"
+        except Exception:
+            name   = ticker_str
+            sector = "Other"
+        return [{"name": name, "symbol": symbol, "ticker": ticker_str, "sector": sector}]
+    except Exception:
+        return []
 
 
 # ── Serializers ───────────────────────────────────────────────────────────────

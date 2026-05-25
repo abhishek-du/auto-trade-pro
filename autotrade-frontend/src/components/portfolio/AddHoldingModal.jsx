@@ -107,7 +107,7 @@ export default function AddHoldingModal({ onClose, onAdd, searchStocks }) {
                 {searching && (
                   <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 border border-muted border-t-transparent rounded-full animate-spin" />
                 )}
-                {results.length > 0 && (
+                {(results.length > 0 || (!searching && query.trim().length >= 2)) && (
                   <div className="absolute top-full mt-1 left-0 right-0 z-10 bg-panel border border-border rounded-lg shadow-xl overflow-hidden">
                     {results.map(r => (
                       <div
@@ -122,6 +122,27 @@ export default function AddHoldingModal({ onClose, onAdd, searchStocks }) {
                         <span className="text-[10px] text-muted bg-white/5 px-2 py-0.5 rounded">{r.sector}</span>
                       </div>
                     ))}
+                    {/* Fallback: let user add any NSE ticker directly */}
+                    {!searching && results.length === 0 && query.trim().length >= 2 && (
+                      <div
+                        onClick={() => {
+                          const t = query.trim().toUpperCase()
+                          setSelected({ name: t, symbol: t + '.NS', ticker: t, sector: 'Other' })
+                          setResults([])
+                        }}
+                        className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-white/5 transition-colors border-t border-border/50"
+                      >
+                        <div className="w-6 h-6 rounded bg-cyan/10 flex items-center justify-center shrink-0">
+                          <span className="text-cyan text-[10px] font-bold">NS</span>
+                        </div>
+                        <div>
+                          <p className="text-slate-200 text-sm font-medium">
+                            Use <span className="text-cyan font-bold">{query.trim().toUpperCase()}.NS</span> directly
+                          </p>
+                          <p className="text-muted text-[10px]">Add as custom NSE symbol</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

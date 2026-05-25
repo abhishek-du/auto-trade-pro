@@ -20,6 +20,7 @@ from engine.portfolio_service import (
     calculate_portfolio_summary,
     calculate_tax_liability,
     search_stocks,
+    search_stocks_live,
     sell_holding,
 )
 
@@ -244,4 +245,11 @@ async def get_tax_summary(portfolio_id: str, db: AsyncSession = Depends(get_db))
 
 @router.get("/search/stocks")
 async def search_stocks_api(q: str = Query(..., min_length=1)):
-    return search_stocks(q)
+    import asyncio
+    results = search_stocks(q)
+    # If the dict produced no matches, try a live yfinance lookup for the raw ticker
+    if not results and len(q.strip()) >= 2:
+        loop = asyncio.get_event_loop()
+        live = await loop.run_in_executor(None, search_stocks_live, q)
+        results.extend(live)
+    return results
