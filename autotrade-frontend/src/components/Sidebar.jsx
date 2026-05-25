@@ -32,7 +32,8 @@ const INDIA_NAV = [
   { to: '/portfolio',       label: 'My Portfolio',   Icon: Briefcase  },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/sip',             label: 'SIP Goals',      Icon: Target     },
-  { to: '/tax',             label: 'Tax Calculator', Icon: Receipt    },
+  { to: '/tax',             label: 'Tax Calculator',    Icon: Receipt,   },
+  { to: '/allocation',      label: 'Asset Allocation',  Icon: IndianRupee, allocation: true },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
   { to: '/backtest',        label: 'Backtest',       Icon: TestTube2  },
 ];
@@ -203,6 +204,36 @@ function PortfolioValueBadge() {
   );
 }
 
+function AllocationDot() {
+  const [dotColor, setDotColor] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/portfolios/')
+        .then(r => r.json())
+        .then(portfolios => {
+          if (!Array.isArray(portfolios) || portfolios.length === 0) { setDotColor(null); return; }
+          const pid = portfolios[0]?.id;
+          if (!pid) return;
+          return fetch(`/api/v1/allocation/analysis?portfolio_id=${pid}&risk_profile=moderate`)
+            .then(r => r.json())
+            .then(d => {
+              const maxDev = (d.rebalancing || [])
+                .filter(r => r.action !== 'HOLD')
+                .reduce((m, r) => Math.max(m, Math.abs(r.deviation_pct)), 0);
+              if (maxDev > 10) setDotColor('#EF4444');
+              else if (maxDev > 5) setDotColor('#F59E0B');
+              else setDotColor('#10B981');
+            });
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 300_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!dotColor) return null;
+  return <span className="ml-auto w-2 h-2 rounded-full shrink-0" style={{ background: dotColor }} />;
+}
+
 function ZerodhaDot() {
   const [connected, setConnected] = useState(null);
   useEffect(() => {
@@ -255,9 +286,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : PortfolioValueBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : PortfolioValueBadge;
             return (
               <NavLink
                 key={to}

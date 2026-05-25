@@ -7,12 +7,15 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import { BreadthCompact }    from '../components/breadth/BreadthWidget';
 import SectorHeatmapWidget from '../components/heatmap/SectorHeatmapWidget';
 import UpcomingEventsWidget from '../components/calendar/UpcomingEventsWidget';
+import AllocationWidget    from '../components/allocation/AllocationWidget';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { useSignals }   from '../hooks/useSignals';
+import { usePortfolioTracker } from '../hooks/usePortfolioTracker';
 
 export default function Dashboard() {
   const { portfolio, loading: pLoading } = usePortfolio();
   const { signals,   loading: sLoading } = useSignals();
+  const { activeId: portfolioId }        = usePortfolioTracker();
 
   if (pLoading) return <LoadingSpinner />;
 
@@ -97,6 +100,11 @@ export default function Dashboard() {
 
       {/* Upcoming market events */}
       <UpcomingEventsWidget maxItems={5} compact={false} />
+
+      {/* Asset allocation widget */}
+      {portfolioId && (
+        <AllocationWidget portfolioId={portfolioId} compact={true} />
+      )}
     </div>
   );
 }
