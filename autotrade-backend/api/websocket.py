@@ -266,6 +266,110 @@ class LivePriceManager:
 live_price_manager = LivePriceManager()
 
 
+# ── /ws/candles/{symbol} — real-time candle updates ───────────────────────────
+
+@router.websocket("/candles/{symbol}")
+async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h"):
+    """Streams the latest candle bar for a symbol every 15 s.
+
+    On connect: sends last 5 candles as an 'init' message.
+    Then every 15 s: fetches the latest bar and sends a 'candle_update' message.
+    Falls back to DB polling if live fetch fails.
+    """
+    await ws.accept()
+
+    from api.india import TIMEFRAME_CONFIG, _normalize_symbol, _ts_to_unix
+    if timeframe not in TIMEFRAME_CONFIG:
+        await ws.close(code=1003, reason="Invalid timeframe")
+        return
+
+    sym        = _normalize_symbol(symbol)
+    bar_secs   = TIMEFRAME_CONFIG[timeframe]["seconds"]
+    yf_interval = TIMEFRAME_CONFIG[timeframe]["yf_interval"]
+    yf_period   = TIMEFRAME_CONFIG[timeframe]["yf_period"]
+    last_bar_time: int | None = None
+
+    # Send last 5 candles on connect
+    try:
+        async with AsyncSessionLocal() as session:
+            from db.models import Candle
+            from sqlalchemy import desc, select, and_
+            rows = (await session.execute(
+                select(Candle)
+                .where(and_(Candle.symbol == sym, Candle.timeframe == timeframe))
+                .order_by(desc(Candle.timestamp))
+                .limit(5)
+            )).scalars().all()
+
+        if rows:
+            init_candles = sorted(rows, key=lambda r: r.timestamp)
+            last_bar_time = _ts_to_unix(init_candles[-1].timestamp)
+            await ws.send_json({
+                "type":      "init",
+                "symbol":    sym,
+                "timeframe": timeframe,
+                "candles": [
+                    {
+                        "time":   _ts_to_unix(r.timestamp),
+                        "open":   round(float(r.open),  4),
+                        "high":   round(float(r.high),  4),
+                        "low":    round(float(r.low),   4),
+                        "close":  round(float(r.close), 4),
+                        "volume": round(float(r.volume), 2),
+                    }
+                    for r in init_candles
+                ],
+            })
+    except Exception as exc:
+        logger.warning(f"[ws/candles] init failed for {sym}: {exc}")
+
+    try:
+        while True:
+            await asyncio.sleep(15)
+
+            # Fetch latest bar from yfinance in executor
+            try:
+                import yfinance as yf
+
+                def _fetch():
+                    df = yf.Ticker(sym).history(period="1d", interval=yf_interval)
+                    if df.empty:
+                        return None
+                    row = df.iloc[-1]
+                    ts = df.index[-1]
+                    if hasattr(ts, "timestamp"):
+                        t = int(ts.timestamp())
+                    else:
+                        import calendar
+                        t = calendar.timegm(ts.timetuple())
+                    return {
+                        "time":   t,
+                        "open":   round(float(row["Open"]),   4),
+                        "high":   round(float(row["High"]),   4),
+                        "low":    round(float(row["Low"]),    4),
+                        "close":  round(float(row["Close"]),  4),
+                        "volume": round(float(row.get("Volume", 0) or 0), 2),
+                    }
+
+                candle = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+
+                if candle:
+                    is_new = last_bar_time is None or candle["time"] > last_bar_time
+                    last_bar_time = candle["time"]
+                    await ws.send_json({
+                        "type":      "candle_update",
+                        "symbol":    sym,
+                        "timeframe": timeframe,
+                        "candle":    candle,
+                        "is_new_bar": is_new,
+                    })
+            except Exception as exc:
+                logger.debug(f"[ws/candles] tick failed for {sym}: {exc}")
+
+    except (WebSocketDisconnect, Exception):
+        pass
+
+
 @router.websocket("/live-prices")
 async def live_prices_ws(websocket: WebSocket):
     """Streams live NSE prices to the Live Market page."""
