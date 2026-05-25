@@ -185,24 +185,32 @@ def calculate_xirr(
     """Newton-Raphson XIRR. Returns annualized % (e.g. 15.0 = 15%)."""
     if len(cashflows) < 2:
         return None
-    dates  = [cf[0] for cf in cashflows]
+    dates   = [cf[0] for cf in cashflows]
     amounts = [cf[1] for cf in cashflows]
-    t0     = dates[0]
-    years  = [(d - t0).days / 365.25 for d in dates]
+    t0      = dates[0]
+    years   = [(d - t0).days / 365.25 for d in dates]
 
-    rate = guess
-    for _ in range(1000):
-        npv  = sum(a / (1 + rate) ** t for a, t in zip(amounts, years))
-        dnpv = sum(-t * a / (1 + rate) ** (t + 1) for a, t in zip(amounts, years))
-        if abs(dnpv) < 1e-12:
-            break
-        new_rate = rate - npv / dnpv
-        if abs(new_rate - rate) < 1e-8:
+    try:
+        rate = float(guess)
+        for _ in range(1000):
+            base = 1.0 + rate
+            if base <= 0:
+                return None
+            npv  = sum(a / base ** t for a, t in zip(amounts, years))
+            dnpv = sum(-t * a / base ** (t + 1) for a, t in zip(amounts, years))
+            if abs(dnpv) < 1e-12:
+                break
+            new_rate = rate - npv / dnpv
+            if not isinstance(new_rate, (int, float)) or new_rate != new_rate:  # NaN check
+                return None
+            if abs(new_rate - rate) < 1e-8:
+                rate = new_rate
+                break
             rate = new_rate
-            break
-        rate = new_rate
+    except (TypeError, ZeroDivisionError, OverflowError):
+        return None
 
-    if not (-0.99 < rate < 100):
+    if not isinstance(rate, (int, float)) or not (-0.99 < rate < 100):
         return None
     return round(rate * 100, 2)
 

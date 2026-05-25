@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { Wallet, Calculator } from 'lucide-react';
+import { Wallet, Calculator, Briefcase } from 'lucide-react';
 import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
+import MyMutualFunds  from '../components/mutualfunds/MyMutualFunds';
 import { getIndiaMutualFunds, projectSip } from '../api/client';
 
 function fmtINR(n) {
@@ -79,10 +80,36 @@ export default function MutualFunds() {
     }
   };
 
-  if (loading) return <LoadingSpinner />;
+  const [activeTab, setActiveTab] = useState('market')
+
+  if (loading && activeTab === 'market') return <LoadingSpinner />;
 
   return (
     <div className="space-y-5 fade-in">
+
+      {/* ── Tab bar ── */}
+      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+        <button
+          onClick={() => setActiveTab('market')}
+          className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            activeTab === 'market' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'
+          }`}
+        >
+          <Wallet size={12} /> Market Funds
+        </button>
+        <button
+          onClick={() => setActiveTab('mine')}
+          className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            activeTab === 'mine' ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'
+          }`}
+        >
+          <Briefcase size={12} /> My Portfolio & SIPs
+        </button>
+      </div>
+
+      {activeTab === 'mine' && <MyMutualFunds />}
+
+      {activeTab === 'market' && (<>
 
       {/* ── SIP Calculator ─────────────────────────────────────────────────── */}
       <div className="rounded-xl border border-border p-5 space-y-4" style={{ background: '#0F1829' }}>
@@ -219,6 +246,7 @@ export default function MutualFunds() {
           </div>
         )}
       </div>
+      </>)}
     </div>
   );
 }

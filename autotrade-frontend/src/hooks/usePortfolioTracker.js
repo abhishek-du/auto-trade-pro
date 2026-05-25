@@ -97,13 +97,15 @@ export function usePortfolioTracker() {
       body: JSON.stringify({ name, description }),
     })
     const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || 'Failed to create portfolio')
     await loadPortfolios()
     setActiveId(data.id)
     return data
   }
 
   async function deletePortfolio(id) {
-    await fetch(`${BASE}/${id}`, { method: 'DELETE' })
+    const res = await fetch(`${BASE}/${id}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error('Failed to delete portfolio')
     if (activeId === id) setActiveId(null)
     await loadPortfolios()
     setDetail(null)
