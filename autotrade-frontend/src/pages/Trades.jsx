@@ -1,9 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Fragment } from 'react';
 import {
-  Search, ChevronLeft, ChevronRight,
+  Search, ChevronLeft, ChevronRight, ChevronDown,
   TrendingUp, TrendingDown, IndianRupee, Activity,
   Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
-  Zap, Target, ShieldAlert, Clock,
+  Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
@@ -20,14 +20,15 @@ const fmtDate = (s) => {
   catch { return s; }
 };
 
-function elapsed(openedAt) {
+function elapsed(openedAt, closedAt = null) {
   if (!openedAt) return '—';
-  const ms   = Date.now() - new Date(openedAt).getTime();
+  const end  = closedAt ? new Date(closedAt) : new Date();
+  const ms   = end - new Date(openedAt);
   const mins = Math.floor(ms / 60000);
   if (mins < 60)  return `${mins}m`;
   const hrs = Math.floor(mins / 60);
   if (hrs  < 24)  return `${hrs}h ${mins % 60}m`;
-  return `${Math.floor(hrs / 24)}d`;
+  return `${Math.floor(hrs / 24)}d ${hrs % 24}h`;
 }
 
 function DirectionBadge({ direction }) {
@@ -48,6 +49,86 @@ function PnLPct({ value }) {
     <span className={`tabular-nums text-xs font-semibold px-1.5 py-0.5 rounded ${n >= 0 ? 'bg-profit/15 text-profit' : 'bg-loss/15 text-loss'}`}>
       {n >= 0 ? '+' : ''}{n.toFixed(2)}%
     </span>
+  );
+}
+
+// ── Trade Detail Panel (expanded row) ────────────────────────────────────────
+
+function TradeDetailPanel({ trade }) {
+  const isOpen   = (trade.status ?? 'CLOSED').toUpperCase() === 'OPEN';
+  const holdTime = elapsed(trade.opened_at, isOpen ? null : trade.closed_at);
+  const conf     = trade.signal_confidence ?? 0;
+  const confColor = conf >= 75 ? 'bg-profit' : conf >= 50 ? 'bg-warn' : 'bg-loss';
+
+  return (
+    <div className="bg-[#080e1c] border-t border-border/40 px-6 py-4 space-y-3">
+
+      {/* AI Reasoning */}
+      {trade.ai_reason ? (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Brain size={13} className="text-cyan" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">AI Reasoning</span>
+          </div>
+          <p className="text-slate-300 text-sm leading-relaxed bg-surface/60 rounded-lg px-3 py-2.5 border border-border/50">
+            {trade.ai_reason}
+          </p>
+        </div>
+      ) : (
+        <p className="text-muted text-xs italic">No AI reasoning recorded for this trade.</p>
+      )}
+
+      {/* Meta row */}
+      <div className="flex flex-wrap gap-6 pt-1">
+
+        {/* Strategy / Pattern */}
+        {trade.pattern_name && (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
+            <span className="text-xs font-mono font-bold text-cyan bg-cyan/10 border border-cyan/25 px-2.5 py-1 rounded">
+              {trade.pattern_name.replace(/_/g, ' ')}
+            </span>
+          </div>
+        )}
+
+        {/* Signal Confidence */}
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Signal Confidence</p>
+          <div className="flex items-center gap-2">
+            <div className="w-24 h-1.5 bg-surface rounded-full overflow-hidden">
+              <div className={`h-full rounded-full transition-all ${confColor}`} style={{ width: `${Math.min(100, conf)}%` }} />
+            </div>
+            <span className="text-xs font-bold text-slate-300 tabular-nums">{conf.toFixed(1)}%</span>
+          </div>
+        </div>
+
+        {/* Hold Duration */}
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">
+            {isOpen ? 'Holding For' : 'Held For'}
+          </p>
+          <div className="flex items-center gap-1.5">
+            <Clock3 size={12} className={isOpen ? 'text-profit' : 'text-muted'} />
+            <span className={`text-xs font-bold tabular-nums ${isOpen ? 'text-profit' : 'text-slate-300'}`}>{holdTime}</span>
+            {isOpen && <span className="text-[10px] text-profit/60 animate-pulse">● live</span>}
+          </div>
+        </div>
+
+        {/* Opened */}
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Opened</p>
+          <span className="text-xs text-slate-400 tabular-nums">{fmtDate(trade.opened_at)}</span>
+        </div>
+
+        {/* Closed */}
+        {!isOpen && trade.closed_at && (
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Closed</p>
+            <span className="text-xs text-slate-400 tabular-nums">{fmtDate(trade.closed_at)}</span>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -276,10 +357,11 @@ export default function Trades() {
     return m;
   }, [positions]);
 
-  const [search,    setSearch]    = useState('');
-  const [direction, setDirection] = useState('All');
-  const [status,    setStatus]    = useState('All');
-  const [page,      setPage]      = useState(1);
+  const [search,     setSearch]     = useState('');
+  const [direction,  setDirection]  = useState('All');
+  const [status,     setStatus]     = useState('All');
+  const [page,       setPage]       = useState(1);
+  const [expandedId, setExpandedId] = useState(null);
 
   const filtered = useMemo(() => {
     return trades.filter((t) => {
@@ -399,19 +481,21 @@ export default function Trades() {
                     {h}
                   </th>
                 ))}
+                <th className="px-3 py-3 w-8" />
               </tr>
             </thead>
             <tbody>
               {pageRows.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="text-center py-12 text-muted text-sm">
+                  <td colSpan={11} className="text-center py-12 text-muted text-sm">
                     No trades match the current filters.
                   </td>
                 </tr>
               ) : (
                 pageRows.map((t, i) => {
-                  const isOpen   = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
-                  const pos      = isOpen ? positionByTradeId[t.id] : null;
+                  const isOpen     = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
+                  const pos        = isOpen ? positionByTradeId[t.id] : null;
+                  const isExpanded = expandedId === (t.id ?? i);
 
                   /* P&L: use live unrealised for open, realised pnl for closed */
                   const pnl      = isOpen ? (pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
@@ -422,11 +506,12 @@ export default function Trades() {
                   const isGain   = pnl >= 0;
 
                   return (
+                    <Fragment key={t.id ?? i}>
                     <tr
-                      key={t.id ?? i}
-                      className={`border-b border-border/50 hover:bg-surface/50 transition-colors ${
-                        isOpen ? 'bg-profit/[0.03]' : ''
-                      }`}
+                      onClick={() => setExpandedId(isExpanded ? null : (t.id ?? i))}
+                      className={`border-b cursor-pointer hover:bg-surface/50 transition-colors ${
+                        isExpanded ? 'border-border/20 bg-surface/30' : 'border-border/50'
+                      } ${isOpen ? 'bg-profit/[0.03]' : ''}`}
                     >
                       {/* Date */}
                       <td className="px-4 py-3 text-muted text-xs tabular-nums whitespace-nowrap">
@@ -512,7 +597,25 @@ export default function Trades() {
                           {isOpen ? 'LIVE' : (t.status ?? 'CLOSED')}
                         </span>
                       </td>
+
+                      {/* Expand toggle */}
+                      <td className="px-3 py-3 text-right">
+                        <ChevronDown
+                          size={14}
+                          className={`text-muted transition-transform duration-200 ${isExpanded ? 'rotate-180 text-cyan' : ''}`}
+                        />
+                      </td>
                     </tr>
+
+                    {/* Expanded detail panel */}
+                    {isExpanded && (
+                      <tr>
+                        <td colSpan={11} className="p-0">
+                          <TradeDetailPanel trade={t} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })
               )}
