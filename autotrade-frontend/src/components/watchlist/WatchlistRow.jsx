@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { ChevronDown, CandlestickChart as ChartIcon } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { formatINR, formatVolume, formatPct } from '../../utils/indianFormat'
 
 const SECTOR_COLORS = {
@@ -30,9 +31,10 @@ function VolRatioColor(ratio) {
   return 'text-slate-300'
 }
 
-const WatchlistRow = React.memo(function WatchlistRow({ stock, onExpand, isExpanded }) {
+const WatchlistRow = React.memo(function WatchlistRow({ stock, onExpand, isExpanded, onChart }) {
   const [flashClass, setFlashClass] = useState('')
   const prevPriceRef = useRef(stock.price)
+  const navigate = useNavigate()
 
   useEffect(() => {
     if (stock.price === prevPriceRef.current) return
@@ -179,6 +181,24 @@ const WatchlistRow = React.memo(function WatchlistRow({ stock, onExpand, isExpan
           : <span className="text-muted text-sm">—</span>
         }
       </td>
+
+      {/* Col 11 — Chart button */}
+      <td className="px-2 py-2.5 text-center">
+        <button
+          title="Open chart"
+          onClick={(e) => {
+            e.stopPropagation()
+            if (onChart) {
+              onChart(stock)
+            } else {
+              navigate(`/chart?symbol=${encodeURIComponent(stock.symbol)}&name=${encodeURIComponent(stock.name || stock.symbol)}`)
+            }
+          }}
+          className="p-1.5 rounded-lg text-muted hover:text-cyan hover:bg-cyan/10 transition-colors opacity-0 group-hover:opacity-100"
+        >
+          <ChartIcon size={13} />
+        </button>
+      </td>
     </tr>
   )
 }, (prev, next) =>
@@ -186,7 +206,8 @@ const WatchlistRow = React.memo(function WatchlistRow({ stock, onExpand, isExpan
   prev.stock.change_pct === next.stock.change_pct &&
   prev.stock.volume     === next.stock.volume      &&
   prev.stock.signal     === next.stock.signal      &&
-  prev.isExpanded       === next.isExpanded
+  prev.isExpanded       === next.isExpanded        &&
+  prev.onChart          === next.onChart
 )
 
 export default WatchlistRow

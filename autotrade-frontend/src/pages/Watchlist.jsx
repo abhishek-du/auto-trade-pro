@@ -6,6 +6,7 @@ import WatchlistTableHeader      from '../components/watchlist/WatchlistTableHea
 import WatchlistRow              from '../components/watchlist/WatchlistRow'
 import WatchlistDetailPanel      from '../components/watchlist/WatchlistDetailPanel'
 import WatchlistAlertsBar        from '../components/watchlist/WatchlistAlertsBar'
+import ChartModal                from '../components/chart/ChartModal'
 import toast                     from 'react-hot-toast'
 
 function ISTClock({ marketStatus }) {
@@ -45,8 +46,15 @@ export default function Watchlist() {
 
   const [expandedSymbol, setExpandedSymbol] = useState(null)
   const [refreshing,     setRefreshing]     = useState(false)
-  const [alertFilter,    setAlertFilter]    = useState(null) // {key, stocks}
+  const [alertFilter,    setAlertFilter]    = useState(null)
   const [marketStatus,   setMarketStatus]   = useState('CLOSED')
+  const [chartSymbol,    setChartSymbol]    = useState(null)
+  const [chartName,      setChartName]      = useState(null)
+
+  const handleOpenChart = useCallback((stock) => {
+    setChartSymbol(stock.symbol)
+    setChartName(stock.name || stock.symbol)
+  }, [])
 
   // Poll market status
   useEffect(() => {
@@ -88,6 +96,7 @@ export default function Watchlist() {
     : watchlist
 
   return (
+    <>
     <div className="space-y-4">
 
       {/* Header */}
@@ -154,10 +163,11 @@ export default function Watchlist() {
                       onExpand={() =>
                         setExpandedSymbol(expandedSymbol === stock.symbol ? null : stock.symbol)
                       }
+                      onChart={handleOpenChart}
                     />
                     {expandedSymbol === stock.symbol && (
                       <tr key={`${stock.symbol}-detail`}>
-                        <td colSpan={10} className="p-0">
+                        <td colSpan={11} className="p-0">
                           <WatchlistDetailPanel
                             stock={stock}
                             onClose={() => setExpandedSymbol(null)}
@@ -185,5 +195,13 @@ export default function Watchlist() {
         </div>
       </div>
     </div>
+
+    <ChartModal
+      symbol={chartSymbol}
+      name={chartName}
+      isOpen={!!chartSymbol}
+      onClose={() => setChartSymbol(null)}
+    />
+    </>
   )
 }

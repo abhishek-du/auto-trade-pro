@@ -4,6 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
+  CandlestickChart as ChartIcon,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -20,6 +21,7 @@ const MAIN_NAV = [
 const INDIA_NAV = [
   { to: '/live-market',     label: 'Live Market',    Icon: Radio,       liveMarket: true  },
   { to: '/watchlist',       label: 'Watchlist',      Icon: BookMarked,  watchlist: true   },
+  { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
   { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },

@@ -13,7 +13,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import (
@@ -49,7 +49,8 @@ from api.schemas import (
     VIXScoreOut,
 )
 from crawler.fii_dii_crawler import fetch_fii_dii_data, save_fii_dii_to_db
-from crawler.india_price_feed import fetch_india_vix, is_nse_market_open
+from crawler.india_price_feed import fetch_india_vix, fetch_nse_candles, is_nse_market_open
+from crawler.price_feed import save_candles_to_db
 from crawler.options_chain import run_options_analysis
 from db.database import get_db
 from db.models import (
@@ -117,6 +118,342 @@ _NSE_HOLIDAYS: dict[str, str] = {
     "2026-11-25": "Guru Nanak Jayanti",
     "2026-12-25": "Christmas",
 }
+
+
+# ── Candle timeframe configuration ───────────────────────────────────────────
+
+TIMEFRAME_CONFIG: dict[str, dict] = {
+    "1m":  {"db_tf": "1m",  "yf_interval": "1m",  "yf_period": "1d",   "label": "1 Min",  "seconds": 60},
+    "5m":  {"db_tf": "5m",  "yf_interval": "5m",  "yf_period": "5d",   "label": "5 Min",  "seconds": 300},
+    "15m": {"db_tf": "15m", "yf_interval": "15m", "yf_period": "5d",   "label": "15 Min", "seconds": 900},
+    "1h":  {"db_tf": "1h",  "yf_interval": "1h",  "yf_period": "60d",  "label": "1 Hour", "seconds": 3600},
+    "1d":  {"db_tf": "1d",  "yf_interval": "1d",  "yf_period": "2y",   "label": "1 Day",  "seconds": 86400},
+}
+
+_IST_OFFSET_SEC = 19_800  # 5h30m in seconds
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """RELIANCE → RELIANCE.NS; ^NSEI / GC=F / TCS.NS unchanged."""
+    if symbol.startswith("^") or "=" in symbol or "." in symbol:
+        return symbol
+    return symbol + ".NS"
+
+
+def _ts_to_unix(ts) -> int:
+    """UTC-naive datetime → unix seconds (for lightweight-charts)."""
+    import calendar
+    return calendar.timegm(ts.timetuple())
+
+
+def _compute_indicator_series(candles: list[dict]) -> dict:
+    """Return EMA/RSI/MACD/BB/Supertrend/VWAP time series from candle list."""
+    import math as _m
+    import numpy as np
+    import pandas as pd
+
+    if len(candles) < 20:
+        return {}
+
+    times  = np.array([c["time"]   for c in candles], dtype=np.int64)
+    close  = np.array([c["close"]  for c in candles], dtype=np.float64)
+    high   = np.array([c["high"]   for c in candles], dtype=np.float64)
+    low    = np.array([c["low"]    for c in candles], dtype=np.float64)
+    volume = np.array([c["volume"] for c in candles], dtype=np.float64)
+
+    def to_s(vals):
+        return [
+            {"time": int(t), "value": round(float(v), 4)}
+            for t, v in zip(times, vals)
+            if not _m.isnan(float(v))
+        ]
+
+    result: dict = {}
+
+    # EMAs
+    cs = pd.Series(close)
+    for p, key in [(20, "ema20"), (50, "ema50"), (200, "ema200")]:
+        if len(close) >= p:
+            result[key] = to_s(cs.ewm(span=p, adjust=False).mean().values)
+
+    # RSI-14
+    if len(close) >= 15:
+        delta     = cs.diff()
+        gain      = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+        loss      = (-delta).clip(lower=0).ewm(com=13, adjust=False).mean()
+        rs        = gain / loss.replace(0, np.nan)
+        rsi       = 100 - 100 / (1 + rs)
+        result["rsi"] = to_s(rsi.values)
+
+    # MACD (12/26/9)
+    if len(close) >= 27:
+        ema12  = cs.ewm(span=12, adjust=False).mean()
+        ema26  = cs.ewm(span=26, adjust=False).mean()
+        macd_l = ema12 - ema26
+        sig_l  = macd_l.ewm(span=9, adjust=False).mean()
+        hist   = macd_l - sig_l
+        result["macd"] = {
+            "macd":   to_s(macd_l.values),
+            "signal": to_s(sig_l.values),
+            "histogram": [
+                {
+                    "time":  int(t),
+                    "value": round(float(v), 4),
+                    "color": "rgba(16,185,129,0.7)" if v >= 0 else "rgba(239,68,68,0.7)",
+                }
+                for t, v in zip(times, hist.values)
+                if not _m.isnan(float(v))
+            ],
+        }
+
+    # Bollinger Bands (20, 2σ)
+    if len(close) >= 20:
+        mid   = cs.rolling(20).mean()
+        std   = cs.rolling(20).std()
+        result["bollinger"] = {
+            "upper":  to_s((mid + 2 * std).values),
+            "middle": to_s(mid.values),
+            "lower":  to_s((mid - 2 * std).values),
+        }
+
+    # Supertrend (period=7, mult=3)
+    if len(close) >= 14:
+        prev_c = cs.shift(1)
+        tr = pd.concat([
+            pd.Series(high)  - pd.Series(low),
+            (pd.Series(high) - prev_c).abs(),
+            (pd.Series(low)  - prev_c).abs(),
+        ], axis=1).max(axis=1)
+        atr_s = tr.rolling(7).mean().values
+        hl2   = (high + low) / 2
+        ub    = hl2 + 3.0 * atr_s
+        lb    = hl2 - 3.0 * atr_s
+
+        fu = np.full(len(close), np.nan)
+        fl = np.full(len(close), np.nan)
+        st = np.full(len(close), np.nan)
+        dirs: list[str] = [""] * len(close)
+
+        valids = np.where(~np.isnan(atr_s))[0]
+        if len(valids):
+            s = int(valids[0])
+            fu[s], fl[s] = ub[s], lb[s]
+            st[s]   = fu[s] if close[s] <= fu[s] else fl[s]
+            dirs[s] = "down" if close[s] <= fu[s] else "up"
+            for i in range(s + 1, len(close)):
+                fu[i] = ub[i] if ub[i] < fu[i-1] or close[i-1] > fu[i-1] else fu[i-1]
+                fl[i] = lb[i] if lb[i] > fl[i-1] or close[i-1] < fl[i-1] else fl[i-1]
+                if st[i-1] == fu[i-1]:
+                    st[i] = fl[i] if close[i] > fu[i] else fu[i]
+                else:
+                    st[i] = fu[i] if close[i] < fl[i] else fl[i]
+                dirs[i] = "up" if close[i] > st[i] else "down"
+
+        result["supertrend"] = [
+            {"time": int(t), "value": round(float(v), 4), "direction": d}
+            for t, v, d in zip(times, st, dirs)
+            if not _m.isnan(float(v)) and d
+        ]
+
+    # VWAP with daily IST reset (meaningful only for intraday)
+    try:
+        from datetime import datetime, timedelta, timezone as _tz
+        _ist_off = timedelta(hours=5, minutes=30)
+        cumtv = 0.0; cumv = 0.0; last_date = None
+        vwap_pts: list[dict] = []
+        for i in range(len(times)):
+            dt_ist  = datetime.utcfromtimestamp(int(times[i])) + _ist_off
+            cur_d   = dt_ist.date()
+            if cur_d != last_date:
+                cumtv = 0.0; cumv = 0.0; last_date = cur_d
+            tp     = (high[i] + low[i] + close[i]) / 3
+            cumtv += tp * volume[i]
+            cumv  += volume[i]
+            if cumv > 0:
+                vwap_pts.append({"time": int(times[i]), "value": round(cumtv / cumv, 4)})
+        result["vwap"] = vwap_pts
+    except Exception:
+        pass
+
+    # Support / resistance (local pivot method)
+    if len(close) >= 30:
+        w = min(15, len(close) // 4)
+        loc_hi, loc_lo = [], []
+        for i in range(w, len(close) - w):
+            if high[i]  == max(high[i-w : i+w+1]):  loc_hi.append(float(high[i]))
+            if low[i]   == min(low[i-w  : i+w+1]):  loc_lo.append(float(low[i]))
+
+        def _cluster(levels: list[float], tol: float = 0.01) -> list[float]:
+            if not levels: return []
+            levels = sorted(set(levels))
+            out, grp = [], [levels[0]]
+            for lv in levels[1:]:
+                if grp and lv <= grp[-1] * (1 + tol):
+                    grp.append(lv)
+                else:
+                    out.append(sum(grp) / len(grp)); grp = [lv]
+            out.append(sum(grp) / len(grp))
+            return out
+
+        cur = float(close[-1])
+        result["resistance_levels"] = [round(r, 2) for r in sorted(_cluster(loc_hi)) if r > cur][:3]
+        result["support_levels"]    = [round(s, 2) for s in sorted(_cluster(loc_lo), reverse=True) if s < cur][:3]
+
+    return result
+
+
+# ── Candle REST endpoints ─────────────────────────────────────────────────────
+
+@router.get("/candles/{symbol}", summary="OHLCV candles for TradingView chart")
+async def get_candles(
+    symbol: str,
+    timeframe: str = Query("1h", description="1m | 5m | 15m | 1h | 1d"),
+    limit: int     = Query(300, ge=1, le=1000),
+    from_ts: Optional[int] = Query(None, description="Oldest unix timestamp to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    if timeframe not in TIMEFRAME_CONFIG:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of: {list(TIMEFRAME_CONFIG)}")
+
+    sym = _normalize_symbol(symbol)
+    cfg = TIMEFRAME_CONFIG[timeframe]
+
+    # ── 1. Try DB first ────────────────────────────────────────────────────────
+    async def _query_db() -> list:
+        q = (
+            select(Candle)
+            .where(and_(Candle.symbol == sym, Candle.timeframe == timeframe))
+            .order_by(desc(Candle.timestamp))
+            .limit(limit)
+        )
+        if from_ts:
+            from datetime import datetime, timezone as _tz
+            dt = datetime.fromtimestamp(from_ts, tz=_tz.utc).replace(tzinfo=None)
+            q  = q.where(Candle.timestamp >= dt)
+        return (await db.execute(q)).scalars().all()
+
+    rows = await _query_db()
+
+    # ── 2. Fetch from yfinance if DB is sparse ─────────────────────────────────
+    if len(rows) < 50:
+        logger.info(f"[candles] DB sparse ({len(rows)}) for {sym}/{timeframe} — fetching from yfinance")
+        try:
+            fresh = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: fetch_nse_candles(sym, interval=cfg["yf_interval"], period=cfg["yf_period"]),
+            )
+            if fresh:
+                await save_candles_to_db(fresh, db)
+                await db.commit()
+                rows = await _query_db()
+        except Exception as exc:
+            logger.warning(f"[candles] yfinance fetch failed for {sym}: {exc}")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No candle data for {sym}/{timeframe}")
+
+    # ── 3. Sort ASC, build response ────────────────────────────────────────────
+    rows_asc = sorted(rows, key=lambda r: r.timestamp)
+    candles  = [
+        {
+            "time":   _ts_to_unix(r.timestamp),
+            "open":   round(float(r.open),   4),
+            "high":   round(float(r.high),   4),
+            "low":    round(float(r.low),    4),
+            "close":  round(float(r.close),  4),
+            "volume": round(float(r.volume), 2),
+        }
+        for r in rows_asc
+    ]
+
+    # ── 4. Current price from PRICE_CACHE if available ─────────────────────────
+    current_price: float | None = None
+    try:
+        from crawler.live_prices import PRICE_CACHE
+        entry = PRICE_CACHE.get(sym) or PRICE_CACHE.get(symbol)
+        if entry:
+            current_price = entry.get("price")
+    except Exception:
+        pass
+    if current_price is None and candles:
+        current_price = candles[-1]["close"]
+
+    return {
+        "symbol":        sym,
+        "timeframe":     timeframe,
+        "candles":       candles,
+        "count":         len(candles),
+        "from_time":     candles[0]["time"]  if candles else None,
+        "to_time":       candles[-1]["time"] if candles else None,
+        "current_price": current_price,
+    }
+
+
+@router.get("/candles/{symbol}/latest", summary="Most recent candle bar")
+async def get_latest_candle(
+    symbol: str,
+    timeframe: str = Query("1h"),
+    db: AsyncSession = Depends(get_db),
+):
+    if timeframe not in TIMEFRAME_CONFIG:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+
+    sym = _normalize_symbol(symbol)
+    row = (await db.execute(
+        select(Candle)
+        .where(and_(Candle.symbol == sym, Candle.timeframe == timeframe))
+        .order_by(desc(Candle.timestamp))
+        .limit(1)
+    )).scalar_one_or_none()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No candles for {sym}/{timeframe}")
+
+    return {
+        "time":   _ts_to_unix(row.timestamp),
+        "open":   round(float(row.open),   4),
+        "high":   round(float(row.high),   4),
+        "low":    round(float(row.low),    4),
+        "close":  round(float(row.close),  4),
+        "volume": round(float(row.volume), 2),
+    }
+
+
+@router.get("/candles/{symbol}/indicators", summary="Indicator time series for chart")
+async def get_candle_indicators(
+    symbol: str,
+    timeframe: str = Query("1h"),
+    limit: int     = Query(300, ge=20, le=1000),
+    db: AsyncSession = Depends(get_db),
+):
+    if timeframe not in TIMEFRAME_CONFIG:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+
+    sym  = _normalize_symbol(symbol)
+    rows = (await db.execute(
+        select(Candle)
+        .where(and_(Candle.symbol == sym, Candle.timeframe == timeframe))
+        .order_by(desc(Candle.timestamp))
+        .limit(limit)
+    )).scalars().all()
+
+    if not rows:
+        return {}
+
+    rows_asc = sorted(rows, key=lambda r: r.timestamp)
+    candles  = [
+        {
+            "time":   _ts_to_unix(r.timestamp),
+            "open":   float(r.open),
+            "high":   float(r.high),
+            "low":    float(r.low),
+            "close":  float(r.close),
+            "volume": float(r.volume),
+        }
+        for r in rows_asc
+    ]
+
+    return _compute_indicator_series(candles)
 
 
 # ── Sync helpers (run in executor) ────────────────────────────────────────────
