@@ -4,7 +4,7 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target,
+  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -32,6 +32,7 @@ const INDIA_NAV = [
   { to: '/portfolio',       label: 'My Portfolio',   Icon: Briefcase  },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/sip',             label: 'SIP Goals',      Icon: Target     },
+  { to: '/tax',             label: 'Tax Calculator', Icon: Receipt    },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
   { to: '/backtest',        label: 'Backtest',       Icon: TestTube2  },
 ];

@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2 } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2, ExternalLink, Zap } from 'lucide-react'
 import toast from 'react-hot-toast'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { usePortfolioTracker } from '../hooks/usePortfolioTracker'
@@ -9,8 +10,71 @@ import HoldingsTable from '../components/portfolio/HoldingsTable'
 import AddHoldingModal from '../components/portfolio/AddHoldingModal'
 import SellModal from '../components/portfolio/SellModal'
 import AllocationCharts from '../components/portfolio/AllocationCharts'
-import TaxSummaryPanel from '../components/portfolio/TaxSummaryPanel'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
+import { formatINR } from '../utils/indianFormat'
+
+function TaxQuickView({ portfolioId }) {
+  const [status,  setStatus]  = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!portfolioId) return
+    setLoading(true)
+    fetch(`/api/v1/tax/current-fy-status/${portfolioId}`)
+      .then(r => r.json())
+      .then(d => { setStatus(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [portfolioId])
+
+  if (loading) return <LoadingSpinner message="Loading tax summary…" />
+
+  return (
+    <div className="space-y-4">
+      {status && (
+        <>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <p className="text-slate-300 text-sm font-semibold">
+              {status.financial_year} — Quick Tax Summary
+            </p>
+            <span className="text-muted text-xs">{status.days_left_in_fy}d left in FY</span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { label: 'Realized STCG', value: status.realized_stcg,   color: 'text-amber-400', sub: '@ 20%' },
+              { label: 'Realized LTCG', value: status.realized_ltcg,   color: 'text-blue-400',  sub: '@ 12.5%' },
+              { label: 'Losses Booked', value: status.realized_losses,  color: 'text-profit',    sub: 'set-off' },
+              { label: 'Est. Tax',      value: status.estimated_tax_so_far, color: 'text-red-400', sub: 'incl. cess' },
+            ].map(c => (
+              <div key={c.label} className="rounded-xl border border-border p-3 space-y-1" style={{ background: '#0a0f1c' }}>
+                <p className="text-muted text-[10px] uppercase tracking-widest">{c.label}</p>
+                <p className={`text-base font-bold tabular-nums ${c.color}`}>{formatINR(c.value, 0)}</p>
+                <p className="text-muted/60 text-[10px]">{c.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {status.ltcg_exemption_remaining > 0 && (
+            <div className="flex items-center gap-2 rounded-xl border border-profit/30 px-4 py-2.5 bg-profit/5">
+              <Zap size={13} className="text-profit flex-shrink-0" />
+              <p className="text-xs text-profit font-medium">
+                {formatINR(status.ltcg_exemption_remaining, 0)} of ₹1.25L LTCG exemption still unused this year — consider harvesting gains
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      <Link
+        to={`/tax?portfolio=${portfolioId}`}
+        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-accent/30 bg-accent/10 text-accent text-xs font-semibold hover:bg-accent/20 transition-colors"
+      >
+        <Receipt size={12} /> View Full Tax Calculator
+        <ExternalLink size={11} className="text-accent/70" />
+      </Link>
+    </div>
+  )
+}
 
 const TABS = [
   { id: 'holdings',     label: 'Holdings',     icon: List       },
@@ -204,9 +268,7 @@ export default function PortfolioTracker() {
             )}
 
             {tab === 'tax' && (
-              detail?.tax
-                ? <TaxSummaryPanel tax={detail.tax} />
-                : <p className="text-muted text-sm text-center py-8">No realised gains/losses yet.</p>
+              <TaxQuickView portfolioId={activeId} />
             )}
 
             {tab === 'transactions' && (
