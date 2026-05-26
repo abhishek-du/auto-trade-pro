@@ -799,3 +799,29 @@ class SIPInvestment(Base):
 
     def __repr__(self) -> str:
         return f"<SIPInvestment {self.scheme_code} ₹{self.amount:,.0f} on {self.investment_date} units={self.units_purchased:.4f}>"
+
+
+# ── IPO analysis cache ────────────────────────────────────────────────────────
+
+class IPOAnalysisCache(Base):
+    """Persists Groq/rule-based IPO analysis so we don't re-call the LLM on every request."""
+    __tablename__ = "ipo_analysis_cache"
+    __table_args__ = (
+        Index("ix_ipo_analysis_ipo_id", "ipo_id", unique=True),
+    )
+
+    id:          Mapped[str]       = mapped_column(String(36),  primary_key=True, default=lambda: str(uuid.uuid4()))
+    ipo_id:      Mapped[str]       = mapped_column(String(100), nullable=False, unique=True)
+    ipo_slug:    Mapped[str]       = mapped_column(String(200), nullable=False, default="")
+    company_name:Mapped[str]       = mapped_column(String(300), nullable=False, default="")
+    status:      Mapped[str]       = mapped_column(String(30),  nullable=False, default="upcoming")
+    verdict:     Mapped[str]       = mapped_column(String(20),  nullable=False, default="NEUTRAL")
+    score:       Mapped[int]       = mapped_column(Integer,     nullable=False, default=5)
+    analysis_json: Mapped[dict]    = mapped_column(JSON,        nullable=False, default=dict)
+    ipo_data_json: Mapped[dict]    = mapped_column(JSON,        nullable=False, default=dict)
+    source:      Mapped[str]       = mapped_column(String(20),  nullable=False, default="rule_based")
+    created_at:  Mapped[datetime]  = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at:  Mapped[datetime]  = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<IPOAnalysisCache {self.ipo_slug} verdict={self.verdict} score={self.score}>"

@@ -89,7 +89,15 @@ export function useLiveMarket() {
       clearInterval(moversId);
       clearInterval(pingRef.current);
       clearTimeout(reconnectRef.current);
-      if (wsRef.current) wsRef.current.close();
+      const ws = wsRef.current;
+      wsRef.current = null;
+      // Don't close a CONNECTING socket — its onopen handler will close it because
+      // mountedRef.current is now false. Calling close() on readyState=0 triggers
+      // a browser warning "WebSocket closed before connection established".
+      if (ws && ws.readyState !== WebSocket.CONNECTING) {
+        ws.onclose = null; // prevent the reconnect timer from firing
+        ws.close();
+      }
     };
   }, [loadRest, connect]);
 
