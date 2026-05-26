@@ -26,6 +26,9 @@ import PortfolioTracker  from './pages/PortfolioTracker';
 import SIPTracker        from './pages/SIPTracker';
 import TaxCalculator     from './pages/TaxCalculator';
 import AssetAllocation   from './pages/AssetAllocation';
+import IPOTracker        from './pages/IPOTracker';
+import StockChat          from './pages/StockChat';
+import FloatingChatButton from './components/chat/FloatingChatButton';
 
 export default function App() {
   return (
@@ -60,10 +63,13 @@ export default function App() {
               <Route path="/sip"             element={<SIPTracker />}         />
               <Route path="/tax"             element={<TaxCalculator />}      />
               <Route path="/allocation"     element={<AssetAllocation />}    />
+              <Route path="/ipo"            element={<IPOTracker />}         />
+              <Route path="/chat"           element={<StockChat />}          />
             </Routes>
           </main>
         </div>
       </div>
+      <FloatingChatButton />
       <Toaster
         position="bottom-right"
         toastOptions={{

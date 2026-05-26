@@ -4,7 +4,8 @@ import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
-  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt,
+  CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
+  Bot,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -34,6 +35,7 @@ const INDIA_NAV = [
   { to: '/sip',             label: 'SIP Goals',      Icon: Target     },
   { to: '/tax',             label: 'Tax Calculator',    Icon: Receipt,   },
   { to: '/allocation',      label: 'Asset Allocation',  Icon: IndianRupee, allocation: true },
+  { to: '/ipo',            label: 'IPO Tracker',       Icon: Rocket,      ipoTracker: true },
   { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
   { to: '/backtest',        label: 'Backtest',       Icon: TestTube2  },
 ];
@@ -234,6 +236,29 @@ function AllocationDot() {
   return <span className="ml-auto w-2 h-2 rounded-full shrink-0" style={{ background: dotColor }} />;
 }
 
+function IPOBadge() {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/ipo/stats/summary')
+        .then(r => r.json())
+        .then(d => {
+          const n = d?.by_status?.open ?? 0;
+          setCount(n > 0 ? n : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 300_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!count) return null;
+  return (
+    <span className="ml-auto text-[10px] font-bold bg-profit/20 text-profit px-1.5 py-0.5 rounded-full shrink-0">
+      {count}
+    </span>
+  );
+}
+
 function ZerodhaDot() {
   const [connected, setConnected] = useState(null);
   useEffect(() => {
@@ -274,6 +299,32 @@ export default function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
 
+        {/* Avishk AI — top of nav */}
+        <NavLink
+          to="/chat"
+          className={({ isActive }) => [
+            'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all duration-150 mb-2',
+            isActive
+              ? 'text-white border border-accent/40'
+              : 'text-slate-300 border border-accent/20 hover:border-accent/40 hover:text-white',
+          ].join(' ')}
+          style={({ isActive }) => ({
+            background: isActive
+              ? 'linear-gradient(135deg,rgba(29,78,216,0.25),rgba(8,145,178,0.15))'
+              : 'linear-gradient(135deg,rgba(29,78,216,0.1),rgba(8,145,178,0.06))',
+          })}
+        >
+          {({ isActive }) => (
+            <>
+              <Bot size={16} className={isActive ? 'text-cyan' : 'text-accent'} />
+              Avishk AI Analyst
+              <span className="ml-auto flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-profit shrink-0 arjun-pulse" />
+              </span>
+            </>
+          )}
+        </NavLink>
+
         {/* Main section */}
         <p className="px-3 pt-1 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Menu
@@ -286,9 +337,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : PortfolioValueBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : PortfolioValueBadge;
             return (
               <NavLink
                 key={to}
