@@ -77,9 +77,9 @@ export default function Analytics() {
 
       {/* KPI row — using actual AnalyticsOut fields */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-        <MetricCard title="Total Trades"  value={totalTrades} subtitle="All-time completed trades" icon={Activity} />
+        <MetricCard title="Total Trades"  value={totalTrades} subtitle="All-time completed trades" icon={Activity} format="count" />
         <MetricCard title="Total P&L"     value={data?.total_pnl ?? 0} subtitle="Sum of all closed trade P&L"
-          trend={(data?.total_pnl ?? 0) > 0 ? 1 : -1} icon={TrendingUp} />
+          trend={data?.roi_pct ?? null} icon={TrendingUp} />
         <MetricCard title="Avg R:R"       value={data?.avg_rr != null ? data.avg_rr.toFixed(2) : '—'}
           subtitle="Mean reward-to-risk ratio" icon={BarChart2} />
         <MetricCard title="Best Symbol"   value={bestSymbol} subtitle="Highest cumulative P&L" icon={PieIcon} />

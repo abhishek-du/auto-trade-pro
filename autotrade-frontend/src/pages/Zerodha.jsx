@@ -917,9 +917,7 @@ function DeepPanel({ data, loading }) {
           </div>
         )}
         {!data.news?.length && (
-          <p className="text-slate-600 text-xs">
-            No recent news found. Add <code className="bg-white/5 px-1 rounded">FINNHUB_KEY</code> to .env for stock-specific news.
-          </p>
+          <p className="text-slate-600 text-xs">No recent news found for this symbol.</p>
         )}
 
       </div>

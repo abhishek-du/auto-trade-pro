@@ -24,7 +24,7 @@ export const getSimulationAnalysis    = ()     => api.get('/api/v1/simulation/an
 export const getGoLiveStatus          = ()     => api.get('/api/v1/simulation/should-go-live');
 export const triggerSignals           = ()     => api.post('/api/v1/signals/trigger');
 export const getSettings              = ()     => api.get('/api/v1/settings/');
-export const saveSettings             = (body) => api.post('/api/v1/settings/', body);
+export const saveSettings             = (body) => api.patch('/api/v1/settings/', body);
 
 // ── Indian market ─────────────────────────────────────────────────────────────
 export const getIndiaMarketStatus  = ()              => api.get('/api/v1/india/market-status');

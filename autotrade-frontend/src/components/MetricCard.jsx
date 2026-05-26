@@ -1,5 +1,7 @@
-function fmt(value) {
+function fmt(value, format) {
   if (typeof value === 'number') {
+    if (format === 'count')  return value.toLocaleString('en-IN');
+    if (format === 'plain')  return value.toFixed(2);
     const abs  = Math.abs(value);
     const sign = value < 0 ? '-' : '';
     if (abs >= 10_000_000) return sign + '₹' + (abs / 10_000_000).toFixed(2) + ' Cr';
@@ -9,7 +11,7 @@ function fmt(value) {
   return value;
 }
 
-export default function MetricCard({ title, value, subtitle, trend, icon: Icon }) {
+export default function MetricCard({ title, value, subtitle, trend, icon: Icon, format }) {
   const up    = typeof trend === 'number' ? trend > 0 : null;
   const color = up === true ? 'text-profit' : up === false ? 'text-loss' : 'text-muted';
   const sign  = typeof trend === 'number' && trend > 0 ? '+' : '';
@@ -31,7 +33,7 @@ export default function MetricCard({ title, value, subtitle, trend, icon: Icon }
       </div>
 
       <div className="flex items-end justify-between gap-2 relative">
-        <span className="text-slate-100 text-2xl font-bold leading-none tabular-nums">{fmt(value)}</span>
+        <span className="text-slate-100 text-2xl font-bold leading-none tabular-nums">{fmt(value, format)}</span>
         {typeof trend === 'number' && (
           <span className={`text-sm font-bold ${color} tabular-nums`}>{sign}{trend.toFixed(2)}%</span>
         )}
