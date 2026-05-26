@@ -2,15 +2,15 @@ import { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { getPortfolioSnapshots } from '../api/client';
 
-const fmtUSD = (n) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(n ?? 0);
+const fmtINR = (n) =>
+  '₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(n ?? 0);
 
 function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-border px-3 py-2 text-xs shadow-xl" style={{ background: '#131E30' }}>
       <p className="text-muted mb-1">{label}</p>
-      <p className="text-slate-100 font-bold">{fmtUSD(payload[0]?.value)}</p>
+      <p className="text-slate-100 font-bold">{fmtINR(payload[0]?.value)}</p>
     </div>
   );
 }
@@ -48,14 +48,14 @@ export default function CandlestickChart() {
           <p className="text-muted text-xs mt-0.5">Simulated portfolio balance</p>
         </div>
         <div className="text-right">
-          <p className="text-slate-100 font-bold tabular-nums">{fmtUSD(last)}</p>
+          <p className="text-slate-100 font-bold tabular-nums">{fmtINR(last)}</p>
           <p className={`text-xs font-semibold tabular-nums ${up ? 'text-profit' : 'text-loss'}`}>
             {up ? '+' : ''}{(((last - first) / (first || 1)) * 100).toFixed(2)}%
           </p>
         </div>
       </div>
 
-      <div className="flex-1 px-2 py-3">
+      <div className="flex-1 min-h-0 px-2 py-3">
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <p className="text-muted text-sm">Loading chart…</p>
@@ -72,7 +72,7 @@ export default function CandlestickChart() {
               <CartesianGrid strokeDasharray="3 3" stroke="#1E2D45" vertical={false} />
               <XAxis dataKey="date" tick={{ fill: '#4E6280', fontSize: 10 }} axisLine={false} tickLine={false} />
               <YAxis domain={[min, max]} tick={{ fill: '#4E6280', fontSize: 10 }} axisLine={false} tickLine={false}
-                tickFormatter={(v) => `$${v.toFixed(0)}`} width={52} />
+                tickFormatter={(v) => `₹${v.toFixed(0)}`} width={52} />
               <Tooltip content={<ChartTooltip />} />
               <Area type="monotone" dataKey="equity" stroke={color} strokeWidth={2}
                 fill="url(#equityGrad)" dot={false} activeDot={{ r: 4, fill: color }} />

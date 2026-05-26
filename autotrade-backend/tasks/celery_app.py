@@ -169,4 +169,33 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.seed_calendar_events",
         "schedule": crontab(hour=1, minute=30),
     },
+
+    # Every 30 min: refresh IPO data from ipoalerts.in
+    "refresh-ipo-data-30min": {
+        "task":     "tasks.india_tasks.refresh_ipo_data",
+        "schedule": 1800,
+        "options":  {"countdown": 20},
+    },
+
+    # ── Kite library tasks (post market-close holdings, daily candles, etc.) ──
+    "kite-sync-holdings-daily": {
+        "task":     "tasks.kite_sync_holdings",
+        "schedule": crontab(hour=15, minute=35),
+    },
+    "kite-sync-candles-daily": {
+        "task":     "tasks.kite_sync_candles",
+        "schedule": crontab(hour=10, minute=0),
+    },
+    "kite-refresh-instruments-daily": {
+        "task":     "tasks.kite_refresh_instruments",
+        "schedule": crontab(hour=2, minute=30),
+    },
+    "kite-check-token-daily": {
+        "task":     "tasks.kite_check_token",
+        "schedule": crontab(hour=0, minute=35),
+    },
+    "kite-start-ticker-on-open": {
+        "task":     "tasks.kite_start_ticker",
+        "schedule": crontab(hour=3, minute=45),
+    },
 }

@@ -1,5 +1,5 @@
 const fmtUSD = (n) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n ?? 0);
+  ('₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n ?? 0));
 
 export default function PortfolioCard({ portfolio }) {
   if (!portfolio) return null;

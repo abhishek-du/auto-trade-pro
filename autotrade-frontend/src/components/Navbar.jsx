@@ -115,11 +115,11 @@ function BalanceTicker({ portfolio }) {
     <div className="flex items-center gap-3">
       <div className="text-right">
         <p className="text-slate-100 font-bold text-base tabular-nums leading-none">
-          {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(balance)}
+          {'₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(balance)}
         </p>
         <p className={`text-xs font-semibold tabular-nums mt-0.5 ${positive ? 'text-profit' : 'text-loss'}`}>
           {positive ? '+' : ''}
-          {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(pnl)}
+          {'₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(pnl)}
           {' '}({positive ? '+' : ''}{pct.toFixed(2)}%)
         </p>
       </div>

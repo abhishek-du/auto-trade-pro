@@ -9,7 +9,7 @@ import MetricCard    from '../components/MetricCard';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getAnalytics } from '../api/client';
 
-const fmtUSD   = (n) => `$${Number(n ?? 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+const fmtINR   = (n) => `₹${Number(n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 const fmtPct   = (n) => `${(n ?? 0).toFixed(1)}%`;
 const CHART_THEME = {
   cartesian: { strokeDasharray: '3 3', stroke: '#334155', strokeOpacity: 0.6 },
@@ -109,10 +109,10 @@ export default function Analytics() {
               </defs>
               <CartesianGrid {...CHART_THEME.cartesian} />
               <XAxis dataKey="date"  tick={CHART_THEME.tick} tickLine={false} axisLine={CHART_THEME.axis} interval="preserveStartEnd" />
-              <YAxis tick={CHART_THEME.tick} tickLine={false} axisLine={false} tickFormatter={fmtUSD} width={68} />
-              <Tooltip content={<ChartTooltip prefix="$" />} />
+              <YAxis tick={CHART_THEME.tick} tickLine={false} axisLine={false} tickFormatter={fmtINR} width={68} />
+              <Tooltip content={<ChartTooltip prefix="₹" />} />
               <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="5 3"
-                label={{ value: '$1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
+                label={{ value: '₹1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
               {/* backend equity_curve uses 'equity' key; daily_pnl_chart uses 'balance' */}
               <Area type="monotone" dataKey="equity" name="Balance"
                 stroke="url(#sGrad)" strokeWidth={2} fill="url(#aGrad)" dot={false}
@@ -139,8 +139,8 @@ export default function Analytics() {
               <BarChart data={bySymbol.slice(0, 10)} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
                 <CartesianGrid {...CHART_THEME.cartesian} vertical={false} />
                 <XAxis dataKey="symbol" tick={CHART_THEME.tick} tickLine={false} axisLine={CHART_THEME.axis} />
-                <YAxis tick={CHART_THEME.tick} tickLine={false} axisLine={false} tickFormatter={fmtUSD} width={64} />
-                <Tooltip content={<ChartTooltip prefix="$" />} />
+                <YAxis tick={CHART_THEME.tick} tickLine={false} axisLine={false} tickFormatter={fmtINR} width={64} />
+                <Tooltip content={<ChartTooltip prefix="₹" />} />
                 <ReferenceLine y={0} stroke="#334155" />
                 <Bar dataKey="pnl" name="P&L" radius={[4, 4, 0, 0]}>
                   {bySymbol.slice(0, 10).map((entry, i) => (

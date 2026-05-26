@@ -260,21 +260,70 @@ function IPOBadge() {
 }
 
 function ZerodhaDot() {
-  const [connected, setConnected] = useState(null);
+  // Status states: null (loading) → { connected, paper_mode, ticker_running, cash }
+  const [info, setInfo] = useState(null);
+
   useEffect(() => {
-    getZerodhaStatus()
-      .then(s => setConnected(s?.connected ?? false))
-      .catch(() => setConnected(false));
-    const id = setInterval(() => {
-      getZerodhaStatus()
-        .then(s => setConnected(s?.connected ?? false))
-        .catch(() => setConnected(false));
-    }, 30_000);
-    return () => clearInterval(id);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const s = await getZerodhaStatus();
+        if (cancelled) return;
+        // Best-effort: ticker status (separate endpoint, fast)
+        let ticker = false;
+        try {
+          const t = await fetch('/api/v1/zerodha/ticker/status').then(r => r.json());
+          ticker = Boolean(t?.running);
+        } catch { /* ignore */ }
+        if (cancelled) return;
+        setInfo({
+          connected:      Boolean(s?.connected),
+          paper_mode:     Boolean(s?.paper_mode ?? true),
+          ticker_running: ticker,
+          cash:           Number(s?.available_margins_inr ?? 0),
+        });
+      } catch {
+        if (!cancelled) setInfo({ connected: false, paper_mode: true, ticker_running: false, cash: 0 });
+      }
+    };
+    load();
+    const id = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
-  if (connected === null) return null;
+
+  if (info === null) return null;
+
+  // Color logic per spec:
+  //   not connected         → amber
+  //   connected + paper     → blue
+  //   connected + real      → green pulsing
+  let dotCls = 'bg-amber-400';
+  if (info.connected) {
+    dotCls = info.paper_mode ? 'bg-blue-400' : 'bg-emerald-400 animate-pulse';
+  }
+
+  // Cash badge (only when connected & non-zero)
+  const cashLabel = info.connected && info.cash > 0
+    ? (info.cash >= 100_000
+        ? '₹' + (info.cash / 100_000).toFixed(1) + 'L'
+        : '₹' + Math.round(info.cash / 1000) + 'K')
+    : null;
+
   return (
-    <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${connected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+    <span className="ml-auto flex items-center gap-1 shrink-0">
+      {cashLabel && (
+        <span className="text-[10px] font-bold text-slate-400/80 tabular-nums">{cashLabel}</span>
+      )}
+      <span
+        className={`w-2 h-2 rounded-full ${dotCls}`}
+        title={
+          !info.connected ? 'Zerodha not connected' :
+          info.paper_mode ? 'Connected (paper mode)' :
+          info.ticker_running ? 'LIVE — real orders enabled' :
+          'Connected — real orders enabled'
+        }
+      />
+    </span>
   );
 }
 

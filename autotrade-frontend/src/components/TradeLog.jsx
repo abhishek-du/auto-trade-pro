@@ -1,4 +1,4 @@
-const fmtUSD  = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n ?? 0);
+const fmtUSD  = (n) => '₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n ?? 0);
 const fmtDate = (s) => {
   try { return new Date(s).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }); }
   catch { return '—'; }

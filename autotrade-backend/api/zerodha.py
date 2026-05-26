@@ -227,6 +227,13 @@ async def get_status():
             margins.get("available", {}).get("live_balance", 0.0)
         )
         exp_ist = _token_expiry_ist()
+        # Best-effort ticker status check
+        ticker_running = False
+        try:
+            from crawler.zerodha_ticker import is_ticker_running as _tr
+            ticker_running = bool(_tr())
+        except Exception:
+            ticker_running = False
         return {
             "connected":                True,
             "api_key_configured":       True,
@@ -239,6 +246,9 @@ async def get_status():
             "expires_datetime_ist":     exp_ist.strftime("%Y-%m-%d %H:%M IST"),
             "last_connected":           datetime.datetime.utcnow().isoformat(),
             "kite_historical_available": _zm._kite_historical_available,
+            "paper_mode":               bool(settings.ZERODHA_PAPER_MODE or settings.PAPER_MODE),
+            "ticker_running":           ticker_running,
+            "redirect_url":             settings.ZERODHA_REDIRECT_URL,
             "error":                    None,
         }
     except Exception as exc:
@@ -952,3 +962,601 @@ async def mf_analysis():
         "buy_count":    sum(1 for r in valid if r.get("signal") in ("BUY", "STRONG_BUY")),
         "scanned_at":   datetime.datetime.utcnow().isoformat() + "Z",
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Extended endpoints — GTT, mutual funds, alerts, ticker control, margins
+# preview, historical sync.  All endpoints catch exceptions and return
+# {"error": str(e)} with appropriate HTTP status (never a bare 500).
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _err(status: int, exc: Exception) -> HTTPException:
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+def _need_connection():
+    if not settings.ZERODHA_ACCESS_TOKEN or not settings.ZERODHA_ENABLED:
+        raise HTTPException(status_code=401, detail="Zerodha not connected")
+
+
+# ── Profile ──────────────────────────────────────────────────────────────────
+
+@router.get("/profile")
+async def get_profile_endpoint():
+    _need_connection()
+    try:
+        kite = get_kite_client()
+        return await kite.get_profile()
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Orders — extra (single by id, modify, trades by order) ──────────────────
+
+@router.get("/orders/{order_id}")
+async def get_order_by_id(order_id: str):
+    _need_connection()
+    try:
+        kite = get_kite_client()
+        return {"history": await kite.get_order_history(order_id)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.put("/orders/{order_id}")
+async def modify_order_endpoint(order_id: str, body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        kite = get_kite_client()
+        kw = {k: body[k] for k in ("quantity", "price", "order_type", "trigger_price", "validity")
+              if k in body and body[k] is not None}
+        new_id = await kite.modify_order(order_id, variety=body.get("variety", "regular"), **kw)
+        return {"order_id": new_id, "status": "modified"}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/trades/{order_id}")
+async def get_trades_for_order(order_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_order_trades
+        return {"trades": await asyncio.to_thread(get_order_trades, order_id)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Positions convert ────────────────────────────────────────────────────────
+
+@router.post("/positions/convert")
+async def convert_position_endpoint(body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        kite = get_kite_client()
+        ok = await kite.convert_position(
+            tradingsymbol    = body["tradingsymbol"],
+            exchange         = body.get("exchange", "NSE"),
+            transaction_type = body["transaction_type"],
+            position_type    = body["position_type"],
+            quantity         = int(body["quantity"]),
+            old_product      = body["old_product"],
+            new_product      = body["new_product"],
+        )
+        return {"converted": bool(ok)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/sync")
+async def sync_real_holdings_endpoint(db: AsyncSession = Depends(get_db)):
+    """Force a holdings + positions sync from Kite into the DB."""
+    _need_connection()
+    try:
+        from engine.zerodha_portfolio import sync_real_holdings, get_real_positions
+        h = await sync_real_holdings(db)
+        try:
+            p = await get_real_positions(db)
+        except Exception:
+            p = {"day": [], "net": []}
+        await db.commit()
+        return {"holdings": h, "positions_count": len(p.get("day", [])) + len(p.get("net", []))}
+    except Exception as exc:
+        await db.rollback()
+        raise _err(502, exc)
+
+
+# ── GTT endpoints ────────────────────────────────────────────────────────────
+
+@router.get("/gtt")
+async def list_gtts():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_gtts
+        return {"triggers": await asyncio.to_thread(get_gtts)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/gtt/{trigger_id}")
+async def get_gtt_one(trigger_id: int):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_gtt
+        return await asyncio.to_thread(get_gtt, trigger_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/gtt/single")
+async def place_gtt_single_endpoint(body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import place_gtt_single
+        return await asyncio.to_thread(
+            place_gtt_single,
+            tradingsymbol     = body["tradingsymbol"],
+            exchange          = body.get("exchange", "NSE"),
+            last_price        = float(body["last_price"]),
+            trigger_price     = float(body["trigger_price"]),
+            quantity          = int(body["quantity"]),
+            order_price       = float(body["order_price"]),
+            transaction_type  = body.get("transaction_type", "BUY"),
+            product           = body.get("product", "CNC"),
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/gtt/oco")
+async def place_gtt_oco_endpoint(body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import place_gtt_oco
+        return await asyncio.to_thread(
+            place_gtt_oco,
+            tradingsymbol    = body["tradingsymbol"],
+            exchange         = body.get("exchange", "NSE"),
+            last_price       = float(body["last_price"]),
+            stoploss_trigger = float(body["stoploss_trigger"]),
+            stoploss_price   = float(body["stoploss_price"]),
+            target_trigger   = float(body["target_trigger"]),
+            target_price     = float(body["target_price"]),
+            quantity         = int(body["quantity"]),
+            product          = body.get("product", "CNC"),
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/gtt/bracket")
+async def place_gtt_bracket_endpoint(body: dict, db: AsyncSession = Depends(get_db)):
+    """Buy + OCO (SL + Target) bracket — full real-money flow."""
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from engine.zerodha_executor import place_gtt_with_oco
+        return await place_gtt_with_oco(
+            symbol         = body["tradingsymbol"],
+            quantity       = int(body["quantity"]),
+            buy_price      = float(body["buy_price"]),
+            stoploss_price = float(body["stoploss_price"]),
+            target_price   = float(body["target_price"]),
+            session        = db,
+            last_price     = float(body.get("last_price", body["buy_price"])),
+        )
+    except Exception as exc:
+        await db.rollback()
+        raise _err(502, exc)
+
+
+@router.put("/gtt/{trigger_id}")
+async def modify_gtt_endpoint(trigger_id: int, body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import modify_gtt
+        return await asyncio.to_thread(
+            modify_gtt,
+            trigger_id,
+            trigger_type=body["trigger_type"],
+            tradingsymbol=body["tradingsymbol"],
+            exchange=body.get("exchange", "NSE"),
+            trigger_values=body["trigger_values"],
+            last_price=float(body["last_price"]),
+            orders=body["orders"],
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.delete("/gtt/{trigger_id}")
+async def delete_gtt_endpoint(trigger_id: int):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import delete_gtt
+        return await asyncio.to_thread(delete_gtt, trigger_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Quotes / OHLC / LTP / instruments ────────────────────────────────────────
+
+@router.get("/quote")
+async def quote_endpoint(symbols: str = Query(...)):
+    _need_connection()
+    try:
+        kite = get_kite_client()
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        # Convert .NS → NSE:SYM
+        from crawler.zerodha_instruments import symbol_to_kite
+        instruments = [symbol_to_kite(s) for s in sym_list]
+        return await kite.get_quote(instruments)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/ohlc")
+async def ohlc_endpoint(symbols: str = Query(...)):
+    _need_connection()
+    try:
+        kite = get_kite_client()
+        from crawler.zerodha_instruments import symbol_to_kite
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        return await kite.get_ohlc([symbol_to_kite(s) for s in sym_list])
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/ltp")
+async def ltp_endpoint(symbols: str = Query(...)):
+    _need_connection()
+    try:
+        kite = get_kite_client()
+        from crawler.zerodha_instruments import symbol_to_kite
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        return await kite.get_ltp([symbol_to_kite(s) for s in sym_list])
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/depth/{symbol}")
+async def depth_endpoint(symbol: str):
+    _need_connection()
+    try:
+        sym_ns = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+        return await get_market_depth(sym_ns)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/instruments")
+async def instruments_endpoint(exchange: str = Query(default="NSE")):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_instruments
+        rows = await asyncio.to_thread(get_instruments, exchange)
+        # Keep payload tractable — top-1000 rows
+        return {"count": len(rows), "instruments": rows[:1000]}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Historical ───────────────────────────────────────────────────────────────
+
+@router.get("/historical/{symbol}")
+async def historical_endpoint(
+    symbol: str,
+    interval: str = Query(default="1d"),
+    days: int = Query(default=120),
+):
+    _need_connection()
+    try:
+        from crawler.zerodha_historical import get_kite_candles_for_range, INTERVAL_MAP
+        if interval not in INTERVAL_MAP:
+            return {"error": f"Unsupported interval. Allowed: {list(INTERVAL_MAP)}"}
+        to = datetime.date.today()
+        frm = to - datetime.timedelta(days=days)
+        candles = await get_kite_candles_for_range(symbol, frm, to, interval=interval)
+        return {"symbol": symbol, "interval": interval, "candles": candles}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/historical/sync")
+async def historical_sync_endpoint(
+    body: dict | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    _need_connection()
+    body = body or {}
+    try:
+        from crawler.zerodha_historical import sync_all_nse_candles, sync_kite_candles
+        if body.get("symbol"):
+            return await sync_kite_candles(
+                body["symbol"],
+                body.get("timeframe", "1d"),
+                int(body.get("days_back", 120)),
+                db,
+            )
+        return await sync_all_nse_candles(
+            db,
+            timeframe=body.get("timeframe", "1d"),
+            days_back=int(body.get("days_back", 120)),
+        )
+    except Exception as exc:
+        await db.rollback()
+        raise _err(502, exc)
+
+
+# ── Margins preview ──────────────────────────────────────────────────────────
+
+@router.post("/margins/preview")
+async def margins_preview(body: dict):
+    _need_connection()
+    try:
+        from engine.zerodha_executor import calculate_order_margins_preview
+        return await calculate_order_margins_preview(
+            symbol           = body["symbol"],
+            transaction_type = body.get("transaction_type", "BUY"),
+            quantity         = int(body["quantity"]),
+            price            = float(body.get("price", 0.0)),
+            product          = body.get("product", "CNC"),
+            exchange         = body.get("exchange", "NSE"),
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/margins/basket")
+async def margins_basket(body: dict):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_basket_margins
+        return await asyncio.to_thread(
+            get_basket_margins, body.get("orders", []), bool(body.get("consider_positions", True))
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/charges/preview")
+async def charges_preview(body: dict):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_virtual_contract_note
+        return await asyncio.to_thread(get_virtual_contract_note, body.get("orders", []))
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Ticker control ───────────────────────────────────────────────────────────
+
+@router.post("/ticker/start")
+async def ticker_start():
+    _need_connection()
+    try:
+        from crawler.zerodha_ticker import start_kite_ticker, is_ticker_running
+        if is_ticker_running():
+            return {"running": True, "started": False, "reason": "already_running"}
+        started = await asyncio.to_thread(start_kite_ticker)
+        return {"running": True, "started": bool(started)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/ticker/stop")
+async def ticker_stop():
+    try:
+        from crawler.zerodha_ticker import stop_kite_ticker
+        await asyncio.to_thread(stop_kite_ticker)
+        return {"running": False, "stopped": True}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/ticker/status")
+async def ticker_status():
+    try:
+        from crawler.zerodha_ticker import is_ticker_running, LIVE_TICKS
+        return {
+            "running": is_ticker_running(),
+            "subscribed_count": len(LIVE_TICKS),
+        }
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Mutual funds ─────────────────────────────────────────────────────────────
+
+@router.get("/mf/instruments")
+async def mf_instruments_endpoint():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_instruments
+        rows = await asyncio.to_thread(get_mf_instruments)
+        return {"count": len(rows), "instruments": rows[:500]}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/mf/orders")
+async def mf_orders_endpoint():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_orders
+        return {"orders": await asyncio.to_thread(get_mf_orders)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/mf/orders/{order_id}")
+async def mf_order_one(order_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_order
+        return await asyncio.to_thread(get_mf_order, order_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/mf/orders")
+async def mf_place_order_endpoint(body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import place_mf_order
+        order_id = await asyncio.to_thread(
+            place_mf_order,
+            tradingsymbol    = body["tradingsymbol"],
+            transaction_type = body.get("transaction_type", "BUY"),
+            amount           = body.get("amount"),
+            quantity         = body.get("quantity"),
+            tag              = body.get("tag"),
+        )
+        return {"order_id": order_id}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.delete("/mf/orders/{order_id}")
+async def mf_cancel_order(order_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import cancel_mf_order
+        return await asyncio.to_thread(cancel_mf_order, order_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/mf/holdings")
+async def mf_holdings_endpoint():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_holdings
+        return {"holdings": await asyncio.to_thread(get_mf_holdings)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/mf/sips")
+async def mf_sips_endpoint():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_sips
+        return {"sips": await asyncio.to_thread(get_mf_sips)}
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.get("/mf/sips/{sip_id}")
+async def mf_sip_one(sip_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_mf_sip
+        return await asyncio.to_thread(get_mf_sip, sip_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.post("/mf/sips")
+async def mf_place_sip(body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import place_mf_sip
+        return await asyncio.to_thread(
+            place_mf_sip,
+            tradingsymbol  = body["tradingsymbol"],
+            amount         = float(body["amount"]),
+            instalments    = int(body["instalments"]),
+            frequency      = body.get("frequency", "monthly"),
+            initial_amount = body.get("initial_amount"),
+            instalment_day = body.get("instalment_day"),
+            tag            = body.get("tag"),
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.put("/mf/sips/{sip_id}")
+async def mf_modify_sip(sip_id: str, body: dict):
+    _need_connection()
+    if settings.ZERODHA_PAPER_MODE:
+        raise HTTPException(status_code=403, detail="ZERODHA_PAPER_MODE is True")
+    try:
+        from crawler.zerodha_kite_lib import modify_mf_sip
+        return await asyncio.to_thread(
+            modify_mf_sip,
+            sip_id,
+            amount=body.get("amount"),
+            status=body.get("status"),
+            instalments=body.get("instalments"),
+            frequency=body.get("frequency"),
+            instalment_day=body.get("instalment_day"),
+        )
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.delete("/mf/sips/{sip_id}")
+async def mf_delete_sip(sip_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import cancel_mf_sip
+        return await asyncio.to_thread(cancel_mf_sip, sip_id)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+# ── Alerts ───────────────────────────────────────────────────────────────────
+
+@router.get("/alerts")
+async def alerts_list():
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import get_alerts
+        return {"alerts": await asyncio.to_thread(get_alerts)}
+    except Exception as exc:
+        return {"alerts": [], "error": str(exc)}
+
+
+@router.post("/alerts")
+async def alerts_create(body: dict):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import place_alert
+        return await asyncio.to_thread(place_alert, **body)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.put("/alerts/{alert_id}")
+async def alerts_modify(alert_id: str, body: dict):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import modify_alert
+        return await asyncio.to_thread(modify_alert, alert_id, **body)
+    except Exception as exc:
+        raise _err(502, exc)
+
+
+@router.delete("/alerts/{alert_id}")
+async def alerts_delete(alert_id: str):
+    _need_connection()
+    try:
+        from crawler.zerodha_kite_lib import delete_alert
+        return await asyncio.to_thread(delete_alert, alert_id)
+    except Exception as exc:
+        raise _err(502, exc)

@@ -78,6 +78,15 @@ async def lifespan(app: FastAPI):
 
     _asyncio.create_task(_warmup_info_cache())
 
+    # ── Kite WebSocket ticker (only when connected + market open) ────────────
+    if settings.ZERODHA_ENABLED and is_nse_market_open():
+        try:
+            from crawler.zerodha_ticker import start_kite_ticker
+            await _asyncio.to_thread(start_kite_ticker)
+            logger.info("Kite WebSocket ticker started on app startup")
+        except Exception as exc:
+            logger.warning(f"Kite ticker startup failed: {exc}")
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────

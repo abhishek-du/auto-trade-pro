@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     FINNHUB_KEY:  str = ""
     NEWSAPI_KEY:  str = ""
 
+    # ── IPO data (ipoalerts.in) ───────────────────────────────────────────────
+    IPOALERTS_API_KEY:     str  = ""
+    IPOALERTS_BASE_URL:    str  = "https://api.ipoalerts.in"
+    IPOALERTS_INCLUDE_GMP: bool = False
+
     # ── LLM ───────────────────────────────────────────────────────────────────
     # Groq: fast inference — signal commentary, quick market analysis
     GROQ_API_KEY: str = ""
@@ -77,11 +82,13 @@ class Settings(BaseSettings):
     KITE_REDIRECT_URL: str = "http://localhost:8000/api/v1/kite/callback"
 
     # ── Zerodha KiteConnect v3 (raw HTTP — full integration) ─────────────────
-    ZERODHA_API_KEY:      str  = ""
-    ZERODHA_API_SECRET:   str  = ""
-    ZERODHA_ACCESS_TOKEN: str  = ""
-    ZERODHA_REDIRECT_URL: str  = "http://localhost:8000/api/v1/zerodha/callback"
-    ZERODHA_ENABLED:      bool = False
+    ZERODHA_API_KEY:       str  = ""
+    ZERODHA_API_SECRET:    str  = ""
+    ZERODHA_ACCESS_TOKEN:  str  = ""
+    ZERODHA_REQUEST_TOKEN: str  = ""
+    ZERODHA_REDIRECT_URL:  str  = "http://localhost:8000/api/v1/zerodha/callback"
+    ZERODHA_ENABLED:       bool = False
+    ZERODHA_PAPER_MODE:    bool = True
 
     # ── Paper trading parameters ──────────────────────────────────────────────
     PAPER_TRADING_BALANCE: float = 1000.0
@@ -101,6 +108,10 @@ class Settings(BaseSettings):
     @property
     def zerodha_available(self) -> bool:
         return bool(self.ZERODHA_API_KEY and self.ZERODHA_API_SECRET)
+
+    @property
+    def ipoalerts_available(self) -> bool:
+        return bool(self.IPOALERTS_API_KEY)
 
     @property
     def groq_available(self) -> bool:
