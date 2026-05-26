@@ -40,8 +40,7 @@ import {
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
-const fmtUSD = (n) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n ?? 0);
+const fmtUSD = (n) => '₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n ?? 0);
 const fmtPct = (n) => `${(n ?? 0).toFixed(1)}%`;
 
 const REJECTION_COLORS = ['#EF4444', '#F59E0B', '#6B7280', '#8B5CF6', '#1A56DB'];
@@ -257,7 +256,7 @@ export default function Simulation() {
                 <XAxis dataKey="date" tick={{ fill: '#64748B', fontSize: 11 }} tickLine={false}
                   axisLine={{ stroke: '#334155' }} interval="preserveStartEnd" />
                 <YAxis tick={{ fill: '#64748B', fontSize: 11 }} tickLine={false} axisLine={false}
-                  tickFormatter={(v) => `$${v.toLocaleString()}`} width={72} />
+                  tickFormatter={(v) => `₹${v.toLocaleString('en-IN')}`} width={72} />
                 <Tooltip content={<EquityTooltip />} />
                 <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="6 3"
                   label={{ value: 'Start $1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />

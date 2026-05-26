@@ -478,3 +478,108 @@ def refresh_stock_info_cache():
     logger.info("[stock_info_cache] Starting daily refresh")
     _run_async(_run())
     logger.info("[stock_info_cache] Done")
+
+
+# ── 15. IPO data refresh — every 30 minutes ──────────────────────────────────
+
+@celery_app.task(name="tasks.india_tasks.refresh_ipo_data")
+def refresh_ipo_data():
+    """Refresh IPO cache from ipoalerts.in API. Runs every 30 minutes."""
+    async def _run():
+        from crawler.ipo_crawler import refresh_ipo_cache
+        await refresh_ipo_cache()
+
+    logger.info("[ipo_refresh] Starting")
+    _run_async(_run())
+    logger.info("[ipo_refresh] Done")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kite-library tasks (Step 12)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(name="tasks.kite_sync_holdings")
+def kite_sync_holdings_task():
+    """Sync Demat holdings from Kite into portfolio_holdings (daily 15:35 IST)."""
+    from utils.config import settings
+    if not settings.ZERODHA_ENABLED:
+        return {"skipped": True}
+
+    async def _run():
+        from db.database import get_db
+        from engine.zerodha_portfolio import sync_real_holdings
+        async for session in get_db():
+            return await sync_real_holdings(session)
+
+    result = _run_async(_run())
+    logger.info(f"[kite_sync_holdings] Result: {result}")
+    return result
+
+
+@celery_app.task(name="tasks.kite_sync_candles")
+def kite_sync_candles_task():
+    """Fetch daily candles for all NSE watchlist symbols via Kite (10:00 UTC)."""
+    from utils.config import settings
+    if not settings.ZERODHA_ENABLED:
+        return {"skipped": True}
+
+    async def _run():
+        from db.database import get_db
+        from crawler.zerodha_historical import sync_all_nse_candles
+        async for session in get_db():
+            return await sync_all_nse_candles(session)
+
+    result = _run_async(_run())
+    logger.info(f"[kite_sync_candles] Result: {result}")
+    return result
+
+
+@celery_app.task(name="tasks.kite_refresh_instruments")
+def kite_refresh_instruments_task():
+    """Refresh the NSE instrument cache (02:30 UTC / 08:00 IST)."""
+    from utils.config import settings
+    if not settings.ZERODHA_ENABLED:
+        return {"skipped": True}
+
+    async def _run():
+        from crawler.zerodha_instruments import refresh_instrument_cache
+        return await refresh_instrument_cache()
+
+    count = _run_async(_run())
+    logger.info(f"[kite_refresh_instruments] Cache refreshed: {count} symbols")
+    return {"refreshed": count}
+
+
+@celery_app.task(name="tasks.kite_check_token")
+def kite_check_token_task():
+    """Verify token validity after the 6:00 AM IST expiry (00:35 UTC)."""
+    from utils.config import settings
+    from crawler.zerodha_kite_lib import verify_token, _write_env, reset_kite
+    valid = False
+    try:
+        valid = verify_token()
+    except Exception as exc:
+        logger.warning(f"[kite_check_token] verify failed: {exc}")
+    if not valid:
+        settings.ZERODHA_ENABLED = False
+        _write_env("ZERODHA_ENABLED", "false")
+        reset_kite()
+        logger.warning("[kite_check_token] Kite access_token expired — user must re-login")
+    return {"valid": valid}
+
+
+@celery_app.task(name="tasks.kite_start_ticker")
+def kite_start_ticker_task():
+    """Start the KiteTicker just before market open (03:45 UTC / 09:15 IST)."""
+    from utils.config import settings
+    if not settings.ZERODHA_ENABLED:
+        return {"skipped": True}
+    from crawler.zerodha_ticker import start_kite_ticker, is_ticker_running
+    from crawler.india_price_feed import is_nse_market_open
+    if not is_nse_market_open():
+        return {"skipped": "market_closed"}
+    if is_ticker_running():
+        return {"skipped": "already_running"}
+    started = start_kite_ticker()
+    logger.info(f"[kite_start_ticker] Started: {started}")
+    return {"started": bool(started)}

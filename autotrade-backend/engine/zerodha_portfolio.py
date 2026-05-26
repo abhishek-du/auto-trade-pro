@@ -210,3 +210,74 @@ async def get_zerodha_pnl_summary(session: AsyncSession) -> dict:
         "available_cash": round(available_cash,  2),
         "total_equity":   round(demat_value + available_cash, 2),
     }
+
+
+# ── Spec-named convenience aliases (used by tasks + new endpoints) ───────────
+
+async def sync_real_holdings(session: AsyncSession) -> dict:
+    """Alias for sync_zerodha_holdings — used by Celery task and /sync endpoint."""
+    return await sync_zerodha_holdings(session)
+
+
+async def get_real_positions(session: AsyncSession) -> dict:
+    """Refresh + return day/net positions with P&L sums."""
+    summary = await sync_zerodha_positions(session)
+    # Read fresh rows back to return structured data
+    from db.models import ZerodhaPosition
+    day_rows = (await session.execute(
+        select(ZerodhaPosition).where(ZerodhaPosition.position_type == "day")
+    )).scalars().all()
+    net_rows = (await session.execute(
+        select(ZerodhaPosition).where(ZerodhaPosition.position_type == "net")
+    )).scalars().all()
+    return {
+        "day": [
+            {
+                "tradingsymbol": p.tradingsymbol, "exchange": p.exchange,
+                "product": p.product, "quantity": p.quantity,
+                "average_price": p.average_price, "last_price": p.last_price,
+                "pnl": p.pnl, "m2m": p.m2m, "value": p.value,
+            } for p in day_rows
+        ],
+        "net": [
+            {
+                "tradingsymbol": p.tradingsymbol, "exchange": p.exchange,
+                "product": p.product, "quantity": p.quantity,
+                "average_price": p.average_price, "last_price": p.last_price,
+                "pnl": p.pnl, "m2m": p.m2m, "value": p.value,
+            } for p in net_rows
+        ],
+        "day_pnl_total": summary.get("day_pnl"),
+        "net_pnl_total": summary.get("net_pnl"),
+        "synced_at":     summary.get("synced_at"),
+    }
+
+
+async def get_full_pnl_summary(session: AsyncSession) -> dict:
+    """Combined holdings + positions + margins summary."""
+    summary = await get_zerodha_pnl_summary(session)
+    try:
+        positions = await get_real_positions(session)
+        summary["positions"] = positions
+    except Exception as exc:
+        logger.warning(f"[zerodha_portfolio] positions skipped: {exc}")
+        summary["positions"] = {"day": [], "net": []}
+    return summary
+
+
+async def get_or_create_zerodha_portfolio(session: AsyncSession):
+    """Find or create a TrackerPortfolio named 'Zerodha Demat'."""
+    from db.models import TrackerPortfolio
+    result = await session.execute(
+        select(TrackerPortfolio).where(TrackerPortfolio.name == "Zerodha Demat")
+    )
+    portfolio = result.scalar_one_or_none()
+    if portfolio is None:
+        portfolio = TrackerPortfolio(
+            name="Zerodha Demat",
+            description="Auto-synced from Zerodha Kite",
+            currency="INR",
+        )
+        session.add(portfolio)
+        await session.flush()
+    return portfolio
