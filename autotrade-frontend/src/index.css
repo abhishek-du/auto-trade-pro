@@ -96,3 +96,62 @@ body {
 .price-up      { color: #10B981; }
 .price-down    { color: #EF4444; }
 .price-neutral { color: var(--color-muted); }
+.price-positive { color: #10B981; }
+.price-negative { color: #EF4444; }
+
+/* ── Chat components ── */
+.chat-bubble-user {
+  background: linear-gradient(135deg, #1D4ED8, #0891B2);
+  border-radius: 1rem 1rem 0.25rem 1rem;
+  display: inline-block;
+}
+
+.signal-badge-buy {
+  display: inline-flex; align-items: center;
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  background: rgba(16,185,129,0.15); color: #10B981;
+  border: 1px solid rgba(16,185,129,0.3);
+}
+.signal-badge-sell {
+  display: inline-flex; align-items: center;
+  padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  background: rgba(239,68,68,0.15); color: #EF4444;
+  border: 1px solid rgba(239,68,68,0.3);
+}
+
+.stock-chip {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 9999px;
+  font-size: 11px; font-weight: 600;
+  background: rgba(59,130,246,0.12); color: #60A5FA;
+  border: 1px solid rgba(59,130,246,0.3);
+  cursor: pointer; transition: background 0.15s;
+}
+.stock-chip:hover { background: rgba(59,130,246,0.22); }
+
+/* Typing indicator (3 bouncing dots) */
+.typing-indicator { display: flex; align-items: center; gap: 3px; }
+.typing-indicator span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #4E6280;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-indicator span:nth-child(1) { animation-delay: 0s; }
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30%            { transform: translateY(-5px); opacity: 1; }
+}
+
+/* Arjun FAB pulse ring */
+@keyframes arjun-ring {
+  0%   { transform: scale(1);   opacity: 0.5; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+.arjun-pulse {
+  border: 2px solid rgba(6, 182, 212, 0.5);
+  animation: arjun-ring 2s ease-out infinite;
+}
