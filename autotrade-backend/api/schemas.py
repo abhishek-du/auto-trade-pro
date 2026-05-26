@@ -202,6 +202,7 @@ class AnalyticsOut(BaseModel):
     avg_rr:                    Optional[float]
     total_trades:              int
     total_pnl:                 float
+    roi_pct:                   Optional[float]
     equity_curve:              list[EquityPoint]
     pnl_by_symbol:             list[PnlBySymbolOut]
     trades_by_direction:       dict[str, int]

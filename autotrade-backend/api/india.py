@@ -803,27 +803,9 @@ async def get_options_chain_detail(
     )).scalar_one_or_none()
 
     if snap is None:
-        # No valid snapshot — try a live fetch (will only succeed during market hours)
-        try:
-            await run_options_analysis(db)
-            await db.commit()
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Options fetch failed: {exc}")
-        snap = (await db.execute(
-            select(OptionsChainSnapshot)
-            .where(
-                OptionsChainSnapshot.symbol == sym,
-                OptionsChainSnapshot.pcr > 0,
-                OptionsChainSnapshot.atm_strike > 0,
-            )
-            .order_by(desc(OptionsChainSnapshot.snapshot_at))
-            .limit(1)
-        )).scalar_one_or_none()
-
-    if snap is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No valid options data for {sym} — will populate during NSE market hours (09:15–15:30 IST)",
+            detail=f"No options data for {sym} yet — Celery refreshes every 15 min during NSE hours (09:15–15:30 IST)",
         )
 
     return OptionsChainDetailOut(

@@ -149,11 +149,15 @@ async def get_analytics(db: AsyncSession = Depends(get_db)):
     total_result = await db.execute(select(func.count(PaperTrade.id)))
     total_trades = int(total_result.scalar_one() or 0)
 
+    wallet_status = await VirtualWallet.get_summary(db)
+    roi_pct       = wallet_status.get("roi_percent")
+
     return AnalyticsOut(
         win_rate=win_rate,
         avg_rr=avg_rr,
         total_trades=total_trades,
         total_pnl=total_pnl,
+        roi_pct=roi_pct,
         equity_curve=equity_curve,
         pnl_by_symbol=pnl_by_symbol,
         trades_by_direction=trades_by_direction,

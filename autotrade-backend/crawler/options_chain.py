@@ -35,6 +35,11 @@ _CHAIN_URL = "https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
 
 SUPPORTED_SYMBOLS = ("NIFTY", "BANKNIFTY")
 
+# Circuit breaker: track last NSE failure time to avoid hammering a blocked endpoint
+import time as _time
+_last_nse_failure: float = 0.0
+_NSE_BACKOFF_SECS = 1800  # 30 min cooldown after a 404/non-200
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -179,6 +184,13 @@ async def fetch_options_chain(symbol: str = "NIFTY") -> dict:
 
     url = _CHAIN_URL.format(symbol=normalized)
 
+    global _last_nse_failure
+    if _last_nse_failure and (_time.time() - _last_nse_failure) < _NSE_BACKOFF_SECS:
+        wait_min = int((_NSE_BACKOFF_SECS - (_time.time() - _last_nse_failure)) / 60) + 1
+        raise ValueError(
+            f"NSE options chain blocked (Akamai 404) — backing off for {wait_min} more min"
+        )
+
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         # Step 1 — get session cookie from NSE homepage
         await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
@@ -188,6 +200,7 @@ async def fetch_options_chain(symbol: str = "NIFTY") -> dict:
         response = await client.get(url, headers=BROWSER_HEADERS)
 
     if response.status_code != 200:
+        _last_nse_failure = _time.time()
         raise ValueError(
             f"NSE options chain returned HTTP {response.status_code} for {normalized}"
         )
@@ -458,7 +471,12 @@ async def run_options_analysis(session: AsyncSession) -> dict:
             )
 
         except Exception as exc:
-            logger.warning(f"Options analysis failed for {symbol}: {exc}")
-            results[symbol] = {"error": str(exc)}
+            msg = str(exc)
+            # Downgrade backoff/market-closed messages to debug — they're expected
+            if "backing off" in msg or "market closed" in msg.lower() or "closed" in msg.lower():
+                logger.debug(f"Options analysis skipped for {symbol}: {msg}")
+            else:
+                logger.warning(f"Options analysis failed for {symbol}: {msg}")
+            results[symbol] = {"error": msg}
 
     return results

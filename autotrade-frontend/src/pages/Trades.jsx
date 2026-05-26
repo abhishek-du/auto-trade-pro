@@ -140,9 +140,17 @@ function InvestmentSummary({ wallet, trades }) {
   const realisedPnl   = wallet?.realised_pnl   ?? 0;
   const unrealisedPnl = wallet?.unrealised_pnl ?? 0;
   const totalPnl      = realisedPnl + unrealisedPnl;
-  const currentValue  = wallet?.equity ?? (totalInvested + totalPnl);
-  const roiPct        = wallet?.roi_percent ?? (totalInvested ? (totalPnl / totalInvested) * 100 : 0);
-  const isGain        = totalPnl >= 0;
+  const balance       = wallet?.balance ?? 0;
+
+  // Portfolio Value = remaining cash + deployed capital + unrealised P&L
+  // wallet.balance already includes realised gains from closed trades.
+  // wallet.equity = balance + unrealisedPnl (excludes deployed capital — that's the bug).
+  const portfolioValue = balance + totalInvested + unrealisedPnl;
+
+  // ROI: always use backend-computed value (based on actual starting balance).
+  // Never use peak_balance as denominator — peak is the highest balance ever, not the start.
+  const roiPct = wallet?.roi_percent ?? 0;
+  const isGain = totalPnl >= 0;
 
   const cards = [
     {
@@ -155,16 +163,16 @@ function InvestmentSummary({ wallet, trades }) {
     },
     {
       label: 'Portfolio Value',
-      value: fmt(currentValue),
-      sub:   'Cash + open positions',
+      value: fmt(portfolioValue),
+      sub:   `Cash ${fmt(balance)}  ·  Unrealised ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)}`,
       icon:  BarChart2,
       color: 'text-blue-400',
       bg:    'bg-blue-500/10',
     },
     {
-      label: 'Total Return',
+      label: 'Total P&L',
       value: (isGain ? '+' : '') + fmt(totalPnl),
-      sub:   `Realised ${fmt(realisedPnl)}  ·  Unrealised ${fmt(unrealisedPnl)}`,
+      sub:   `Realised ${fmt(realisedPnl)}  ·  Unrealised ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)}`,
       icon:  isGain ? ArrowUpRight : ArrowDownRight,
       color: isGain ? 'text-profit' : 'text-loss',
       bg:    isGain ? 'bg-profit/10' : 'bg-loss/10',
@@ -172,7 +180,7 @@ function InvestmentSummary({ wallet, trades }) {
     {
       label: 'Return on Investment',
       value: `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
-      sub:   `On ${fmt(totalInvested)} deployed`,
+      sub:   `Net P&L ${isGain ? '+' : ''}${fmt(totalPnl)} on starting capital`,
       icon:  roiPct >= 0 ? TrendingUp : TrendingDown,
       color: roiPct >= 0 ? 'text-profit' : 'text-loss',
       bg:    roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',

@@ -292,23 +292,54 @@ def build_trade_setup(sig: IndicatorSignals, ltp: float, signal: str) -> dict:
 # ── News fetcher ──────────────────────────────────────────────────────────────
 
 async def fetch_stock_news(symbol: str) -> list[dict]:
-    """Fetch up to 5 recent news items for the NSE symbol from Finnhub."""
+    """Fetch up to 5 recent news items for the NSE symbol.
+
+    Primary: yfinance (works for all NSE stocks, no key needed).
+    Secondary: Finnhub company-news (only works for US stocks on free plan).
+    """
+    # yfinance in a thread (it's sync)
+    try:
+        import asyncio, functools
+        import yfinance as yf
+
+        def _yf_news():
+            ticker = yf.Ticker(f"{symbol}.NS")
+            return ticker.news or []
+
+        loop    = asyncio.get_event_loop()
+        raw     = await loop.run_in_executor(None, _yf_news)
+        results = []
+        for item in raw[:8]:
+            c = item.get("content") or item
+            title   = c.get("title", "")
+            if not title:
+                continue
+            url     = (c.get("canonicalUrl") or {}).get("url") or c.get("url", "")
+            source  = (c.get("provider") or {}).get("displayName") or "Yahoo Finance"
+            pub     = c.get("pubDate") or c.get("displayTime") or ""
+            summary = (c.get("summary") or "")[:300]
+            results.append({
+                "headline":     title.strip(),
+                "source":       source,
+                "url":          url,
+                "published_at": pub,
+                "summary":      summary,
+            })
+        if results:
+            return results[:5]
+    except Exception as exc:
+        logger.warning(f"[deep_analysis] yfinance news failed for {symbol}: {exc}")
+
+    # Finnhub fallback (only useful for US-listed stocks)
     if not settings.finnhub_available:
         return []
-
     from_dt = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
     to_dt   = datetime.date.today().strftime("%Y-%m-%d")
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(
                 f"{_FH_BASE}/company-news",
-                params={
-                    "symbol": f"NSE:{symbol}",
-                    "from":   from_dt,
-                    "to":     to_dt,
-                    "token":  settings.FINNHUB_KEY,
-                },
+                params={"symbol": f"NSE:{symbol}", "from": from_dt, "to": to_dt, "token": settings.FINNHUB_KEY},
             )
             if r.status_code != 200:
                 return []
@@ -328,7 +359,7 @@ async def fetch_stock_news(symbol: str) -> list[dict]:
             ]
     except Exception as exc:
         logger.warning(f"[deep_analysis] Finnhub news failed for {symbol}: {exc}")
-        return []
+    return []
 
 
 # ── Groq AI commentary ────────────────────────────────────────────────────────
