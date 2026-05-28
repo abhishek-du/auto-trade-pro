@@ -108,12 +108,18 @@ export default function HoldingsTable({ holdings, onSell, onDelete }) {
             return (
               <tr key={h.id} className="hover:bg-white/[0.02] transition-colors">
                 <td className="px-3 py-3">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <p className="text-slate-200 font-semibold">
                       {h.display_symbol || (h.symbol?.startsWith('MF:') ? h.symbol.slice(3) : h.symbol?.replace('.NS', ''))}
                     </p>
-                    {h.is_mf && (
+                    {h.source === 'ZERODHA' && (
+                      <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30 shrink-0" title="Synced from Zerodha Demat">Z</span>
+                    )}
+                    {h.source === 'MUTUAL_FUND' && (
                       <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 shrink-0">MF</span>
+                    )}
+                    {h.source === 'MANUAL' && !h.is_mf && (
+                      <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-slate-500/15 text-muted border border-border shrink-0" title="Manually added">M</span>
                     )}
                   </div>
                   <p className="text-muted text-[10px] max-w-[140px] truncate">{h.company_name}</p>

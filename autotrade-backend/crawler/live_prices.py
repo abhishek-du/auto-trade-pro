@@ -25,6 +25,58 @@ PRICE_CACHE: dict[str, dict] = {}
 INFO_CACHE:  dict[str, dict] = {}
 INFO_CACHE_TTL = 86_400  # 24 hours
 
+
+# ── Unified price resolver (Zerodha first → yfinance fallback) ───────────────
+
+def get_price(symbol: str) -> dict | None:
+    """Single source of truth for a symbol's current price.
+
+    Priority chain:
+      1. Zerodha LIVE_TICKS (sub-second latency via KiteTicker)
+      2. PRICE_CACHE (15-second refresh — yfinance backed)
+      3. None (caller decides whether to do a synchronous yfinance call)
+
+    Always returns a dict with at least {price, source, age_seconds} or None.
+    The `source` field tells the UI whether data is real-time broker feed
+    or polled, so it can render a latency label.
+    """
+    from utils.config import settings as _s
+    import time as _time
+
+    # 1. Zerodha LIVE_TICKS — sub-second from KiteTicker WebSocket
+    if getattr(_s, "ZERODHA_ENABLED", False) and getattr(_s, "ZERODHA_ACCESS_TOKEN", ""):
+        try:
+            from crawler.zerodha_ticker import get_live_tick
+            tick = get_live_tick(symbol)
+            if tick and tick.get("last_price"):
+                return {
+                    "price":      float(tick["last_price"]),
+                    "change":     float(tick.get("change", 0) or 0),
+                    "change_pct": float(tick.get("change_percent", 0) or 0),
+                    "volume":     float(tick.get("volume_traded", 0) or 0),
+                    "source":     "zerodha_ticker",
+                    "age_seconds": 0.0,
+                }
+        except Exception:
+            pass  # Fall through to PRICE_CACHE
+
+    # 2. PRICE_CACHE (15-sec refresh)
+    cached = PRICE_CACHE.get(symbol)
+    if cached and cached.get("price"):
+        age = _time.time() - cached.get("_ts", _time.time())
+        return {
+            **{k: v for k, v in cached.items() if not k.startswith("_")},
+            "source":     "yfinance_cache",
+            "age_seconds": round(age, 2),
+        }
+
+    return None
+
+
+def get_prices_batch(symbols: list[str]) -> dict[str, dict]:
+    """Batch wrapper around get_price()."""
+    return {s: p for s in symbols if (p := get_price(s)) is not None}
+
 # ── Symbol catalogue ──────────────────────────────────────────────────────────
 
 SYMBOLS_CONFIG: list[dict] = [

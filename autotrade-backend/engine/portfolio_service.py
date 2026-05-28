@@ -638,12 +638,21 @@ def _portfolio_to_dict(p: TrackerPortfolio) -> dict:
 
 def _holding_to_dict(h: TrackerHolding) -> dict:
     is_mf = h.symbol.startswith("MF:")
+    # Source inference: notes-prefixed for Zerodha-synced rows
+    notes_str = (h.notes or "")
+    if "source:zerodha" in notes_str.lower():
+        source = "ZERODHA"
+    elif is_mf:
+        source = "MUTUAL_FUND"
+    else:
+        source = "MANUAL"
     return {
         "id":             h.id,
         "portfolio_id":   h.portfolio_id,
         "symbol":         h.symbol,
         "display_symbol": h.symbol[3:] if is_mf else h.symbol.replace(".NS", "").replace(".BO", ""),
         "is_mf":          is_mf,
+        "source":         source,
         "company_name":   h.company_name,
         "sector":         h.sector,
         "quantity":       h.quantity,

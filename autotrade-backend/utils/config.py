@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     ALPHA_VANTAGE_KEY: str = ""
 
     # ── Watchlists (comma-separated) ──────────────────────────────────────────
-    WATCHLIST_FOREX:  str = "EUR/USD,GBP/USD,USD/JPY,AUD/USD,USD/CHF,USD/CAD"
-    WATCHLIST_STOCKS: str = "AAPL,TSLA,NVDA,MSFT,AMZN,META,GOOGL,SPY,QQQ"
+    # NSE-focused defaults — this is an Indian markets app
+    WATCHLIST_FOREX:  str = "USD/INR,EUR/INR,GBP/INR,JPY/INR"
+    WATCHLIST_STOCKS: str = "RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,SBIN.NS,BHARTIARTL.NS,KOTAKBANK.NS,LT.NS,ITC.NS"
 
     # ── Indian market watchlists ──────────────────────────────────────────────
     WATCHLIST_NSE_LARGE_CAP: list[str] = [
@@ -90,6 +91,12 @@ class Settings(BaseSettings):
     ZERODHA_ENABLED:       bool = False
     ZERODHA_PAPER_MODE:    bool = True
 
+    # ── Unified decision router ──────────────────────────────────────────────
+    # Single confidence gate used by paper, live, and agent execution paths
+    PAPER_CONFIDENCE_THRESHOLD: float = 60.0   # min confidence for paper trade
+    LIVE_CONFIDENCE_THRESHOLD:  float = 70.0   # tighter gate for live Zerodha orders
+    AGENT_DRY_RUN:              bool  = False  # if true, agent logs but never executes
+
     # ── AI Trading Agent (Varsity-grounded) ──────────────────────────────────
     AGENT_ENABLED:              bool  = False
     AGENT_PAPER_MODE:           bool  = True
@@ -113,7 +120,8 @@ class Settings(BaseSettings):
     AGENT_SESSION_END:          str   = "15:20"
 
     # ── Paper trading parameters ──────────────────────────────────────────────
-    PAPER_TRADING_BALANCE: float = 1000.0
+    # Default ₹1,00,000 — realistic for Indian retail (₹1L is the typical starter)
+    PAPER_TRADING_BALANCE: float = 100000.0
     MAX_RISK_PER_TRADE: float = 0.02       # fraction of balance risked per trade
     MAX_OPEN_POSITIONS: int = 5
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance
