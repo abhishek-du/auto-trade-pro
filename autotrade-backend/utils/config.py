@@ -90,6 +90,28 @@ class Settings(BaseSettings):
     ZERODHA_ENABLED:       bool = False
     ZERODHA_PAPER_MODE:    bool = True
 
+    # ── AI Trading Agent (Varsity-grounded) ──────────────────────────────────
+    AGENT_ENABLED:              bool  = False
+    AGENT_PAPER_MODE:           bool  = True
+    AGENT_EQUITY:               float = 500_000.0
+
+    # Risk limits — Varsity Module 9
+    AGENT_MAX_RISK_PER_TRADE:   float = 0.01
+    AGENT_MAX_OPEN_RISK:        float = 0.06
+    AGENT_DAILY_DD_STOP:        float = 0.03
+    AGENT_WEEKLY_DD_STOP:       float = 0.05
+    AGENT_MONTHLY_DD_STOP:      float = 0.10
+    AGENT_CASH_BUFFER_MIN:      float = 0.20
+    AGENT_MAX_NEW_ENTRIES_DAY:  int   = 5
+    AGENT_CONSEC_LOSS_LOCKOUT:  int   = 2
+    AGENT_CONFIDENCE_THRESHOLD: int   = 70
+
+    # Universe / timing
+    AGENT_TIMEFRAME:            str   = "15m"
+    AGENT_WARMUP_BARS:          int   = 210
+    AGENT_SESSION_START:        str   = "09:20"
+    AGENT_SESSION_END:          str   = "15:20"
+
     # ── Paper trading parameters ──────────────────────────────────────────────
     PAPER_TRADING_BALANCE: float = 1000.0
     MAX_RISK_PER_TRADE: float = 0.02       # fraction of balance risked per trade

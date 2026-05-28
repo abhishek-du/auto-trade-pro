@@ -28,6 +28,9 @@ import TaxCalculator     from './pages/TaxCalculator';
 import AssetAllocation   from './pages/AssetAllocation';
 import IPOTracker        from './pages/IPOTracker';
 import StockChat          from './pages/StockChat';
+import PortfolioDoctor    from './pages/PortfolioDoctor';
+import EarningsAnalyzer  from './pages/EarningsAnalyzer';
+import TradingAgent      from './pages/TradingAgent';
 import FloatingChatButton from './components/chat/FloatingChatButton';
 
 export default function App() {
@@ -65,6 +68,9 @@ export default function App() {
               <Route path="/allocation"     element={<AssetAllocation />}    />
               <Route path="/ipo"            element={<IPOTracker />}         />
               <Route path="/chat"           element={<StockChat />}          />
+              <Route path="/doctor"        element={<PortfolioDoctor />}    />
+              <Route path="/earnings"      element={<EarningsAnalyzer />}   />
+              <Route path="/agent"         element={<TradingAgent />}       />
             </Routes>
           </main>
         </div>

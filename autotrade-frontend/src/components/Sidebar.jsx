@@ -5,7 +5,7 @@ import {
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot,
+  Bot, Stethoscope, FileText, BrainCircuit,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -26,6 +26,9 @@ const INDIA_NAV = [
   { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
   { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
   { to: '/portfolio-tracker', label: 'My Holdings',     Icon: Briefcase,   portfolioTracker: true },
+  { to: '/doctor',           label: 'Portfolio Doctor', Icon: Stethoscope, doctorBadge: true },
+  { to: '/earnings',         label: 'Earnings AI',      Icon: FileText,    earningsBadge: true },
+  { to: '/agent',            label: 'Trading Agent',    Icon: BrainCircuit, agentBadge: true },
   { to: '/calendar',          label: 'Market Calendar', Icon: CalendarDays, calendar: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
@@ -236,6 +239,82 @@ function AllocationDot() {
   return <span className="ml-auto w-2 h-2 rounded-full shrink-0" style={{ background: dotColor }} />;
 }
 
+function AgentStatusBadge() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/agent/status')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) setInfo({ enabled: d.enabled, paper: d.paper_mode, positions: d.portfolio?.open_positions_count || 0 }); })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 30_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!info) return null;
+  if (info.enabled) {
+    return (
+      <span className="ml-auto flex items-center gap-1 shrink-0">
+        {info.positions > 0 && <span className="text-[10px] font-bold text-cyan/80 tabular-nums">{info.positions}</span>}
+        <span className={`w-1.5 h-1.5 rounded-full ${info.paper ? 'bg-blue-400' : 'bg-emerald-400 animate-pulse'}`} title={info.paper ? 'Paper mode' : 'LIVE'} />
+      </span>
+    );
+  }
+  return <span className="ml-auto w-1.5 h-1.5 rounded-full bg-slate-500 shrink-0" title="Agent disabled" />;
+}
+
+function EarningsBadge() {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/earnings/recent?limit=10')
+        .then(r => r.ok ? r.json() : [])
+        .then(d => {
+          const n = Array.isArray(d) ? d.length : 0;
+          setCount(n > 0 ? n : null);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 3600_000); // hourly
+    return () => clearInterval(id);
+  }, []);
+  if (!count) return null;
+  return (
+    <span className="ml-auto text-[10px] font-bold bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded-full shrink-0">
+      {count}
+    </span>
+  );
+}
+
+function DoctorHealthBadge() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/portfolios/')
+        .then(r => r.json())
+        .then(portfolios => {
+          if (!Array.isArray(portfolios) || portfolios.length === 0) { setInfo(null); return; }
+          const pid = portfolios[0]?.id;
+          if (!pid) return;
+          return fetch(`/api/v1/doctor/diagnose/${pid}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d) setInfo({ score: d.overall_score, grade: d.overall_grade, critical: (d.findings || []).filter(f => f.severity === 'CRITICAL').length }); });
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 300_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!info) return null;
+  const color = info.score >= 85 ? '#10B981' : info.score >= 70 ? '#22D3EE' : info.score >= 55 ? '#F59E0B' : info.score >= 40 ? '#F97316' : '#EF4444';
+  return (
+    <span className="ml-auto flex items-center gap-1 shrink-0">
+      {info.critical > 0 && <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse shrink-0" />}
+      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full border" style={{ color, borderColor: color + '40', background: color + '15' }}>{info.grade}</span>
+    </span>
+  );
+}
+
 function IPOBadge() {
   const [count, setCount] = useState(null);
   useEffect(() => {
@@ -386,9 +465,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : PortfolioValueBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker, doctorBadge: isDoctorBadge, earningsBadge: isEarningsBadge, agentBadge: isAgentBadge }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker || isDoctorBadge || isEarningsBadge || isAgentBadge) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : isDoctorBadge ? DoctorHealthBadge : isEarningsBadge ? EarningsBadge : isAgentBadge ? AgentStatusBadge : PortfolioValueBadge;
             return (
               <NavLink
                 key={to}

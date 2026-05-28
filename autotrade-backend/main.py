@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import allocation, analytics, india, ipo_tracker, kite, mf_tracker, news, portfolio, portfolio_tracker, settings as settings_api, signals, simulation, sip_tracker, stock_chat, tax_calculator, trades, websocket, zerodha
+from api import agent, allocation, analytics, earnings, india, ipo_tracker, kite, mf_tracker, news, portfolio, portfolio_doctor, portfolio_tracker, settings as settings_api, signals, simulation, sip_tracker, stock_chat, tax_calculator, trades, websocket, zerodha
 import db.models  # noqa: F401 — registers all ORM models on Base.metadata
 from db.database import engine, init_db
 from utils.config import settings
@@ -121,6 +121,9 @@ app.add_middleware(
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(portfolio.router,         prefix="/api/v1/portfolio")
+app.include_router(portfolio_doctor.router, prefix="/api/v1/doctor")
+app.include_router(earnings.router,        prefix="/api/v1/earnings")
+app.include_router(agent.router,           prefix="/api/v1/agent")
 app.include_router(portfolio_tracker.router, prefix="/api/v1/portfolios")
 app.include_router(mf_tracker.router,       prefix="/api/v1/mf-tracker")
 app.include_router(sip_tracker.router,      prefix="/api/v1/sip")

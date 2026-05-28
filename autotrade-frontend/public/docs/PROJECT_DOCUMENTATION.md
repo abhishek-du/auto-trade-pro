@@ -19,6 +19,10 @@
 - LLM Integration
 - Avishk AI Stock Analyst
 - India Market Suite
+- Personal Portfolio Tracker (Stocks + Mutual Funds)
+- Portfolio Doctor — AI Health Analysis
+- Earnings Call Analyzer — AI Transcript Summaries
+- AI Trading Agent — Varsity-Grounded Autonomous System
 - Zerodha KiteConnect v3 Integration
 - Celery Background Tasks
 - API Reference
@@ -42,13 +46,16 @@ The platform covers the complete spectrum of Indian market tools:
 - **Signal Engine** — multi-factor BUY/SELL/HOLD on NSE/BSE stocks
 - **Avishk AI Stock Analyst** — conversational AI with live NSE context (price, indicators, news, signals), powered by Groq LLM with rule-based fallback
 - **India Market Suite** — FII/DII flows, options chain, sector heatmap, market breadth, India VIX, NSE signals, market calendar (F&O expiry, RBI MPC, holidays, earnings, IPOs)
-- **Personal Portfolio Tracker** — real holdings with live P&L, XIRR, allocation and risk analytics
+- **Personal Portfolio Tracker** — real stock + mutual fund holdings in one portfolio with live P&L, XIRR, allocation analytics. MF NAV auto-fetches via mfapi.in
+- **Portfolio Doctor** — AI-powered health diagnosis: 7 diagnostic modules + Groq narrative + 0-100 score with letter grade
+- **Earnings Call Analyzer** — fetches BSE/NSE filed transcripts (any NSE-listed company via dynamic scrip resolution), extracts PDF text, generates structured AI summaries with management tone analysis
+- **AI Trading Agent** — Varsity-grounded autonomous trading system: 4 strategies, regime classifier, fundamental + macro overlay, unconditional risk-manager veto, paper-by-default with backtester
 - **Asset Allocation Analyzer** — target vs. actual allocation with rebalancing recommendations
 - **SIP Goal Planner** — SIP projections with XIRR and scenario analysis
 - **Tax Calculator** — STCG/LTCG under Budget 2024 rules with P&L worksheet
 - **IPO Tracker** — live IPO status, GMP, subscription data
 - **Mutual Fund Tracker** — NAV history, SIP analysis, signal scoring
-- **Zerodha KiteConnect v3** — full paid-plan integration: OAuth, real holdings sync, 60 API endpoints, KiteTicker WebSocket, GTT/OCO orders, MF orders/SIPs, margin preview, virtual contract note, alerts
+- **Zerodha KiteConnect v3** — full paid-plan integration: OAuth, real holdings sync, 60 API endpoints, KiteTicker WebSocket, GTT/OCO orders, MF orders/SIPs, margin preview, virtual contract note, alerts. Legacy `/kite/*` endpoints transparently fall back to v3 credentials
 
 All data flows through a FastAPI backend with Celery workers; the React SPA reads over REST and WebSocket.
 
@@ -156,16 +163,24 @@ autotrade-backend/
 ├── requirements.txt
 │
 ├── api/                     — REST API routers
-│   ├── analytics.py         — Performance stats + chart data
+│   ├── agent.py             — AI Trading Agent: status, cycle, backtest,
+│   │                          decisions, trades, performance, signal, config, rulebook
 │   ├── allocation.py        — Asset allocation analysis + rebalancing
+│   ├── analytics.py         — Performance stats + chart data
+│   ├── earnings.py          — Earnings call AI analyzer: summary, list, history,
+│   │                          recent, refresh, compare
 │   ├── india.py             — India market: FII/DII, options, calendar,
 │   │                          breadth, heatmap, signals, backtest
 │   ├── ipo_tracker.py       — IPO status, GMP, subscription data
-│   ├── kite.py              — Legacy Kite portfolio tracker
+│   ├── kite.py              — Legacy Kite portfolio tracker (transparent
+│   │                          fallback to Zerodha v3 when KITE_API_KEY unset)
 │   ├── mf_tracker.py        — Mutual fund tracker (holdings, SIP analysis)
 │   ├── news.py              — News feed + per-symbol sentiment
 │   ├── portfolio.py         — Virtual wallet: summary, positions, snapshots
-│   ├── portfolio_tracker.py — Real personal portfolio: holdings, XIRR, P&L
+│   ├── portfolio_doctor.py  — AI Portfolio Doctor: diagnose, history,
+│   │                          quick-check, delete
+│   ├── portfolio_tracker.py — Real personal portfolio: stocks + MFs, holdings,
+│   │                          XIRR, P&L, MF search via mfapi.in
 │   ├── schemas.py           — Pydantic request/response models
 │   ├── settings.py          — Read/write runtime configuration
 │   ├── signals.py           — Latest signals, per-symbol history
@@ -178,35 +193,74 @@ autotrade-backend/
 │   └── zerodha.py           — Zerodha KiteConnect v3 (60 endpoints)
 │
 ├── crawler/                 — Data ingestion
-│   ├── price_feed.py        — yfinance + Alpha Vantage OHLCV
-│   ├── india_price_feed.py  — NSE-specific price ingestion
-│   ├── live_prices.py       — In-memory PRICE_CACHE, broadcast
-│   ├── news_crawler.py      — NewsAPI + Finnhub + RSS + FinBERT
+│   ├── earnings_crawler.py  — BSE/NSE earnings transcript PDF crawler with
+│   │                          dynamic scrip-code resolution + pdfplumber extractor
 │   ├── fii_dii_crawler.py   — NSE institutional flow scraper
+│   ├── india_price_feed.py  — NSE-specific price ingestion
+│   ├── ipo_crawler.py       — IPO data scraper (ipoalerts.in + Chittorgarh fallback)
+│   ├── live_prices.py       — In-memory PRICE_CACHE, broadcast
+│   ├── market_breadth.py    — A/D ratio, new highs/lows, breadth mood scoring
+│   ├── news_crawler.py      — NewsAPI + Finnhub + RSS + FinBERT
 │   ├── options_chain.py     — NSE options chain (circuit breaker for 404)
+│   ├── price_feed.py        — yfinance + Alpha Vantage OHLCV
+│   ├── sector_data.py       — SECTOR_DEFINITIONS + SECTOR_CACHE (mood scoring)
+│   ├── sentiment.py         — FinBERT sentiment scoring wrapper
 │   ├── zerodha_client.py    — Async KiteConnect HTTP client (singleton)
-│   ├── zerodha_market.py    — NSE/INDEX_TOKENS, live prices, instrument map
-│   ├── zerodha_kite_lib.py  — kiteconnect library wrapper (40+ methods)
+│   ├── zerodha_historical.py — Official Kite candle sync → save_candles_to_db
 │   ├── zerodha_instruments.py — Hardcoded token map + async cache refresh
+│   ├── zerodha_kite_lib.py  — kiteconnect library wrapper (40+ methods)
+│   ├── zerodha_market.py    — NSE/INDEX_TOKENS, live prices, instrument map
 │   ├── zerodha_ticker.py    — KiteTicker WebSocket → LIVE_TICKS + PRICE_CACHE
-│   └── zerodha_historical.py — Official Kite candle sync → save_candles_to_db
+│   └── zerodha_websocket.py — KiteTicker WebSocket connection management
 │
 ├── db/
 │   ├── database.py          — Engine, session factory, Base, init_db
-│   └── models.py            — All ORM models
+│   └── models.py            — All ORM models (32 tables incl. agent/doctor/earnings)
 │
 ├── engine/                  — Trading logic
+│   ├── agent/               — AI Trading Agent (Varsity-grounded multi-agent)
+│   │   ├── __init__.py
+│   │   ├── agent_loop.py            — Main orchestrator: per-bar cycle
+│   │   ├── analyzer.py              — MarketAnalyzerAgent: features + regime
+│   │   ├── backtester.py            — Event-bar backtester with Indian cost model
+│   │   ├── decision_engine.py       — Fuses candidate + bear-case check (M12)
+│   │   ├── execution.py             — Paper/live order placement
+│   │   ├── fundamentals.py          — FundamentalsAgent: 0-100 grade (M3, 24h cache)
+│   │   ├── indicators_agent.py      — Pure-numpy indicators for hot loops
+│   │   ├── macro.py                 — MacroSectorAgent: -2..+2 bias (M8+M15)
+│   │   ├── portfolio_context.py     — Open positions, drawdowns, cash
+│   │   ├── risk_manager.py          — Unconditional veto: 7 gate types (M9)
+│   │   ├── selector.py              — Strategy selector with R:R ≥ 1.5 gate
+│   │   └── strategies/              — 4 Varsity-grounded strategies
+│   │       ├── base.py              — Strategy ABC + TradeCandidate dataclass
+│   │       ├── mean_reversion.py    — Short at BB upper (M2.3)
+│   │       ├── pullback_trend.py    — Pullback to 20EMA (M2.2)
+│   │       ├── range_reversal.py    — Long at BB lower with hammer
+│   │       └── trend_breakout.py    — 20-bar breakout + volume (M2.1)
+│   ├── allocation_engine.py — Asset allocation analyzer + risk profiler
+│   ├── backtester.py        — Single-symbol historical backtest
+│   ├── calendar_engine.py   — Indian market calendar (F&O, RBI, holidays)
 │   ├── candlestick.py       — Pattern detection (Doji, Hammer, Engulfing…)
 │   ├── deep_analysis.py     — Reasoning, trade setup, yfinance news, AI commentary
+│   ├── earnings_summarizer.py — AI transcript summarizer (Groq → structured JSON)
+│   ├── fundamental_analyzer.py — yfinance + Screener.in fundamental data
+│   ├── india_signal_generator.py — NSE-specific signal generator
+│   ├── india_specific.py    — India-specific signal adjustments
 │   ├── indicators.py        — Full suite: RSI, MACD, BB, EMA, ATR, Stochastic,
 │   │                          Supertrend, Ichimoku, ADX, VWAP+bands
+│   ├── ipo_analyzer.py      — IPO scoring + Groq verdict
 │   ├── llm_explainer.py     — Groq API + fallback explanation generator
+│   ├── ml_predictor.py      — ML model predictor
 │   ├── mutual_fund_analyzer.py — MF NAV trend + signal scoring
-│   ├── portfolio_service.py — XIRR calculation, portfolio analytics
+│   ├── portfolio_doctor.py  — Portfolio Doctor: 7 diagnostic modules +
+│   │                          Dr. Arjun AI narrative + 0-100 health score
+│   ├── portfolio_service.py — XIRR calculation, portfolio analytics, MF NAV cache
 │   ├── risk_manager.py      — 6-check pre-trade gate + position sizing
 │   ├── signal_generator.py  — Confluence scorer + TradingSignal dataclass
+│   ├── sip_engine.py        — SIP projection engine
 │   ├── stock_chat.py        — Avishk AI chat engine (intent, context, Groq)
 │   ├── stock_context_builder.py — Live context assembly for AI chat
+│   ├── tax_engine.py        — Indian capital gains tax engine (Budget 2024)
 │   ├── zerodha_executor.py  — 10-rule real-order safety gate
 │   └── zerodha_portfolio.py — Real holdings sync, P&L summary
 │
@@ -217,18 +271,41 @@ autotrade-backend/
 │   ├── position_tracker.py  — Open position queries + bulk price refresh
 │   └── simulation_logger.py — Audit log writer + performance analyser
 │
+├── services/
+│   └── kite_service.py      — Legacy Kite OAuth helper
+│
 ├── tasks/
-│   ├── celery_app.py        — Celery app + beat schedule (13 tasks)
+│   ├── celery_app.py        — Celery app + beat schedule (27 scheduled tasks)
 │   ├── _db.py               — NullPool session factory for workers
-│   ├── india_tasks.py       — India market + Kite Celery tasks
+│   ├── india_tasks.py       — India market + Kite + agent + earnings tasks
 │   ├── market_scan.py       — OHLCV candle crawl task
 │   ├── news_scan.py         — News + FinBERT task
 │   └── paper_trade_loop.py  — Full trading cycle task
 │
 └── utils/
-    ├── config.py            — Pydantic settings loaded from .env
-    └── logger.py            — Structured Python logging
+    ├── config.py            — Pydantic settings loaded from .env (incl. AGENT_*)
+    ├── llm.py               — Shared Groq/Anthropic LLM helper utilities
+    ├── logger.py            — Structured Python logging
+    └── runtime_config.py    — Runtime-mutable config (used by /settings API)
 ```
+
+### New backend modules summary (added recently)
+
+| Module | Purpose |
+|---|---|
+| `api/agent.py` | 11 endpoints for the AI Trading Agent |
+| `api/earnings.py` | 6 endpoints for AI earnings call analyzer |
+| `api/portfolio_doctor.py` | 5 endpoints for AI Portfolio Doctor |
+| `crawler/earnings_crawler.py` | BSE/NSE transcript fetch + dynamic BSE scrip resolver + PDF text extraction |
+| `engine/agent/` | Full Varsity-grounded multi-agent system (12 files in package) |
+| `engine/earnings_summarizer.py` | Groq-driven structured transcript summarizer |
+| `engine/portfolio_doctor.py` | 7 diagnostic modules + Dr. Arjun narrative |
+| `engine/portfolio_service.py` (updated) | MF support: `MF:{scheme_code}` symbol prefix, mfapi.in NAV cache |
+| `api/portfolio_tracker.py` (updated) | New `/search/mf` and `/search/mf/{code}/nav` endpoints |
+| `api/kite.py` (updated) | Transparent fallback to Zerodha v3 when legacy `KITE_API_KEY` unset |
+| `db/models.py` (updated) | 7 new tables: `portfolio_diagnoses`, `earnings_call_summaries`, `agent_decisions`, `agent_trades`, `agent_positions`, `agent_performance` |
+| `tasks/india_tasks.py` (updated) | 3 new tasks: `run_agent_cycle`, `agent_eod_reconcile`, `fetch_earnings_transcripts` |
+| `utils/config.py` (updated) | 17 new `AGENT_*` settings + `EARNINGS_CACHE_HOURS` |
 
 ---
 
@@ -437,9 +514,9 @@ Vectorised backtest over 1 year of daily data. Simulates paper trades on each si
 
 ---
 
-## Personal Portfolio Tracker
+## Personal Portfolio Tracker (Stocks + Mutual Funds)
 
-`api/portfolio_tracker.py` — manages user's real holdings portfolios (separate from the paper trading virtual wallet).
+`api/portfolio_tracker.py` — manages user's real holdings portfolios (separate from the paper trading virtual wallet). Supports **both stocks/ETFs and mutual funds** in the same portfolio.
 
 ### Portfolios
 Multiple named portfolios (e.g. "Zerodha Demat", "HDFC Securities"). Each has holdings, total invested, current value, unrealised P&L, and XIRR.
@@ -449,6 +526,183 @@ Multiple named portfolios (e.g. "Zerodha Demat", "HDFC Securities"). Each has ho
 
 ### Live P&L
 Current prices fetched from `PRICE_CACHE` (updated every 15 seconds during market hours by the live price feed). Falls back to yfinance if symbol not cached.
+
+### Mutual Fund Holdings
+Mutual fund units are stored in the same `tracker_holdings` table using a `MF:{scheme_code}` symbol prefix. NAV is fetched from mfapi.in with a 1-hour in-process cache. The Add Holding modal has two tabs:
+
+- **Stock / ETF** — searches NSE symbols via the existing `/search/stocks` endpoint
+- **Mutual Fund** — searches AMFI fund database via `/api/v1/portfolios/search/mf?q=<query>` (returns up to 15 matches with scheme code, name, and inferred category). On fund selection, current NAV auto-fetches via `/api/v1/portfolios/search/mf/{scheme_code}/nav` and pre-fills the purchase NAV field (editable for historical entries).
+
+The `_holding_to_dict()` serializer exposes `is_mf: true` and a `display_symbol` that strips the `MF:` prefix, so the Holdings table renders fund rows with an `MF` badge and category labels.
+
+### Endpoints
+- `GET  /api/v1/portfolios/` — list all portfolios with summaries
+- `POST /api/v1/portfolios/` — create portfolio
+- `GET  /api/v1/portfolios/{id}` — full portfolio detail
+- `POST /api/v1/portfolios/{id}/holdings` — add stock/MF holding (body accepts `symbol`, `quantity`, `price`, `trade_date`, `company_name`, `sector`)
+- `POST /api/v1/portfolios/{id}/holdings/{hid}/sell` — sell holding
+- `GET  /api/v1/portfolios/search/stocks?q=` — NSE stock search
+- `GET  /api/v1/portfolios/search/mf?q=` — mutual fund search via mfapi.in
+- `GET  /api/v1/portfolios/search/mf/{scheme_code}/nav` — fetch current NAV
+
+---
+
+## Portfolio Doctor — AI Health Analysis
+
+`engine/portfolio_doctor.py` + `api/portfolio_doctor.py` — runs 7 deterministic diagnostic modules over a portfolio and produces a 0–100 health score with an AI-generated narrative.
+
+### Diagnostic Modules
+1. **Concentration** — flags single stocks > 25%, sectors > 40%, and all-equity portfolios
+2. **Risk Quality** — checks fundamentals per holding (PE > 80, D/E > 3.0, negative ROE, revenue decline)
+3. **Diversification** — minimum 8 holdings; missing asset classes (debt, gold, international)
+4. **Tax Efficiency** — STCG liability, loss-harvesting opportunities, LTCG exemption utilisation, timing suggestions for the 12-month threshold
+5. **Performance** — XIRR vs NIFTY 50 benchmark; persistent losers held > 6 months
+6. **Sector Timing** — cross-references portfolio weights against current SECTOR_CACHE momentum
+7. **Position Sizing** — dead weight (<1% positions), inconsistent sizing ratios
+
+### Severity & Scoring
+Each finding has severity: `CRITICAL` (-25 points), `WARNING` (-10), `INFO` (-3), or `GOOD` (+2). Final 0–100 score maps to letter grades A/B/C/D/F.
+
+### AI Narrative
+A "Dr. Arjun" persona is sent the structured findings via Groq llama-3.1-8b-instant. The model writes a 3-4 paragraph doctor's-style assessment with specific stock names and numbers. Falls back to rule-based summary when `GROQ_API_KEY` is unset.
+
+### Endpoints
+- `POST   /api/v1/doctor/diagnose` — full diagnosis (15–30s; calls fundamentals + AI)
+- `GET    /api/v1/doctor/diagnose/{portfolio_id}` — latest cached diagnosis
+- `GET    /api/v1/doctor/history/{portfolio_id}` — last 5 diagnoses for trend chart
+- `GET    /api/v1/doctor/quick-check/{portfolio_id}` — fast check (no AI, < 3s)
+- `DELETE /api/v1/doctor/diagnose/{diagnosis_id}` — delete a cached diagnosis
+
+### Storage
+`portfolio_diagnoses` table holds the score, grade, findings JSON, AI narrative, and quick wins. Sidebar polls `/diagnose/{id}` every 5 minutes to surface the current letter grade as a coloured badge.
+
+---
+
+## Earnings Call Analyzer — AI Transcript Summaries
+
+`crawler/earnings_crawler.py` + `engine/earnings_summarizer.py` + `api/earnings.py` — fetches earnings call transcript PDFs from BSE/NSE filings under SEBI LODR regulations, extracts text, and produces structured AI summaries.
+
+### Source Priority
+1. **BSE filing API** — `api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData` with `SUBCATNAME='Earnings Call Transcript'` filter. PDFs live at `bseindia.com/xml-data/corpfiling/AttachLive/{uuid}.pdf`
+2. **NSE announcements** — `nseindia.com/api/corp-info-equities-announcement?category=transcript` (uses the same two-step session pattern as `fii_dii_crawler.py`)
+3. **Trendlyne fallback** — scrapes the conference-calls page when neither BSE nor NSE return results
+
+### Dynamic BSE Scrip Resolution
+For any NSE ticker outside the ~40-stock hardcoded `BSE_SCRIP_MAP`, `_resolve_bse_scrip_code()` calls BSE's `listofscripdata` search API and matches on the `scrip_id` field. Resolved codes are cached in-process. This means any NSE-listed company works without code changes.
+
+### PDF Text Extraction
+Primary: **pdfplumber** (text-layer PDFs). Fallback: **PyPDF2**. Cleaning step removes page numbers, merges hyphenated line breaks, collapses repeated newlines, and trims trailing disclaimers ("Forward-Looking Statements", "DISCLAIMER", "Safe Harbour Statement").
+
+### AI Summarization
+Sends the cleaned transcript text to Groq llama-3.1-8b-instant with a system prompt as Dr. Arjun (Indian equity research analyst). Returns a strict JSON object with:
+
+- `financial_highlights` — 5 bullets with specific numbers (revenue, margins, segment perf, balance sheet, key operating metric)
+- `management_guidance` — 4 bullets (revenue/margin/capex/strategic timeline)
+- `key_risks` — 4 bullets (macro, margin pressure, competitive/regulatory, balance sheet)
+- `analyst_questions` — 3 most-important Q&A concerns
+- `strategic_updates` — 3 developments (acquisitions, new verticals, partnerships)
+- `revenue_guidance`, `margin_guidance`, `capex_guidance`, `dividend_info`
+- `management_tone` — `OPTIMISTIC` / `CAUTIOUS` / `NEUTRAL` / `NEGATIVE` with `tone_reason`
+- `ai_confidence` — `HIGH` / `MEDIUM` / `LOW`
+
+Transcripts > 80k chars are split: first 70% + last 30% retained (typical concall structure: management remarks + Q&A).
+
+### Endpoints
+- `GET  /api/v1/earnings/summary/{symbol}?quarter=Q4FY26&refresh=false`
+- `GET  /api/v1/earnings/list/{symbol}` — available transcripts without summarization
+- `GET  /api/v1/earnings/history/{symbol}` — all cached summaries
+- `GET  /api/v1/earnings/recent?limit=10` — latest summaries across all companies
+- `POST /api/v1/earnings/refresh/{symbol}?quarter=` — force re-summarize
+- `GET  /api/v1/earnings/compare/{symbol}?quarters=Q4FY26&quarters=Q3FY26` — side-by-side trend
+
+### Storage
+`earnings_call_summaries` table — unique constraint on `(symbol, quarter)`, indexed by `(symbol, created_at)`. Daily Celery task `tasks.fetch_earnings_transcripts` runs at 20:00 IST to auto-summarize new filings for the top 10 NSE stocks.
+
+---
+
+## AI Trading Agent — Varsity-Grounded Autonomous System
+
+`engine/agent/` — multi-agent cooperative system that trades NSE equities like a disciplined human professional. **Every rule is derived from the 17 Zerodha Varsity modules.** Paper-mode by default; live trading requires `AGENT_PAPER_MODE=false` AND `AGENT_ENABLED=true`.
+
+### Architecture
+```
+MarketAnalyzer → StrategySelector → DecisionEngine
+      ↓               ↓                ↓
+FundamentalsAgent  MacroSectorAgent  Memory
+      └─────────→ RiskManager ←────────┘
+                       ↓
+                ExecutionManager → Zerodha Kite
+```
+
+Per-bar flow (every 15 min during market hours):
+1. `MarketAnalyzerAgent.compute_features(df)` → regime + 17 features
+2. `MacroSectorAgent.bias(symbol)` → −2 … +2 (Varsity M8 + M15)
+3. `FundamentalsAgent.get_cached_grade(symbol)` → 0–100 score + INVESTMENT/WATCHLIST/REJECT (M3)
+4. `StrategySelectorAgent.propose(...)` → best candidate from 4 strategies
+5. `DecisionEngine.fuse(...)` → final decision + bear-case check (M12)
+6. `RiskManagerAgent.can_take_trade(...)` → unconditional veto (M9)
+7. `AgentExecutionManager.execute(...)` → paper log or live order
+
+### Regime Classifier (M2)
+Dow Theory + ADX-based: `BULL_TRENDING` (ADX≥25 + EMA-aligned + +DI>−DI), `BEAR_TRENDING`, `HIGH_VOL_RANGE` (ATR > 1.5× 50-avg), `LOW_VOL_RANGE`, `RANGE`.
+
+### Strategies
+- **TrendBreakoutLong** (M2.1) — bull regime + breakout 20-bar high + volume spike + RSI 55-75 + ADX ≥ 20 + EMA20>EMA50
+- **PullbackTrendLong** (M2.2) — bull regime + prev low touched 20EMA + close back above + RSI ≥ 40
+- **MeanReversionShort** (M2.3) — range regime + close > BB upper + RSI ≥ 70 + bearish rejection candle
+- **RangeReversalLong** — range regime + close ≤ BB lower + RSI ≤ 35 + hammer/bullish pattern
+
+Selector picks the highest-confidence candidate with **R:R ≥ 1.5** (M9.4).
+
+### Risk Manager (M9) — Unconditional Veto
+7 gate types:
+1. **Drawdown stops**: daily 3%, weekly 5%, monthly 10%
+2. **Consecutive loss lockout**: 2 losses → halt new entries today
+3. **Max daily entries**: 5 per day
+4. **Position sizing**: max 1% equity at risk per trade
+5. **Portfolio risk cap**: max 6% total open risk
+6. **Cash buffer**: minimum 20% cash post-trade (M11)
+7. **Correlation cluster**: blocks symbols correlated > 0.70 with open positions (M16)
+
+### Decision Engine — Innerworth Check (M12)
+Before finalising any decision, the engine writes the bear case. STRONG bear cases reduce confidence by 10 points. Examples:
+- Buying into `BEAR_TRENDING` regime
+- Macro bias ≤ −2 against the trade direction
+- RSI > 70 at entry on a long signal
+
+### Indian Cost Model (M7)
+Backtester deducts realistic costs: brokerage min(₹20, 0.03%), STT 0.1%, NSE turnover 0.00345%, SEBI 0.0001%, stamp 0.015% (buy only), GST 18% on (brokerage + exchange + SEBI).
+
+### Endpoints
+- `GET  /api/v1/agent/status` — enabled flag, portfolio, decisions today
+- `POST /api/v1/agent/cycle/trigger` — manual one-shot cycle
+- `POST /api/v1/agent/backtest` — body: `{symbol, timeframe, fund_grade, macro_bias, days_back}`
+- `GET  /api/v1/agent/decisions?limit=20&symbol=&action=`
+- `GET  /api/v1/agent/trades?open_only=false`
+- `GET  /api/v1/agent/performance` — win rate, profit factor, expectancy, equity curve
+- `GET  /api/v1/agent/positions` — currently open positions
+- `POST /api/v1/agent/positions/{symbol}/close` — manual exit at LTP
+- `POST /api/v1/agent/signal/{symbol}` — on-demand signal without execution
+- `PUT  /api/v1/agent/config` — requires header `X-Agent-Config-Update: yes`
+- `GET  /api/v1/agent/rulebook` — all Varsity-derived rules as JSON
+
+### Storage
+- `agent_decisions` — every evaluation (traded, blocked, or skipped) with reasoning chain
+- `agent_trades` — open + closed positions with P&L
+- `agent_positions` — currently open (one row per symbol)
+- `agent_performance` — daily snapshots
+
+### Celery Schedule
+- `tasks.run_agent_cycle` — every 15 min during NSE hours (Mon-Fri 03:45-10:00 UTC)
+- `tasks.agent_eod_reconcile` — 15:25 IST (closes remaining positions, resets daily counters)
+
+### Deployment Gate
+Before flipping `AGENT_PAPER_MODE=false`:
+1. Backtest all universe symbols → confirm positive expectancy
+2. Paper trade for ≥ 30 days
+3. Win rate > 45% AND profit factor > 1.3
+4. Max paper drawdown < 8%
+5. Start live at 10% of real capital
 
 ---
 
@@ -702,7 +956,7 @@ Subscribes all NSE symbols + indices in `MODE_FULL`. Each tick contains last_pri
 
 ## Celery Background Tasks
 
-13 scheduled tasks via Celery Beat.
+27 scheduled tasks via Celery Beat (core + India market + Kite + AI features).
 
 ### Core Tasks
 
@@ -730,6 +984,14 @@ Subscribes all NSE symbols + indices in `MODE_FULL`. Each tick contains last_pri
 | `kite_refresh_instruments` | Daily 02:30 | 08:00 IST | Refresh instrument token cache |
 | `kite_check_token` | Daily 00:35 | 06:05 IST | Verify token validity; flag expired |
 | `kite_start_ticker` | Daily 03:45 | 09:15 IST | Start KiteTicker WebSocket at market open |
+
+### AI Feature Tasks
+
+| Task | Schedule (UTC) | IST equivalent | Action |
+|---|---|---|---|
+| `fetch_earnings_transcripts` | Daily 14:30 | 20:00 IST | Auto-fetch + AI-summarize new transcripts for top 10 NSE stocks |
+| `run_agent_cycle` | Every 15 min during market hours | 09:14-15:59 IST (Mon-Fri) | One AI Trading Agent evaluation cycle |
+| `agent_eod_reconcile` | Daily 09:55 | 15:25 IST | Close remaining open positions + reset daily counters |
 
 ### NullPool Pattern
 
@@ -879,6 +1141,43 @@ All endpoints prefixed `/api/v1/`. Interactive docs at `/docs` (Swagger) or `/re
 | GET | `/` | Current runtime configuration |
 | PATCH | `/` | Update runtime parameters |
 
+### Portfolio Doctor (`/api/v1/doctor`)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/diagnose` | Full AI diagnosis (15–30s) |
+| GET | `/diagnose/{portfolio_id}` | Latest cached diagnosis |
+| GET | `/history/{portfolio_id}` | Last 5 diagnoses |
+| GET | `/quick-check/{portfolio_id}` | Fast no-AI check |
+| DELETE | `/diagnose/{diagnosis_id}` | Delete cached diagnosis |
+
+### Earnings Call Analyzer (`/api/v1/earnings`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/summary/{symbol}` | Fetch + AI-summarize latest earnings call |
+| GET | `/list/{symbol}` | Available transcripts (no AI) |
+| GET | `/history/{symbol}` | All cached summaries |
+| GET | `/recent` | Latest summaries across all companies |
+| POST | `/refresh/{symbol}` | Force re-summarize |
+| GET | `/compare/{symbol}` | Side-by-side quarter comparison |
+
+### AI Trading Agent (`/api/v1/agent`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/status` | Agent enabled flag, portfolio, decisions count |
+| POST | `/cycle/trigger` | Manual one-shot evaluation cycle |
+| POST | `/backtest` | Run backtest with realistic costs |
+| GET | `/decisions` | Recent decisions feed |
+| GET | `/trades` | Open + closed trades |
+| GET | `/performance` | Win rate, profit factor, equity curve |
+| GET | `/positions` | Currently open positions |
+| POST | `/positions/{symbol}/close` | Manual exit at LTP |
+| POST | `/signal/{symbol}` | On-demand signal (no execution) |
+| PUT | `/config` | Update config (requires `X-Agent-Config-Update: yes` header) |
+| GET | `/rulebook` | All Varsity-derived rules as JSON |
+
 ### WebSocket (`/ws`)
 
 Real-time price and portfolio updates pushed to connected frontend clients every 15 seconds (15 minutes when market is closed).
@@ -923,9 +1222,21 @@ NIFTY/BANKNIFTY options data: ATM strike, PCR, max pain, total OI, support/resis
 Kite instrument token cache. Downloaded daily from Kite instrument master. Columns: instrument_token, exchange_token, tradingsymbol, name, expiry, strike, instrument_type, segment, exchange, refreshed_at.
 
 ### Portfolio Tracker tables
-`portfolios` — named portfolios with type and currency.
-`holdings` — individual stock holdings linked to portfolio.
-`transactions` — buy/sell transactions for XIRR computation.
+`tracker_portfolios` — named portfolios with type and currency.
+`tracker_holdings` — individual stock + MF holdings (MF rows use `MF:{scheme_code}` symbol prefix).
+`tracker_transactions` — buy/sell transactions for XIRR computation.
+
+### `portfolio_diagnoses`
+Persisted Portfolio Doctor reports: overall_score, overall_grade, summary, findings JSON, ai_narrative, quick_wins, data_snapshot. Indexed by `(portfolio_id, created_at)` for history charts.
+
+### `earnings_call_summaries`
+AI-generated transcript summaries. Unique constraint on `(symbol, quarter)`. Stores full 5-section breakdown (financial_highlights, management_guidance, key_risks, analyst_questions, strategic_updates) + tone, confidence, source PDF URL.
+
+### Agent tables
+- `agent_decisions` — every evaluation the agent made (traded, blocked, skipped) with full reasoning chain
+- `agent_trades` — open + closed positions with stop/target/exit_reason/pnl
+- `agent_positions` — currently open positions, one row per symbol
+- `agent_performance` — daily snapshots: total trades, win rate, profit factor, max DD, sharpe, equity_end
 
 ---
 
@@ -970,8 +1281,11 @@ autotrade-frontend/src/
 └── pages/
     ├── Dashboard.jsx        — Portfolio + equity chart + positions + signals
     ├── Trades.jsx           — Capital deployed, open positions, trade history
-    ├── Portfolio.jsx        — Legacy Kite holdings tracker
-    ├── PortfolioTracker.jsx — Personal holdings with live P&L + XIRR
+    ├── Portfolio.jsx        — Legacy Kite holdings tracker (auto-falls back to Zerodha v3)
+    ├── PortfolioTracker.jsx — Personal holdings (stocks + MFs) with live P&L + XIRR + Doctor tab
+    ├── PortfolioDoctor.jsx  — AI health diagnosis page: 7 modules + Dr. Arjun narrative
+    ├── EarningsAnalyzer.jsx — Earnings call transcript AI analyzer with quarter comparison
+    ├── TradingAgent.jsx     — AI Trading Agent: status, decisions, positions, backtest, rulebook
     ├── Analytics.jsx        — Charts: equity curve, P&L by symbol, win/loss pie
     ├── News.jsx             — News feed with sentiment
     ├── Simulation.jsx       — Simulation logs + go-live checker
@@ -995,6 +1309,27 @@ autotrade-frontend/src/
     ├── Settings.jsx         — Runtime config editor
     └── Documentation.jsx    — This documentation page (loads markdown)
 ```
+
+### Component sub-packages (`src/components/`)
+
+| Folder | Purpose |
+|---|---|
+| `agent/` | `DecisionCard`, `BacktestPanel` — AI Trading Agent UI |
+| `allocation/` | Asset allocation widget + questionnaire modal |
+| `breadth/` | Market breadth A/D bars + heatmap cells |
+| `calendar/` | Calendar event cards + expiry countdown |
+| `chart/` | Candlestick chart, OHLC tooltip, indicator overlays |
+| `chat/` | Avishk AI chat: `ChatInput`, `ChatMessage`, `ChatSidebar`, `FloatingChatButton`, `StockDataCard` |
+| `doctor/` | `HealthScoreCard`, `FindingCard`, `ScoreHistory`, `DiagnosisSettings`, `ProgressOverlay` |
+| `earnings/` | `ToneIndicator`, `SummarySection`, `GuidanceCards`, `QuarterSelector`, `ComparisonView`, `EarningsCard` |
+| `heatmap/` | Sector heatmap cells + drill-down |
+| `ipo/` | IPO list cards + analysis panel |
+| `market/` | Live market tickers, NSE index strip |
+| `mutualfunds/` | MF list + SIP calculator |
+| `portfolio/` | `AddHoldingModal` (two-tab: Stock/ETF + Mutual Fund), `HoldingsTable`, `SummaryCards`, `AllocationCharts`, `SellModal`, `TransactionsTab`, `TaxSummaryPanel`, `PortfolioSelector` |
+| `sip/` | SIP goal cards + projection charts |
+| `tax/` | Tax calculator: `StandaloneCalculator` |
+| `watchlist/` | Watchlist toolbar, row, detail panel, alerts bar |
 
 ---
 
@@ -1048,6 +1383,29 @@ Manages WebSocket to `ws://localhost:8000/ws`. Handles reconnection and message 
 ### `useLiveMarket.js`
 Live price state for the Live Market page. Combines WebSocket updates with REST polling fallback.
 
+### `usePortfolioTracker.js`
+Personal portfolio state: lists portfolios, holdings (stocks + MFs), transactions. Applies live prices client-side for instant P&L updates.
+
+### `usePortfolioDoctor.js`
+Doctor diagnosis state. `runDiagnosis()` triggers the full AI cycle (15-30s) with rotating progress messages. Auto-loads latest cached diagnosis + history on mount.
+
+### `useEarnings.js`
+Earnings analyzer state for a given symbol. `fetchSummary(quarter, refresh)` triggers AI summarization with progress messages. Includes `loadComparison(quarters)` for side-by-side trend analysis.
+
+### `useAgent.js`
+AI Trading Agent state: status, decisions, trades, positions, performance. Auto-polls every 30s. Exposes `triggerCycle()`, `closePosition()`, `runBacktest()`, `updateConfig()`.
+
+### Additional hooks
+- `useAllocation.js` — Asset allocation analyzer state
+- `useBreadth.js` — Market breadth state
+- `useCalendar.js` — Market calendar events
+- `useIPOTracker.js` — IPO list + analysis state
+- `useMFTracker.js` — Mutual fund tracker (separate from portfolio tracker)
+- `useSectors.js` — Sector heatmap state
+- `useSIPTracker.js` — SIP goals state
+- `useTaxCalculator.js` — Tax calculator inputs + computed P&L
+- `useWatchlist.js` — Watchlist state with signal scoring
+
 ---
 
 ## Configuration and Environment Variables
@@ -1086,6 +1444,24 @@ MAX_DAILY_LOSS=0.05                  # halt when down 5% on the day
 # Signal / trade sizing
 ATR_MULTIPLIER=2.0
 MIN_RISK_REWARD=2.0
+
+# AI Trading Agent (Varsity-grounded autonomous system)
+AGENT_ENABLED=false                  # master kill-switch, off by default
+AGENT_PAPER_MODE=true                # paper-trade by default
+AGENT_EQUITY=500000                  # ₹5L starting capital
+AGENT_MAX_RISK_PER_TRADE=0.01        # 1% per trade (Varsity M9.1)
+AGENT_MAX_OPEN_RISK=0.06             # 6% total open risk
+AGENT_DAILY_DD_STOP=0.03             # halt after 3% daily loss
+AGENT_WEEKLY_DD_STOP=0.05            # halt after 5% weekly loss
+AGENT_MONTHLY_DD_STOP=0.10           # halt after 10% monthly loss
+AGENT_CASH_BUFFER_MIN=0.20           # always keep 20% cash
+AGENT_MAX_NEW_ENTRIES_DAY=5
+AGENT_CONSEC_LOSS_LOCKOUT=2
+AGENT_CONFIDENCE_THRESHOLD=70
+AGENT_TIMEFRAME=15m
+AGENT_WARMUP_BARS=210
+AGENT_SESSION_START=09:20
+AGENT_SESSION_END=15:20
 
 # Watchlists (comma-separated)
 WATCHLIST_FOREX=EUR/USD,GBP/USD,USD/JPY,AUD/USD,USD/CHF,USD/CAD

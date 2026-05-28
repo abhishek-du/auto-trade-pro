@@ -45,6 +45,8 @@ class AddHoldingRequest(BaseModel):
     price: float
     trade_date: date
     notes: Optional[str] = ""
+    company_name: Optional[str] = ""
+    sector: Optional[str] = ""
 
 
 class SellHoldingRequest(BaseModel):
@@ -153,6 +155,8 @@ async def add_holding(
     return await add_or_update_holding(
         portfolio_id, body.symbol, body.quantity, body.price,
         body.trade_date, body.notes or "", db,
+        company_name=body.company_name or "",
+        sector_override=body.sector or "",
     )
 
 
@@ -247,9 +251,66 @@ async def get_tax_summary(portfolio_id: str, db: AsyncSession = Depends(get_db))
 async def search_stocks_api(q: str = Query(..., min_length=1)):
     import asyncio
     results = search_stocks(q)
-    # If the dict produced no matches, try a live yfinance lookup for the raw ticker
     if not results and len(q.strip()) >= 2:
         loop = asyncio.get_event_loop()
         live = await loop.run_in_executor(None, search_stocks_live, q)
         results.extend(live)
     return results
+
+
+# ── Mutual fund search (for adding MF to portfolio tracker) ──────────────────
+
+def _infer_mf_category(name: str) -> str:
+    n = name.lower()
+    if "elss" in n or "tax saver" in n:     return "ELSS"
+    if "index" in n or "nifty" in n or "sensex" in n: return "Index"
+    if "mid cap" in n or "midcap" in n:     return "Mid Cap"
+    if "large cap" in n or "largecap" in n: return "Large Cap"
+    if "small cap" in n or "smallcap" in n: return "Small Cap"
+    if "hybrid" in n or "balanced" in n:    return "Hybrid"
+    if "liquid" in n or "overnight" in n:   return "Liquid"
+    if "debt" in n or "bond" in n or "gilt" in n: return "Debt"
+    if "gold" in n:                         return "Gold"
+    return "Equity"
+
+
+@router.get("/search/mf")
+async def search_mf_api(q: str = Query(..., min_length=2)):
+    """Search mutual funds by name via mfapi.in search endpoint."""
+    import asyncio
+    import httpx
+
+    async def _fetch():
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(
+                    "https://api.mfapi.in/mf/search",
+                    params={"q": q.strip()},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return [
+                    {
+                        "scheme_code": str(f["schemeCode"]),
+                        "scheme_name": f["schemeName"],
+                        "category":    _infer_mf_category(f["schemeName"]),
+                        "symbol":      f"MF:{f['schemeCode']}",
+                    }
+                    for f in (data if isinstance(data, list) else [])
+                ][:15]
+        except Exception:
+            return []
+
+    return await _fetch()
+
+
+@router.get("/search/mf/{scheme_code}/nav")
+async def get_mf_nav(scheme_code: str):
+    """Fetch latest NAV for a scheme code."""
+    import asyncio
+    from engine.portfolio_service import _get_mf_nav
+    loop = asyncio.get_event_loop()
+    nav = await loop.run_in_executor(None, _get_mf_nav, scheme_code)
+    if nav is None:
+        raise HTTPException(404, "NAV not available")
+    return {"scheme_code": scheme_code, "nav": nav}

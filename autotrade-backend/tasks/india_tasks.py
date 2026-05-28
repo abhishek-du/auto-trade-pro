@@ -568,6 +568,72 @@ def kite_check_token_task():
     return {"valid": valid}
 
 
+@celery_app.task(name="tasks.run_agent_cycle")
+def run_agent_cycle_task():
+    """Run one AI agent evaluation cycle on each 15-min bar close."""
+    async def _run():
+        from db.database import get_db
+        from engine.agent.agent_loop import run_agent_cycle
+        async for session in get_db():
+            result = await run_agent_cycle(session)
+            logger.info(
+                f"[agent_cycle] scanned={result.get('symbols_scanned',0)} "
+                f"decisions={result.get('decisions',0)} "
+                f"mode={'PAPER' if result.get('paper_mode') else 'LIVE'} "
+                f"status={result.get('status')}"
+            )
+            break
+
+    asyncio.run(_run())
+    return {"status": "done"}
+
+
+@celery_app.task(name="tasks.agent_eod_reconcile")
+def agent_eod_reconcile_task():
+    """End-of-day: close remaining open positions, reset daily counters."""
+    async def _run():
+        from db.database import get_db
+        from crawler.live_prices import PRICE_CACHE
+        from engine.agent.agent_loop import _get_portfolio, _executor, eod_reconcile
+
+        portfolio = _get_portfolio()
+        async for session in get_db():
+            await _executor.check_and_close_positions(portfolio, PRICE_CACHE, session)
+            break
+        eod_reconcile()
+
+    asyncio.run(_run())
+    return {"status": "done"}
+
+
+@celery_app.task(name="tasks.fetch_earnings_transcripts")
+def fetch_earnings_transcripts_task():
+    """Auto-fetch and AI-summarize new earnings for top NSE stocks.
+    Runs daily at 14:30 UTC (20:00 IST) during results season.
+    """
+    from utils.config import settings
+
+    async def _run():
+        from db.database import get_db
+        from engine.earnings_summarizer import get_earnings_summary
+        async for session in get_db():
+            for symbol in settings.nse_symbols[:10]:
+                try:
+                    summary = await get_earnings_summary(symbol, session=session)
+                    if summary:
+                        logger.info(
+                            f"[earnings_task] {symbol} {summary.quarter} "
+                            f"tone={summary.management_tone} words={summary.word_count}"
+                        )
+                except Exception as exc:
+                    logger.warning(f"[earnings_task] Failed for {symbol}: {exc}")
+                await asyncio.sleep(5)
+            break
+
+    asyncio.run(_run())
+    return {"status": "done"}
+
+
 @celery_app.task(name="tasks.kite_start_ticker")
 def kite_start_ticker_task():
     """Start the KiteTicker just before market open (03:45 UTC / 09:15 IST)."""

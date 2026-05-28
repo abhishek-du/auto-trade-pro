@@ -22,6 +22,9 @@ const PAGE_TITLES = {
   '/zerodha':          'Zerodha KiteConnect',
   '/calendar':          'Market Calendar',
   '/portfolio-tracker': 'My Holdings',
+  '/doctor':            'Portfolio Doctor',
+  '/earnings':          'Earnings Analyzer',
+  '/agent':             'AI Trading Agent',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────

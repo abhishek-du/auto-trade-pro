@@ -46,9 +46,9 @@ function FlashCell({ value, children }) {
 }
 
 const COLS = [
-  { key: 'symbol',        label: 'Stock'         },
-  { key: 'current_price', label: 'LTP'           },
-  { key: 'quantity',      label: 'Qty'           },
+  { key: 'symbol',        label: 'Holding'       },
+  { key: 'current_price', label: 'LTP/NAV'       },
+  { key: 'quantity',      label: 'Qty/Units'     },
   { key: 'avg_buy_price', label: 'Avg Cost'      },
   { key: 'invested',      label: 'Invested'      },
   { key: 'current_value', label: 'Market Value'  },
@@ -74,7 +74,7 @@ export default function HoldingsTable({ holdings, onSell, onDelete }) {
   if (!sorted.length) {
     return (
       <div className="text-center py-12 text-muted text-sm">
-        No holdings yet. Add your first stock using the button above.
+        No holdings yet. Add your first stock or mutual fund using the button above.
       </div>
     )
   }
@@ -108,8 +108,15 @@ export default function HoldingsTable({ holdings, onSell, onDelete }) {
             return (
               <tr key={h.id} className="hover:bg-white/[0.02] transition-colors">
                 <td className="px-3 py-3">
-                  <p className="text-slate-200 font-semibold">{h.symbol?.replace('.NS', '')}</p>
-                  <p className="text-muted text-[10px] max-w-[120px] truncate">{h.company_name}</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-slate-200 font-semibold">
+                      {h.display_symbol || (h.symbol?.startsWith('MF:') ? h.symbol.slice(3) : h.symbol?.replace('.NS', ''))}
+                    </p>
+                    {h.is_mf && (
+                      <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 shrink-0">MF</span>
+                    )}
+                  </div>
+                  <p className="text-muted text-[10px] max-w-[140px] truncate">{h.company_name}</p>
                   {h.sector && (
                     <span className="text-[9px] bg-white/5 text-muted px-1.5 py-0.5 rounded mt-0.5 inline-block">{h.sector}</span>
                   )}
