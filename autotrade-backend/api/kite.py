@@ -27,17 +27,72 @@ from utils.logger import logger
 router = APIRouter(tags=["Kite Portfolio"])
 
 
+# ── Zerodha v3 fallback helpers ──────────────────────────────────────────────
+# If only ZERODHA_API_KEY is configured (newer integration), treat the user
+# as connected via that path. Legacy /kite/* endpoints transparently delegate.
+
+def _zerodha_v3_active() -> bool:
+    """True when the new Zerodha v3 integration has a valid token in env."""
+    return bool(
+        settings.zerodha_available
+        and settings.ZERODHA_ACCESS_TOKEN
+        and settings.ZERODHA_ENABLED
+    )
+
+
+async def _zerodha_v3_status() -> dict | None:
+    """Probe Zerodha v3 client; return status dict or None if not configured."""
+    if not _zerodha_v3_active():
+        return None
+    try:
+        from crawler.zerodha_client import get_kite_client
+        kite = get_kite_client()
+        # Cheap call to verify the token is live
+        await kite.get_profile()
+
+        # Token expires at 06:00 IST next day — compute approximate expiry
+        now_utc = datetime.datetime.utcnow()
+        # 06:00 IST = 00:30 UTC
+        next_expiry = (now_utc + datetime.timedelta(days=1)).replace(
+            hour=0, minute=30, second=0, microsecond=0,
+        )
+        if now_utc.hour < 1:
+            next_expiry = now_utc.replace(hour=0, minute=30, second=0, microsecond=0)
+
+        return {
+            "connected":              True,
+            "credentials_configured": True,
+            "via":                    "zerodha_v3",
+            "login_time":             None,
+            "expires_at":             next_expiry.isoformat(),
+        }
+    except Exception as exc:
+        logger.debug(f"[kite] v3 token probe failed: {exc}")
+        return {
+            "connected":              False,
+            "credentials_configured": True,
+            "via":                    "zerodha_v3",
+            "error":                  str(exc)[:120],
+        }
+
+
 # ── 1. Login URL ──────────────────────────────────────────────────────────────
 
 @router.get("/login-url")
 async def get_login_url():
-    """Return the Zerodha login URL.  Frontend opens this in a new tab."""
-    if not settings.kite_available:
-        raise HTTPException(
-            status_code=503,
-            detail="Kite API credentials not configured — set KITE_API_KEY and KITE_API_SECRET in .env",
-        )
-    return {"login_url": KiteService.get_login_url()}
+    """Return the Zerodha login URL.  Frontend opens this in a new tab.
+
+    Prefers legacy KITE_API_KEY, falls back to ZERODHA_API_KEY (v3).
+    """
+    if settings.kite_available:
+        return {"login_url": KiteService.get_login_url()}
+    if settings.zerodha_available:
+        from crawler.zerodha_client import get_kite_client
+        return {"login_url": get_kite_client().get_login_url()}
+    raise HTTPException(
+        status_code=503,
+        detail="Zerodha credentials not configured — set ZERODHA_API_KEY (or KITE_API_KEY) in .env",
+    )
 
 
 # ── 2. OAuth Callback ─────────────────────────────────────────────────────────
@@ -76,7 +131,13 @@ async def kite_callback(
 
 @router.get("/status")
 async def get_kite_status(db: AsyncSession = Depends(get_db)):
-    """Return whether a valid Kite session exists and when it expires."""
+    """Return whether a valid Kite session exists and when it expires.
+
+    Resolution order:
+      1. Legacy KiteSession DB row (KITE_API_KEY integration)
+      2. Zerodha v3 access token in .env (ZERODHA_API_KEY integration)
+    """
+    # 1. Check legacy KiteSession first
     result = await db.execute(
         select(KiteSession)
         .where(KiteSession.user_id == "default")
@@ -84,29 +145,53 @@ async def get_kite_status(db: AsyncSession = Depends(get_db)):
         .limit(1)
     )
     row = result.scalar_one_or_none()
-    if row is None:
-        return {
-            "connected": False,
-            "credentials_configured": settings.kite_available,
-            "login_url": KiteService.get_login_url() if settings.kite_available else None,
-        }
 
-    now_utc = datetime.datetime.utcnow()
-    active = bool(row.is_active and row.expires_at > now_utc)
-
-    # Count synced holdings
+    holdings_count = 0
     cnt_result = await db.execute(
         select(PortfolioHolding).where(PortfolioHolding.quantity > 0)
     )
     holdings_count = len(cnt_result.scalars().all())
 
+    now_utc = datetime.datetime.utcnow()
+    legacy_active = bool(row and row.is_active and row.expires_at > now_utc)
+
+    if legacy_active:
+        return {
+            "connected":              True,
+            "credentials_configured": settings.kite_available,
+            "via":                    "legacy_kite",
+            "login_time":             row.login_time.isoformat() if row.login_time else None,
+            "expires_at":             row.expires_at.isoformat() if row.expires_at else None,
+            "holdings_count":         holdings_count,
+            "login_url":              None,
+        }
+
+    # 2. Fall back to Zerodha v3
+    v3 = await _zerodha_v3_status()
+    if v3 and v3.get("connected"):
+        return {
+            **v3,
+            "holdings_count": holdings_count,
+            "login_url":      None,
+        }
+
+    # 3. Nothing valid — return the appropriate "connect" prompt
+    has_any_creds = settings.kite_available or settings.zerodha_available
+    login_url = None
+    if settings.kite_available:
+        login_url = KiteService.get_login_url()
+    elif settings.zerodha_available:
+        from crawler.zerodha_client import get_kite_client
+        try:
+            login_url = get_kite_client().get_login_url()
+        except Exception:
+            login_url = None
+
     return {
-        "connected": active,
-        "credentials_configured": settings.kite_available,
-        "login_time": row.login_time.isoformat() if row.login_time else None,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
-        "holdings_count": holdings_count,
-        "login_url": KiteService.get_login_url() if settings.kite_available and not active else None,
+        "connected":              False,
+        "credentials_configured": has_any_creds,
+        "holdings_count":         holdings_count,
+        "login_url":              login_url,
     }
 
 
@@ -218,20 +303,34 @@ async def add_manual_holding(
 
 @router.post("/sync")
 async def sync_holdings(db: AsyncSession = Depends(get_db)):
-    """Immediately re-fetch holdings from Kite and update the DB."""
+    """Immediately re-fetch holdings from Kite and update the DB.
+
+    Tries legacy KiteSession first; falls back to Zerodha v3 client.
+    """
+    # 1. Legacy path
     token = await KiteService.get_access_token(db)
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="No active Kite session — please reconnect via /login-url",
-        )
-    try:
-        raw = await KiteService.sync_holdings(db)
-        await KiteService.update_xirr_for_all(db)
-        return {"status": "ok", "holdings_synced": len(raw)}
-    except Exception as exc:
-        logger.error(f"[Kite] Sync error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    if token:
+        try:
+            raw = await KiteService.sync_holdings(db)
+            await KiteService.update_xirr_for_all(db)
+            return {"status": "ok", "holdings_synced": len(raw), "via": "legacy_kite"}
+        except Exception as exc:
+            logger.warning(f"[Kite] Legacy sync failed, trying v3: {exc}")
+
+    # 2. Zerodha v3 path
+    if _zerodha_v3_active():
+        try:
+            from engine.zerodha_portfolio import sync_real_holdings
+            holdings = await sync_real_holdings(db)
+            return {"status": "ok", "holdings_synced": len(holdings or []), "via": "zerodha_v3"}
+        except Exception as exc:
+            logger.error(f"[Kite] v3 sync error: {exc}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    raise HTTPException(
+        status_code=401,
+        detail="No active Zerodha session — please connect via /login-url",
+    )
 
 
 # ── 7. Disconnect ─────────────────────────────────────────────────────────────

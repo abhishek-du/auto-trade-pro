@@ -801,6 +801,70 @@ class SIPInvestment(Base):
         return f"<SIPInvestment {self.scheme_code} ₹{self.amount:,.0f} on {self.investment_date} units={self.units_purchased:.4f}>"
 
 
+# ── 27. PortfolioDiagnosis ────────────────────────────────────────────────────
+
+class PortfolioDiagnosis(Base):
+    """AI-powered portfolio health diagnosis snapshot."""
+    __tablename__ = "portfolio_diagnoses"
+    __table_args__ = (
+        Index("ix_portfolio_diagnoses_portfolio_created", "portfolio_id", "created_at"),
+    )
+
+    id:            Mapped[str]      = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    portfolio_id:  Mapped[str]      = mapped_column(String(36), ForeignKey("tracker_portfolios.id", ondelete="CASCADE"), nullable=False)
+    overall_score: Mapped[int]      = mapped_column(Integer,  nullable=False, default=0)
+    overall_grade: Mapped[str]      = mapped_column(String(5), nullable=False, default="F")
+    summary:       Mapped[str]      = mapped_column(Text,      nullable=False, default="")
+    findings:      Mapped[list]     = mapped_column(JSON,      nullable=False, default=list)
+    ai_narrative:  Mapped[str]      = mapped_column(Text,      nullable=False, default="")
+    quick_wins:    Mapped[list]     = mapped_column(JSON,      nullable=False, default=list)
+    data_snapshot: Mapped[dict]     = mapped_column(JSON,      nullable=False, default=dict)
+    is_ai:         Mapped[bool]     = mapped_column(Boolean,   nullable=False, default=False)
+    created_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<PortfolioDiagnosis portfolio={self.portfolio_id} score={self.overall_score} grade={self.overall_grade}>"
+
+
+# ── 28. EarningsCallSummary ───────────────────────────────────────────────────
+
+class EarningsCallSummary(Base):
+    """AI-generated earnings call transcript summary for NSE-listed companies."""
+    __tablename__ = "earnings_call_summaries"
+    __table_args__ = (
+        UniqueConstraint("symbol", "quarter", name="uq_earnings_symbol_quarter"),
+        Index("ix_earnings_symbol_created", "symbol", "created_at"),
+        Index("ix_earnings_symbol_quarter", "symbol", "quarter"),
+    )
+
+    id:                   Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    symbol:               Mapped[str]          = mapped_column(String(30),  nullable=False)
+    company_name:         Mapped[str]          = mapped_column(String(200), nullable=False, default="")
+    quarter:              Mapped[str]          = mapped_column(String(20),  nullable=False, default="")
+    call_date:            Mapped[str]          = mapped_column(String(20),  nullable=False, default="")
+    pdf_url:              Mapped[str]          = mapped_column(Text,        nullable=False, default="")
+    source:               Mapped[str]          = mapped_column(String(20),  nullable=False, default="BSE")
+    financial_highlights: Mapped[list]         = mapped_column(JSON,        nullable=False, default=list)
+    management_guidance:  Mapped[list]         = mapped_column(JSON,        nullable=False, default=list)
+    key_risks:            Mapped[list]         = mapped_column(JSON,        nullable=False, default=list)
+    analyst_questions:    Mapped[list]         = mapped_column(JSON,        nullable=False, default=list)
+    strategic_updates:    Mapped[list]         = mapped_column(JSON,        nullable=False, default=list)
+    revenue_guidance:     Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    margin_guidance:      Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    capex_guidance:       Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    dividend_info:        Mapped[str | None]   = mapped_column(Text,        nullable=True)
+    management_tone:      Mapped[str]          = mapped_column(String(20),  nullable=False, default="NEUTRAL")
+    tone_reason:          Mapped[str]          = mapped_column(Text,        nullable=False, default="")
+    ai_confidence:        Mapped[str]          = mapped_column(String(10),  nullable=False, default="MEDIUM")
+    transcript_length:    Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
+    word_count:           Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
+    is_ai:                Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=False)
+    created_at:           Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<EarningsCallSummary {self.symbol} {self.quarter} tone={self.management_tone}>"
+
+
 # ── IPO analysis cache ────────────────────────────────────────────────────────
 
 class IPOAnalysisCache(Base):
@@ -825,3 +889,123 @@ class IPOAnalysisCache(Base):
 
     def __repr__(self) -> str:
         return f"<IPOAnalysisCache {self.ipo_slug} verdict={self.verdict} score={self.score}>"
+
+
+# ── Agent tables ──────────────────────────────────────────────────────────────
+
+class AgentDecision(Base):
+    """Every evaluation the agent makes — traded, blocked, or skipped."""
+    __tablename__ = "agent_decisions"
+    __table_args__ = (
+        Index("ix_agent_dec_symbol_ts",  "symbol", "ts"),
+        Index("ix_agent_dec_action_ts",  "action", "ts"),
+    )
+
+    id:          Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    ts:          Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    symbol:      Mapped[str]          = mapped_column(String(30),  nullable=False)
+    action:      Mapped[str]          = mapped_column(String(10),  nullable=False)   # BUY | SELL | SKIP
+    confidence:  Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
+    regime:      Mapped[str]          = mapped_column(String(30),  nullable=False, default="")
+    strategy:    Mapped[str]          = mapped_column(String(50),  nullable=False, default="")
+    entry:       Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    target:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    qty:         Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    risk_pct:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasons:     Mapped[list]         = mapped_column(JSON,  nullable=False, default=list)
+    macro_bias:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    fund_score:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    skip_reason: Mapped[str | None]   = mapped_column(String(100), nullable=True)
+    is_paper:    Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
+    order_id:    Mapped[str | None]   = mapped_column(String(60),  nullable=True)
+    created_at:  Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<AgentDecision {self.action} {self.symbol} conf={self.confidence} {self.strategy}>"
+
+
+class AgentTrade(Base):
+    """Open and closed agent trades with P&L tracking."""
+    __tablename__ = "agent_trades"
+    __table_args__ = (
+        Index("ix_agent_trade_symbol_entry", "symbol", "entry_ts"),
+        Index("ix_agent_trade_paper_created", "is_paper", "entry_ts"),
+    )
+
+    id:            Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    decision_id:   Mapped[str | None]   = mapped_column(String(36), ForeignKey("agent_decisions.id", ondelete="SET NULL"), nullable=True)
+    symbol:        Mapped[str]          = mapped_column(String(30),  nullable=False)
+    side:          Mapped[str]          = mapped_column(String(10),  nullable=False)
+    qty:           Mapped[int]          = mapped_column(Integer,     nullable=False)
+    entry_price:   Mapped[float]        = mapped_column(Float,       nullable=False)
+    exit_price:    Mapped[float | None] = mapped_column(Float,       nullable=True)
+    stop_price:    Mapped[float]        = mapped_column(Float,       nullable=False)
+    target_price:  Mapped[float]        = mapped_column(Float,       nullable=False)
+    entry_ts:      Mapped[datetime]     = mapped_column(DateTime,    nullable=False)
+    exit_ts:       Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    exit_reason:   Mapped[str | None]   = mapped_column(String(30),  nullable=True)
+    pnl:           Mapped[float | None] = mapped_column(Float,       nullable=True)
+    pnl_pct:       Mapped[float | None] = mapped_column(Float,       nullable=True)
+    strategy:      Mapped[str]          = mapped_column(String(50),  nullable=False, default="")
+    regime:        Mapped[str]          = mapped_column(String(30),  nullable=False, default="")
+    brokerage:     Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
+    is_paper:      Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=True)
+    created_at:    Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<AgentTrade {self.side} {self.symbol} qty={self.qty} @ {self.entry_price}>"
+
+
+class AgentPosition(Base):
+    """Currently open agent positions — one row per symbol."""
+    __tablename__ = "agent_positions"
+    __table_args__ = (
+        UniqueConstraint("symbol", "is_paper", name="uq_agent_position_symbol"),
+    )
+
+    id:             Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    symbol:         Mapped[str]          = mapped_column(String(30), nullable=False)
+    side:           Mapped[str]          = mapped_column(String(10), nullable=False)
+    qty:            Mapped[int]          = mapped_column(Integer,    nullable=False)
+    entry_price:    Mapped[float]        = mapped_column(Float,      nullable=False)
+    stop_price:     Mapped[float]        = mapped_column(Float,      nullable=False)
+    target_price:   Mapped[float]        = mapped_column(Float,      nullable=False)
+    current_price:  Mapped[float | None] = mapped_column(Float,      nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float,      nullable=True)
+    strategy:       Mapped[str]          = mapped_column(String(50), nullable=False, default="")
+    regime:         Mapped[str]          = mapped_column(String(30), nullable=False, default="")
+    entry_ts:       Mapped[datetime]     = mapped_column(DateTime,   nullable=False)
+    is_paper:       Mapped[bool]         = mapped_column(Boolean,    nullable=False, default=True)
+    updated_at:     Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<AgentPosition {self.side} {self.symbol} qty={self.qty} entry={self.entry_price}>"
+
+
+class AgentPerformance(Base):
+    """Daily performance snapshot for the agent."""
+    __tablename__ = "agent_performance"
+    __table_args__ = (
+        UniqueConstraint("date", "is_paper", name="uq_agent_perf_date"),
+    )
+
+    id:             Mapped[str]   = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    date:           Mapped[date]  = mapped_column(Date,    nullable=False)
+    total_trades:   Mapped[int]   = mapped_column(Integer, nullable=False, default=0)
+    winning_trades: Mapped[int]   = mapped_column(Integer, nullable=False, default=0)
+    losing_trades:  Mapped[int]   = mapped_column(Integer, nullable=False, default=0)
+    gross_pnl:      Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    net_pnl:        Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    win_rate:       Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    avg_win:        Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    avg_loss:       Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    expectancy:     Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    max_drawdown:   Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    sharpe:         Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    equity_end:     Mapped[float] = mapped_column(Float,   nullable=False, default=0.0)
+    is_paper:       Mapped[bool]  = mapped_column(Boolean, nullable=False, default=True)
+    created_at:     Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<AgentPerformance {self.date} trades={self.total_trades} net_pnl={self.net_pnl}>"

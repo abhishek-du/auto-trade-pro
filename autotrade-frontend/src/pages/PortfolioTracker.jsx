@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2, ExternalLink, Zap } from 'lucide-react'
+import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2, ExternalLink, Zap, Stethoscope } from 'lucide-react'
 import toast from 'react-hot-toast'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { usePortfolioTracker } from '../hooks/usePortfolioTracker'
@@ -81,6 +81,7 @@ const TABS = [
   { id: 'allocation',   label: 'Allocation',   icon: PieIcon    },
   { id: 'tax',          label: 'Tax Summary',  icon: Receipt    },
   { id: 'transactions', label: 'Trade History', icon: BarChart2  },
+  { id: 'doctor',       label: 'Doctor',        icon: Stethoscope },
 ]
 
 export default function PortfolioTracker() {
@@ -280,6 +281,24 @@ export default function PortfolioTracker() {
                   onRefresh={() => loadTransactions(txSymbol)}
                 />
               )
+            )}
+
+            {tab === 'doctor' && (
+              <div className="rounded-xl border border-border p-5 space-y-4" style={{ background: '#0F1829' }}>
+                <div className="flex items-center gap-2">
+                  <Stethoscope size={16} className="text-red-400" />
+                  <p className="text-slate-200 font-semibold text-sm">Portfolio Health Check</p>
+                </div>
+                <p className="text-muted text-xs">Get a full AI-powered diagnosis of concentration, tax efficiency, risk quality, and more.</p>
+                <Link
+                  to="/doctor"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm text-white"
+                  style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}
+                >
+                  <Stethoscope size={14} />
+                  Open Portfolio Doctor →
+                </Link>
+              </div>
             )}
           </div>
         </>

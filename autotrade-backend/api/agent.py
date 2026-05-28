@@ -1,0 +1,438 @@
+"""AI Trading Agent API — /api/v1/agent endpoints."""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Optional
+
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, Header
+from pydantic import BaseModel
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.database import get_db
+from db.models import AgentDecision, AgentTrade, AgentPerformance
+from utils.config import settings
+
+router = APIRouter(tags=["Trading Agent"])
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    symbol:     str
+    timeframe:  str   = "1h"
+    fund_grade: str   = "WATCHLIST"
+    macro_bias: int   = 0
+    days_back:  int   = 365
+
+class ConfigUpdate(BaseModel):
+    enabled:              Optional[bool]  = None
+    paper_mode:           Optional[bool]  = None
+    confidence_threshold: Optional[int]   = None
+    max_risk_per_trade:   Optional[float] = None
+
+
+# ── GET /status ───────────────────────────────────────────────────────────────
+
+@router.get("/status")
+async def agent_status(db: AsyncSession = Depends(get_db)):
+    from engine.agent.agent_loop import _get_portfolio, _is_market_hours, _is_trading_day
+
+    portfolio = _get_portfolio()
+    now       = datetime.utcnow()
+
+    # Count decisions today
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    decisions_today = (await db.execute(
+        select(AgentDecision).where(
+            AgentDecision.created_at >= today_start,
+            AgentDecision.order_id != None,
+            AgentDecision.is_paper == settings.AGENT_PAPER_MODE,
+        )
+    )).scalars().all()
+
+    return {
+        "enabled":            settings.AGENT_ENABLED,
+        "paper_mode":         settings.AGENT_PAPER_MODE,
+        "session_active":     _is_market_hours() and _is_trading_day(),
+        "confidence_threshold": settings.AGENT_CONFIDENCE_THRESHOLD,
+        "max_risk_per_trade": settings.AGENT_MAX_RISK_PER_TRADE,
+        "portfolio": {
+            "equity":               portfolio.equity,
+            "cash":                 round(portfolio.cash, 2),
+            "open_positions_count": len(portfolio.open_positions),
+            "open_positions":       portfolio.open_positions,
+            "daily_pnl_pct":        round(portfolio.daily_pnl_pct * 100, 2),
+            "weekly_pnl_pct":       round(portfolio.weekly_pnl_pct * 100, 2),
+            "open_risk_pct":        round(portfolio.open_risk_pct * 100, 2),
+        },
+        "decisions_today": len(decisions_today),
+    }
+
+
+# ── POST /cycle/trigger ───────────────────────────────────────────────────────
+
+@router.post("/cycle/trigger")
+async def trigger_cycle(db: AsyncSession = Depends(get_db)):
+    """Manually trigger one agent evaluation cycle."""
+    from engine.agent.agent_loop import run_agent_cycle
+    result = await run_agent_cycle(db)
+    return result
+
+
+# ── POST /backtest ────────────────────────────────────────────────────────────
+
+@router.post("/backtest")
+async def run_backtest(req: BacktestRequest, db: AsyncSession = Depends(get_db)):
+    """Run backtest on historical candle data."""
+    from engine.agent.backtester import AgentBacktester
+    from crawler.price_feed import get_latest_candles
+
+    limit = req.days_back * 7  # generous estimate for intraday bars
+    candles = await get_latest_candles(req.symbol, req.timeframe, limit, db)
+
+    if not candles or len(candles) < settings.AGENT_WARMUP_BARS + 10:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Not enough data for {req.symbol} on {req.timeframe}. "
+                   f"Need {settings.AGENT_WARMUP_BARS + 10} bars, got {len(candles)}.",
+        )
+
+    candles_sorted = sorted(candles, key=lambda c: c.timestamp)
+    df = pd.DataFrame([{
+        "open":   float(c.open), "high":  float(c.high),
+        "low":    float(c.low),  "close": float(c.close),
+        "volume": float(c.volume), "timestamp": c.timestamp,
+    } for c in candles_sorted])
+    df.set_index("timestamp", inplace=True)
+
+    bt = AgentBacktester()
+    try:
+        result = bt.run(
+            df,
+            symbol=req.symbol,
+            equity=settings.AGENT_EQUITY,
+            fund_grade=req.fund_grade,
+            macro_bias=req.macro_bias,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Remove per-trade list from response to keep it small
+    result_clean = {k: v for k, v in result.items() if k != "trades"}
+    result_clean["trade_count_detail"] = len(result.get("trades", []))
+    return result_clean
+
+
+# ── GET /decisions ────────────────────────────────────────────────────────────
+
+@router.get("/decisions")
+async def get_decisions(
+    limit:  int = 20,
+    symbol: Optional[str] = None,
+    action: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(AgentDecision).order_by(desc(AgentDecision.created_at)).limit(limit)
+    if symbol: q = q.where(AgentDecision.symbol == symbol)
+    if action: q = q.where(AgentDecision.action == action.upper())
+    rows = (await db.execute(q)).scalars().all()
+
+    return [
+        {
+            "id":          r.id,
+            "ts":          r.ts.isoformat() if r.ts else None,
+            "symbol":      r.symbol,
+            "action":      r.action,
+            "confidence":  r.confidence,
+            "regime":      r.regime,
+            "strategy":    r.strategy,
+            "entry":       r.entry,
+            "stop":        r.stop,
+            "target":      r.target,
+            "qty":         r.qty,
+            "risk_pct":    r.risk_pct,
+            "reasons":     r.reasons or [],
+            "macro_bias":  r.macro_bias,
+            "fund_score":  r.fund_score,
+            "skip_reason": r.skip_reason,
+            "is_paper":    r.is_paper,
+            "order_id":    r.order_id,
+        }
+        for r in rows
+    ]
+
+
+# ── GET /trades ───────────────────────────────────────────────────────────────
+
+@router.get("/trades")
+async def get_trades(
+    limit:     int  = 20,
+    open_only: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(AgentTrade).order_by(desc(AgentTrade.entry_ts)).limit(limit)
+    if open_only:
+        q = q.where(AgentTrade.exit_ts == None)
+    rows = (await db.execute(q)).scalars().all()
+
+    return [
+        {
+            "id":           r.id,
+            "symbol":       r.symbol,
+            "side":         r.side,
+            "qty":          r.qty,
+            "entry_price":  r.entry_price,
+            "exit_price":   r.exit_price,
+            "stop_price":   r.stop_price,
+            "target_price": r.target_price,
+            "entry_ts":     r.entry_ts.isoformat(),
+            "exit_ts":      r.exit_ts.isoformat() if r.exit_ts else None,
+            "exit_reason":  r.exit_reason,
+            "pnl":          r.pnl,
+            "strategy":     r.strategy,
+            "regime":       r.regime,
+            "is_paper":     r.is_paper,
+        }
+        for r in rows
+    ]
+
+
+# ── GET /performance ──────────────────────────────────────────────────────────
+
+@router.get("/performance")
+async def get_performance(db: AsyncSession = Depends(get_db)):
+    """Compute live performance from agent_trades table."""
+    rows = (await db.execute(
+        select(AgentTrade).where(
+            AgentTrade.exit_ts != None,
+            AgentTrade.is_paper == settings.AGENT_PAPER_MODE,
+        )
+    )).scalars().all()
+
+    if not rows:
+        return {"total_trades": 0, "message": "No closed trades yet"}
+
+    trades = list(rows)
+    pnls   = [t.pnl or 0.0 for t in trades]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    win_rate   = len(wins) / len(pnls)
+    avg_win    = sum(wins)   / len(wins)   if wins   else 0.0
+    avg_loss   = abs(sum(losses) / len(losses)) if losses else 0.0
+    profit_fac = sum(wins) / max(abs(sum(losses)), 1e-9)
+
+    # Equity curve from DB
+    from db.models import AgentPerformance as AP
+    perf_rows = (await db.execute(
+        select(AP).where(AP.is_paper == settings.AGENT_PAPER_MODE).order_by(AP.date)
+    )).scalars().all()
+
+    equity_curve = [{"date": str(r.date), "equity": r.equity_end} for r in perf_rows]
+
+    return {
+        "total_trades":          len(trades),
+        "win_rate_pct":          round(win_rate * 100, 2),
+        "avg_win_inr":           round(avg_win,  2),
+        "avg_loss_inr":          round(avg_loss, 2),
+        "profit_factor":         round(profit_fac, 2),
+        "expectancy_per_trade":  round(win_rate * avg_win - (1 - win_rate) * avg_loss, 2),
+        "total_pnl":             round(sum(pnls), 2),
+        "equity_curve":          equity_curve,
+    }
+
+
+# ── GET /positions ────────────────────────────────────────────────────────────
+
+@router.get("/positions")
+async def get_positions():
+    from engine.agent.agent_loop import _get_portfolio
+    from crawler.live_prices import PRICE_CACHE
+
+    portfolio = _get_portfolio()
+    result    = []
+
+    for symbol, pos in portfolio.open_positions.items():
+        price = float(PRICE_CACHE.get(symbol, {}).get("price", 0) or 0)
+        pnl   = 0.0
+        if price > 0:
+            if pos["side"] == "BUY":
+                pnl = (price - pos["entry"]) * pos["qty"]
+            else:
+                pnl = (pos["entry"] - price) * pos["qty"]
+
+        result.append({
+            "symbol":        symbol,
+            "side":          pos["side"],
+            "qty":           pos["qty"],
+            "entry":         pos["entry"],
+            "stop":          pos["stop"],
+            "target":        pos["target"],
+            "current_price": price,
+            "unrealized_pnl": round(pnl, 2),
+            "strategy":      pos.get("strategy", ""),
+        })
+
+    return result
+
+
+# ── POST /positions/{symbol}/close ────────────────────────────────────────────
+
+@router.post("/positions/{symbol}/close")
+async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
+    from engine.agent.agent_loop import _get_portfolio, _executor
+    from crawler.live_prices import PRICE_CACHE
+
+    portfolio = _get_portfolio()
+    if symbol not in portfolio.open_positions:
+        raise HTTPException(404, f"{symbol} not in open positions")
+
+    price = float(PRICE_CACHE.get(symbol, {}).get("price", 0) or 0)
+    if price <= 0:
+        raise HTTPException(422, f"No live price for {symbol}")
+
+    pnl = portfolio.close_position(symbol, price)
+    await _executor._record_exit(symbol, price, "MANUAL", pnl, db)
+    return {"symbol": symbol, "exit_price": price, "pnl": round(pnl, 2)}
+
+
+# ── POST /signal/{symbol} ─────────────────────────────────────────────────────
+
+@router.post("/signal/{symbol}")
+async def on_demand_signal(symbol: str, db: AsyncSession = Depends(get_db)):
+    """On-demand signal without execution."""
+    from crawler.price_feed import get_latest_candles
+    from engine.agent.analyzer    import MarketAnalyzerAgent
+    from engine.agent.selector    import StrategySelectorAgent
+    from engine.agent.fundamentals import FundamentalsAgent
+    from engine.agent.macro       import MacroSectorAgent
+
+    candles = await get_latest_candles(symbol, settings.AGENT_TIMEFRAME, 300, db)
+    if not candles or len(candles) < 30:
+        raise HTTPException(422, f"Not enough data for {symbol}")
+
+    candles_sorted = sorted(candles, key=lambda c: c.timestamp)
+    df = pd.DataFrame([{
+        "open": float(c.open), "high": float(c.high), "low": float(c.low),
+        "close": float(c.close), "volume": float(c.volume),
+    } for c in candles_sorted])
+
+    analyzer   = MarketAnalyzerAgent()
+    selector   = StrategySelectorAgent()
+    fund_agent = FundamentalsAgent()
+    macro      = MacroSectorAgent()
+
+    features   = analyzer.compute_features(df)
+    macro_bias = macro.bias(symbol)
+    fund_score, fund_grade = await fund_agent.get_cached_grade(symbol)
+    candidate  = selector.propose(symbol, df, features, macro_bias, fund_grade)
+
+    if not candidate:
+        return {
+            "action": "HOLD",
+            "regime": features.regime,
+            "reasons": ["no_qualifying_setup"],
+            "composite_score": features.composite_score,
+            "macro_bias": macro_bias,
+            "fund_grade": fund_grade,
+        }
+
+    return {
+        **candidate.to_dict(),
+        "regime":          features.regime,
+        "composite_score": features.composite_score,
+        "macro_bias":      macro_bias,
+        "fund_grade":      fund_grade,
+        "fund_score":      fund_score,
+    }
+
+
+# ── PUT /config ───────────────────────────────────────────────────────────────
+
+@router.put("/config")
+async def update_config(
+    body: ConfigUpdate,
+    x_agent_config_update: Optional[str] = Header(None),
+):
+    if x_agent_config_update != "yes":
+        raise HTTPException(403, "Requires header: X-Agent-Config-Update: yes")
+
+    changes = {}
+    if body.enabled is not None:
+        settings.AGENT_ENABLED = body.enabled
+        changes["enabled"] = body.enabled
+    if body.paper_mode is not None:
+        settings.AGENT_PAPER_MODE = body.paper_mode
+        changes["paper_mode"] = body.paper_mode
+    if body.confidence_threshold is not None:
+        settings.AGENT_CONFIDENCE_THRESHOLD = body.confidence_threshold
+        changes["confidence_threshold"] = body.confidence_threshold
+    if body.max_risk_per_trade is not None:
+        settings.AGENT_MAX_RISK_PER_TRADE = body.max_risk_per_trade
+        changes["max_risk_per_trade"] = body.max_risk_per_trade
+
+    return {"updated": changes}
+
+
+# ── GET /rulebook ─────────────────────────────────────────────────────────────
+
+@router.get("/rulebook")
+async def get_rulebook():
+    """All Varsity-derived trading rules as structured JSON."""
+    return {
+        "modules": [
+            {"id": "M1.1", "module": "Introduction to Stock Markets",
+             "rule": "Min ₹5 Cr avg daily turnover gate",
+             "condition": "avg_daily_turnover_cr >= 5.0",
+             "action": "include_in_universe"},
+            {"id": "M2.1", "module": "Technical Analysis",
+             "rule": "Trend breakout: price > 20-bar swing high + volume spike + bull regime",
+             "condition": "regime=BULL_TRENDING AND close>swing_high_20 AND vol_spike AND 55<=rsi14<=75",
+             "action": "BUY with 2R target"},
+            {"id": "M2.2", "module": "Technical Analysis",
+             "rule": "Pullback to 20EMA in bull trend",
+             "condition": "regime=BULL_TRENDING AND prev_low<=ema20 AND close>ema20 AND rsi>=40",
+             "action": "BUY with 2R target"},
+            {"id": "M2.3", "module": "Technical Analysis",
+             "rule": "Mean reversion short at BB upper in range",
+             "condition": "regime=RANGE AND close>=bb_upper AND rsi>=70 AND bearish_rejection_candle",
+             "action": "SELL to BB midline"},
+            {"id": "M7.1", "module": "Markets and Taxation",
+             "rule": "Always net costs from P&L: brokerage + STT + GST + exchange + stamp",
+             "condition": "always",
+             "action": "deduct_realistic_costs"},
+            {"id": "M9.1", "module": "Risk Management",
+             "rule": "Max 1% equity at risk per trade",
+             "condition": "trade_risk_pct > max_risk_per_trade",
+             "action": "BLOCK_TRADE"},
+            {"id": "M9.2", "module": "Risk Management",
+             "rule": "Daily/Weekly/Monthly drawdown stops",
+             "condition": "daily_dd>3% OR weekly_dd>5% OR monthly_dd>10%",
+             "action": "HALT_ALL_ENTRIES"},
+            {"id": "M9.3", "module": "Risk Management",
+             "rule": "Consecutive loss lockout",
+             "condition": "consec_losses>=2",
+             "action": "BLOCK_NEW_ENTRIES_TODAY"},
+            {"id": "M9.4", "module": "Risk Management",
+             "rule": "Minimum 1.5:1 risk-reward",
+             "condition": "risk_reward < 1.5",
+             "action": "DISCARD_CANDIDATE"},
+            {"id": "M11.1", "module": "Personal Finance",
+             "rule": "Keep 20% cash buffer at all times",
+             "condition": "cash_after_trade < 0.20 * equity",
+             "action": "BLOCK_TRADE"},
+            {"id": "M12.1", "module": "Innerworth",
+             "rule": "Write the bear case before every entry",
+             "condition": "always",
+             "action": "reduce_confidence_if_strong_bear_case"},
+            {"id": "M12.2", "module": "Innerworth",
+             "rule": "Minimum confidence threshold",
+             "condition": "confidence < 70",
+             "action": "HOLD"},
+            {"id": "M16.1", "module": "Quantitative Concepts",
+             "rule": "Block correlated cluster (>0.7 correlation)",
+             "condition": "max_corr_with_open > 0.70",
+             "action": "BLOCK_TRADE"},
+        ]
+    }

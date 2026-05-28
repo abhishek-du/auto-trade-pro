@@ -5,6 +5,7 @@ for the /api/v1/portfolios endpoints.
 """
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -14,6 +15,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import TrackerHolding, TrackerPortfolio, TrackerTransaction
 from utils.logger import logger
+
+# ── Mutual Fund NAV cache ─────────────────────────────────────────────────────
+# scheme_code -> (nav_float, fetched_at_timestamp)
+_MF_NAV_CACHE: dict[str, tuple[float, float]] = {}
+_MF_NAV_TTL = 3600  # 1 hour
+
+
+def _get_mf_nav(scheme_code: str) -> float | None:
+    """Fetch latest NAV from mfapi.in with 1-hour in-process cache."""
+    now = time.time()
+    cached = _MF_NAV_CACHE.get(scheme_code)
+    if cached and (now - cached[1]) < _MF_NAV_TTL:
+        return cached[0]
+    try:
+        import httpx
+        resp = httpx.get(f"https://api.mfapi.in/mf/{scheme_code}", timeout=5.0)
+        data = resp.json()
+        nav = float(data["data"][0]["nav"])
+        _MF_NAV_CACHE[scheme_code] = (nav, now)
+        return nav
+    except Exception:
+        return None
 
 # ── Stock lookup dictionary (display_name → yfinance symbol) ─────────────────
 
@@ -145,7 +168,9 @@ NSE_SECTOR_MAP: dict[str, str] = {
 # ── Price helpers ─────────────────────────────────────────────────────────────
 
 def get_current_price(symbol: str) -> float | None:
-    """PRICE_CACHE first; yfinance fallback."""
+    """PRICE_CACHE first; MF NAV for MF: symbols; yfinance fallback for stocks."""
+    if symbol.startswith("MF:"):
+        return _get_mf_nav(symbol[3:])
     from crawler.live_prices import PRICE_CACHE
     cached = PRICE_CACHE.get(symbol)
     if cached and cached.get("price"):
@@ -159,11 +184,16 @@ def get_current_price(symbol: str) -> float | None:
 
 
 def get_prices_batch(symbols: list[str]) -> dict[str, float]:
-    """Batch price fetch — cache first, yfinance for misses."""
+    """Batch price fetch — cache first, MF NAV for MF: symbols, yfinance for misses."""
     from crawler.live_prices import PRICE_CACHE
     result: dict[str, float] = {}
     missing: list[str] = []
     for sym in symbols:
+        if sym.startswith("MF:"):
+            nav = _get_mf_nav(sym[3:])
+            if nav:
+                result[sym] = nav
+            continue
         cached = PRICE_CACHE.get(sym)
         if cached and cached.get("price"):
             result[sym] = float(cached["price"])
@@ -429,11 +459,15 @@ async def add_or_update_holding(
     trade_date: date,
     notes: str,
     session: AsyncSession,
+    company_name: str = "",
+    sector_override: str = "",
 ) -> dict:
-    company_name = _get_company_name(symbol)
-    sector       = NSE_SECTOR_MAP.get(symbol, "Other")
+    is_mf = symbol.startswith("MF:")
+    if not company_name:
+        company_name = _get_company_name(symbol) if not is_mf else symbol[3:]
+    sector       = sector_override or (NSE_SECTOR_MAP.get(symbol, "Other") if not is_mf else "Mutual Fund")
     total_amount = round(quantity * price, 2)
-    stt          = round(total_amount * 0.001, 2)
+    stt          = 0.0 if is_mf else round(total_amount * 0.001, 2)
 
     res = await session.execute(
         select(TrackerHolding).where(
@@ -603,10 +637,13 @@ def _portfolio_to_dict(p: TrackerPortfolio) -> dict:
 
 
 def _holding_to_dict(h: TrackerHolding) -> dict:
+    is_mf = h.symbol.startswith("MF:")
     return {
         "id":             h.id,
         "portfolio_id":   h.portfolio_id,
         "symbol":         h.symbol,
+        "display_symbol": h.symbol[3:] if is_mf else h.symbol.replace(".NS", "").replace(".BO", ""),
+        "is_mf":          is_mf,
         "company_name":   h.company_name,
         "sector":         h.sector,
         "quantity":       h.quantity,

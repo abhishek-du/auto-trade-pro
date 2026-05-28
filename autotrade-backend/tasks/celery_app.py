@@ -198,4 +198,20 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_start_ticker",
         "schedule": crontab(hour=3, minute=45),
     },
+    "fetch-earnings-daily": {
+        "task":     "tasks.fetch_earnings_transcripts",
+        "schedule": crontab(hour=14, minute=30),  # 20:00 IST
+    },
+    # AI Trading Agent: every 15 min during NSE hours (Mon-Fri)
+    # Times below are UTC: NSE 09:15-15:30 IST = 03:45-10:00 UTC
+    "agent-cycle-every-15min": {
+        "task":     "tasks.run_agent_cycle",
+        "schedule": crontab(hour="3-10", minute="14,29,44,59", day_of_week="1-5"),
+        "options":  {"countdown": 30},
+    },
+    # EOD reconcile at 15:25 IST = 09:55 UTC
+    "agent-eod-reconcile": {
+        "task":     "tasks.agent_eod_reconcile",
+        "schedule": crontab(hour=9, minute=55, day_of_week="1-5"),
+    },
 }
