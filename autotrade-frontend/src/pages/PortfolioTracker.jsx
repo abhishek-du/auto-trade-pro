@@ -166,6 +166,27 @@ export default function PortfolioTracker() {
                 <RefreshCw size={14} className={detailLoading ? 'animate-spin' : ''} />
               </button>
               <button
+                onClick={async () => {
+                  try {
+                    const r = await fetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
+                    if (!r.ok) {
+                      const err = await r.json().catch(() => ({}))
+                      toast.error(err.detail || 'Zerodha sync failed — connect Zerodha first')
+                      return
+                    }
+                    const d = await r.json()
+                    toast.success(`Synced ${d.synced} Zerodha holdings`)
+                    reload()
+                  } catch {
+                    toast.error('Sync request failed')
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 transition-colors"
+                title="Pull live Zerodha Demat holdings into this view"
+              >
+                Sync Zerodha
+              </button>
+              <button
                 onClick={() => setShowAdd(true)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-semibold hover:opacity-90 transition-opacity"
               >

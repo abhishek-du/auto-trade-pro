@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
+from utils.config import settings
 from utils.runtime_config import RuntimeConfig, _KNOWN_KEYS
 
 router = APIRouter(tags=["Settings"])
@@ -36,6 +37,9 @@ class RuntimeSettingsOut(BaseModel):
     enable_ml_predictions:   bool
     watchlist_forex:         list[str]
     watchlist_stocks:        list[str]
+    paper_mode:              bool
+    paper_confidence_threshold: float
+    live_confidence_threshold:  float
 
 
 class SettingsPatch(BaseModel):
@@ -55,6 +59,9 @@ class SettingsPatch(BaseModel):
     enable_ml_predictions:   bool  | None = None
     watchlist_forex:         list[str] | None = None
     watchlist_stocks:        list[str] | None = None
+    paper_mode:              bool  | None = None
+    paper_confidence_threshold: float | None = None
+    live_confidence_threshold:  float | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -116,3 +123,50 @@ async def reset_setting(key: str, db: AsyncSession = Depends(get_db)):
 )
 async def list_setting_keys():
     return {k: t.__name__ for k, t in _KNOWN_KEYS.items()}
+
+
+# ── Trade mode toggle (paper ↔ live) ─────────────────────────────────────────
+
+@router.get("/mode", summary="Get current trade mode (PAPER | LIVE | DRY_RUN)")
+async def get_trade_mode(db: AsyncSession = Depends(get_db)):
+    from engine.decision_router import resolve_mode
+    mode = await resolve_mode(db)
+    return {
+        "mode":      mode.value,
+        "is_paper":  mode.value == "PAPER",
+        "is_live":   mode.value == "LIVE",
+        "is_dry_run": mode.value == "DRY_RUN",
+    }
+
+
+class ModeToggle(BaseModel):
+    paper_mode: bool
+    confirm:    str | None = None  # must equal "I_UNDERSTAND_REAL_MONEY" to go live
+
+
+@router.post("/mode", summary="Switch between paper and live trading at runtime")
+async def set_trade_mode(
+    body: ModeToggle,
+    db: AsyncSession = Depends(get_db),
+):
+    # Safety gate — going live requires explicit confirmation string
+    if body.paper_mode is False:
+        if body.confirm != "I_UNDERSTAND_REAL_MONEY":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Switching to LIVE mode requires explicit confirmation. "
+                    "POST {'paper_mode': false, 'confirm': 'I_UNDERSTAND_REAL_MONEY'}"
+                ),
+            )
+        # Also verify Zerodha is actually connected
+        from utils.config import settings as _s
+        if not (_s.ZERODHA_ENABLED and _s.ZERODHA_ACCESS_TOKEN):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot go LIVE: Zerodha is not connected. Login first.",
+            )
+
+    await RuntimeConfig.set(db, "paper_mode", body.paper_mode)
+    await db.commit()
+    return {"mode": "PAPER" if body.paper_mode else "LIVE", "updated": True}

@@ -51,6 +51,11 @@ _KNOWN_KEYS: dict[str, type] = {
     # Watchlists (stored as JSON arrays)
     "watchlist_forex":         list,
     "watchlist_stocks":        list,
+    # Decision router — runtime-mutable mode toggle
+    # paper_mode=True → use simulator;  paper_mode=False → live Zerodha
+    "paper_mode":              bool,
+    "paper_confidence_threshold": float,
+    "live_confidence_threshold":  float,
 }
 
 
@@ -169,6 +174,18 @@ class RuntimeConfig:
     def watchlist_stocks(self) -> list[str]:
         return list(self._get("watchlist_stocks", settings.stock_symbols))
 
+    @property
+    def paper_mode(self) -> bool:
+        return bool(self._get("paper_mode", settings.PAPER_MODE))
+
+    @property
+    def paper_confidence_threshold(self) -> float:
+        return float(self._get("paper_confidence_threshold", getattr(settings, "PAPER_CONFIDENCE_THRESHOLD", 60.0)))
+
+    @property
+    def live_confidence_threshold(self) -> float:
+        return float(self._get("live_confidence_threshold", getattr(settings, "LIVE_CONFIDENCE_THRESHOLD", 70.0)))
+
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""
         return {
@@ -187,4 +204,7 @@ class RuntimeConfig:
             "enable_ml_predictions":   self.enable_ml_predictions,
             "watchlist_forex":         self.watchlist_forex,
             "watchlist_stocks":        self.watchlist_stocks,
+            "paper_mode":              self.paper_mode,
+            "paper_confidence_threshold": self.paper_confidence_threshold,
+            "live_confidence_threshold":  self.live_confidence_threshold,
         }

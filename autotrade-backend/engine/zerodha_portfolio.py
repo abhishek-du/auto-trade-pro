@@ -214,6 +214,99 @@ async def get_zerodha_pnl_summary(session: AsyncSession) -> dict:
 
 # ── Spec-named convenience aliases (used by tasks + new endpoints) ───────────
 
+async def sync_zerodha_into_tracker(
+    session: AsyncSession,
+    portfolio_name: str = "Zerodha Demat",
+) -> dict:
+    """Mirror Zerodha real holdings into the user's TrackerPortfolio.
+
+    Creates (or finds) a TrackerPortfolio named `Zerodha Demat` and upserts
+    every Demat holding as a TrackerHolding with notes='source:zerodha'.
+    This makes the "My Holdings" page (which reads tracker_*) the single
+    place where real + manual stocks live together.
+
+    Idempotent — running twice doesn't duplicate rows.
+    """
+    from db.models import TrackerPortfolio, TrackerHolding, TrackerTransaction
+    import uuid
+
+    kite = get_kite_client()
+    if not kite.access_token:
+        return {"synced": 0, "skipped": True, "reason": "no_zerodha_token"}
+
+    try:
+        raw = await kite.get_holdings()
+    except Exception as exc:
+        return {"synced": 0, "error": str(exc)}
+
+    # Find or create the Zerodha-mirror portfolio
+    res = await session.execute(
+        select(TrackerPortfolio).where(TrackerPortfolio.name == portfolio_name)
+    )
+    portfolio = res.scalar_one_or_none()
+    if portfolio is None:
+        portfolio = TrackerPortfolio(
+            id=str(uuid.uuid4()),
+            name=portfolio_name,
+            description="Auto-synced from Zerodha — DO NOT EDIT MANUALLY",
+        )
+        session.add(portfolio)
+        await session.flush()
+
+    today = datetime.datetime.utcnow().date()
+    synced = 0
+
+    for h in raw:
+        sym_bare = str(h.get("tradingsymbol", "")).strip()
+        if not sym_bare:
+            continue
+        # Normalize to NSE suffix for tracker convention
+        exch     = str(h.get("exchange", "NSE"))
+        sym_nse  = sym_bare if "." in sym_bare else f"{sym_bare}.NS"
+
+        qty     = float(h.get("quantity", 0) or 0)
+        avg_prc = float(h.get("average_price", 0) or 0)
+        if qty <= 0 or avg_prc <= 0:
+            continue
+
+        # Upsert holding row
+        res = await session.execute(
+            select(TrackerHolding).where(
+                TrackerHolding.portfolio_id == portfolio.id,
+                TrackerHolding.symbol == sym_nse,
+            )
+        )
+        holding = res.scalar_one_or_none()
+        if holding is None:
+            holding = TrackerHolding(
+                portfolio_id=portfolio.id,
+                symbol=sym_nse,
+                company_name=sym_bare,
+                sector=h.get("sector", "Zerodha Demat"),
+                quantity=qty,
+                avg_buy_price=avg_prc,
+                first_buy_date=today,
+                notes="source:zerodha",
+            )
+            session.add(holding)
+        else:
+            holding.quantity      = qty
+            holding.avg_buy_price = avg_prc
+            holding.notes         = "source:zerodha"
+        synced += 1
+
+    await session.commit()
+    logger.info(
+        f"[zerodha_portfolio] Synced {synced} holdings into tracker portfolio "
+        f"'{portfolio_name}' (id={portfolio.id})"
+    )
+    return {
+        "synced":       synced,
+        "portfolio_id": portfolio.id,
+        "portfolio_name": portfolio_name,
+    }
+
+
 async def sync_real_holdings(session: AsyncSession) -> dict:
     """Alias for sync_zerodha_holdings — used by Celery task and /sync endpoint."""
     return await sync_zerodha_holdings(session)

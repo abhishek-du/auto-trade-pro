@@ -18,10 +18,10 @@ const PAGE_TITLES = {
   '/mutual-funds':     'Mutual Funds',
   '/fundamentals':     'Fundamentals',
   '/backtest':         'Backtest',
-  '/portfolio':        'My Portfolio',
+  '/portfolio':        'Simulator',
   '/zerodha':          'Zerodha KiteConnect',
   '/calendar':          'Market Calendar',
-  '/portfolio-tracker': 'My Holdings',
+  '/portfolio-tracker': 'My Portfolio',
   '/doctor':            'Portfolio Doctor',
   '/earnings':          'Earnings Analyzer',
   '/agent':             'AI Trading Agent',
@@ -171,6 +171,68 @@ function ZerodhaTokenBanner() {
   );
 }
 
+// ── Trade mode badge (PAPER ↔ LIVE toggle) ───────────────────────────────────
+
+function TradeModeBadge() {
+  const [mode, setMode] = useState(null);
+
+  async function load() {
+    try {
+      const r = await fetch('/api/v1/settings/mode');
+      if (r.ok) setMode(await r.json());
+    } catch {}
+  }
+
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function toggle() {
+    if (!mode) return;
+    if (mode.is_live) {
+      // Switch back to paper — no confirm needed
+      const r = await fetch('/api/v1/settings/mode', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paper_mode: true }),
+      });
+      if (r.ok) load();
+      return;
+    }
+    // Going LIVE — double confirm
+    if (!confirm('Switch to LIVE mode? Real orders will be placed on Zerodha with REAL money.')) return;
+    if (!confirm('Are you absolutely sure? Type-confirm in next prompt is locked.')) return;
+    const r = await fetch('/api/v1/settings/mode', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paper_mode: false, confirm: 'I_UNDERSTAND_REAL_MONEY' }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert('Could not switch to LIVE: ' + (err.detail || 'unknown error'));
+    }
+    load();
+  }
+
+  if (!mode) return null;
+
+  const cls = mode.is_live
+    ? 'bg-red-500/15 text-red-400 border-red-500/30 animate-pulse'
+    : mode.is_dry_run
+      ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+      : 'bg-blue-500/15 text-blue-400 border-blue-500/30';
+  return (
+    <button onClick={toggle}
+      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-bold uppercase tracking-widest ${cls}`}
+      title={`Current mode: ${mode.mode}. Click to toggle.`}>
+      <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" />
+      {mode.mode}
+    </button>
+  );
+}
+
 // ── Navbar ────────────────────────────────────────────────────────────────────
 
 export default function Navbar() {
@@ -194,11 +256,7 @@ export default function Navbar() {
       <div className="flex items-center justify-between px-6 py-3">
         <div className="flex items-center gap-3">
           <h1 className="text-slate-100 font-bold text-lg">{title}</h1>
-          <span
-            className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest rounded-md border border-cyan/20 text-cyan/70"
-            style={{ background: 'rgba(6,182,212,0.07)' }}>
-            Live
-          </span>
+          <TradeModeBadge />
         </div>
         <div className="flex items-center gap-5">
           <ZerodhaTokenBanner />

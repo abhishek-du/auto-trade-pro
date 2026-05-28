@@ -245,6 +245,25 @@ async def get_tax_summary(portfolio_id: str, db: AsyncSession = Depends(get_db))
     return calculate_tax_liability(txns, date.today())
 
 
+# ── Zerodha holdings sync into tracker (unifies real Demat + manual entries) ──
+
+@router.post("/sync-zerodha")
+async def sync_zerodha_holdings(db: AsyncSession = Depends(get_db)):
+    """Mirror live Zerodha Demat holdings into a TrackerPortfolio named 'Zerodha Demat'.
+
+    After this call, the My Holdings page shows real broker holdings alongside
+    manually-added stocks/MFs. Each row is tagged with `source: ZERODHA`.
+    Returns the portfolio id and number of holdings synced.
+    """
+    from engine.zerodha_portfolio import sync_zerodha_into_tracker
+    result = await sync_zerodha_into_tracker(db)
+    if result.get("skipped"):
+        raise HTTPException(409, detail=result.get("reason", "Zerodha not connected"))
+    if result.get("error"):
+        raise HTTPException(500, detail=result["error"])
+    return result
+
+
 # ── Stock search ──────────────────────────────────────────────────────────────
 
 @router.get("/search/stocks")
