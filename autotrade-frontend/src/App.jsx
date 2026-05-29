@@ -31,6 +31,7 @@ import StockChat          from './pages/StockChat';
 import PortfolioDoctor    from './pages/PortfolioDoctor';
 import EarningsAnalyzer  from './pages/EarningsAnalyzer';
 import TradingAgent      from './pages/TradingAgent';
+import IntelligenceDashboard from './pages/IntelligenceDashboard';
 import FloatingChatButton from './components/chat/FloatingChatButton';
 
 export default function App() {
@@ -71,6 +72,7 @@ export default function App() {
               <Route path="/doctor"        element={<PortfolioDoctor />}    />
               <Route path="/earnings"      element={<EarningsAnalyzer />}   />
               <Route path="/agent"         element={<TradingAgent />}       />
+              <Route path="/intelligence"  element={<IntelligenceDashboard />} />
             </Routes>
           </main>
         </div>

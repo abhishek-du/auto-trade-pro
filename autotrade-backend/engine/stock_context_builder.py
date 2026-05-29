@@ -275,6 +275,36 @@ async def build_stock_context(
 
     display_name = _DISPLAY_NAMES.get(symbol, symbol.replace(".NS", "").replace(".BO", ""))
 
+    # ── Master Intelligence Hub score + macro context ────────────────────────
+    hub_score: dict = {}
+    macro_ctx: dict = {}
+    try:
+        from db.models import MasterIntelligenceScore
+        from sqlalchemy import select, desc
+        row = (await session.execute(
+            select(MasterIntelligenceScore)
+            .where(MasterIntelligenceScore.symbol == symbol)
+            .order_by(desc(MasterIntelligenceScore.scored_at)).limit(1)
+        )).scalar_one_or_none()
+        if row:
+            hub_score = {
+                "master_score":   row.master_score,
+                "signal":         row.signal,
+                "rank":           row.rank,
+                "is_blocked":     row.is_blocked,
+                "blocked_reason": row.blocked_reason,
+                "reasoning":      row.reasoning or {},
+            }
+        import engine.intelligence_hub as hub
+        if hub.LAST_MACRO_CONTEXT is not None:
+            m = hub.LAST_MACRO_CONTEXT
+            macro_ctx = {
+                "total_bias": m.total_macro_bias, "vix": m.india_vix,
+                "market_mood": m.nse_market_mood, "fii_3d": m.fii_net_3d,
+            }
+    except Exception as exc:
+        logger.debug("build_stock_context: hub score fetch failed for %s: %s", symbol, exc)
+
     return {
         "symbol":           symbol,
         "display_name":     display_name,
@@ -285,6 +315,8 @@ async def build_stock_context(
         "signal":           latest_signal,
         "sentiment":        {"score": sentiment_score, "news": recent_news},
         "fii_dii":          fii_data,
+        "hub_score":        hub_score,
+        "macro":            macro_ctx,
         "candle_count":     len(candles),
         "timeframe":        timeframe,
         "context_built_at": datetime.utcnow().isoformat(),

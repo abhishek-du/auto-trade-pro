@@ -46,13 +46,35 @@ class MacroSectorAgent:
         return _SECTOR_MAP.get(symbol, "GENERAL")
 
     def bias(self, symbol: str) -> int:
-        """Return integer bias -2 … +2 (Varsity M8 + M15)."""
+        """Return integer bias -5 … +5 (Varsity M8 + M15).
+
+        Prefers the hub's MacroContext (which adds FII/DII + breadth) when a
+        cycle has built it; otherwise falls back to real-time PRICE_CACHE reads.
+        """
+        sector = self.sector_of(symbol)
+
+        # Prefer hub macro context if a cycle has run this session
+        try:
+            from engine.intelligence_hub import LAST_MACRO_CONTEXT
+            if LAST_MACRO_CONTEXT is not None:
+                base = LAST_MACRO_CONTEXT.total_macro_bias
+                # Add this symbol's sector momentum on top of market-wide bias
+                from crawler.sector_data import SECTOR_CACHE
+                mood = (SECTOR_CACHE.get(sector) or {}).get("mood", "NEUTRAL")
+                sector_adj = {
+                    "STRONGLY_BULLISH": 2, "BULLISH": 1, "NEUTRAL": 0,
+                    "BEARISH": -1, "STRONGLY_BEARISH": -2,
+                }.get(mood, 0)
+                return max(-5, min(5, base + sector_adj))
+        except Exception:
+            pass
+
+        # Fallback: real-time read
         try:
             m = self.read_macro()
         except Exception:
             return 0
 
-        sector = self.sector_of(symbol)
         b = 0
 
         # USDINR — Varsity M8: weak rupee benefits exporters

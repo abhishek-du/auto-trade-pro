@@ -923,6 +923,35 @@ async def run_full_diagnosis(
     # AI narrative
     ai_narrative, is_ai = await generate_ai_narrative(all_findings, portfolio_summary)
 
+    # Push findings to the Intelligence Hub cache so the master cycle can
+    # block/penalise flagged symbols without re-running a diagnosis.
+    try:
+        from engine.intelligence_hub import update_portfolio_doctor_cache
+        conc_flags, overweight, losers, harvest = [], [], [], []
+        for f in all_findings:
+            mod, sev = f.module, f.severity
+            if mod == "CONCENTRATION" and sev == Severity.CRITICAL:
+                conc_flags.extend(f.stocks or [])
+            if mod == "SECTOR_TIMING" and sev == Severity.WARNING:
+                sec = (f.metric or {}).get("sector", "")
+                if sec:
+                    overweight.append(sec)
+            if mod == "PERFORMANCE" and "loser" in (f.title or "").lower():
+                losers.extend(f.stocks or [])
+            if mod == "TAX_EFFICIENCY" and "harvest" in (f.title or "").lower():
+                harvest.extend(f.stocks or [])
+        update_portfolio_doctor_cache({
+            "health_score":        score,
+            "health_grade":        grade,
+            "concentration_flags": conc_flags,
+            "overweight_sectors":  overweight,
+            "losers_to_exit":      losers,
+            "tax_harvest_symbols": harvest,
+            "updated_at":          datetime.utcnow().isoformat(),
+        })
+    except Exception:
+        pass
+
     summary_obj = portfolio_summary.get("summary", {})
     return DiagnosisReport(
         portfolio_id=portfolio_id,

@@ -71,6 +71,27 @@ class DecisionEngine:
             if "STRONG" in bear:
                 candidate.confidence -= 10
 
+        # Master Intelligence Hub modifiers — earnings tone, news, FII bias
+        tone_mod = news_mod = fii_mod = 0
+        try:
+            from engine import intelligence_hub as hub
+            if hub.LAST_EARNINGS_CONTEXT is not None:
+                tone = hub.LAST_EARNINGS_CONTEXT.tones_by_symbol.get(symbol, "NEUTRAL")
+                tone_mod = {"OPTIMISTIC": 5, "NEUTRAL": 0, "CAUTIOUS": -10, "NEGATIVE": -20}.get(tone, 0)
+            if hub.LAST_NEWS_CONTEXT is not None:
+                news_raw = hub.LAST_NEWS_CONTEXT.scores_by_symbol.get(symbol, 0.0)
+                news_mod = int(news_raw * 8)
+            if hub.LAST_MACRO_CONTEXT is not None:
+                fii_mod = hub.LAST_MACRO_CONTEXT.fii_bias * 3
+            if tone_mod or news_mod or fii_mod:
+                candidate.confidence += tone_mod + news_mod + fii_mod
+                candidate.confidence = max(0, min(100, candidate.confidence))
+                candidate.reasons.append(
+                    f"hub_context:news={news_mod:+d},earnings={tone_mod:+d},fii={fii_mod:+d}"
+                )
+        except Exception as exc:
+            logger.debug(f"[agent/decision] hub modifier skipped for {symbol}: {exc}")
+
         if candidate.confidence < settings.AGENT_CONFIDENCE_THRESHOLD:
             logger.debug(f"[agent/decision] {symbol} filtered: confidence {candidate.confidence} < {settings.AGENT_CONFIDENCE_THRESHOLD}")
             return None
