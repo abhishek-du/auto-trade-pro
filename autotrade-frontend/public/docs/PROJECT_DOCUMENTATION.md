@@ -10,6 +10,7 @@
 - Architecture
 - Technology Stack
 - Backend — Structure and Modules
+- Decision Router & Unified Trade Mode
 - Signal Engine
 - Technical Indicators
 - Deep Analysis Engine
@@ -19,11 +20,12 @@
 - LLM Integration
 - Avishk AI Stock Analyst
 - India Market Suite
-- Personal Portfolio Tracker (Stocks + Mutual Funds)
+- My Portfolio (Stocks + Mutual Funds + Zerodha sync)
 - Portfolio Doctor — AI Health Analysis
 - Earnings Call Analyzer — AI Transcript Summaries
 - AI Trading Agent — Varsity-Grounded Autonomous System
 - Zerodha KiteConnect v3 Integration
+- Unified Market Data Layer
 - Celery Background Tasks
 - API Reference
 - Database Schema
@@ -44,9 +46,10 @@ AutoTrade Pro is a full-stack automated paper-trading platform for Indian market
 The platform covers the complete spectrum of Indian market tools:
 
 - **Signal Engine** — multi-factor BUY/SELL/HOLD on NSE/BSE stocks
+- **Decision Router** — single source of truth that routes every signal to paper or live execution through one unified confidence gate; runtime paper↔live toggle, no restart
 - **Avishk AI Stock Analyst** — conversational AI with live NSE context (price, indicators, news, signals), powered by Groq LLM with rule-based fallback
 - **India Market Suite** — FII/DII flows, options chain, sector heatmap, market breadth, India VIX, NSE signals, market calendar (F&O expiry, RBI MPC, holidays, earnings, IPOs)
-- **Personal Portfolio Tracker** — real stock + mutual fund holdings in one portfolio with live P&L, XIRR, allocation analytics. MF NAV auto-fetches via mfapi.in
+- **My Portfolio** — real stock + mutual fund + Zerodha-synced holdings in one portfolio with live P&L, XIRR, allocation analytics; source-tagged (manual / mutual fund / Zerodha). MF NAV auto-fetches via mfapi.in
 - **Portfolio Doctor** — AI-powered health diagnosis: 7 diagnostic modules + Groq narrative + 0-100 score with letter grade
 - **Earnings Call Analyzer** — fetches BSE/NSE filed transcripts (any NSE-listed company via dynamic scrip resolution), extracts PDF text, generates structured AI summaries with management tone analysis
 - **AI Trading Agent** — Varsity-grounded autonomous trading system: 4 strategies, regime classifier, fundamental + macro overlay, unconditional risk-manager veto, paper-by-default with backtester
@@ -56,8 +59,11 @@ The platform covers the complete spectrum of Indian market tools:
 - **IPO Tracker** — live IPO status, GMP, subscription data
 - **Mutual Fund Tracker** — NAV history, SIP analysis, signal scoring
 - **Zerodha KiteConnect v3** — full paid-plan integration: OAuth, real holdings sync, 60 API endpoints, KiteTicker WebSocket, GTT/OCO orders, MF orders/SIPs, margin preview, virtual contract note, alerts. Legacy `/kite/*` endpoints transparently fall back to v3 credentials
+- **Unified Market Data Layer** — `get_price()` resolves Zerodha KiteTicker (sub-second) first, then yfinance cache; returns a `source` + `age_seconds` label so the UI shows data freshness
 
 All data flows through a FastAPI backend with Celery workers; the React SPA reads over REST and WebSocket.
+
+**Two distinct portfolios, clearly named** — *Simulator* (`/portfolio`, the virtual paper-trading wallet) is now separate in name and intent from *My Portfolio* (`/portfolio-tracker`, real holdings: manual + mutual fund + Zerodha-synced). A trade-mode badge (PAPER / LIVE / DRY_RUN) in the Navbar reflects the live routing state and toggles it at runtime.
 
 ---
 
@@ -301,11 +307,63 @@ autotrade-backend/
 | `engine/earnings_summarizer.py` | Groq-driven structured transcript summarizer |
 | `engine/portfolio_doctor.py` | 7 diagnostic modules + Dr. Arjun narrative |
 | `engine/portfolio_service.py` (updated) | MF support: `MF:{scheme_code}` symbol prefix, mfapi.in NAV cache |
-| `api/portfolio_tracker.py` (updated) | New `/search/mf` and `/search/mf/{code}/nav` endpoints |
+| `engine/decision_router.py` (NEW) | Single paper/live routing gate for every signal |
+| `api/portfolio_tracker.py` (updated) | `/search/mf`, `/search/mf/{code}/nav`, `/sync-zerodha` endpoints |
+| `api/settings.py` (updated) | `GET/POST /settings/mode` runtime trade-mode toggle |
 | `api/kite.py` (updated) | Transparent fallback to Zerodha v3 when legacy `KITE_API_KEY` unset |
+| `crawler/live_prices.py` (updated) | `get_price()` Zerodha-first unified resolver with `source`+`age_seconds` |
+| `engine/zerodha_portfolio.py` (updated) | `sync_zerodha_into_tracker()` mirrors Demat into tracker portfolio |
+| `engine/portfolio_service.py` (updated) | `_holding_to_dict()` exposes `source` (MANUAL / MUTUAL_FUND / ZERODHA) |
+| `utils/runtime_config.py` (updated) | `paper_mode` + confidence-threshold keys, runtime-mutable |
 | `db/models.py` (updated) | 7 new tables: `portfolio_diagnoses`, `earnings_call_summaries`, `agent_decisions`, `agent_trades`, `agent_positions`, `agent_performance` |
 | `tasks/india_tasks.py` (updated) | 3 new tasks: `run_agent_cycle`, `agent_eod_reconcile`, `fetch_earnings_transcripts` |
-| `utils/config.py` (updated) | 17 new `AGENT_*` settings + `EARNINGS_CACHE_HOURS` |
+| `utils/config.py` (updated) | `AGENT_*` settings, `PAPER/LIVE_CONFIDENCE_THRESHOLD`, NSE watchlist + ₹1L paper balance defaults |
+
+---
+
+## Decision Router & Unified Trade Mode
+
+`engine/decision_router.py` is the **single source of truth** for whether a trading signal becomes a paper trade or a real Zerodha order. Every execution path — the signal engine, the AI Trading Agent, and manual triggers — funnels through one function so behaviour is consistent and auditable.
+
+### Routing flow
+
+```
+signal ─▶ route_decision(signal, session)
+            │
+            ├─ resolve_mode()         → PAPER | LIVE | DRY_RUN
+            ├─ unified confidence gate (60% paper / 70% live, configurable)
+            │
+            ├─ PAPER   → paper_trading.trade_simulator.open_paper_trade()
+            ├─ LIVE    → engine.zerodha_executor.place_real_order()
+            └─ DRY_RUN → log decision to SimulationLog, never execute
+```
+
+`route_decision()` never raises — it always returns a `RoutingResult` with an `outcome` enum (`EXECUTED_PAPER`, `EXECUTED_LIVE`, `DRY_RUN_LOGGED`, `BLOCKED_LOW_CONFIDENCE`, `BLOCKED_NO_ZERODHA_TOKEN`, `BLOCKED_SAFETY_GATE`, `ERROR`) plus a human-readable `reason`.
+
+### Mode resolution priority
+
+1. `AGENT_DRY_RUN` env flag (always wins — used to validate new strategies)
+2. `paper_mode` runtime-config DB override (set via `/api/v1/settings/mode`)
+3. `.env` defaults — LIVE only when `PAPER_MODE=false` AND `ZERODHA_PAPER_MODE=false` AND `ZERODHA_ENABLED=true`
+
+### Unified confidence gate
+
+A single, configurable threshold replaces the three divergent thresholds that previously existed across the codebase:
+
+| Mode | Default threshold | Setting key |
+|---|---|---|
+| PAPER | 60 | `paper_confidence_threshold` |
+| LIVE | 70 (tighter) | `live_confidence_threshold` |
+| DRY_RUN | none (logs all) | — |
+
+Both are runtime-mutable via `PATCH /api/v1/settings`.
+
+### Runtime mode toggle
+
+- `GET /api/v1/settings/mode` → `{mode, is_paper, is_live, is_dry_run}`
+- `POST /api/v1/settings/mode` → switch paper↔live **without restarting**
+  - Going LIVE requires `confirm: "I_UNDERSTAND_REAL_MONEY"` **and** a valid Zerodha session, otherwise returns 400/409
+- The Navbar `TradeModeBadge` shows the current mode (PAPER blue / LIVE red-pulsing / DRY_RUN amber) and toggles it with a double-confirmation dialog
 
 ---
 
@@ -514,18 +572,27 @@ Vectorised backtest over 1 year of daily data. Simulates paper trades on each si
 
 ---
 
-## Personal Portfolio Tracker (Stocks + Mutual Funds)
+## My Portfolio (Stocks + Mutual Funds + Zerodha sync)
 
-`api/portfolio_tracker.py` — manages user's real holdings portfolios (separate from the paper trading virtual wallet). Supports **both stocks/ETFs and mutual funds** in the same portfolio.
+`api/portfolio_tracker.py` — manages the user's **real** holdings (distinct from the *Simulator* paper-trading wallet at `/portfolio`). Sidebar label: **My Portfolio** (`/portfolio-tracker`). Holds stocks/ETFs, mutual funds, and Zerodha-synced Demat positions in one unified view.
+
+### Three sources, one ledger
+Every row in `tracker_holdings` is tagged via `_holding_to_dict()` with a `source`:
+
+| Source | Origin | Badge |
+|---|---|---|
+| `MANUAL` | User-entered stock/ETF | gray **M** |
+| `MUTUAL_FUND` | `MF:{scheme_code}` rows | green **MF** |
+| `ZERODHA` | Auto-synced from Demat (`notes="source:zerodha"`) | blue **Z** |
 
 ### Portfolios
-Multiple named portfolios (e.g. "Zerodha Demat", "HDFC Securities"). Each has holdings, total invested, current value, unrealised P&L, and XIRR.
+Multiple named portfolios. A reserved `"Zerodha Demat"` portfolio is auto-created/updated by the sync. Each has holdings, total invested, current value, unrealised P&L, and XIRR.
 
 ### XIRR Calculation
 `engine/portfolio_service.py` computes Extended Internal Rate of Return using cash-flow dates (buy transactions) and current market value as the final cash flow. Newton-Raphson iteration to 0.0001% tolerance.
 
 ### Live P&L
-Current prices fetched from `PRICE_CACHE` (updated every 15 seconds during market hours by the live price feed). Falls back to yfinance if symbol not cached.
+Current prices resolve through the unified `get_price()` layer — Zerodha KiteTicker first, then `PRICE_CACHE` (15-second yfinance refresh).
 
 ### Mutual Fund Holdings
 Mutual fund units are stored in the same `tracker_holdings` table using a `MF:{scheme_code}` symbol prefix. NAV is fetched from mfapi.in with a 1-hour in-process cache. The Add Holding modal has two tabs:
@@ -533,7 +600,8 @@ Mutual fund units are stored in the same `tracker_holdings` table using a `MF:{s
 - **Stock / ETF** — searches NSE symbols via the existing `/search/stocks` endpoint
 - **Mutual Fund** — searches AMFI fund database via `/api/v1/portfolios/search/mf?q=<query>` (returns up to 15 matches with scheme code, name, and inferred category). On fund selection, current NAV auto-fetches via `/api/v1/portfolios/search/mf/{scheme_code}/nav` and pre-fills the purchase NAV field (editable for historical entries).
 
-The `_holding_to_dict()` serializer exposes `is_mf: true` and a `display_symbol` that strips the `MF:` prefix, so the Holdings table renders fund rows with an `MF` badge and category labels.
+### Zerodha Demat sync
+`POST /api/v1/portfolios/sync-zerodha` calls `engine/zerodha_portfolio.sync_zerodha_into_tracker()`, which mirrors live Demat holdings into the `"Zerodha Demat"` tracker portfolio (idempotent upsert, NSE-suffix normalised, tagged `source:zerodha`). A **Sync Zerodha** button in the My Portfolio header triggers it. Returns 409 if Zerodha is not connected.
 
 ### Endpoints
 - `GET  /api/v1/portfolios/` — list all portfolios with summaries
@@ -541,6 +609,7 @@ The `_holding_to_dict()` serializer exposes `is_mf: true` and a `display_symbol`
 - `GET  /api/v1/portfolios/{id}` — full portfolio detail
 - `POST /api/v1/portfolios/{id}/holdings` — add stock/MF holding (body accepts `symbol`, `quantity`, `price`, `trade_date`, `company_name`, `sector`)
 - `POST /api/v1/portfolios/{id}/holdings/{hid}/sell` — sell holding
+- `POST /api/v1/portfolios/sync-zerodha` — mirror Zerodha Demat into tracker
 - `GET  /api/v1/portfolios/search/stocks?q=` — NSE stock search
 - `GET  /api/v1/portfolios/search/mf?q=` — mutual fund search via mfapi.in
 - `GET  /api/v1/portfolios/search/mf/{scheme_code}/nav` — fetch current NAV
@@ -954,6 +1023,22 @@ Subscribes all NSE symbols + indices in `MODE_FULL`. Each tick contains last_pri
 
 ---
 
+## Unified Market Data Layer
+
+`crawler/live_prices.get_price(symbol)` is the single price resolver every module should call. It removes the drift that occurred when some pages read yfinance and others read the paid Zerodha feed.
+
+### Priority chain
+
+1. **Zerodha KiteTicker** (`crawler/zerodha_ticker.get_live_tick`) — sub-second WebSocket ticks, used only when `ZERODHA_ENABLED` and a token is present. Returns `source="zerodha_ticker"`, `age_seconds=0`.
+2. **PRICE_CACHE** — yfinance-backed, refreshed every 15 s during market hours (60 s when closed). Returns `source="yfinance_cache"` with the real `age_seconds`.
+3. **None** — caller decides whether to make a synchronous yfinance call.
+
+`get_prices_batch(symbols)` is a thin batch wrapper. Because the return dict carries `source` and `age_seconds`, the frontend can render a freshness label (e.g. "Live" vs "15s delayed") and prefer broker data whenever the Zerodha session is valid.
+
+> Note: LIVE_TICKS is keyed by Zerodha `instrument_token`, so `get_price()` resolves the symbol→token mapping through `zerodha_ticker.get_live_tick()` rather than reading the dict directly.
+
+---
+
 ## Celery Background Tasks
 
 27 scheduled tasks via Celery Beat (core + India market + Kite + AI features).
@@ -1013,19 +1098,24 @@ All endpoints prefixed `/api/v1/`. Interactive docs at `/docs` (Swagger) or `/re
 | GET | `/stats` | Aggregated performance stats |
 | POST | `/reset?confirm=true` | Reset wallet to starting balance |
 
-### Personal Portfolio Tracker (`/api/v1/portfolios`)
+### My Portfolio (`/api/v1/portfolios`)
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/` | All portfolios with summary |
 | POST | `/` | Create new portfolio |
-| GET | `/{id}` | Portfolio detail + holdings |
+| GET | `/{id}` | Portfolio detail + holdings (each tagged with `source`) |
 | PUT | `/{id}` | Update portfolio name/type |
 | DELETE | `/{id}` | Delete portfolio |
-| POST | `/{id}/holdings` | Add holding |
+| POST | `/{id}/holdings` | Add stock/MF holding |
 | PUT | `/{id}/holdings/{hid}` | Update holding |
 | DELETE | `/{id}/holdings/{hid}` | Delete holding |
+| POST | `/{id}/holdings/{hid}/sell` | Sell holding |
 | GET | `/{id}/xirr` | Compute XIRR for portfolio |
+| POST | `/sync-zerodha` | Mirror live Zerodha Demat holdings into tracker |
+| GET | `/search/stocks?q=` | NSE stock search |
+| GET | `/search/mf?q=` | Mutual fund search (mfapi.in) |
+| GET | `/search/mf/{code}/nav` | Latest NAV for a scheme |
 
 ### Trades (`/api/v1/trades`)
 
@@ -1139,7 +1229,11 @@ All endpoints prefixed `/api/v1/`. Interactive docs at `/docs` (Swagger) or `/re
 | Method | Path | Description |
 |---|---|---|
 | GET | `/` | Current runtime configuration |
-| PATCH | `/` | Update runtime parameters |
+| PATCH | `/` | Update runtime parameters (incl. `paper_mode`, confidence thresholds) |
+| DELETE | `/{key}` | Reset one setting to its `.env` default |
+| GET | `/keys` | List configurable keys and value types |
+| GET | `/mode` | Current trade mode (PAPER / LIVE / DRY_RUN) |
+| POST | `/mode` | Toggle paper↔live at runtime (live requires confirm string) |
 
 ### Portfolio Doctor (`/api/v1/doctor`)
 
@@ -1251,7 +1345,8 @@ autotrade-frontend/src/
 │   └── client.js        — All API fetch functions
 │
 ├── components/
-│   ├── Navbar.jsx        — Live clock, balance/PnL ticker, Kite token expiry warning
+│   ├── Navbar.jsx        — Live clock, balance/PnL ticker, Kite token expiry warning,
+│   │                       TradeModeBadge (PAPER/LIVE/DRY_RUN toggle)
 │   ├── Sidebar.jsx       — Nav with live status dots (market, watchlist, breadth,
 │   │                       sector strip, portfolio value, allocation, IPO, Zerodha)
 │   ├── chat/
@@ -1281,8 +1376,8 @@ autotrade-frontend/src/
 └── pages/
     ├── Dashboard.jsx        — Portfolio + equity chart + positions + signals
     ├── Trades.jsx           — Capital deployed, open positions, trade history
-    ├── Portfolio.jsx        — Legacy Kite holdings tracker (auto-falls back to Zerodha v3)
-    ├── PortfolioTracker.jsx — Personal holdings (stocks + MFs) with live P&L + XIRR + Doctor tab
+    ├── Portfolio.jsx        — "Simulator" — virtual paper-trading wallet (sidebar: Simulator)
+    ├── PortfolioTracker.jsx — "My Portfolio" — real holdings (manual + MF + Zerodha-synced) with source badges, live P&L, XIRR, Sync Zerodha button, Doctor tab
     ├── PortfolioDoctor.jsx  — AI health diagnosis page: 7 modules + Dr. Arjun narrative
     ├── EarningsAnalyzer.jsx — Earnings call transcript AI analyzer with quarter comparison
     ├── TradingAgent.jsx     — AI Trading Agent: status, decisions, positions, backtest, rulebook
@@ -1341,7 +1436,11 @@ Fixed-width navigation with live status indicators per item:
 - **Watchlist** — BUY signal count badge
 - **Breadth** — market mood dot (green/red/gray)
 - **Sector Heatmap** — 4-column sector strip (colored bars)
-- **My Holdings** — total portfolio value badge
+- **My Portfolio** — real-holdings value badge (renamed from "My Holdings")
+- **Simulator** — paper-trading wallet (renamed from "My Portfolio" to disambiguate)
+- **Portfolio Doctor** — health letter-grade badge (A–F)
+- **Earnings AI** — recent summary count badge
+- **Trading Agent** — agent status dot (gray=off, blue=paper, green pulsing=live)
 - **Market Calendar** — upcoming events count
 - **Asset Allocation** — deviation severity dot (green/amber/red)
 - **IPO Tracker** — open IPO count badge
@@ -1436,7 +1535,7 @@ ZERODHA_ENABLED=false                # set true after first successful login
 ZERODHA_PAPER_MODE=true              # SAFETY: set false ONLY for real orders
 
 # Paper trading parameters
-PAPER_TRADING_BALANCE=1000.0
+PAPER_TRADING_BALANCE=100000.0       # ₹1L — realistic Indian retail starter
 MAX_RISK_PER_TRADE=0.02              # 2% of balance per trade
 MAX_OPEN_POSITIONS=5
 MAX_DAILY_LOSS=0.05                  # halt when down 5% on the day
@@ -1444,6 +1543,12 @@ MAX_DAILY_LOSS=0.05                  # halt when down 5% on the day
 # Signal / trade sizing
 ATR_MULTIPLIER=2.0
 MIN_RISK_REWARD=2.0
+
+# Decision router — unified paper/live confidence gate
+PAPER_CONFIDENCE_THRESHOLD=60        # min confidence for a paper trade
+LIVE_CONFIDENCE_THRESHOLD=70         # tighter gate for live Zerodha orders
+AGENT_DRY_RUN=false                  # if true, agent logs decisions but never executes
+# Runtime override: POST /api/v1/settings/mode flips paper_mode without restart
 
 # AI Trading Agent (Varsity-grounded autonomous system)
 AGENT_ENABLED=false                  # master kill-switch, off by default
@@ -1463,9 +1568,9 @@ AGENT_WARMUP_BARS=210
 AGENT_SESSION_START=09:20
 AGENT_SESSION_END=15:20
 
-# Watchlists (comma-separated)
-WATCHLIST_FOREX=EUR/USD,GBP/USD,USD/JPY,AUD/USD,USD/CHF,USD/CAD
-WATCHLIST_STOCKS=AAPL,TSLA,NVDA,MSFT,AMZN,META,GOOGL,SPY,QQQ
+# Watchlists (comma-separated) — NSE-focused defaults
+WATCHLIST_FOREX=USD/INR,EUR/INR,GBP/INR,JPY/INR
+WATCHLIST_STOCKS=RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,SBIN.NS,BHARTIARTL.NS,KOTAKBANK.NS,LT.NS,ITC.NS
 ```
 
 ### Zerodha Setup
