@@ -588,6 +588,205 @@ def run_agent_cycle_task():
     return {"status": "done"}
 
 
+@celery_app.task(name="tasks.run_master_intelligence_cycle")
+def run_master_intelligence_cycle():
+    """Master brain cycle: build unified context, score the NSE universe,
+    drive the agent on top opportunities, score MFs, log the cycle."""
+    import pandas as pd
+
+    async def _run():
+        from datetime import datetime
+        from db.database import get_db
+        from engine.intelligence_hub import (
+            build_master_context, score_universe, persist_scores,
+            _get_sector_for_symbol,
+        )
+        from engine.agent.agent_loop import (
+            _get_portfolio, _is_market_hours, _is_trading_day,
+        )
+        from engine.agent.execution import AgentExecutionManager
+        from engine.agent.selector import StrategySelectorAgent
+        from engine.agent.decision_engine import DecisionEngine
+        from engine.agent.risk_manager import RiskManagerAgent
+        from engine.mf_signal_engine import (
+            get_portfolio_mf_holdings, score_mf_universe, persist_mf_scores,
+        )
+        from crawler.price_feed import get_latest_candles
+        from crawler.live_prices import PRICE_CACHE
+        from db.models import HubCycleLog
+        from utils.config import settings
+
+        if not settings.AGENT_ENABLED:
+            logger.info("[hub] agent disabled — skipping master cycle")
+            return
+        if not _is_trading_day():
+            logger.info("[hub] not a trading day — skipping")
+            return
+
+        portfolio   = _get_portfolio()
+        cycle_start = datetime.utcnow()
+
+        async for session in get_db():
+            cycle_log = HubCycleLog(cycle_start=cycle_start, bar_time=cycle_start, status="running")
+            session.add(cycle_log)
+            await session.commit()
+
+            try:
+                ctx = await build_master_context(portfolio, session)
+                logger.info(
+                    f"[hub] context: macro_bias={ctx.macro.total_macro_bias:+d} "
+                    f"vix={ctx.macro.india_vix:.1f} mood={ctx.macro.nse_market_mood} "
+                    f"news={len(ctx.news.scores_by_symbol)} earnings={len(ctx.earnings.tones_by_symbol)}"
+                )
+
+                universe = settings.nse_symbols
+                scored = await score_universe(universe, ctx, session)
+                await persist_scores(scored, cycle_start, session)
+
+                top_buys = [
+                    {"symbol": s.symbol, "score": s.master_score}
+                    for s in scored if s.signal in ("STRONG_BUY", "BUY") and not s.is_blocked
+                ][:5]
+                top_sells = [
+                    {"symbol": s.symbol, "score": s.master_score}
+                    for s in scored if s.signal in ("STRONG_SELL", "SELL") and not s.is_blocked
+                ][:5]
+                logger.info(f"[hub] scored {len(scored)} | top_buys={[b['symbol'] for b in top_buys]}")
+
+                decisions_made = 0
+                if _is_market_hours():
+                    executor = AgentExecutionManager()
+                    selector = StrategySelectorAgent()
+                    de       = DecisionEngine()
+                    rm       = RiskManagerAgent(portfolio.to_risk_ctx())
+
+                    await executor.check_and_close_positions(portfolio, PRICE_CACHE, session)
+
+                    # Exit positions whose sector turned strongly bearish
+                    for sym, pos in list(portfolio.open_positions.items()):
+                        sec = _get_sector_for_symbol(sym)
+                        if ctx.sectors.sector_moods.get(sec) == "STRONGLY_BEARISH":
+                            price = (PRICE_CACHE.get(sym, {}) or {}).get("price", 0) or 0
+                            if price > 0:
+                                portfolio.close_position(sym, price)
+                                logger.warning(f"[hub] exited {sym}: sector {sec} STRONGLY_BEARISH")
+
+                    tried = 0
+                    for stock in scored:
+                        if stock.is_blocked:
+                            continue
+                        if stock.signal not in ("STRONG_BUY", "BUY"):
+                            break
+                        if tried >= 10 or decisions_made >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
+                            break
+                        tried += 1
+                        try:
+                            candles = await get_latest_candles(stock.symbol, "15m", 300, session)
+                            if not candles or len(candles) < 50:
+                                continue
+                            cs = sorted(candles, key=lambda c: c.timestamp)
+                            df = pd.DataFrame([{
+                                "open": float(c.open), "high": float(c.high), "low": float(c.low),
+                                "close": float(c.close), "volume": float(c.volume),
+                                "timestamp": c.timestamp,
+                            } for c in cs])
+                            df.set_index("timestamp", inplace=True)
+
+                            candidate = selector.propose(
+                                stock.symbol, df, stock.features,
+                                macro_bias=ctx.macro.total_macro_bias,
+                                fund_grade=stock.fund_grade,
+                            )
+                            if candidate is None:
+                                continue
+                            decision = de.fuse(
+                                symbol=stock.symbol, candidate=candidate, regime=stock.regime,
+                                macro_bias=ctx.macro.total_macro_bias, fund_score=0,
+                                fund_grade=stock.fund_grade, equity=portfolio.equity,
+                            )
+                            if decision is None:
+                                continue
+                            ok, why = rm.can_take_trade(candidate, portfolio.equity)
+                            if not ok:
+                                logger.info(f"[hub] blocked {stock.symbol}: {why}")
+                                continue
+                            order_id = await executor.execute(decision, session)
+                            if order_id:
+                                portfolio.add_position(decision)
+                                decisions_made += 1
+                                logger.info(
+                                    f"[hub] TRADE {decision.action} {decision.qty} {stock.symbol} "
+                                    f"score={stock.master_score:.1f} conf={decision.confidence}%"
+                                )
+                        except Exception as exc:
+                            logger.error(f"[hub] exec error {stock.symbol}: {exc}")
+
+                # Score MF portfolio
+                try:
+                    mfs = await get_portfolio_mf_holdings(session)
+                    if mfs:
+                        mf_scores = await score_mf_universe(mfs, ctx, session)
+                        await persist_mf_scores(mf_scores, session)
+                        logger.info(f"[hub] MF scored: {len(mf_scores)}")
+                except Exception as exc:
+                    logger.warning(f"[hub] MF scoring skipped: {exc}")
+
+                cycle_log.cycle_end        = datetime.utcnow()
+                cycle_log.symbols_scored   = len(scored)
+                cycle_log.top_buys         = top_buys
+                cycle_log.top_sells        = top_sells
+                cycle_log.macro_context    = {
+                    "total_macro_bias": ctx.macro.total_macro_bias,
+                    "india_vix":        ctx.macro.india_vix,
+                    "nse_market_mood":  ctx.macro.nse_market_mood,
+                    "fii_net_3d":       ctx.macro.fii_net_3d,
+                    "dii_net_3d":       ctx.macro.dii_net_3d,
+                }
+                cycle_log.decisions_made   = decisions_made
+                cycle_log.skipped_count    = sum(1 for s in scored if s.is_blocked)
+                cycle_log.status           = "complete"
+                cycle_log.duration_seconds = (datetime.utcnow() - cycle_start).total_seconds()
+                await session.commit()
+
+                # Broadcast to WS clients via Redis pub/sub (non-fatal)
+                try:
+                    import json, redis as _redis
+                    r = _redis.from_url(
+                        settings.REDIS_URL,
+                        ssl_cert_reqs=None if settings.redis_uses_tls else None,
+                    )
+                    r.publish("hub_events", json.dumps({
+                        "type": "hub_cycle_complete",
+                        "bar_time": cycle_start.isoformat(),
+                        "top_buys": [b["symbol"] for b in top_buys],
+                        "top_sells": [s["symbol"] for s in top_sells],
+                        "macro_bias": ctx.macro.total_macro_bias,
+                        "vix": ctx.macro.india_vix,
+                        "mood": ctx.macro.nse_market_mood,
+                        "decisions": decisions_made,
+                        "scores_updated": len(scored),
+                    }))
+                except Exception:
+                    pass
+
+                logger.info(
+                    f"[hub] cycle complete in {cycle_log.duration_seconds:.1f}s | "
+                    f"scored={len(scored)} trades={decisions_made} macro={ctx.macro.total_macro_bias:+d}"
+                )
+            except Exception as exc:
+                logger.exception(f"[hub] cycle error: {exc}")
+                cycle_log.status = "error"
+                cycle_log.error_msg = str(exc)[:500]
+                try:
+                    await session.commit()
+                except Exception:
+                    pass
+            break
+
+    asyncio.run(_run())
+    return {"status": "done"}
+
+
 @celery_app.task(name="tasks.agent_eod_reconcile")
 def agent_eod_reconcile_task():
     """End-of-day: close remaining open positions, reset daily counters."""

@@ -5,7 +5,7 @@ import {
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot, Stethoscope, FileText, BrainCircuit,
+  Bot, Stethoscope, FileText, BrainCircuit, Sparkles,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
 
@@ -28,6 +28,7 @@ const INDIA_NAV = [
   { to: '/portfolio-tracker', label: 'My Portfolio',    Icon: Briefcase,   portfolioTracker: true },
   { to: '/doctor',           label: 'Portfolio Doctor', Icon: Stethoscope, doctorBadge: true },
   { to: '/earnings',         label: 'Earnings AI',      Icon: FileText,    earningsBadge: true },
+  { to: '/intelligence',     label: 'Intelligence Hub', Icon: Sparkles,    hubBadge: true },
   { to: '/agent',            label: 'Trading Agent',    Icon: BrainCircuit, agentBadge: true },
   { to: '/calendar',          label: 'Market Calendar', Icon: CalendarDays, calendar: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
@@ -237,6 +238,29 @@ function AllocationDot() {
   }, []);
   if (!dotColor) return null;
   return <span className="ml-auto w-2 h-2 rounded-full shrink-0" style={{ background: dotColor }} />;
+}
+
+function HubBiasBadge() {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/v1/intelligence/context')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.macro) setInfo({ bias: d.macro.total_macro_bias ?? 0 }); })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 120_000);
+    return () => clearInterval(id);
+  }, []);
+  if (!info) return null;
+  const b = info.bias;
+  const cls = b > 0 ? 'bg-emerald-500/20 text-emerald-400' : b < 0 ? 'bg-red-500/20 text-red-400' : 'bg-slate-500/20 text-slate-300';
+  return (
+    <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${cls}`}
+      title={`Macro bias ${b > 0 ? '+' : ''}${b}`}>
+      {b > 0 ? '+' : ''}{b}
+    </span>
+  );
 }
 
 function AgentStatusBadge() {
@@ -465,9 +489,9 @@ export default function Sidebar() {
         <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
           Indian Market
         </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker, doctorBadge: isDoctorBadge, earningsBadge: isEarningsBadge, agentBadge: isAgentBadge }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker || isDoctorBadge || isEarningsBadge || isAgentBadge) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : isDoctorBadge ? DoctorHealthBadge : isEarningsBadge ? EarningsBadge : isAgentBadge ? AgentStatusBadge : PortfolioValueBadge;
+        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker, doctorBadge: isDoctorBadge, earningsBadge: isEarningsBadge, agentBadge: isAgentBadge, hubBadge: isHubBadge }) => {
+          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker || isDoctorBadge || isEarningsBadge || isAgentBadge || isHubBadge) {
+            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : isDoctorBadge ? DoctorHealthBadge : isEarningsBadge ? EarningsBadge : isAgentBadge ? AgentStatusBadge : isHubBadge ? HubBiasBadge : PortfolioValueBadge;
             return (
               <NavLink
                 key={to}

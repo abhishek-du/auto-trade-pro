@@ -25,6 +25,7 @@ const PAGE_TITLES = {
   '/doctor':            'Portfolio Doctor',
   '/earnings':          'Earnings Analyzer',
   '/agent':             'AI Trading Agent',
+  '/intelligence':      'Intelligence Hub',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────

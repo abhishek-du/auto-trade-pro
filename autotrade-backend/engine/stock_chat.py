@@ -146,6 +146,30 @@ def format_context_for_llm(context: dict) -> str:
     name   = context["display_name"]
     symbol = context["symbol"]
 
+    # Master Intelligence Hub score (most decision-relevant — show first)
+    hs = context.get("hub_score") or {}
+    if hs.get("master_score") is not None:
+        lines.append("MASTER INTELLIGENCE SCORE:")
+        lines.append(f"  Score: {hs['master_score']:.1f}/100 ({hs.get('signal','NEUTRAL')})")
+        if hs.get("rank"):
+            lines.append(f"  Rank: #{hs['rank']} in NSE universe")
+        if hs.get("is_blocked"):
+            lines.append(f"  ⚠ Blocked: {hs.get('blocked_reason')}")
+        r = hs.get("reasoning") or {}
+        if r:
+            lines.append(
+                f"  Components — Technical {r.get('technical',0):.0f}, News {r.get('news',0):.0f}, "
+                f"Sector {r.get('sector',0):.0f}, Macro {r.get('macro',0):.0f}, "
+                f"Earnings {r.get('earnings',0):.0f}, Fundamental {r.get('fundamental',0):.0f}"
+            )
+        mc = context.get("macro") or {}
+        if mc:
+            lines.append(
+                f"  Market: bias {mc.get('total_bias',0):+d}, VIX {mc.get('vix','—')}, "
+                f"mood {mc.get('market_mood','NEUTRAL')}, FII 3d ₹{mc.get('fii_3d',0):.0f}Cr"
+            )
+        lines.append("")
+
     price = context.get("price", {})
     if price.get("price"):
         lines.append(f"LIVE DATA FOR {name} ({symbol})")

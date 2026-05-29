@@ -1009,3 +1009,89 @@ class AgentPerformance(Base):
 
     def __repr__(self) -> str:
         return f"<AgentPerformance {self.date} trades={self.total_trades} net_pnl={self.net_pnl}>"
+
+
+# ── Master Intelligence Hub ────────────────────────────────────────────────────
+
+class MasterIntelligenceScore(Base):
+    """Per-symbol unified score combining technical, news, sector, macro,
+    earnings, fundamental, and options signals — one row per symbol per cycle."""
+    __tablename__ = "master_intelligence_scores"
+    __table_args__ = (
+        Index("ix_mis_symbol_scored",  "symbol", "scored_at"),
+        Index("ix_mis_scored_master",  "scored_at", "master_score"),
+        Index("ix_mis_symbol_bar",     "symbol", "bar_time"),
+    )
+
+    id:                Mapped[str]      = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    symbol:            Mapped[str]      = mapped_column(String(30),  nullable=False)
+    scored_at:         Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    bar_time:          Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    technical_score:   Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    news_score:        Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    sector_score:      Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    macro_score:       Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    earnings_score:    Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    fundamental_score: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    options_score:     Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    portfolio_score:   Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+
+    master_score:      Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    rank:              Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    signal:            Mapped[str]      = mapped_column(String(15), nullable=False, default="NEUTRAL")
+    regime:            Mapped[str]      = mapped_column(String(30), nullable=False, default="")
+    reasoning:         Mapped[dict]     = mapped_column(JSON, nullable=False, default=dict)
+
+    blocked_reason:    Mapped[str | None] = mapped_column(String(80), nullable=True)
+    is_blocked:        Mapped[bool]     = mapped_column(Boolean, nullable=False, default=False)
+
+    def __repr__(self) -> str:
+        return f"<MasterIntelligenceScore {self.symbol} {self.master_score:.1f} {self.signal}>"
+
+
+class HubCycleLog(Base):
+    """One row per master-intelligence cycle for observability."""
+    __tablename__ = "hub_cycle_logs"
+
+    id:               Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cycle_start:      Mapped[datetime]     = mapped_column(DateTime, nullable=False)
+    cycle_end:        Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    bar_time:         Mapped[datetime]     = mapped_column(DateTime, nullable=False)
+    symbols_scored:   Mapped[int]          = mapped_column(Integer, nullable=False, default=0)
+    top_buys:         Mapped[list]         = mapped_column(JSON, nullable=False, default=list)
+    top_sells:        Mapped[list]         = mapped_column(JSON, nullable=False, default=list)
+    macro_context:    Mapped[dict]         = mapped_column(JSON, nullable=False, default=dict)
+    decisions_made:   Mapped[int]          = mapped_column(Integer, nullable=False, default=0)
+    skipped_count:    Mapped[int]          = mapped_column(Integer, nullable=False, default=0)
+    status:           Mapped[str]          = mapped_column(String(15), nullable=False, default="running")
+    error_msg:        Mapped[str | None]   = mapped_column(Text, nullable=True)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at:       Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<HubCycleLog {self.bar_time} scored={self.symbols_scored} status={self.status}>"
+
+
+class MFIntelligenceScore(Base):
+    """Mutual-fund scoring output from the hub MF engine."""
+    __tablename__ = "mf_intelligence_scores"
+    __table_args__ = (
+        Index("ix_mfis_scheme_scored", "scheme_code", "scored_at"),
+    )
+
+    id:               Mapped[str]      = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    scheme_code:      Mapped[str]      = mapped_column(String(30),  nullable=False)
+    scheme_name:      Mapped[str]      = mapped_column(String(300), nullable=False, default="")
+    category:         Mapped[str]      = mapped_column(String(80),  nullable=False, default="")
+    scored_at:        Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    nav_trend_score:  Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    sector_alignment: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    category_score:   Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    master_score:     Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    signal:           Mapped[str]      = mapped_column(String(15), nullable=False, default="HOLD")
+    reasoning:        Mapped[dict]     = mapped_column(JSON, nullable=False, default=dict)
+
+    def __repr__(self) -> str:
+        return f"<MFIntelligenceScore {self.scheme_code} {self.master_score:.1f} {self.signal}>"
