@@ -10,13 +10,14 @@
 - Architecture
 - Technology Stack
 - Backend — Structure and Modules
+- Master Intelligence Hub — Unified Multi-Factor Scoring
 - Decision Router & Unified Trade Mode
 - Signal Engine
 - Technical Indicators
 - Deep Analysis Engine
 - Risk Management
 - Paper Trading Simulation
-- News and Sentiment
+- News and Sentiment (India-First)
 - LLM Integration
 - Avishk AI Stock Analyst
 - India Market Suite
@@ -45,6 +46,7 @@ AutoTrade Pro is a full-stack automated paper-trading platform for Indian market
 
 The platform covers the complete spectrum of Indian market tools:
 
+- **Master Intelligence Hub** — top-level brain that builds one unified `MasterContext` (macro + sector + news + earnings + options + portfolio), scores the entire NSE universe with 7-component weighted scoring (technical 35%, news 15%, sector 15%, macro 10%, earnings 10%, fundamentals 10%, options 5%), drives the AI Trading Agent on the top opportunities, and scores mutual fund holdings — runs every 15 minutes during market hours
 - **Signal Engine** — multi-factor BUY/SELL/HOLD on NSE/BSE stocks
 - **Decision Router** — single source of truth that routes every signal to paper or live execution through one unified confidence gate; runtime paper↔live toggle, no restart
 - **Avishk AI Stock Analyst** — conversational AI with live NSE context (price, indicators, news, signals), powered by Groq LLM with rule-based fallback
@@ -79,49 +81,73 @@ All data flows through a FastAPI backend with Celery workers; the React SPA read
 │  FastAPI Backend (Uvicorn, async)                             │
 │  localhost:8000                                               │
 │                                                               │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Master Intelligence Hub  (engine/intelligence_hub.py) │  │
+│  │  build_master_context → score_universe → persist       │  │
+│  │  → drives AI Trading Agent → scores MF universe        │  │
+│  └────────────────────────────────────────────────────────┘  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
 │  │  API Routers │  │  Signal      │  │  Paper Trading   │    │
-│  │  (60 routes) │  │  Engine      │  │  Simulation      │    │
+│  │  (60+ routes)│  │  Engine      │  │  Simulation      │    │
 │  └──────────────┘  └──────────────┘  └──────────────────┘    │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
 │  │  India Market│  │  Zerodha     │  │  Avishk AI Chat  │    │
 │  │  Suite       │  │  KiteConnect │  │  Engine          │    │
 │  └──────────────┘  └──────────────┘  └──────────────────┘    │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  Decision Router — paper/live unified routing gate   │    │
+│  └──────────────────────────────────────────────────────┘    │
 └────────────────────┬─────────────────────────────────────────┘
-                     │ SQLAlchemy async
+                     │ SQLAlchemy async (NullPool)
 ┌────────────────────▼────────────────┐
 │  PostgreSQL (Supabase transaction    │
-│  pooler)                             │
+│  pooler — port 6543, NullPool +      │
+│  statement_cache_size=0)             │
 └─────────────────────────────────────┘
 
-┌──────────────────────────────────────┐
-│  Celery Workers + Beat               │
-│  Core:                               │
-│    scan_watchlist   (every 30s)      │
-│    scan_news        (every 5 min)    │
-│    paper_trade_loop (every 60s)      │
-│  India Market:                       │
-│    fii_dii          (daily 17:00)   │
-│    options_chain    (every 15 min)   │
-│    sector_breadth   (every 30 min)   │
-│    india_signals    (daily 08:00)    │
-│  Zerodha Kite:                       │
-│    kite_sync_holdings  (daily 21:05) │
-│    kite_sync_candles   (daily 15:30) │
-│    kite_refresh_instruments (08:00)  │
-│    kite_check_token    (daily 06:05) │
-│    kite_start_ticker   (09:15)       │
-│  Broker/Backend: Upstash Redis (TLS) │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  Celery Workers + Beat  (27+ scheduled tasks)            │
+│  Master Brain:                                            │
+│    run_master_intelligence_cycle (every 15 min @ 09:15-) │
+│  Core:                                                    │
+│    scan_watchlist   (every 30s)                          │
+│    scan_news        (every 5 min — India RSS first)      │
+│    paper_trade_loop (every 60s)                          │
+│  India Market:                                            │
+│    fii_dii            (daily 13:00 UTC = 18:30 IST)      │
+│    options_chain      (every 15 min, market hours)       │
+│    sector_data        (every 60s)                        │
+│    market_breadth     (every 2 min)                      │
+│    india_trade_loop   (every 60s)                        │
+│    india_fundamentals (weekly, Sun 18:30 UTC)            │
+│  Zerodha Kite:                                            │
+│    kite_sync_holdings (15 min)                           │
+│    kite_sync_candles  (daily 15:30 IST)                  │
+│    kite_refresh_instruments  (daily 08:00 IST)           │
+│    kite_check_token   (daily 06:05 IST)                  │
+│    kite_start_ticker  (daily 09:15 IST)                  │
+│  AI Features:                                             │
+│    fetch_earnings_transcripts (daily 20:00 IST)          │
+│    agent_eod_reconcile (daily 15:25 IST, Mon-Fri)        │
+│  Broker/Backend: local Redis on localhost:6379            │
+│  (Docker container — switched from Upstash after the     │
+│   500K req/month free quota hit cap)                      │
+└──────────────────────────────────────────────────────────┘
 
 External APIs:
-  yfinance           — free, no key (primary price + news)
-  Groq API           — Avishk AI chat + signal explanations
+  yfinance           — free, no key (price + earnings + fundamentals fallback)
+  Groq API           — Avishk AI + signal explanations + Doctor/Earnings AI
   NSE India          — FII/DII, options chain (public endpoints)
   MFAPI              — mutual fund NAV history (free)
   ipoalerts.in       — IPO data (free, 25 req/day)
   Zerodha KiteConnect v3 — OAuth, portfolio, all market data,
                            orders, GTT, MF (₹500/month paid plan)
+  News stack (India-first):
+    • Free RSS — Moneycontrol, Business Standard, Mint, Economic Times
+                 (no key, no rate limit — primary source)
+    • NewsData.io — India business news, 200 req/day free (optional)
+    • Finnhub    — global/US news (optional secondary)
+    • NewsAPI    — global news (optional secondary)
 ```
 
 ---
@@ -138,7 +164,7 @@ External APIs:
 | SQLAlchemy | 2.0 | Async ORM with `AsyncSession` |
 | asyncpg | 0.29+ | Fastest PostgreSQL async driver |
 | Celery | 5.3+ | Distributed background task queue |
-| Redis / Upstash | — | Celery broker and result backend |
+| Redis (local Docker) | 7 | Celery broker + result backend (was Upstash; switched after the 500K req/month free quota hit cap) |
 | PostgreSQL | 15 via Supabase | Hosted relational database |
 | yfinance | 0.2+ | Free OHLCV + news (primary source) |
 | kiteconnect | 4.2+ | Official Zerodha KiteConnect v3 library |
@@ -177,6 +203,9 @@ autotrade-backend/
 │   │                          recent, refresh, compare
 │   ├── india.py             — India market: FII/DII, options, calendar,
 │   │                          breadth, heatmap, signals, backtest
+│   ├── intelligence.py      — Master Intelligence Hub: context, scores,
+│   │                          per-symbol history, score breakdown, MF signals,
+│   │                          cycle log, top opportunities, manual trigger
 │   ├── ipo_tracker.py       — IPO status, GMP, subscription data
 │   ├── kite.py              — Legacy Kite portfolio tracker (transparent
 │   │                          fallback to Zerodha v3 when KITE_API_KEY unset)
@@ -254,8 +283,16 @@ autotrade-backend/
 │   ├── india_specific.py    — India-specific signal adjustments
 │   ├── indicators.py        — Full suite: RSI, MACD, BB, EMA, ATR, Stochastic,
 │   │                          Supertrend, Ichimoku, ADX, VWAP+bands
+│   ├── intelligence_hub.py  — Master Intelligence Hub: builds MasterContext
+│   │                          (macro+sector+news+earnings+options+portfolio),
+│   │                          scores universe with 7-component weights,
+│   │                          persists MasterIntelligenceScore + HubCycleLog
 │   ├── ipo_analyzer.py      — IPO scoring + Groq verdict
 │   ├── llm_explainer.py     — Groq API + fallback explanation generator
+│   ├── mf_signal_engine.py  — Mutual fund universe scorer used by the Hub:
+│   │                          fetches portfolio MFs, pulls 90-day NAV via
+│   │                          mfapi.in, scores against macro + sector context,
+│   │                          persists MFIntelligenceScore rows
 │   ├── ml_predictor.py      — ML model predictor
 │   ├── mutual_fund_analyzer.py — MF NAV trend + signal scoring
 │   ├── portfolio_doctor.py  — Portfolio Doctor: 7 diagnostic modules +
@@ -299,31 +336,168 @@ autotrade-backend/
 
 | Module | Purpose |
 |---|---|
+| `engine/intelligence_hub.py` (NEW) | Master brain: 7-context build (Macro/Sector/News/Earnings/Options/Portfolio), 7-weight scoring, persistence — 567 lines |
+| `engine/mf_signal_engine.py` (NEW) | Mutual fund universe scorer used by the Hub — 193 lines |
+| `api/intelligence.py` (NEW) | 8 endpoints serving the Intelligence Dashboard |
 | `api/agent.py` | 11 endpoints for the AI Trading Agent |
 | `api/earnings.py` | 6 endpoints for AI earnings call analyzer |
 | `api/portfolio_doctor.py` | 5 endpoints for AI Portfolio Doctor |
 | `crawler/earnings_crawler.py` | BSE/NSE transcript fetch + dynamic BSE scrip resolver + PDF text extraction |
+| `crawler/news_crawler.py` (updated) | India-first RSS feeds (Moneycontrol/BS/Mint/ET), NSE_STOCK_LOOKUP-backed ticker extraction (`_india_name_map()`), NewsData.io enricher, RSS-first priority in `run_news_crawl` |
 | `engine/agent/` | Full Varsity-grounded multi-agent system (12 files in package) |
 | `engine/earnings_summarizer.py` | Groq-driven structured transcript summarizer |
 | `engine/portfolio_doctor.py` | 7 diagnostic modules + Dr. Arjun narrative |
-| `engine/portfolio_service.py` (updated) | MF support: `MF:{scheme_code}` symbol prefix, mfapi.in NAV cache |
-| `engine/decision_router.py` (NEW) | Single paper/live routing gate for every signal |
+| `engine/portfolio_service.py` (updated) | MF support: `MF:{scheme_code}` symbol prefix, mfapi.in NAV cache; `_holding_to_dict()` exposes `source` (MANUAL / MUTUAL_FUND / ZERODHA) |
+| `engine/decision_router.py` | Single paper/live routing gate for every signal |
 | `api/portfolio_tracker.py` (updated) | `/search/mf`, `/search/mf/{code}/nav`, `/sync-zerodha` endpoints |
 | `api/settings.py` (updated) | `GET/POST /settings/mode` runtime trade-mode toggle |
 | `api/kite.py` (updated) | Transparent fallback to Zerodha v3 when legacy `KITE_API_KEY` unset |
 | `crawler/live_prices.py` (updated) | `get_price()` Zerodha-first unified resolver with `source`+`age_seconds` |
 | `engine/zerodha_portfolio.py` (updated) | `sync_zerodha_into_tracker()` mirrors Demat into tracker portfolio |
-| `engine/portfolio_service.py` (updated) | `_holding_to_dict()` exposes `source` (MANUAL / MUTUAL_FUND / ZERODHA) |
 | `utils/runtime_config.py` (updated) | `paper_mode` + confidence-threshold keys, runtime-mutable |
-| `db/models.py` (updated) | 7 new tables: `portfolio_diagnoses`, `earnings_call_summaries`, `agent_decisions`, `agent_trades`, `agent_positions`, `agent_performance` |
-| `tasks/india_tasks.py` (updated) | 3 new tasks: `run_agent_cycle`, `agent_eod_reconcile`, `fetch_earnings_transcripts` |
-| `utils/config.py` (updated) | `AGENT_*` settings, `PAPER/LIVE_CONFIDENCE_THRESHOLD`, NSE watchlist + ₹1L paper balance defaults |
+| `db/database.py` (updated) | Main app engine uses `NullPool` (matching Celery workers) for Supabase transaction-mode pooler; `get_db()` guards rollback/close on session errors |
+| `db/models.py` (updated) | 10 new tables: `portfolio_diagnoses`, `earnings_call_summaries`, `agent_decisions`, `agent_trades`, `agent_positions`, `agent_performance`, `master_intelligence_scores`, `mf_intelligence_scores`, `hub_cycle_logs`, `tracker_holdings`+`tracker_transactions` enhancements |
+| `tasks/india_tasks.py` (updated) | 4 new tasks: `run_agent_cycle`, `agent_eod_reconcile`, `fetch_earnings_transcripts`, `run_master_intelligence_cycle` |
+| `tasks/celery_app.py` (updated) | Added `master-intelligence-every-15min` beat entry (cron-style: minute 14/29/44/59 of hours 3-10 UTC, Mon-Fri, +45s countdown) |
+| `utils/config.py` (updated) | `AGENT_*` settings, `PAPER/LIVE_CONFIDENCE_THRESHOLD`, `NEWSDATA_KEY` + `newsdata_available` property, NSE watchlist + ₹1L paper balance defaults, default `REDIS_URL=redis://localhost:6379/0` |
+
+---
+
+## Master Intelligence Hub — Unified Multi-Factor Scoring
+
+`engine/intelligence_hub.py` is AutoTrade Pro's **top-level brain**. Instead of having every feature (signal engine, agent, doctor, chat) re-fetch macro/sector/news data separately, the Hub builds **one unified `MasterContext`** once per cycle, then scores the entire NSE universe with a 7-component weighted formula and persists the results for every other module to read.
+
+The Hub also drives the AI Trading Agent: the top-N opportunities from the scoring pass are fed straight into `StrategySelectorAgent → DecisionEngine → RiskManager → AgentExecutionManager`, so paper/live orders flow from the same context that the dashboards display.
+
+### Context bundle (`MasterContext` dataclass)
+
+`build_master_context()` assembles six sub-contexts **sequentially on one AsyncSession** — concurrent builders on a single session triggered the SQLAlchemy "session is provisioning a new connection" error, so the builders run in series:
+
+| Sub-context | Builder | What it contains |
+|---|---|---|
+| `MacroContext` | `build_macro_context(session)` | India VIX, NIFTY/BANKNIFTY daily change, FII/DII net flow trend, market mood, `total_macro_bias` (−4..+4) |
+| `SectorContext` | `build_sector_context()` (sync — reads SECTOR_CACHE) | 11 NSE sector index changes + sector mood scores per sector |
+| `NewsContext` | `build_news_context(session)` | Per-symbol FinBERT score map for the last 24h of headlines |
+| `EarningsContext` | `build_earnings_context(session)` | Latest management tone (`OPTIMISTIC`/`CAUTIOUS`/`NEUTRAL`/`NEGATIVE`) per symbol from `earnings_call_summaries` |
+| `OptionsContext` | `build_options_context(session)` | NIFTY/BANKNIFTY PCR-derived bias (`pcr > 1.1` → bearish, `pcr < 0.9` → bullish, `pcr <= 0` → neutral — guards the case where the snapshot has no PCR field) |
+| `PortfolioContext` | `build_portfolio_context(agent_portfolio, session)` | Open positions, drawdowns, cash %, overweight sectors |
+
+### Scoring formula (`score_symbol`)
+
+For each candidate symbol the Hub computes:
+
+| Component | Source | Range | Weight |
+|---|---|---|---|
+| Technical | `signals.composite_score` from signal_generator | −100..+100 | **35%** |
+| News | FinBERT sentiment × 100 from `NewsContext` | −100..+100 | **15%** |
+| Sector | `SECTOR_CACHE` momentum × 25 (clamped ±50) | −50..+50 | **15%** |
+| Macro | `total_macro_bias × 12` (clamped ±50) | −50..+50 | **10%** |
+| Earnings | Tone map: `OPTIMISTIC=+30 / NEUTRAL=0 / CAUTIOUS=-15 / NEGATIVE=-40` | −40..+30 | **10%** |
+| Fundamental | `FundamentalsAgent.get_cached_grade()` 0–100 → re-centered to ±50 | −50..+50 | **10%** |
+| Options | `OptionsContext.nifty_bias × 15` | −15..+15 | **5%** |
+
+```
+master_score = technical*0.35 + news*0.15 + sector*0.15
+             + macro*0.10 + earnings*0.10 + fundamental*0.10
+             + options*0.05
+```
+
+### Sector + portfolio adjustments
+
+After the base weighted sum, two real-world tweaks fire:
+
+- **Sector mood gate** — if the sector is `STRONGLY_BEARISH` and the master score is still positive, it is dampened to discourage swimming upstream.
+- **Overweight de-emphasis** — if the symbol's sector is in `portfolio.overweight_sectors`, the score is multiplied by 0.7 so the system doesn't keep buying what we already over-own.
+
+### Signal labels
+
+| Threshold | Signal |
+|---|---|
+| `master_score >= 60` | `STRONG_BUY` |
+| `master_score >= 25` | `BUY` |
+| `−25 < master_score < 25` | `NEUTRAL` |
+| `master_score >= -60` | `SELL` |
+| `master_score < -60` | `STRONG_SELL` |
+
+A `risk_off` flag is set on bear regime/high-VIX days and trims an extra 15 points off positive scores.
+
+### Universe scoring (`score_universe`)
+
+Candles are fetched **serially** from the DB (one session can't serve concurrent DB ops), but scoring is then done in parallel via `asyncio.gather` since `score_symbol` itself doesn't touch the session except via lookups that are already cached. The result is a `list[ScoredStock]` containing the master score, signal label, all 7 component scores, and the original price-feed bar time.
+
+### MF universe scoring (`engine/mf_signal_engine.py`)
+
+Right after stock scoring, the Hub runs `score_mf_universe()`:
+
+1. `get_portfolio_mf_holdings(session)` — picks up MF rows from `tracker_holdings` (those with `MF:{scheme_code}` symbol prefix)
+2. For each holding, fetches 90 days of NAV from mfapi.in
+3. Scores momentum + sector match (via `_match_sector(scheme_name)`) against the Hub's `SectorContext`
+4. Persists rows to `mf_intelligence_scores`
+
+### Persistence
+
+After each cycle, two tables are written:
+
+- `master_intelligence_scores` — one row per scored symbol per cycle (`symbol`, `master_score`, `signal`, all 7 component scores JSON, `bar_time`, `created_at`)
+- `hub_cycle_logs` — one row per cycle (`cycle_start`, `bar_time`, `status` running/completed/failed, `symbols_scored`, `top_signal_json`, `error_text`)
+- `mf_intelligence_scores` — one row per MF holding per cycle
+
+### Driving the agent
+
+The Hub passes the top-N candidates through the existing agent pipeline:
+
+```
+top_opportunities  (master_score >= 40, sorted desc)
+    │
+    └─▶ For each candidate:
+          StrategySelectorAgent.propose(symbol, ctx, ...)
+            │
+            └─▶ DecisionEngine.fuse(...)
+                  │
+                  └─▶ RiskManagerAgent.can_take_trade(...)
+                        │
+                        └─▶ AgentExecutionManager.execute(...)
+                              → paper log or live order via decision_router
+```
+
+This is why the Hub schedule (`master-intelligence-every-15min`) runs **45 seconds after** each 15-minute candle close (`countdown: 45`): the candle saver has to finish first, so the technical scores are fresh.
+
+### Beat schedule
+
+```
+"master-intelligence-every-15min": {
+    "task":     "tasks.run_master_intelligence_cycle",
+    "schedule": crontab(hour="3-10", minute="14,29,44,59", day_of_week="1-5"),
+    "options":  {"countdown": 45},   # wait for candle saver
+}
+```
+
+Times are UTC: NSE 09:15-15:30 IST = 03:45-10:00 UTC. The cron pattern fires at minute 14, 29, 44, 59 — i.e. 1 minute before the next 15-min bar starts — and the +45s countdown then runs the cycle once that bar has been saved.
+
+### Endpoints (`/api/v1/intelligence`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/context` | Live `MasterContext` snapshot — used by Sidebar `HubBiasBadge` |
+| GET | `/scores` | Latest score per symbol (filterable by signal/limit) |
+| GET | `/scores/{symbol}` | Score history for one symbol |
+| GET | `/score-breakdown/{symbol}` | Full 7-component breakdown for the latest score |
+| GET | `/mf-signals?limit=` | Latest MF intelligence scores |
+| GET | `/cycle-log?limit=` | Last N hub cycles (status, scored count, top picks, errors) |
+| GET | `/top-opportunities` | Highest-confidence longs and shorts for the current bar |
+| POST | `/trigger` | Manual one-shot cycle (admin/debug) |
+
+### Frontend
+
+- `pages/IntelligenceDashboard.jsx` — full dashboard: context bar (macro/sector/VIX/mood), top opportunities grid, per-symbol score breakdown panel, MF intelligence table, cycle log
+- `hooks/useIntelligenceHub.js` — polls `/context` + `/scores` and exposes loading/error state
+- Sidebar entry: `Intelligence Hub` (Sparkles icon) with a live `HubBiasBadge` that polls `/intelligence/context` and shows the current macro bias direction
 
 ---
 
 ## Decision Router & Unified Trade Mode
 
-`engine/decision_router.py` is the **single source of truth** for whether a trading signal becomes a paper trade or a real Zerodha order. Every execution path — the signal engine, the AI Trading Agent, and manual triggers — funnels through one function so behaviour is consistent and auditable.
+`engine/decision_router.py` is the **single source of truth** for whether a trading signal becomes a paper trade or a real Zerodha order. Every execution path — the signal engine, the AI Trading Agent, the Master Intelligence Hub, and manual triggers — funnels through one function so behaviour is consistent and auditable.
 
 ### Routing flow
 
@@ -458,18 +632,67 @@ All simulation logic in `paper_trading/`. Virtual wallet starts at `PAPER_TRADIN
 
 ---
 
-## News and Sentiment
+## News and Sentiment (India-First)
 
 ### News Crawler (`crawler/news_crawler.py`)
 
-1. **yfinance** — primary source for Indian stocks (nested `content` key)
-2. **NewsAPI** (`NEWSAPI_KEY`) — general financial headlines
-3. **Finnhub** (`FINNHUB_KEY`) — useful for US-listed stocks only
-4. **Free RSS feeds** — Yahoo Finance, ForexFactory (no key required)
+The news pipeline is **India-first**: the four free Indian RSS feeds are the primary source and run on every crawl with no keys and no rate limits. International sources are optional enrichers.
+
+**Source priority** — `run_news_crawl` calls them in parallel via `asyncio.gather`, but assembles the final `all_raw` list **RSS first** so India headlines lead in the deduped output:
+
+```python
+asyncio.gather(
+    fetch_newsapi_headlines(),      # optional, NEWSAPI_KEY
+    fetch_finnhub_news(),           # optional, FINNHUB_KEY (US-focused)
+    fetch_newsdata_india(),         # optional, NEWSDATA_KEY (200/day free)
+    fetch_free_rss_news(),          # always — India-first RSS
+)
+
+all_raw = rss_rows + newsdata_rows + newsapi_rows + finnhub_rows
+```
+
+| Source | Status | Reliability |
+|---|---|---|
+| **Free RSS — Moneycontrol** (`/rss/latestnews.xml`) | always attempted | ~15 headlines/run, very reliable |
+| **Free RSS — Business Standard** (`/rss/markets-106.rss`) | always attempted | reliable when reachable |
+| **Free RSS — Mint** (`/rss/markets`) | always attempted | ~35 headlines/run, very reliable |
+| **Free RSS — Economic Times** (`/markets/rss.cms`) | always attempted | best-effort, sometimes host-blocked |
+| **NewsData.io** — India business news | optional (`NEWSDATA_KEY`) | 200 req/day free; covers ET, Mint, BS, NDTV |
+| **NewsAPI** — global headlines | optional (`NEWSAPI_KEY`) | global, lower India coverage |
+| **Finnhub** — global news | optional (`FINNHUB_KEY`) | US-focused, ~100 headlines/run |
+
+Each fetcher returns `{headline, source, url, published_at}` dicts and never raises — failures are logged and the source contributes an empty list.
+
+### Ticker extraction (`extract_tickers_from_headline`)
+
+Indian headlines say "HDFC Bank" or "Reliance Industries", not "HDFCBANK.NS". The extractor builds a name→symbol map at first call (cached via `lru_cache(maxsize=1)`):
+
+```python
+_india_name_map() →  {
+    "hdfc bank":          "HDFCBANK.NS",
+    "reliance industries":"RELIANCE.NS",
+    "hdfcbank":           "HDFCBANK.NS",   # bare ticker also accepted
+    ...
+}   # built from engine/portfolio_service.NSE_STOCK_LOOKUP
+```
+
+It then matches with `re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", hl_lower)` — whole-token only so "it" doesn't fire inside "wait". Three-pass matching:
+
+1. **Indian company names + bare NSE tickers** (case-insensitive) — `_india_name_map()`
+2. **US watchlist tickers** (upper-case whole-word, e.g. `AAPL`)
+3. **Forex codes** (`USD`, `EUR`, etc.)
+
+Verified extractions: `"HDFC Bank target Rs 1,850"` → `HDFCBANK.NS`; `"Reliance Industries"` → `RELIANCE.NS`; `"Buy Bajaj Finance; target Rs 9000"` → `BAJFINANCE.NS`.
 
 ### FinBERT Sentiment Scoring
 
-When `torch` and `transformers` are installed, `ProsusAI/finbert` scores headlines POSITIVE/NEGATIVE/NEUTRAL. Headlines below 60% confidence or matching "wait-and-see" patterns are forced to NEUTRAL. Keyword heuristic used as fallback.
+When `torch` and `transformers` are installed, `ProsusAI/finbert` scores headlines POSITIVE/NEGATIVE/NEUTRAL. The FinBERT model is loaded once per process via `lru_cache` on the loader function. Headlines below 60% confidence or matching "wait-and-see" patterns are forced to NEUTRAL. Keyword heuristic used as fallback when FinBERT isn't installed.
+
+Scored headlines land in `news_items` with FinBERT score (−1 to +1), label, source, URL, `tickers_affected` JSON array, and publication time. The Master Intelligence Hub then reads the last 24h of rows to build its per-symbol news score map.
+
+### Frontend impact
+
+The News page (`/news`) and `getNews()` API client require no changes — headlines flow automatically from `news_items` via `/api/v1/news/`. After the India RSS switch, the page now leads with Moneycontrol broker calls (HDFC Bank, Bajaj Finance, Wipro) and Mint markets pieces rather than Yahoo/Reuters US headlines.
 
 ---
 
@@ -1041,15 +1264,30 @@ Subscribes all NSE symbols + indices in `MODE_FULL`. Each tick contains last_pri
 
 ## Celery Background Tasks
 
-27 scheduled tasks via Celery Beat (core + India market + Kite + AI features).
+28+ scheduled tasks via Celery Beat (master brain + core + India market + Kite + AI features).
+
+### Master Brain
+
+| Task | Schedule (UTC) | IST equivalent | Action |
+|---|---|---|---|
+| `run_master_intelligence_cycle` | `crontab(hour="3-10", minute="14,29,44,59", day_of_week="1-5")` + `countdown: 45` | minute 14/29/44/59 of NSE hours, +45s | Build `MasterContext`, score NSE universe, drive agent on top picks, score MF universe, log cycle |
+
+The `countdown: 45` defers each cycle by 45 seconds so the preceding candle-saver task has finished writing the bar before the Hub reads it. Without that delay the technical score would be one bar stale.
 
 ### Core Tasks
 
 | Task | Schedule | Action |
 |---|---|---|
 | `scan_watchlist` | Every 30s | Fetch OHLCV candles via yfinance |
-| `scan_news` | Every 5 min | Fetch headlines, run FinBERT |
+| `scan_news` | Every 5 min | India RSS (Moneycontrol/BS/Mint/ET) + optional NewsData.io/NewsAPI/Finnhub → FinBERT → `news_items` |
 | `paper_trade_loop` | Every 60s | Full cycle: update positions → signals → risk → open → explain |
+| `refresh_live_prices` | Every 15s | Poll PRICE_CACHE → broadcast over WebSocket |
+| `refresh_sector_data` | Every 60s | Update SECTOR_CACHE used by Hub + Sidebar strip |
+| `refresh_market_breadth` | Every 2 min | A/D + new-highs/lows + 200-DMA stats |
+| `seed_calendar_events` | Daily 01:30 UTC | Pre-populate F&O expiry / RBI / holiday events |
+| `refresh_stock_info_cache` | Daily 02:30 UTC | Refresh yfinance fundamentals cache |
+| `refresh_ipo_data` | Every 30 min | Pull from ipoalerts.in (with quota guard) |
+| `train_ml_models_task` | Sat 20:30 UTC | Weekly ML model retrain |
 
 ### India Market Tasks (`tasks/india_tasks.py`)
 
@@ -1272,6 +1510,19 @@ All endpoints prefixed `/api/v1/`. Interactive docs at `/docs` (Swagger) or `/re
 | PUT | `/config` | Update config (requires `X-Agent-Config-Update: yes` header) |
 | GET | `/rulebook` | All Varsity-derived rules as JSON |
 
+### Master Intelligence Hub (`/api/v1/intelligence`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/context` | Live `MasterContext` snapshot (macro/sector/news/earnings/options/portfolio summary) |
+| GET | `/scores?signal=&limit=` | Latest score per symbol; filterable by signal label and result count |
+| GET | `/scores/{symbol}` | Score history for one symbol (last 50 cycles) |
+| GET | `/score-breakdown/{symbol}` | Full 7-component score breakdown for the latest cycle |
+| GET | `/mf-signals?limit=` | Latest MF intelligence scores |
+| GET | `/cycle-log?limit=` | Last N hub cycles with status + scored count + top picks |
+| GET | `/top-opportunities` | Highest-confidence longs and shorts for the current bar |
+| POST | `/trigger` | Manual one-shot Hub cycle (admin/debug) |
+
 ### WebSocket (`/ws`)
 
 Real-time price and portfolio updates pushed to connected frontend clients every 15 seconds (15 minutes when market is closed).
@@ -1332,6 +1583,14 @@ AI-generated transcript summaries. Unique constraint on `(symbol, quarter)`. Sto
 - `agent_positions` — currently open positions, one row per symbol
 - `agent_performance` — daily snapshots: total trades, win rate, profit factor, max DD, sharpe, equity_end
 
+### Master Intelligence Hub tables (`db/models.py` — added in fbf8ef3)
+
+- **`master_intelligence_scores`** — one row per symbol per Hub cycle. Columns: `symbol`, `master_score`, `signal` (STRONG_BUY/BUY/NEUTRAL/SELL/STRONG_SELL), `technical_score`, `news_score`, `sector_score`, `macro_score`, `earnings_score`, `fundamental_score`, `options_score`, `risk_off` (bool), `bar_time`, `created_at`. Indexed by `(symbol, created_at desc)` for the per-symbol history endpoint.
+
+- **`hub_cycle_logs`** — one row per Hub cycle (success or failure). Columns: `cycle_start`, `cycle_end`, `bar_time`, `status` (running/completed/failed), `symbols_scored`, `top_signal_json` (JSON of best 5 longs + 5 shorts), `mf_scored`, `error_text`. Used by `/cycle-log` and the dashboard's cycle health strip.
+
+- **`mf_intelligence_scores`** — one row per MF holding per cycle. Columns: `scheme_code`, `scheme_name`, `category`, `score`, `signal`, `nav_trend_score`, `sector_match_score`, `notes`, `bar_time`, `created_at`.
+
 ---
 
 ## Frontend — Structure and Pages
@@ -1381,6 +1640,9 @@ autotrade-frontend/src/
     ├── PortfolioDoctor.jsx  — AI health diagnosis page: 7 modules + Dr. Arjun narrative
     ├── EarningsAnalyzer.jsx — Earnings call transcript AI analyzer with quarter comparison
     ├── TradingAgent.jsx     — AI Trading Agent: status, decisions, positions, backtest, rulebook
+    ├── IntelligenceDashboard.jsx — Master Intelligence Hub dashboard: live MasterContext bar
+    │                              (macro/sector/VIX/mood), top opportunities grid, per-symbol
+    │                              7-component score breakdown, MF intelligence table, cycle log
     ├── Analytics.jsx        — Charts: equity curve, P&L by symbol, win/loss pie
     ├── News.jsx             — News feed with sentiment
     ├── Simulation.jsx       — Simulation logs + go-live checker
@@ -1432,6 +1694,7 @@ autotrade-frontend/src/
 
 ### Sidebar (`components/Sidebar.jsx`)
 Fixed-width navigation with live status indicators per item:
+- **Intelligence Hub** — `HubBiasBadge` showing live macro bias direction (polls `/api/v1/intelligence/context`)
 - **Live Market** — pulsing green/red dot (NSE market open/closed)
 - **Watchlist** — BUY signal count badge
 - **Breadth** — market mood dot (green/red/gray)
@@ -1494,6 +1757,9 @@ Earnings analyzer state for a given symbol. `fetchSummary(quarter, refresh)` tri
 ### `useAgent.js`
 AI Trading Agent state: status, decisions, trades, positions, performance. Auto-polls every 30s. Exposes `triggerCycle()`, `closePosition()`, `runBacktest()`, `updateConfig()`.
 
+### `useIntelligenceHub.js`
+Master Intelligence Hub state for the dashboard. Polls `/api/v1/intelligence/context` and `/api/v1/intelligence/scores` (auto-refreshes ~30s). Exposes the live `MasterContext` (macro bias, sector mood, VIX, market mood), the latest scores list, top opportunities, the most recent cycle log entry, and a `triggerCycle()` action that POSTs to `/intelligence/trigger`. Also feeds the Sidebar `HubBiasBadge`.
+
 ### Additional hooks
 - `useAllocation.js` — Asset allocation analyzer state
 - `useBreadth.js` — Market breadth state
@@ -1510,21 +1776,27 @@ AI Trading Agent state: status, decisions, trades, positions, performance. Auto-
 ## Configuration and Environment Variables
 
 ```
-# Database (Supabase transaction-mode pooler — required)
-DATABASE_URL=postgresql+asyncpg://user:pass@host:port/db
+# Database (Supabase transaction-mode pooler — required, port 6543)
+DATABASE_URL=postgresql+asyncpg://user:pass@host:6543/db
 
-# Redis / Upstash (required for Celery)
-REDIS_URL=rediss://default:token@host:6380
+# Redis (required for Celery)
+# Default is LOCAL Docker Redis on localhost:6379.
+# Switched here from Upstash after the free tier 500K-req/month cap was hit.
+# Start the container: docker run -d -p 6379:6379 --name redis-local redis:7-alpine
+REDIS_URL=redis://localhost:6379/0
+# Use rediss:// (TLS) only if you intentionally move back to a hosted broker.
 
 # LLM (optional — fallback used when absent)
-GROQ_API_KEY=                        # for Avishk AI + signal explanations
+GROQ_API_KEY=                        # for Avishk AI + signal + Doctor/Earnings AI
 
 # Market data (optional — yfinance works without keys)
 ALPHA_VANTAGE_KEY=
 FINNHUB_KEY=                         # useful for US stocks only on free tier
 
-# News (optional — RSS works without keys)
-NEWSAPI_KEY=
+# News (optional — India RSS works without keys)
+# India-first stack: free RSS (Moneycontrol/BS/Mint/ET) is primary and needs no key.
+NEWSDATA_KEY=                        # NewsData.io — India business, 200 req/day free
+NEWSAPI_KEY=                         # global news (optional secondary)
 
 # Zerodha KiteConnect v3 (required for Zerodha page)
 ZERODHA_API_KEY=ccmnshilnxxz9htr
@@ -1587,14 +1859,32 @@ WATCHLIST_STOCKS=RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,SBIN.NS,BHA
 
 ## Infrastructure
 
-### PostgreSQL via Supabase
-Transaction-mode pooler (port 6543). `statement_cache_size=0` in engine connect args disables prepared statements (required by pgBouncer transaction mode).
+### PostgreSQL via Supabase (transaction-mode pooler)
 
-### Redis via Upstash
-Serverless Redis over TLS (`rediss://`). `ssl_cert_reqs=CERT_NONE` in Celery config. 1 MB command-size limit — task payloads are minimal.
+- Pooler endpoint on **port 6543** (PgBouncer transaction mode), not the direct port 5432.
+- `statement_cache_size=0` in engine `connect_args` disables prepared statements — required by pgBouncer transaction mode (it rebinds connections between statements, so server-side prepared statements break).
+- **Both the main FastAPI engine and Celery worker engines use `NullPool`.** Previously the main app engine used `QueuePool`, which combined with the transaction pooler caused intermittent `ConnectionDoesNotExistError` cascading into `PendingRollbackError`. The fix (commit `f84b5e5`) was to switch the main engine to `NullPool` so every checkout is a fresh PgBouncer connection. See `db/database.py` and `tasks/_db.py`.
+- `get_db()` (FastAPI dependency) now guards `rollback()` and `close()` in a try/except so a poisoned session can't crash the request stack with cascading exceptions.
+
+### Redis (local Docker — broker + result backend)
+
+- Default URL: `redis://localhost:6379/0` (no TLS, no password).
+- Run via Docker on the dev box: `docker run -d -p 6379:6379 --name redis-local redis:7-alpine`.
+- Switched from Upstash after the free tier's 500K commands/month cap was hit (the `paper_trade_loop` every 60s + `refresh_live_prices` every 15s + `scan_watchlist` every 30s burns through that quickly).
+- Celery config still respects `rediss://` if the URL is changed — `redis_uses_tls` property in `utils/config.py` keys off the URL scheme.
 
 ### Celery Beat
-`celerybeat-schedule` file persists beat scheduler state. `start.sh` deletes it on startup to prevent stale schedule.
+
+- `celerybeat-schedule` file persists beat scheduler state between restarts.
+- `start.sh` deletes it on startup to prevent stale schedule entries from older code.
+- The file is gitignored (it's a binary runtime artifact).
+
+### Process layout
+
+- **Uvicorn** — `python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload` (foreground)
+- **Celery worker** — `python3 -m celery -A tasks.celery_app worker --loglevel=info --concurrency=2` (background)
+- **Celery beat** — `python3 -m celery -A tasks.celery_app beat --loglevel=info` (background)
+- **Important:** Python doesn't hot-reload modules in a running Celery worker. When `crawler/`, `engine/`, or `tasks/` code changes, the worker + beat must be **restarted** for the new code to take effect — `--reload` only applies to Uvicorn. `start.sh` kills and respawns all three.
 
 ---
 
@@ -1628,8 +1918,17 @@ Vite proxies `/api/v1/` and `/ws/` to `localhost:8000` via `vite.config.js`.
 ### asyncpg 32,767 parameter limit
 Bulk candle inserts are chunked at 3,000 rows (3,000 × 8 = 24,000 params) to stay under the PostgreSQL bind-parameter limit.
 
-### NullPool for Celery workers
-`asyncio.run()` in each Celery task creates a new event loop. Standard connection pooling attaches connections to the previous loop and fails on reuse. `NullPool` (fresh engine per call) is intentionally less efficient but always correct.
+### NullPool for both FastAPI and Celery
+`asyncio.run()` in each Celery task creates a new event loop. Standard connection pooling attaches connections to the previous loop and fails on reuse. `NullPool` (fresh engine per call) is intentionally less efficient but always correct. **As of commit `f84b5e5`, the FastAPI main engine also uses `NullPool`** — under Supabase's pgBouncer transaction-mode pooler (port 6543), `QueuePool` produced intermittent `ConnectionDoesNotExistError` that cascaded into `PendingRollbackError` and crashed request handlers. Matching the worker pattern fixed it.
+
+### Hub builders run sequentially on one AsyncSession
+`build_master_context` calls 5 sub-context builders that all touch the DB. Running them via `asyncio.gather` on a single `AsyncSession` raises `This session is provisioning a new connection; concurrent operations are not permitted` — a session can't serve two concurrent coroutines. The builders therefore run **in series** inside one Hub cycle. Likewise, `score_universe` fetches candles serially and only then scores them in parallel, since `score_symbol` itself doesn't touch the session.
+
+### Options bias has no IVR field
+Earlier code expected `OptionsChainSnapshot.ivr` (implied volatility rank) which doesn't exist on the model. The Hub now derives the options bias from PCR alone: `pcr > 1.1 → bearish (-1)`, `pcr < 0.9 → bullish (+1)`, `pcr <= 0 or missing → neutral`. The `pcr <= 0` guard is important — without it, a missing snapshot would have produced a strong bullish bias.
+
+### Celery worker must be restarted to pick up code changes
+Python doesn't hot-reload modules in a running Celery worker process. After editing anything in `crawler/`, `engine/`, `tasks/`, etc., the worker + beat must be restarted for the new code to load. Uvicorn's `--reload` flag only applies to the FastAPI HTTP layer, not Celery. `start.sh` handles this with a `pkill` cycle on launch.
 
 ### `/{symbol:path}` route parameter
 Forex symbols like `EUR/USD` contain slashes. The `:path` converter captures slashes as part of the parameter value.
@@ -1663,4 +1962,4 @@ When `GROQ_API_KEY` is not configured, `process_chat_message()` calls `generate_
 
 ---
 
-*Documentation last updated May 2026 — covers all features through the Zerodha KiteConnect v3 paid-plan integration, Avishk AI Stock Analyst, Personal Portfolio Tracker, Market Calendar, Sector Heatmap, SIP Goal Planner, Tax Calculator (Budget 2024), Asset Allocation Analyzer, and IPO Tracker.*
+*Documentation last updated June 2026 — covers the Master Intelligence Hub (7-component unified scoring), India-first news feed stack (Moneycontrol/BS/Mint/ET RSS + NewsData.io + NSE_STOCK_LOOKUP-backed ticker extraction), Decision Router (paper/live unified gate with runtime toggle), local Docker Redis broker (replaced Upstash), Supabase pooler NullPool fix in the main FastAPI engine, and every feature listed above — Zerodha KiteConnect v3 paid-plan integration, AI Trading Agent (Varsity-grounded), Portfolio Doctor, Earnings Call Analyzer, Avishk AI Stock Analyst, Personal Portfolio Tracker, Market Calendar, Sector Heatmap, SIP Goal Planner, Tax Calculator (Budget 2024), Asset Allocation Analyzer, and IPO Tracker.*
