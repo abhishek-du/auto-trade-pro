@@ -62,9 +62,12 @@ class Settings(BaseSettings):
     INDIAN_INTRADAY_SL_PCT: float = 0.005
 
     # ── News ──────────────────────────────────────────────────────────────────
-    # Finnhub is primary.  NewsAPI is optional secondary.
+    # India-first stack: free RSS (ET/MC/BS/Mint) is primary and needs no key.
+    # NewsData.io (India business news, 200 req/day free) and Finnhub (global)
+    # are optional enrichers — activate by setting their keys in .env.
     FINNHUB_KEY:  str = ""
     NEWSAPI_KEY:  str = ""
+    NEWSDATA_KEY: str = ""
 
     # ── IPO data (ipoalerts.in) ───────────────────────────────────────────────
     IPOALERTS_API_KEY:     str  = ""
@@ -162,6 +165,10 @@ class Settings(BaseSettings):
     @property
     def newsapi_available(self) -> bool:
         return bool(self.NEWSAPI_KEY)
+
+    @property
+    def newsdata_available(self) -> bool:
+        return bool(self.NEWSDATA_KEY)
 
     @property
     def redis_uses_tls(self) -> bool:
