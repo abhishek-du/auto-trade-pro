@@ -27,9 +27,14 @@ from utils.logger import logger
 
 _NEWSAPI_BASE  = "https://newsapi.org/v2/everything"
 _FINNHUB_BASE  = "https://finnhub.io/api/v1"
+# India-first RSS feeds (no key, no rate limit). Empty/blocked feeds are
+# skipped gracefully by fetch_free_rss_news(). Moneycontrol, Business Standard
+# and Mint reliably return market headlines; ET is best-effort.
 _RSS_FEEDS     = [
-    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US",
-    "https://www.forexfactory.com/news?format=rss",
+    "https://www.moneycontrol.com/rss/latestnews.xml",
+    "https://www.business-standard.com/rss/markets-106.rss",
+    "https://www.livemint.com/rss/markets",
+    "https://economictimes.indiatimes.com/markets/rss.cms",
 ]
 _FOREX_CODES   = {"EUR", "USD", "GBP", "JPY", "AUD", "CHF", "CAD"}
 _FINBERT_MODEL = "ProsusAI/finbert"
@@ -167,6 +172,47 @@ async def fetch_finnhub_news(category: str = "general") -> list[dict]:
         return []
 
 
+_NEWSDATA_BASE = "https://newsdata.io/api/1/news"
+
+
+async def fetch_newsdata_india() -> list[dict]:
+    """Fetch Indian business news from NewsData.io (covers ET, Mint, BS, NDTV).
+
+    Returns [] silently when NEWSDATA_KEY is absent — never raises.
+    Free tier: 200 requests/day. Each item: {headline, source, url, published_at}
+    """
+    if not settings.newsdata_available:
+        return []
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(_NEWSDATA_BASE, params={
+                "apikey":   settings.NEWSDATA_KEY,
+                "country":  "in",
+                "category": "business",
+                "language": "en",
+            })
+            resp.raise_for_status()
+            items = resp.json().get("results", []) or []
+
+        result = [
+            {
+                "headline":     (item.get("title") or "").strip(),
+                "source":       (item.get("source_id") or "NewsData"),
+                "url":          item.get("link"),
+                "published_at": _parse_dt(item.get("pubDate")),
+            }
+            for item in items
+            if item.get("title")
+        ]
+        logger.info(f"NewsData.io ✓  {len(result)} India headlines")
+        return result
+
+    except Exception as exc:
+        logger.error(f"NewsData.io fetch failed: {exc}")
+        return []
+
+
 async def fetch_free_rss_news() -> list[dict]:
     """Fetch headlines from free RSS feeds — no API key required.
 
@@ -206,18 +252,45 @@ async def fetch_free_rss_news() -> list[dict]:
     return all_rows
 
 
+@lru_cache(maxsize=1)
+def _india_name_map() -> dict[str, str]:
+    """Build {lowercase company-name → NSE symbol} and {bare-ticker → NSE symbol}.
+
+    Indian headlines say "Reliance Industries" or "HDFC Bank", not "RELIANCE.NS",
+    so we match on company names (from NSE_STOCK_LOOKUP) and bare tickers.
+    """
+    out: dict[str, str] = {}
+    try:
+        from engine.portfolio_service import NSE_STOCK_LOOKUP
+        for name, symbol in NSE_STOCK_LOOKUP.items():
+            out[name.lower()] = symbol
+            bare = symbol.replace(".NS", "").replace(".BO", "")
+            out[bare.lower()] = symbol
+    except Exception:
+        pass
+    return out
+
+
 def extract_tickers_from_headline(headline: str) -> list[str]:
     """Return stock tickers and forex currency codes found in a headline.
 
-    Matches whole words only (case-insensitive for currency codes,
-    case-sensitive upper-case for stock tickers).
+    Matches: (1) Indian company names + bare NSE tickers (case-insensitive),
+    (2) US watchlist tickers (upper-case whole-word), (3) forex codes.
     """
     found: list[str] = []
-    words = set(re.findall(r"\b[A-Z]{2,6}\b", headline))
+    hl_lower = headline.lower()
 
-    # Stock tickers — exact upper-case word match against watchlist
+    # Indian company names + bare tickers (e.g. "Reliance", "HDFC Bank", "INFY")
+    for needle, symbol in _india_name_map().items():
+        # whole-token match to avoid false hits (e.g. "it" inside "wait")
+        if re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", hl_lower):
+            found.append(symbol)
+
+    # US watchlist tickers — exact upper-case word match
+    words = set(re.findall(r"\b[A-Z]{2,6}\b", headline))
     for sym in settings.stock_symbols:
-        if sym.upper() in words:
+        bare = sym.replace(".NS", "").replace(".BO", "")
+        if bare.upper() in words and sym not in found:
             found.append(sym)
 
     # Forex currency codes
@@ -429,9 +502,10 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     errors: list[str] = []
 
     # ── Fetch from all sources ────────────────────────────────────────────────
-    newsapi_rows, finnhub_rows, rss_rows = await asyncio.gather(
+    newsapi_rows, finnhub_rows, newsdata_rows, rss_rows = await asyncio.gather(
         fetch_newsapi_headlines(),
         fetch_finnhub_news(),
+        fetch_newsdata_india(),
         fetch_free_rss_news(),
         return_exceptions=True,
     )
@@ -443,17 +517,20 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             return []
         return result  # type: ignore[return-value]
 
-    newsapi_rows = _unwrap("newsapi", newsapi_rows)
-    finnhub_rows = _unwrap("finnhub", finnhub_rows)
-    rss_rows     = _unwrap("rss",     rss_rows)
+    newsapi_rows  = _unwrap("newsapi",  newsapi_rows)
+    finnhub_rows  = _unwrap("finnhub",  finnhub_rows)
+    newsdata_rows = _unwrap("newsdata", newsdata_rows)
+    rss_rows      = _unwrap("rss",      rss_rows)
 
     source_counts = {
-        "newsapi": len(newsapi_rows),
-        "finnhub": len(finnhub_rows),
-        "rss":     len(rss_rows),
+        "newsapi":  len(newsapi_rows),
+        "finnhub":  len(finnhub_rows),
+        "newsdata": len(newsdata_rows),
+        "rss":      len(rss_rows),
     }
 
-    all_raw: list[dict] = newsapi_rows + finnhub_rows + rss_rows
+    # RSS first — India-first priority; then NewsData, NewsAPI, Finnhub
+    all_raw: list[dict] = rss_rows + newsdata_rows + newsapi_rows + finnhub_rows
     total_fetched = len(all_raw)
 
     # ── Deduplicate within batch by URL ───────────────────────────────────────
