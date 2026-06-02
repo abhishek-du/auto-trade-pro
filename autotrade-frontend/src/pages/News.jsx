@@ -1,7 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getNews } from '../api/client';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 /* ── Sentiment helpers ──────────────────────────────────────── */
 
@@ -81,18 +82,42 @@ function relTime(dateStr) {
 
 const SENTIMENT_FILTERS = ['All', 'Bullish', 'Bearish', 'Neutral'];
 
+const MAX_ARTICLES = 200;
+
 export default function News() {
   const [articles,  setArticles]  = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [filter,    setFilter]    = useState('All');
   const [search,    setSearch]    = useState('');
+  const [liveCount, setLiveCount] = useState(0);
 
+  // ── Initial REST fetch — load the existing feed on mount ───────────────────
   useEffect(() => {
     getNews()
       .then((d) => setArticles(Array.isArray(d) ? d : d?.articles ?? []))
       .catch(() => setArticles([]))
       .finally(() => setLoading(false));
   }, []);
+
+  // ── Live WS feed — prepend each `news_item` event in real time ─────────────
+  // The crawler broadcasts after every successful save (see crawler/news_crawler.py
+  // run_news_crawl). Payload shape matches the REST response, so we can drop
+  // straight into `articles` state without further mapping. Dedup on URL to
+  // handle the rare case where the WS broadcast arrives before the REST fetch
+  // settled, or two tabs prepend the same item back-to-back.
+  const onMessage = useCallback((data) => {
+    if (!data || data.type !== 'news_item') return;
+    setArticles((prev) => {
+      const url = data.url;
+      if (url && prev.some((a) => a.url === url)) return prev;
+      const next = [{ ...data, _live: true }, ...prev];
+      // Cap memory so an open tab doesn't accumulate weeks of headlines.
+      return next.length > MAX_ARTICLES ? next.slice(0, MAX_ARTICLES) : next;
+    });
+    setLiveCount((n) => n + 1);
+  }, []);
+
+  const { status: wsStatus } = useWebSocket('/ws/live-prices', { onMessage });
 
   // Normalise backend shape: headline→title, tickers_affected→symbols, score→sentiment_score
   const normalised = useMemo(() =>
@@ -151,6 +176,24 @@ export default function News() {
           ))}
         </div>
         <span className="text-muted text-xs">{filtered.length} articles</span>
+        {/* Live-feed indicator — also acts as a passive WS health check */}
+        <span
+          className={[
+            'inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full border',
+            wsStatus === 'connected'
+              ? 'text-profit border-profit/30 bg-profit/10'
+              : 'text-muted border-border bg-surface',
+          ].join(' ')}
+          title={
+            wsStatus === 'connected'
+              ? `Live feed connected${liveCount ? ` · ${liveCount} new since open` : ''}`
+              : 'Live feed disconnected — using last fetch'
+          }
+        >
+          {wsStatus === 'connected' ? <Wifi size={11} /> : <WifiOff size={11} />}
+          {wsStatus === 'connected' ? 'Live' : 'Offline'}
+          {liveCount > 0 && wsStatus === 'connected' ? ` · ${liveCount}` : ''}
+        </span>
       </div>
 
       {/* Article list */}
@@ -162,8 +205,11 @@ export default function News() {
         <div className="space-y-3">
           {filtered.map((a, i) => (
             <article
-              key={a.id ?? i}
-              className="bg-panel border border-border rounded-xl p-5 hover:border-accent/40 transition-colors group"
+              key={a.id ?? a.url ?? i}
+              className={[
+                'bg-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
+                a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
+              ].join(' ')}
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0 space-y-2">
