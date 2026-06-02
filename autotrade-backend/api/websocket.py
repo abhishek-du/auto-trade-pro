@@ -262,6 +262,24 @@ class LivePriceManager:
                 dead.add(ws)
         self.connections -= dead
 
+    async def broadcast_event(self, payload: dict) -> None:
+        """Fire a generic event over the live WS to all subscribers.
+
+        Used by non-price producers (news_crawler, alerts, …) that want
+        push-to-frontend without standing up their own WS endpoint. The
+        payload must already carry a ``type`` discriminator so the
+        frontend can route it; this method does not wrap or augment it.
+        """
+        if not self.connections:
+            return
+        dead: set[WebSocket] = set()
+        for ws in set(self.connections):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        self.connections -= dead
+
 
 live_price_manager = LivePriceManager()
 

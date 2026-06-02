@@ -956,3 +956,32 @@ def retag_historical_news():
     """Re-run ticker extraction over all historical news_items rows with empty
     or NULL ``tickers_affected``. One-shot, manual trigger only."""
     return _run_async(_retag_historical_news())
+
+
+# ── Weekly news retention purge — keeps news_items from growing unbounded ────
+#
+# Scheduled in tasks.celery_app beat as ``purge-old-news-weekly``. Retention
+# default is 60 days; older rows are deleted in a single statement. Bigger
+# tables can use a chunked delete loop, but this DB is small enough that the
+# simple form is fine for several years.
+
+async def _purge_old_news(days: int = 60) -> dict:
+    from sqlalchemy import text as _text
+    from tasks._db import celery_session
+    async with celery_session() as session:
+        result = await session.execute(
+            _text(
+                "DELETE FROM news_items "
+                "WHERE crawled_at < (NOW() - (:days || ' days')::interval)"
+            ).bindparams(days=str(days))
+        )
+        await session.commit()
+        deleted = result.rowcount or 0
+    logger.info(f"[purge_old_news] deleted {deleted} rows older than {days}d")
+    return {"deleted": deleted, "older_than_days": days}
+
+
+@celery_app.task(name="tasks.purge_old_news")
+def purge_old_news_task(days: int = 60):
+    """Weekly cleanup: delete news_items older than ``days`` (default 60)."""
+    return _run_async(_purge_old_news(days))
