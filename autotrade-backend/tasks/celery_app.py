@@ -66,6 +66,14 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.news_scan.scan_news",
         "schedule": 300,
     },
+    # Sunday 02:30 IST (21:00 UTC Saturday). Keeps news_items bounded; the
+    # 5-minute crawl saves ~150 rows/cycle → ~43k/day → ~2.6M/2 months without
+    # a purge. 60-day default keeps history useful for backtests.
+    "purge-old-news-weekly": {
+        "task":     "tasks.purge_old_news",
+        "schedule": crontab(day_of_week="sunday", hour=21, minute=0),
+        "kwargs":   {"days": 60},
+    },
     "paper-trade-loop-every-minute": {
         "task":     "tasks.paper_trade_loop.run_paper_trade_loop",
         "schedule": 60,

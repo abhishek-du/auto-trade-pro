@@ -11,6 +11,7 @@ falls back to a keyword heuristic otherwise.
 
 import asyncio
 import re
+import html
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -42,6 +43,14 @@ _RSS_FEEDS     = [
 ]
 _FOREX_CODES   = {"EUR", "USD", "GBP", "JPY", "AUD", "CHF", "CAD"}
 _FINBERT_MODEL = "ProsusAI/finbert"
+
+# Per-source health: count of consecutive crawl cycles that returned 0 rows.
+# Logged at error level when any source crosses _SOURCE_FAIL_THRESHOLD so an
+# operator can notice a quiet outage instead of discovering it via empty news
+# feeds in the UI. Keyed by the same source-name strings the source_counts
+# dict uses.
+_SOURCE_ZERO_STREAK: dict[str, int] = {"rss": 0, "newsdata": 0, "finnhub": 0, "newsapi": 0}
+_SOURCE_FAIL_THRESHOLD: int = 3
 
 _POSITIVE_WORDS = [
     "rally", "gain", "surge", "bullish", "rise", "growth",
@@ -101,7 +110,10 @@ async def fetch_newsapi_headlines(
     Each item: {headline, source, url, published_at}
     """
     if not settings.newsapi_available:
-        logger.warning("NEWSAPI_KEY not configured — skipping NewsAPI fetch")
+        # Debug level: NewsAPI is an optional secondary source. With the India
+        # RSS stack as primary, missing this key is the expected configuration
+        # and warning-level noise every 5 minutes adds nothing.
+        logger.debug("NEWSAPI_KEY not configured — skipping NewsAPI fetch")
         return []
 
     params = {
@@ -528,9 +540,21 @@ def extract_tickers_from_headline(headline: str) -> list[str]:
 
 @lru_cache(maxsize=1)
 def _load_finbert_pipeline():
-    """Load ProsusAI/finbert once per process, cached via lru_cache."""
+    """Load ProsusAI/finbert once per process, cached via lru_cache.
+
+    transformers v5 uses lazy submodule loading via a ``LazyModule`` proxy.
+    Inside the Celery prefork worker, that proxy occasionally loses its
+    module-resolution state after the worker forks, producing
+    ``ModuleNotFoundError: Could not import module 'pipeline'`` when the
+    convenience ``from transformers import pipeline`` shim tries to resolve.
+    Import from the explicit submodule path to bypass the lazy proxy.
+    """
     try:
-        from transformers import pipeline as hf_pipeline
+        try:
+            from transformers.pipelines import pipeline as hf_pipeline
+        except ImportError:
+            # transformers < 5 fallback
+            from transformers import pipeline as hf_pipeline
         logger.info(f"Loading FinBERT '{_FINBERT_MODEL}' — first call may take a moment")
         pipe = hf_pipeline(
             "text-classification",
@@ -542,8 +566,6 @@ def _load_finbert_pipeline():
         logger.info("FinBERT loaded successfully")
         return pipe
     except Exception as exc:
-        # Log with full traceback — the bare str(exc) hides the real cause when
-        # transformers/torch lazily imports submodules and one fails mid-import.
         logger.warning(
             f"FinBERT unavailable ({exc.__class__.__name__}: {exc}) — using keyword fallback",
             exc_info=True,
@@ -761,9 +783,41 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         "rss":      len(rss_rows),
     }
 
+    # ── Per-source health check ───────────────────────────────────────────────
+    # Only flag sources that actually have a configured key (or RSS, which has
+    # no key gate). NewsAPI/Finnhub/NewsData empty when their key is unset is
+    # expected, not an outage.
+    _expects_data = {
+        "rss":      True,
+        "finnhub":  bool(getattr(settings, "FINNHUB_KEY", "")),
+        "newsdata": bool(getattr(settings, "NEWSDATA_KEY", "")),
+        "newsapi":  bool(getattr(settings, "NEWSAPI_KEY", "")),
+    }
+    for src, count in source_counts.items():
+        if not _expects_data.get(src, False):
+            _SOURCE_ZERO_STREAK[src] = 0
+            continue
+        if count == 0:
+            _SOURCE_ZERO_STREAK[src] += 1
+            if _SOURCE_ZERO_STREAK[src] == _SOURCE_FAIL_THRESHOLD:
+                logger.error(
+                    f"[news_crawler] source '{src}' has returned 0 rows for "
+                    f"{_SOURCE_FAIL_THRESHOLD} consecutive cycles — likely upstream outage"
+                )
+        else:
+            _SOURCE_ZERO_STREAK[src] = 0
+
     # RSS first — India-first priority; then NewsData, NewsAPI, Finnhub
     all_raw: list[dict] = rss_rows + newsdata_rows + newsapi_rows + finnhub_rows
     total_fetched = len(all_raw)
+
+    # Normalize headlines: RSS feeds often double-escape (`&amp;amp;`), Finnhub
+    # passes through raw HTML entities, NewsData.io occasionally returns
+    # smart-quotes as numeric refs. Two passes of html.unescape() handle the
+    # common double-escape case; strip() trims feed-leading whitespace.
+    for item in all_raw:
+        h = item.get("headline") or ""
+        item["headline"] = html.unescape(html.unescape(h)).strip()
 
     # ── Deduplicate within batch by URL ───────────────────────────────────────
     seen_urls: set[str] = set()
@@ -811,6 +865,7 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
     # ── Persist to DB ─────────────────────────────────────────────────────────
     total_saved = 0
+    broadcast_payloads: list[dict] = []
     for item, sent in zip(new_items, sentiments):
         tickers = extract_tickers_from_headline(item["headline"])
         row = NewsItem(
@@ -824,8 +879,32 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         )
         session.add(row)
         total_saved += 1
+        broadcast_payloads.append({
+            "type":      "news_item",
+            "headline":  item["headline"],
+            "source":    item["source"],
+            "url":       item.get("url"),
+            "sentiment": sent["sentiment"],
+            "score":     sent["score"],
+            "tickers":   tickers,
+            "published_at": (
+                item["published_at"].isoformat()
+                if item.get("published_at") else None
+            ),
+        })
 
     await session.flush()
+
+    # Push each new headline to any connected WebSocket subscribers so the
+    # frontend doesn't have to poll /api/v1/news/ every few seconds. Fire-
+    # and-forget — a broadcast failure must not block the crawl persistence.
+    if broadcast_payloads:
+        try:
+            from api.websocket import live_price_manager
+            for payload in broadcast_payloads:
+                await live_price_manager.broadcast_event(payload)
+        except Exception as exc:
+            logger.debug(f"[news_crawler] WS broadcast skipped: {exc}")
 
     logger.info(
         f"━━ News crawl DONE ━━  fetched={total_fetched}  "
