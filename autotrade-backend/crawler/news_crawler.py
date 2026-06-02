@@ -16,12 +16,16 @@ from datetime import datetime
 from functools import lru_cache
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import NewsItem
 from utils.config import settings
 from utils.logger import logger
+
+# How many recent matching headlines feed into the symbol-level sentiment average.
+# Single source of truth so future tuning is easy.
+_SENTIMENT_WINDOW: int = 10
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -831,45 +835,57 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
 
 async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
-    """Return the average sentiment score for the last 10 news items mentioning symbol.
+    """Return the average sentiment score for the last N news items mentioning symbol.
 
-    Checks both tickers_affected (JSON array) and the raw headline text.
+    Primary lookup: PostgreSQL JSON containment on ``tickers_affected``. The
+    column stores full NSE symbols (``["INFY.NS", ...]``) from
+    :func:`extract_tickers_from_headline`, and the input ``symbol`` is the same
+    form (``"INFY.NS"``), so we query the JSON directly with ``@>``. The cast
+    works on both ``json`` and ``jsonb`` columns — no migration required for
+    callers, and once the column is upgraded to ``jsonb`` with a GIN index the
+    same query becomes index-backed.
+
+    Fallback: headline text search via ``ilike`` — only used when the primary
+    lookup is empty (covers ADRs, forex codes, and any ticker the
+    kite_instruments map doesn't know about).
+
     Returns 0.0 when no relevant news is found.
     """
-    # Fetch a recent window and filter in Python — avoids JSON operator dialect differences
+    sym = (symbol or "").strip()
+    if not sym:
+        return 0.0
+
+    # JSON containment — the same query against jsonb when the column is
+    # ALTER'd, or a per-row cast when it's still json. PostgreSQL accepts
+    # both via the ::jsonb cast on the bind parameter.
+    payload = f'["{sym}"]'
+
     result = await session.execute(
-        select(NewsItem)
-        .where(NewsItem.tickers_affected.isnot(None))
+        select(NewsItem.score)
+        .where(text("tickers_affected::jsonb @> :payload ::jsonb")
+               .bindparams(payload=payload))
         .order_by(NewsItem.crawled_at.desc())
-        .limit(200)
+        .limit(_SENTIMENT_WINDOW)
     )
-    candidates = result.scalars().all()
+    scores: list[float] = [s for s in result.scalars().all() if s is not None]
 
-    scores: list[float] = []
-    for news in candidates:
-        if symbol in (news.tickers_affected or []):
-            scores.append(news.score)
-        if len(scores) >= 10:
-            break
-
+    # Fallback for tickers not in kite_instruments (ADRs, forex, indices).
+    # Strip exchange suffix so e.g. "RELIANCE.NS" → "RELIANCE" before the
+    # whole-word substring match, otherwise the suffix never appears in the
+    # raw headline text and the fallback always misses.
     if not scores:
-        # Fallback: headline text search in the same recent window
+        bare = sym.replace(".NS", "").replace(".BO", "")
         result2 = await session.execute(
-            select(NewsItem)
+            select(NewsItem.score)
+            .where(NewsItem.headline.ilike(f"%{bare}%"))
             .order_by(NewsItem.crawled_at.desc())
-            .limit(200)
+            .limit(_SENTIMENT_WINDOW)
         )
-        for news in result2.scalars().all():
-            if re.search(rf"\b{re.escape(symbol)}\b", news.headline, re.IGNORECASE):
-                scores.append(news.score)
-            if len(scores) >= 10:
-                break
+        scores = [s for s in result2.scalars().all() if s is not None]
 
     if not scores:
         return 0.0
 
     avg = sum(scores) / len(scores)
-    logger.debug(
-        f"Market sentiment  {symbol}  n={len(scores)}  avg={avg:+.4f}"
-    )
+    logger.debug(f"Market sentiment  {sym}  n={len(scores)}  avg={avg:+.4f}")
     return round(avg, 4)

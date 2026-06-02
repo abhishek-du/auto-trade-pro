@@ -848,3 +848,103 @@ def kite_start_ticker_task():
     started = start_kite_ticker()
     logger.info(f"[kite_start_ticker] Started: {started}")
     return {"started": bool(started)}
+
+
+# ── Retroactive news re-tagging (one-shot, manual trigger) ───────────────────
+#
+# After the news ticker map expanded from 59 large-caps to the full ~9.6k NSE
+# universe, every historical news_items row tagged BEFORE the upgrade still
+# carries [] (or whatever the old small-map produced). This task walks the
+# table in 500-row batches and re-runs `extract_tickers_from_headline` against
+# the new map so the sentiment signal gets immediate historical depth.
+#
+# Manual trigger only — NOT in the beat schedule:
+#     from tasks.india_tasks import retag_historical_news
+#     retag_historical_news.delay()
+
+async def _retag_historical_news():
+    from sqlalchemy import select, or_, update, func, text as sql_text
+    from tasks._db import celery_session
+    from crawler.news_crawler import (
+        _build_india_name_map, extract_tickers_from_headline,
+    )
+    from db.models import NewsItem
+
+    _BATCH = 500
+    processed = updated = skipped = errors = 0
+    last_id = 0
+
+    async with celery_session() as session:
+        # Pre-warm the India name map once (TTL-cached inside the module).
+        await _build_india_name_map(session)
+
+        # "Untagged" covers three on-disk shapes we've seen for this column:
+        #   - SQL NULL                  (older rows before the JSON column existed)
+        #   - JSON null literal         (asyncpg sends Python None as 'null'::jsonb)
+        #   - empty JSON array '[]'     (extractor returned no matches)
+        # We compare with direct jsonb equality only — using jsonb_array_length
+        # in a WHERE clause crashes on scalar rows because PostgreSQL evaluates
+        # both sides of AND per-row regardless of jsonb_typeof.
+        empty_clause = sql_text(
+            "(tickers_affected IS NULL "
+            " OR tickers_affected = 'null'::jsonb "
+            " OR tickers_affected = '[]'::jsonb)"
+        )
+
+        total = (await session.execute(
+            select(func.count(NewsItem.id)).where(empty_clause)
+        )).scalar() or 0
+        logger.info(f"[retag] candidates with empty tickers: {total}")
+
+        while True:
+            rows = (await session.execute(
+                select(NewsItem.id, NewsItem.headline)
+                .where(empty_clause, NewsItem.id > last_id)
+                .order_by(NewsItem.id.asc())
+                .limit(_BATCH)
+            )).all()
+            if not rows:
+                break
+
+            for row_id, headline in rows:
+                processed += 1
+                last_id = row_id
+                try:
+                    tickers = extract_tickers_from_headline(headline or "")
+                    if not tickers:
+                        skipped += 1
+                        continue
+                    await session.execute(
+                        update(NewsItem)
+                        .where(NewsItem.id == row_id)
+                        .values(tickers_affected=tickers)
+                    )
+                    updated += 1
+                except Exception as exc:
+                    errors += 1
+                    logger.warning(f"[retag] row {row_id} failed: {exc}")
+
+            await session.commit()
+            if processed % 1000 == 0 or not rows:
+                logger.info(
+                    f"[retag] progress  processed={processed}  "
+                    f"updated={updated}  skipped={skipped}  errors={errors}"
+                )
+
+    logger.info(
+        f"[retag] DONE  processed={processed}  updated={updated}  "
+        f"skipped={skipped}  errors={errors}"
+    )
+    return {
+        "processed": processed,
+        "updated":   updated,
+        "skipped":   skipped,
+        "errors":    errors,
+    }
+
+
+@celery_app.task(name="tasks.retag_historical_news")
+def retag_historical_news():
+    """Re-run ticker extraction over all historical news_items rows with empty
+    or NULL ``tickers_affected``. One-shot, manual trigger only."""
+    return _run_async(_retag_historical_news())

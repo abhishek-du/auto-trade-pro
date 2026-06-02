@@ -13,7 +13,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.schemas import (
@@ -1731,14 +1731,26 @@ async def get_watchlist_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     )).scalars().all()
 
     # ── Recent news mentioning this ticker ────────────────────────────────────
+    # tickers_affected stores the full NSE symbol (e.g. ["INFY.NS"]), so we
+    # query the JSON column directly via `@>` instead of doing a full-text scan
+    # on the headline. Falls back to ilike on the bare ticker only if no JSON
+    # match — covers ADRs / forex / indices that aren't in kite_instruments.
     from db.models import NewsItem
-    short = sym.replace(".NS", "")
+    bare = sym.replace(".NS", "").replace(".BO", "")
     recent_news_rows = (await db.execute(
         select(NewsItem)
-        .where(NewsItem.headline.ilike(f"%{short}%"))
+        .where(text("tickers_affected::jsonb @> :payload ::jsonb")
+               .bindparams(payload=f'["{sym}"]'))
         .order_by(desc(NewsItem.published_at))
-        .limit(3)
+        .limit(5)
     )).scalars().all()
+    if not recent_news_rows:
+        recent_news_rows = (await db.execute(
+            select(NewsItem)
+            .where(NewsItem.headline.ilike(f"%{bare}%"))
+            .order_by(desc(NewsItem.published_at))
+            .limit(5)
+        )).scalars().all()
 
     recent_news = [
         {
