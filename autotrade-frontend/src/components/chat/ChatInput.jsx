@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { Send, Loader2 } from 'lucide-react'
+import { apiFetch } from '../../api/client'
 
 export default function ChatInput({ value, onChange, onSend, onSuggestionClick, loading, suggestions, placeholder }) {
   const textareaRef = useRef(null)
@@ -28,7 +29,7 @@ export default function ChatInput({ value, onChange, onSend, onSuggestionClick, 
     debounceRef.current = setTimeout(async () => {
       setAutoLoading(true)
       try {
-        const res  = await fetch(`/api/v1/chat/suggest/${encodeURIComponent(last)}`)
+        const res  = await apiFetch(`/api/v1/chat/suggest/${encodeURIComponent(last)}`)
         const data = await res.json()
         if (Array.isArray(data) && data.length) {
           setAutocomplete(data)

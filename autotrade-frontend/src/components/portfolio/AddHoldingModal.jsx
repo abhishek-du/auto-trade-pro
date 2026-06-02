@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { X, Search, Plus, TrendingUp, Wallet } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatINR } from '../../utils/indianFormat'
+import { apiFetch } from '../../api/client'
 
 // ── Stock tab ──────────────────────────────────────────────────────────────────
 
@@ -156,7 +157,7 @@ function MFTab({ onAdd, onClose }) {
     debounceRef.current = setTimeout(async () => {
       setSearching(true)
       try {
-        const r = await fetch(`/api/v1/portfolios/search/mf?q=${encodeURIComponent(query)}`)
+        const r = await apiFetch(`/api/v1/portfolios/search/mf?q=${encodeURIComponent(query)}`)
         setResults(r.ok ? await r.json() : [])
       } finally { setSearching(false) }
     }, 300)
@@ -168,7 +169,7 @@ function MFTab({ onAdd, onClose }) {
     setResults([])
     setNavLoading(true)
     try {
-      const r = await fetch(`/api/v1/portfolios/search/mf/${fund.scheme_code}/nav`)
+      const r = await apiFetch(`/api/v1/portfolios/search/mf/${fund.scheme_code}/nav`)
       if (r.ok) {
         const d = await r.json()
         setNav(d.nav.toFixed(4))

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { apiFetch } from '../api/client'
 
 const WELCOME_MSG = {
   id: 'welcome',
@@ -54,13 +55,10 @@ export function useStockChat() {
       .map(m => ({ role: m.role, content: m.content }))
 
     try {
-      const res = await fetch('/api/v1/chat/message', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ message: txt.trim(), history }),
+      const data = await apiFetch('/api/v1/chat/message', {
+        method: 'POST',
+        body:   JSON.stringify({ message: txt.trim(), history }),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
 
       if (data.source === 'rule_based') setNoAiBanner(true)
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Plus, Trash2, Calculator } from 'lucide-react'
 import TaxSummaryCards from './TaxSummaryCards'
+import { apiFetch } from '../../api/client'
 import TaxWaterfall    from './TaxWaterfall'
 
 const ASSET_TYPES = [
@@ -28,10 +29,9 @@ function ClassificationHint({ trade }) {
     clearTimeout(timer.current)
     timer.current = setTimeout(async () => {
       try {
-        const res = await fetch('/api/v1/tax/classify-trade', {
+        const data = await apiFetch('/api/v1/tax/classify-trade', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body:   JSON.stringify({
             symbol:       trade.symbol || 'STOCK',
             company_name: '',
             asset_type:   trade.asset_type,
@@ -42,7 +42,7 @@ function ClassificationHint({ trade }) {
             quantity:     trade.quantity   || 1,
           }),
         })
-        if (res.ok) setHint(await res.json())
+        setHint(data)
       } catch { setHint(null) }
     }, 400)
     return () => clearTimeout(timer.current)
@@ -102,10 +102,9 @@ export default function StandaloneCalculator() {
     if (!trades.length) { setErr('Add at least one trade'); return }
     setLoading(true); setErr(''); setResult(null)
     try {
-      const res = await fetch('/api/v1/tax/calculate', {
+      const data = await apiFetch('/api/v1/tax/calculate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body:   JSON.stringify({
           financial_year: fy,
           annual_income:  income,
           already_used_ltcg: 0,
@@ -121,8 +120,6 @@ export default function StandaloneCalculator() {
           })),
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Calculation failed')
       setResult(data)
     } catch (e) {
       setErr(e.message)

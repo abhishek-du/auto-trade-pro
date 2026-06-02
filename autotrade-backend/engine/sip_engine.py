@@ -13,37 +13,19 @@ from db.models import SIPGoal, SIPFund, SIPInvestment
 from engine.portfolio_service import calculate_xirr
 from utils.logger import logger
 
-# ── NAV cache (4-hour TTL) ────────────────────────────────────────────────────
-
-_nav_cache: dict[str, tuple[float, float]] = {}   # {scheme_code: (nav, timestamp)}
-_NAV_TTL = 4 * 3600
-
-
-def _nav_cached(scheme_code: str) -> Optional[float]:
-    entry = _nav_cache.get(scheme_code)
-    if entry and (time.time() - entry[1]) < _NAV_TTL:
-        return entry[0]
-    return None
-
-
-def _nav_set(scheme_code: str, nav: float) -> None:
-    _nav_cache[scheme_code] = (nav, time.time())
-
-
-# ── NAV fetching ──────────────────────────────────────────────────────────────
+# NAV is now served from utils.nav_cache (mfapi.in via httpx.AsyncClient).
+# mftool stays as a fallback source for scheme metadata not in mfapi.
 
 async def fetch_current_nav(scheme_code: str) -> Optional[float]:
-    cached = _nav_cached(scheme_code)
-    if cached is not None:
-        return cached
-    loop = asyncio.get_event_loop()
-    try:
-        nav = await loop.run_in_executor(None, _fetch_nav_sync, scheme_code)
-        if nav:
-            _nav_set(scheme_code, nav)
+    """Latest NAV via the shared async cache; mftool fallback if mfapi is empty."""
+    from utils.nav_cache import get_latest_nav
+    nav = await get_latest_nav(scheme_code)
+    if nav is not None:
         return nav
+    try:
+        return await asyncio.to_thread(_fetch_nav_sync, scheme_code)
     except Exception as exc:
-        logger.warning(f"[sip_engine] fetch_current_nav {scheme_code}: {exc}")
+        logger.warning(f"[sip_engine] mftool fallback {scheme_code}: {exc}")
         return None
 
 
@@ -67,12 +49,10 @@ async def fetch_historical_nav(
     to_date: date,
 ) -> list[dict]:
     """Returns [{date, nav}] sorted ascending."""
-    loop = asyncio.get_event_loop()
     try:
-        rows = await loop.run_in_executor(
-            None, _fetch_historical_sync, scheme_code, from_date, to_date
+        return await asyncio.to_thread(
+            _fetch_historical_sync, scheme_code, from_date, to_date
         )
-        return rows
     except Exception as exc:
         logger.warning(f"[sip_engine] fetch_historical_nav {scheme_code}: {exc}")
         return []

@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react'
+import { apiFetch } from '../../api/client'
 
 function MarketTicker({ symbol, label }) {
   const [data, setData] = useState(null)
 
   useEffect(() => {
     const load = () =>
-      fetch(`/api/v1/india/price/${encodeURIComponent(symbol)}`)
+      apiFetch(`/api/v1/india/price/${encodeURIComponent(symbol)}`)
         .then(r => r.json())
         .then(d => setData(d))
         .catch(() => {})

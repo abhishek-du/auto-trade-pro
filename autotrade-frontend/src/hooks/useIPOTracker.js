@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api/client'
 
 export function useIPOTracker() {
   const [ipos,    setIpos]    = useState([])
@@ -16,7 +17,7 @@ export function useIPOTracker() {
       if (status)  params.set('status',  status)
       if (ipoType) params.set('type',    ipoType)
       params.set('limit', '100')
-      const res  = await fetch(`/api/v1/ipo/?${params}`)
+      const res  = await apiFetch(`/api/v1/ipo/?${params}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setIpos(data.ipos || [])
@@ -30,7 +31,7 @@ export function useIPOTracker() {
 
   const fetchStats = useCallback(async () => {
     try {
-      const res  = await fetch('/api/v1/ipo/stats/summary')
+      const res  = await apiFetch('/api/v1/ipo/stats/summary')
       const data = await res.json()
       setStats(data)
       setDataSource(data.source || null)
@@ -40,7 +41,7 @@ export function useIPOTracker() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      await fetch('/api/v1/ipo/refresh', { method: 'POST' })
+      await apiFetch('/api/v1/ipo/refresh', { method: 'POST' })
       await fetchIpos()
       await fetchStats()
     } finally {

@@ -121,34 +121,15 @@ def _get_groq_client():
 
 
 async def _call_groq_for_earnings(system: str, user: str, max_tokens: int = 2000) -> str | None:
-    """Call Groq using httpx (same pattern as llm_explainer.py)."""
-    if not settings.groq_available:
-        return None
-    import httpx
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "model":       "llama-3.3-70b-versatile",
-        "max_tokens":  max_tokens,
-        "temperature": 0.2,
-        "messages": [
+    """Delegate to the shared async Groq client."""
+    from utils.llm import call_groq_chat
+    return await call_groq_chat(
+        [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
         ],
-    }
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers=headers, json=body,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        logger.warning(f"[earnings] Groq call failed: {exc}")
-        return None
+        max_tokens=max_tokens, temperature=0.2, timeout=60.0,
+    )
 
 
 # ── Rule-based fallback ───────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import GuidanceCards   from '../components/earnings/GuidanceCards'
 import QuarterSelector from '../components/earnings/QuarterSelector'
 import ComparisonView  from '../components/earnings/ComparisonView'
 import EarningsCard    from '../components/earnings/EarningsCard'
+import { apiFetch } from '../api/client'
 
 const QUICK_STOCKS = ['INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'RELIANCE.NS', 'WIPRO.NS']
 
@@ -49,7 +50,7 @@ function StockSearch({ onSelect }) {
   useEffect(() => {
     if (!q.trim() || q.length < 2) { setResults([]); return }
     const timer = setTimeout(async () => {
-      const r = await fetch(`/api/v1/portfolios/search/stocks?q=${encodeURIComponent(q)}`)
+      const r = await apiFetch(`/api/v1/portfolios/search/stocks?q=${encodeURIComponent(q)}`)
       const d = r.ok ? await r.json() : []
       setResults(d.slice(0, 8))
       setOpen(true)
@@ -96,7 +97,7 @@ function StockSearch({ onSelect }) {
 function RecentFeed() {
   const [recent, setRecent] = useState([])
   useEffect(() => {
-    fetch('/api/v1/earnings/recent?limit=6')
+    apiFetch('/api/v1/earnings/recent?limit=6')
       .then(r => r.ok ? r.json() : [])
       .then(d => setRecent(Array.isArray(d) ? d : []))
       .catch(() => {})

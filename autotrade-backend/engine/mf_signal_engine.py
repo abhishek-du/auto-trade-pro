@@ -12,18 +12,12 @@ persist_mf_scores(scores, session)
 """
 from __future__ import annotations
 
-import asyncio
-import time
 from dataclasses import asdict, dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.logger import logger
-
-# scheme_code → (nav_list, fetched_ts) — 1h cache
-_NAV_HIST_CACHE: dict[str, tuple] = {}
-_NAV_HIST_TTL = 3600
 
 SECTOR_MF_KEYWORDS = {
     "Banking": ["banking", "financial services", "bank"],
@@ -79,33 +73,14 @@ async def get_portfolio_mf_holdings(session: AsyncSession) -> list[dict]:
 
 
 async def fetch_mf_nav_history(scheme_code: str, days: int = 90) -> list[float]:
-    """Fetch NAV history (oldest→newest) from mfapi.in, 1h cached. Returns floats."""
-    now = time.time()
-    cached = _NAV_HIST_CACHE.get(scheme_code)
-    if cached and (now - cached[1]) < _NAV_HIST_TTL:
-        return cached[0][-days:]
+    """Fetch NAV history (oldest→newest) from mfapi.in.
 
-    def _blocking() -> list[float]:
-        import httpx
-        try:
-            resp = httpx.get(f"https://api.mfapi.in/mf/{scheme_code}", timeout=8.0)
-            data = resp.json().get("data", [])
-            # mfapi returns newest-first; reverse to oldest→newest
-            navs = []
-            for row in reversed(data[:days]):
-                try:
-                    navs.append(float(row["nav"]))
-                except (KeyError, ValueError, TypeError):
-                    continue
-            return navs
-        except Exception as exc:
-            logger.debug(f"[mf] NAV history fetch failed for {scheme_code}: {exc}")
-            return []
-
-    navs = await asyncio.to_thread(_blocking)
-    if navs:
-        _NAV_HIST_CACHE[scheme_code] = (navs, now)
-    return navs
+    Delegates to ``utils.nav_cache.get_nav_history`` so this function and
+    every other MF NAV consumer share one cache layer + one ``httpx.AsyncClient``
+    instead of the three independent process-local caches they had before.
+    """
+    from utils.nav_cache import get_nav_history
+    return await get_nav_history(scheme_code, days)
 
 
 def _match_sector(scheme_name: str) -> str | None:

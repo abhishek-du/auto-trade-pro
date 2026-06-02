@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api/client'
 
 export const ASSET_CLASSES = {
   large_cap:     { label: 'Large Cap',     color: '#3B82F6', emoji: '🏢' },
@@ -30,7 +31,7 @@ export function useAllocation(portfolioId, sipGoalIds = []) {
       if (portfolioId) params.set('portfolio_id', portfolioId)
       if (age)         params.set('age', age)
       sipGoalIds.forEach(id => params.append('sip_goal_ids', id))
-      const res  = await fetch(`/api/v1/allocation/analysis?${params}`)
+      const res  = await apiFetch(`/api/v1/allocation/analysis?${params}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || 'Failed to load analysis')
       setAnalysis(data)
@@ -44,12 +45,10 @@ export function useAllocation(portfolioId, sipGoalIds = []) {
   useEffect(() => { loadAnalysis() }, [loadAnalysis])
 
   async function submitQuestionnaire(answers) {
-    const res    = await fetch('/api/v1/allocation/risk-profile', {
+    const result = await apiFetch('/api/v1/allocation/risk-profile', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(answers),
+      body:   JSON.stringify(answers),
     })
-    const result = await res.json()
     setRiskProfile(result.profile)
     return result
   }

@@ -9,6 +9,7 @@ import FilterBar     from '../components/calendar/FilterBar'
 import ListView      from '../components/calendar/ListView'
 import UpcomingEventsWidget from '../components/calendar/UpcomingEventsWidget'
 import { getEventConfig, daysAwayLabel } from '../utils/eventTypeConfig'
+import { apiFetch } from '../api/client'
 
 const MONTHS = ['January','February','March','April','May','June',
                 'July','August','September','October','November','December']
@@ -53,7 +54,7 @@ export default function MarketCalendar() {
   async function handleSeed() {
     setSeeding(true)
     try {
-      const r = await fetch('/api/v1/india/calendar/seed', { method: 'POST' })
+      const r = await apiFetch('/api/v1/india/calendar/seed', { method: 'POST' })
       const d = await r.json()
       toast.success(`Calendar seeded: ${d.total_inserted} events`)
       // Reload current month

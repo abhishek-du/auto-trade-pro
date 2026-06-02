@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { MessageSquare, X, Send, Loader2 } from 'lucide-react'
 import { useLocation } from 'react-router-dom'
+import { apiFetch } from '../../api/client'
 
 const MAX_MINI_MESSAGES = 20
 
@@ -37,12 +38,10 @@ export default function FloatingChatButton() {
     setLoading(true)
     try {
       const history = messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
-      const res  = await fetch('/api/v1/chat/message', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ message: txt, history }),
+      const data = await apiFetch('/api/v1/chat/message', {
+        method: 'POST',
+        body:   JSON.stringify({ message: txt, history }),
       })
-      const data = await res.json()
       const botMsg = { role: 'assistant', content: data.reply, id: Date.now() + 1 }
       setMessages(prev => [...prev, botMsg].slice(-MAX_MINI_MESSAGES))
       if (!open) setUnread(n => n + 1)

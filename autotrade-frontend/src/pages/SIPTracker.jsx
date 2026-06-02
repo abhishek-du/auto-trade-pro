@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import {
+import { apiFetch } from '../api/client'
   Target, Plus, Calculator, X, ChevronRight,
   Shield, GraduationCap, Home, Car, Plane, Heart, TrendingUp,
   BarChart2, ListOrdered, Briefcase,
@@ -323,7 +324,7 @@ export default function SIPTracker() {
   const [sipFunds, setSipFunds] = useState([])
   useEffect(() => {
     if (!selectedGoalId) { setSipFunds([]); return }
-    fetch(`/api/v1/sip/goals/${selectedGoalId}/funds-list`)
+    apiFetch(`/api/v1/sip/goals/${selectedGoalId}/funds-list`)
       .then(r => r.ok ? r.json() : [])
       .then(data => setSipFunds(Array.isArray(data) ? data : []))
       .catch(() => setSipFunds([]))

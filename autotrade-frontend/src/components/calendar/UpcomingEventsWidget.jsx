@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getEventConfig, daysAwayLabel } from '../../utils/eventTypeConfig'
+import { apiFetch } from '../../api/client'
 
 const MON_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 const DAY_ABBR = ['SUN','MON','TUE','WED','THU','FRI','SAT']
@@ -23,8 +24,7 @@ export default function UpcomingEventsWidget({ events: propEvents, compact = fal
   // Self-fetch when not passed events from parent
   useEffect(() => {
     if (propEvents !== undefined) return
-    fetch('/api/v1/india/calendar/upcoming?days=14')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/calendar/upcoming?days=14')
       .then(d => setFetchedEvents(d.events || []))
       .catch(() => {})
   }, [propEvents])

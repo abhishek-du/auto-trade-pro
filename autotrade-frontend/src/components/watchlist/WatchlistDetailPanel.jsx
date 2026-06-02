@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { X, Loader2, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { formatINR, timeSince } from '../../utils/indianFormat'
 import toast from 'react-hot-toast'
+import { apiFetch } from '../../api/client'
 
 const INDICATOR_LABELS = {
   rsi_signal:   { label: 'RSI',        valKey: 'rsi'      },
@@ -63,8 +64,7 @@ export default function WatchlistDetailPanel({ stock, onClose }) {
 
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/v1/india/watchlist/${sym}`)
-      .then(r => r.json())
+    apiFetch(`/api/v1/india/watchlist/${sym}`)
       .then(d => { setDetail(d); setLoading(false) })
       .catch(() => { setLoading(false) })
   }, [sym])
@@ -72,7 +72,7 @@ export default function WatchlistDetailPanel({ stock, onClose }) {
   async function handleGenerateSignal() {
     setGen(true)
     try {
-      await fetch('/api/v1/india/signals/trigger', { method: 'POST' })
+      await apiFetch('/api/v1/india/signals/trigger', { method: 'POST' })
       toast.success('Signal generation triggered')
     } catch {
       toast.error('Failed to trigger signals')

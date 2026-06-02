@@ -12,6 +12,7 @@ import SellModal from '../components/portfolio/SellModal'
 import AllocationCharts from '../components/portfolio/AllocationCharts'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
 import { formatINR } from '../utils/indianFormat'
+import { apiFetch } from '../api/client'
 
 function TaxQuickView({ portfolioId }) {
   const [status,  setStatus]  = useState(null)
@@ -20,8 +21,7 @@ function TaxQuickView({ portfolioId }) {
   useEffect(() => {
     if (!portfolioId) return
     setLoading(true)
-    fetch(`/api/v1/tax/current-fy-status/${portfolioId}`)
-      .then(r => r.json())
+    apiFetch(`/api/v1/tax/current-fy-status/${portfolioId}`)
       .then(d => { setStatus(d); setLoading(false) })
       .catch(() => setLoading(false))
   }, [portfolioId])
@@ -168,7 +168,7 @@ export default function PortfolioTracker() {
               <button
                 onClick={async () => {
                   try {
-                    const r = await fetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
+                    const r = await apiFetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
                     if (!r.ok) {
                       const err = await r.json().catch(() => ({}))
                       toast.error(err.detail || 'Zerodha sync failed — connect Zerodha first')

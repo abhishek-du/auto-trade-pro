@@ -4,6 +4,7 @@ import { useAgent }       from '../hooks/useAgent'
 import DecisionCard       from '../components/agent/DecisionCard'
 import BacktestPanel      from '../components/agent/BacktestPanel'
 import { formatINR }      from '../utils/indianFormat'
+import { apiFetch } from '../api/client'
 
 function StatusCard({ label, value, sub, color = 'text-slate-100' }) {
   return (
@@ -74,7 +75,7 @@ function RulebookPreview() {
 
   async function load() {
     if (rules.length > 0) { setOpen(!open); return }
-    const r = await fetch('/api/v1/agent/rulebook')
+    const r = await apiFetch('/api/v1/agent/rulebook')
     const d = r.ok ? await r.json() : { modules: [] }
     setRules(d.modules || [])
     setOpen(true)

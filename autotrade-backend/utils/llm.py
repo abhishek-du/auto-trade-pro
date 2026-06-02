@@ -7,8 +7,54 @@ from utils.logger import logger
 
 # Groq model used for all fast, real-time analysis
 GROQ_MODEL  = "llama-3.3-70b-versatile"
+GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
 # Claude model used for deep explanations (only when API key is present)
 CLAUDE_MODEL = "claude-sonnet-4-6"
+
+
+async def call_groq_chat(
+    messages: list[dict],
+    *,
+    max_tokens: int = 600,
+    temperature: float = 0.3,
+    timeout: float = 20.0,
+    model: str = GROQ_MODEL,
+) -> str | None:
+    """Single shared async Groq chat-completion call.
+
+    Replaces six copy-pasted implementations across the engine modules
+    (llm_explainer / stock_chat / deep_analysis / portfolio_doctor /
+    ipo_analyzer / earnings_summarizer). Returns the assistant text on
+    success, ``None`` on any failure (missing key, HTTP error, parse error).
+
+    Callers that need a different model name or longer timeout pass them
+    in via keyword args — the defaults match what the engines were using
+    individually before this consolidation.
+    """
+    if not getattr(settings, "groq_available", False) or not getattr(settings, "GROQ_API_KEY", ""):
+        return None
+    try:
+        import httpx
+        headers = {
+            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+            "Content-Type":  "application/json",
+        }
+        body = {
+            "model":       model,
+            "messages":    messages,
+            "max_tokens":  max_tokens,
+            "temperature": temperature,
+        }
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(GROQ_URL, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        content = (choice.get("message") or {}).get("content") or ""
+        return content.strip() or None
+    except Exception as exc:
+        logger.warning(f"[llm.call_groq_chat] failed: {exc}")
+        return None
 
 
 @lru_cache(maxsize=1)

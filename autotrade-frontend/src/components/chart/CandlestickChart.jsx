@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import {
+import { apiFetch } from '../../api/client'
   createChart, CandlestickSeries, LineSeries, HistogramSeries,
 } from 'lightweight-charts'
 import {
@@ -89,8 +90,7 @@ function SignalPanel({ symbol }) {
 
   useEffect(() => {
     const sym = symbol.replace(/\^/, '%5E')
-    fetch(`/api/v1/india/watchlist/${sym}`)
-      .then(r => r.json())
+    apiFetch(`/api/v1/india/watchlist/${sym}`)
       .then(d => setData(d))
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -328,7 +328,7 @@ export default function CandlestickChart({
     setLoading(true)
     setError(null)
     try {
-      const r   = await fetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}?timeframe=${tf}&limit=500`)
+      const r   = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}?timeframe=${tf}&limit=500`)
       const res = await r.json()
       if (!r.ok) throw new Error(res.detail || 'Fetch failed')
       const { candles, current_price } = res
@@ -369,7 +369,7 @@ export default function CandlestickChart({
 
   const loadIndicators = useCallback(async (tf) => {
     try {
-      const r   = await fetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/indicators?timeframe=${tf}&limit=500`)
+      const r   = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/indicators?timeframe=${tf}&limit=500`)
       const ind = await r.json()
       const s   = seriesRefs.current
 
@@ -424,7 +424,7 @@ export default function CandlestickChart({
     ws.onerror = () => {
       // REST polling fallback
       const id = setInterval(() => {
-        fetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/latest?timeframe=${tf}`)
+        apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/latest?timeframe=${tf}`)
           .then(r => r.json())
           .then(c => {
             if (c?.time) {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api/client'
 
 export function useBreadth() {
   const [breadth,  setBreadth]  = useState(null)
@@ -6,23 +7,20 @@ export function useBreadth() {
   const [history,  setHistory]  = useState([])
 
   const loadHistory = useCallback(() => {
-    fetch('/api/v1/india/breadth/history')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/breadth/history')
       .then(setHistory)
       .catch(() => {})
   }, [])
 
   useEffect(() => {
-    fetch('/api/v1/india/breadth')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/breadth')
       .then(data => { setBreadth(data); setLoading(false) })
       .catch(() => setLoading(false))
 
     loadHistory()
 
     const id = setInterval(() => {
-      fetch('/api/v1/india/breadth')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/breadth')
         .then(setBreadth)
         .catch(() => {})
       loadHistory()
@@ -34,10 +32,8 @@ export function useBreadth() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const r    = await fetch('/api/v1/india/breadth/refresh', { method: 'POST' })
-      const data = await r.json()
-      // After refresh, fetch the full breadth structure
-      const full = await fetch('/api/v1/india/breadth').then(r2 => r2.json())
+      await apiFetch('/api/v1/india/breadth/refresh', { method: 'POST' })
+      const full = await apiFetch('/api/v1/india/breadth')
       setBreadth(full)
       loadHistory()
     } finally {

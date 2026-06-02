@@ -4,37 +4,16 @@ import json
 import re
 from typing import Any
 
-import httpx
-
 from utils.config import settings
 from utils.logger import logger
-
-_GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
-_TIMEOUT    = 15.0
-_MAX_TOKENS = 600
+from utils.llm import call_groq_chat
 
 
 async def _call_groq(prompt: str) -> str | None:
-    if not settings.groq_available:
-        return None
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "model":      _GROQ_MODEL,
-        "max_tokens": _MAX_TOKENS,
-        "messages":   [{"role": "user", "content": prompt}],
-    }
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(_GROQ_URL, headers=headers, json=body)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        logger.warning("Groq call failed: %s", exc)
-        return None
+    return await call_groq_chat(
+        [{"role": "user", "content": prompt}],
+        max_tokens=600, temperature=0.3, timeout=15.0,
+    )
 
 
 # ── Prompt builder ─────────────────────────────────────────────────────────────

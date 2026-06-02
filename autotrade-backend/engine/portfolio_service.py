@@ -5,7 +5,6 @@ for the /api/v1/portfolios endpoints.
 """
 from __future__ import annotations
 
-import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -15,28 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import TrackerHolding, TrackerPortfolio, TrackerTransaction
 from utils.logger import logger
-
-# ── Mutual Fund NAV cache ─────────────────────────────────────────────────────
-# scheme_code -> (nav_float, fetched_at_timestamp)
-_MF_NAV_CACHE: dict[str, tuple[float, float]] = {}
-_MF_NAV_TTL = 3600  # 1 hour
-
-
-def _get_mf_nav(scheme_code: str) -> float | None:
-    """Fetch latest NAV from mfapi.in with 1-hour in-process cache."""
-    now = time.time()
-    cached = _MF_NAV_CACHE.get(scheme_code)
-    if cached and (now - cached[1]) < _MF_NAV_TTL:
-        return cached[0]
-    try:
-        import httpx
-        resp = httpx.get(f"https://api.mfapi.in/mf/{scheme_code}", timeout=5.0)
-        data = resp.json()
-        nav = float(data["data"][0]["nav"])
-        _MF_NAV_CACHE[scheme_code] = (nav, now)
-        return nav
-    except Exception:
-        return None
+from utils.nav_cache import get_latest_nav as _get_mf_nav  # noqa: F401  (re-export
+# kept for any in-tree call site that imports it from this module historically)
 
 # ── Stock lookup dictionary (display_name → yfinance symbol) ─────────────────
 
@@ -167,30 +146,35 @@ NSE_SECTOR_MAP: dict[str, str] = {
 
 # ── Price helpers ─────────────────────────────────────────────────────────────
 
-def get_current_price(symbol: str) -> float | None:
-    """PRICE_CACHE first; MF NAV for MF: symbols; yfinance fallback for stocks."""
+async def get_current_price(symbol: str) -> float | None:
+    """PRICE_CACHE first; MF NAV for MF: symbols; yfinance fallback for stocks.
+
+    Async because the MF NAV path goes through utils.nav_cache (httpx.AsyncClient).
+    The yfinance fallback is a blocking call wrapped in ``asyncio.to_thread``.
+    """
     if symbol.startswith("MF:"):
-        return _get_mf_nav(symbol[3:])
+        return await _get_mf_nav(symbol[3:])
     from crawler.live_prices import PRICE_CACHE
     cached = PRICE_CACHE.get(symbol)
     if cached and cached.get("price"):
         return float(cached["price"])
     try:
-        info = yf.Ticker(symbol).fast_info
+        import asyncio as _asyncio
+        info = await _asyncio.to_thread(lambda: yf.Ticker(symbol).fast_info)
         price = getattr(info, "last_price", None) or getattr(info, "regularMarketPrice", None)
         return float(price) if price else None
     except Exception:
         return None
 
 
-def get_prices_batch(symbols: list[str]) -> dict[str, float]:
+async def get_prices_batch(symbols: list[str]) -> dict[str, float]:
     """Batch price fetch — cache first, MF NAV for MF: symbols, yfinance for misses."""
     from crawler.live_prices import PRICE_CACHE
     result: dict[str, float] = {}
     missing: list[str] = []
     for sym in symbols:
         if sym.startswith("MF:"):
-            nav = _get_mf_nav(sym[3:])
+            nav = await _get_mf_nav(sym[3:])
             if nav:
                 result[sym] = nav
             continue
@@ -200,7 +184,7 @@ def get_prices_batch(symbols: list[str]) -> dict[str, float]:
         else:
             missing.append(sym)
     for sym in missing:
-        price = get_current_price(sym)
+        price = await get_current_price(sym)
         if price:
             result[sym] = price
     return result
@@ -377,7 +361,7 @@ async def calculate_portfolio_summary(portfolio_id: str, session: AsyncSession) 
         }
 
     symbols = [h.symbol for h in holdings]
-    prices  = get_prices_batch(symbols)
+    prices  = await get_prices_batch(symbols)
     today   = date.today()
 
     holdings_out: list[dict] = []

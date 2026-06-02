@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useLiveMarket } from './useLiveMarket'
+import { apiFetch } from '../api/client'
 
 export function useWatchlist() {
   const { prices, connected, lastUpdated } = useLiveMarket()
@@ -16,13 +17,11 @@ export function useWatchlist() {
 
   // ── Initial REST load ──────────────────────────────────────────────────────
   useEffect(() => {
-    fetch('/api/v1/india/watchlist')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/watchlist')
       .then(data => setWatchlist(data.stocks || []))
       .catch(() => {})
 
-    fetch('/api/v1/india/watchlist/alerts')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/watchlist/alerts')
       .then(setAlertsData)
       .catch(() => {})
   }, [])
