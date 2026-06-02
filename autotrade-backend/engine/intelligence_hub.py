@@ -252,11 +252,30 @@ async def build_news_context(session: AsyncSession) -> NewsContext:
         .order_by(desc(NewsItem.published_at)).limit(500)
     )).scalars().all()
 
+    # tickers_affected stores full NSE symbols today (e.g. "INFY.NS") because
+    # _build_india_name_map keys the lookup that way. The branches below stay
+    # defensive against three other shapes we'd want to leave untouched:
+    #   - bare equity tickers ("INFY")                              → append ".NS"
+    #   - exchange-suffixed symbols ("INFY.NS", "INFY.BO")          → use as-is
+    #   - non-equity tickers (indices "^NSEI", forex "USDINR=X", etc.) → use as-is
+    _NON_EQUITY_SYMBOLS = {
+        "USDINR", "EURINR", "GBPINR", "JPYINR",
+        "USD", "EUR", "GBP", "JPY", "AUD", "CHF", "CAD",
+        "NIFTY50", "SENSEX", "BANKNIFTY", "INDIAVIX",
+    }
     raw_scores: dict[str, list] = {}
     headlines: dict[str, list] = {}
     for item in items:
         for ticker in (item.tickers_affected or []):
-            sym = ticker if str(ticker).endswith(".NS") else f"{ticker}.NS"
+            t = str(ticker).strip().upper()
+            if not t:
+                continue
+            if t.endswith(".NS") or t.endswith(".BO"):
+                sym = t
+            elif t.startswith("^") or "=" in t or t in _NON_EQUITY_SYMBOLS:
+                sym = t
+            else:
+                sym = f"{t}.NS"
             if item.score is not None:
                 raw_scores.setdefault(sym, []).append(item.score)
             headlines.setdefault(sym, []).append(item.headline or "")

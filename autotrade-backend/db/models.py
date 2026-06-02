@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey,
     Index, Integer, JSON, String, Text, UniqueConstraint, func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.database import Base
@@ -217,7 +218,9 @@ class NewsItem(Base):
     url:              Mapped[str | None]  = mapped_column(Text,      nullable=True)
     sentiment:        Mapped[str | None]  = mapped_column(String(20), nullable=True)   # positive/negative/neutral
     score:            Mapped[float]       = mapped_column(Float, nullable=False, default=0.0)  # -1 to 1
-    tickers_affected: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # JSONB so the @> containment operator can use the ix_news_tickers_gin
+    # GIN index. Migrated from JSON in commit "post-ticker-expansion cleanup".
+    tickers_affected: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     published_at:     Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     crawled_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
