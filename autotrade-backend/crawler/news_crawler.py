@@ -879,14 +879,16 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         )
         session.add(row)
         total_saved += 1
+        # Payload mirrors NewsItemOut so the WS listener can drop straight
+        # into the same React state shape that GET /api/v1/news/ returns.
         broadcast_payloads.append({
-            "type":      "news_item",
-            "headline":  item["headline"],
-            "source":    item["source"],
-            "url":       item.get("url"),
-            "sentiment": sent["sentiment"],
-            "score":     sent["score"],
-            "tickers":   tickers,
+            "type":             "news_item",
+            "headline":         item["headline"],
+            "source":           item["source"],
+            "url":              item.get("url"),
+            "sentiment":        sent["sentiment"],
+            "score":            sent["score"],
+            "tickers_affected": tickers,
             "published_at": (
                 item["published_at"].isoformat()
                 if item.get("published_at") else None
