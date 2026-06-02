@@ -126,7 +126,7 @@ async def get_harvesting_opportunities(
 
     # Current prices
     symbols = [h.symbol for h in holdings]
-    prices  = get_prices_batch(symbols)
+    prices  = await get_prices_batch(symbols)
 
     # Realised STCG/LTCG so far this FY
     trades  = await build_tax_trades_from_transactions(portfolio_id, financial_year, db)

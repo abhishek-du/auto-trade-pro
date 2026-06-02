@@ -20,9 +20,6 @@ from engine.indicators import IndicatorSignals
 from utils.config import settings
 from utils.logger import logger
 
-_GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
-
 _FH_BASE = "https://finnhub.io/api/v1"
 
 
@@ -396,32 +393,19 @@ async def groq_commentary(
         "Keep under 130 words. End with one sentence on risk. This is for informational purposes only."
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
-                _GROQ_URL,
-                headers={
-                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                    "Content-Type":  "application/json",
-                },
-                json={
-                    "model":      _GROQ_MODEL,
-                    "max_tokens": 220,
-                    "messages": [
-                        {
-                            "role":    "system",
-                            "content": (
-                                "You are a concise, professional NSE (Indian stock market) technical analyst. "
-                                "Give specific, actionable analysis using the data provided. "
-                                "Always mention this is for informational purposes only, not financial advice."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        logger.warning(f"[deep_analysis] Groq failed for {symbol}: {exc}")
-        return ""
+    from utils.llm import call_groq_chat
+    reply = await call_groq_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "You are a concise, professional NSE (Indian stock market) technical analyst. "
+                    "Give specific, actionable analysis using the data provided. "
+                    "Always mention this is for informational purposes only, not financial advice."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=220, temperature=0.3, timeout=20.0,
+    )
+    return reply or ""

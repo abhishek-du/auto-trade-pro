@@ -130,7 +130,10 @@ async def route_decision(
     mode = await resolve_mode(session)
 
     # ── Universal confidence gate ─────────────────────────────────────────────
-    conf = float(getattr(signal, "confidence_score", getattr(signal, "confidence", 0)))
+    # TradingSignal stores this as `confidence`; the legacy alias `confidence_score`
+    # was retired in the post-audit cleanup. Keep one getattr so a future dict-like
+    # caller (e.g. tests) still works, but stop pretending we don't know the name.
+    conf = float(getattr(signal, "confidence", 0) or 0)
     threshold = _confidence_threshold(mode)
 
     if conf < threshold and mode != TradeMode.DRY_RUN:
@@ -244,7 +247,7 @@ async def _log_decision_audit(
             message=f"{outcome_str} | {source} | mode={mode.value}",
             data={
                 "action":     getattr(signal, "action", ""),
-                "confidence": float(getattr(signal, "confidence_score", getattr(signal, "confidence", 0))),
+                "confidence": float(getattr(signal, "confidence", 0) or 0),
                 "entry":      float(getattr(signal, "entry_price", 0)),
                 "stop_loss":  float(getattr(signal, "stop_loss", 0)),
                 "take_profit": float(getattr(signal, "take_profit", 0)),

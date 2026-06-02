@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { apiFetch } from '../api/client'
 
 export function useCalendar() {
   const now = new Date()
@@ -21,8 +22,7 @@ export function useCalendar() {
   useEffect(() => {
     const { year, month } = currentMonth
     setLoading(true)
-    fetch(`/api/v1/india/calendar/month/${year}/${month + 1}`)
-      .then(r => r.json())
+    apiFetch(`/api/v1/india/calendar/month/${year}/${month + 1}`)
       .then(data => {
         setEventsByDate(data.events_by_date || {})
         setLoading(false)
@@ -31,8 +31,7 @@ export function useCalendar() {
   }, [currentMonth])
 
   useEffect(() => {
-    fetch('/api/v1/india/calendar/upcoming?days=14')
-      .then(r => r.json())
+    apiFetch('/api/v1/india/calendar/upcoming?days=14')
       .then(data => {
         setUpcomingEvents(data.events || [])
         setUpcomingMeta({

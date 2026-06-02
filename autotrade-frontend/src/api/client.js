@@ -1,7 +1,12 @@
 import axios from 'axios';
 
+// Empty baseURL = same-origin → Vite dev proxy handles /api/v1 → :8000 in dev,
+// and the prod build hits whatever origin served the page. Override at deploy
+// time with VITE_API_BASE if FastAPI lives on a different host than the SPA.
+const baseURL = (import.meta.env && import.meta.env.VITE_API_BASE) || '';
+
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL,
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' },
 });
@@ -10,6 +15,25 @@ api.interceptors.response.use(
   (res) => res.data,
   (err) => Promise.reject(err)
 );
+
+// Fetch-compatible helper used by hooks/pages migrated off raw fetch().
+// Throws on non-2xx so callers can rely on a resolved value being valid JSON.
+export async function apiFetch(path, options = {}) {
+  const url = (baseURL || '') + path;
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  const res = await fetch(url, { ...options, headers });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const err = new Error(
+      `HTTP ${res.status} ${res.statusText} for ${path}` +
+      (body ? `: ${body.slice(0, 200)}` : '')
+    );
+    err.status = res.status;
+    throw err;
+  }
+  const ct = res.headers.get('content-type') || '';
+  return ct.includes('application/json') ? res.json() : res.text();
+}
 
 export const getPortfolio             = ()     => api.get('/api/v1/portfolio/');
 export const getPortfolioSnapshots    = ()     => api.get('/api/v1/portfolio/snapshots');

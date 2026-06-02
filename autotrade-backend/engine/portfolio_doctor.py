@@ -6,7 +6,6 @@ sector timing, position sizing) and generates an AI narrative via Groq.
 from __future__ import annotations
 
 import asyncio
-import httpx
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from enum import Enum
@@ -711,8 +710,6 @@ def calculate_health_score(all_findings: list[Finding]) -> tuple[int, str]:
 
 # ── AI NARRATIVE ──────────────────────────────────────────────────────────────
 
-_GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 async def generate_ai_narrative(
@@ -771,35 +768,26 @@ async def generate_ai_narrative(
         )
         return narrative, False
 
-    try:
-        headers = {
-            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-            "Content-Type":  "application/json",
-        }
-        body = {
-            "model":      _GROQ_MODEL,
-            "max_tokens": 700,
-            "temperature": 0.5,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(_GROQ_URL, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        text = data["choices"][0]["message"]["content"].strip()
+    from utils.llm import call_groq_chat
+    text = await call_groq_chat(
+        [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
+        max_tokens=700, temperature=0.5, timeout=30.0,
+    )
+    if text:
         return text, True
-    except Exception as exc:
-        logger.warning(f"[portfolio_doctor] Groq API failed: {exc}")
-        crit_titles = [f.title for f in critical[:2]]
-        narrative = (
-            f"Portfolio diagnosis complete. "
-            f"{'Critical issues: ' + '; '.join(crit_titles) + '. ' if crit_titles else 'No critical issues found. '}"
-            f"Review the findings above for detailed recommendations."
-        )
-        return narrative, False
+
+    # Groq unreachable or returned empty — synthesize a short factual summary
+    # from the most critical findings so the UI still has something to show.
+    crit_titles = [f.title for f in critical[:2]]
+    narrative = (
+        f"Portfolio diagnosis complete. "
+        f"{'Critical issues: ' + '; '.join(crit_titles) + '. ' if crit_titles else 'No critical issues found. '}"
+        f"Review the findings above for detailed recommendations."
+    )
+    return narrative, False
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────

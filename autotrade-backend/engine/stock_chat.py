@@ -9,15 +9,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.config import settings
 from utils.logger import logger
+from utils.llm import call_groq_chat
 
 # ── Groq constants (same as llm_explainer.py) ────────────────────────────────
-_GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ── Intent classification ─────────────────────────────────────────────────────
 
@@ -292,28 +290,9 @@ def generate_no_ai_response(message: str, contexts: dict) -> str:
 # ── Groq call ─────────────────────────────────────────────────────────────────
 
 async def _call_groq(messages: list[dict], max_tokens: int = 600) -> str | None:
-    if not settings.groq_available:
-        return None
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "model":       _GROQ_MODEL,
-        "messages":    messages,
-        "max_tokens":  max_tokens,
-        "temperature": 0.4,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(_GROQ_URL, headers=headers, json=body)
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Groq chat HTTP %s: %s", exc.response.status_code, exc.response.text[:200])
-    except Exception as exc:
-        logger.warning("Groq chat call failed: %s", exc)
-    return None
+    return await call_groq_chat(
+        messages, max_tokens=max_tokens, temperature=0.4, timeout=20.0,
+    )
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────

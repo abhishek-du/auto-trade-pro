@@ -116,8 +116,7 @@ function SectorStrip() {
   const [sectors, setSectors] = useState([]);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/sectors/summary')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/sectors/summary')
         .then(d => setSectors(Array.isArray(d) ? d.slice(0, 4) : []))
         .catch(() => {});
     load();
@@ -147,8 +146,7 @@ function BreadthDot() {
   const [mood, setMood] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/breadth/summary')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/breadth/summary')
         .then(d => setMood(d?.nse_market_mood || null))
         .catch(() => {});
     load();
@@ -166,8 +164,7 @@ function CalendarBadge() {
   const [count, setCount] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/calendar/upcoming?days=7')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/calendar/upcoming?days=7')
         .then(d => {
           const n = (d.events || []).length;
           setCount(n > 0 ? n : null);
@@ -189,8 +186,7 @@ function PortfolioValueBadge() {
   const [value, setValue] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/portfolios/')
-        .then(r => r.json())
+      apiFetch('/api/v1/portfolios/')
         .then(portfolios => {
           if (!Array.isArray(portfolios) || portfolios.length === 0) { setValue(null); return; }
           const total = portfolios.reduce((s, p) => s + (p.summary?.current_value || 0), 0);
@@ -214,14 +210,12 @@ function AllocationDot() {
   const [dotColor, setDotColor] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/portfolios/')
-        .then(r => r.json())
+      apiFetch('/api/v1/portfolios/')
         .then(portfolios => {
           if (!Array.isArray(portfolios) || portfolios.length === 0) { setDotColor(null); return; }
           const pid = portfolios[0]?.id;
           if (!pid) return;
-          return fetch(`/api/v1/allocation/analysis?portfolio_id=${pid}&risk_profile=moderate`)
-            .then(r => r.json())
+          return apiFetch(`/api/v1/allocation/analysis?portfolio_id=${pid}&risk_profile=moderate`)
             .then(d => {
               const maxDev = (d.rebalancing || [])
                 .filter(r => r.action !== 'HOLD')
@@ -244,7 +238,7 @@ function HubBiasBadge() {
   const [info, setInfo] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/intelligence/context')
+      apiFetch('/api/v1/intelligence/context')
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (d?.macro) setInfo({ bias: d.macro.total_macro_bias ?? 0 }); })
         .catch(() => {});
@@ -267,7 +261,7 @@ function AgentStatusBadge() {
   const [info, setInfo] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/agent/status')
+      apiFetch('/api/v1/agent/status')
         .then(r => r.ok ? r.json() : null)
         .then(d => { if (d) setInfo({ enabled: d.enabled, paper: d.paper_mode, positions: d.portfolio?.open_positions_count || 0 }); })
         .catch(() => {});
@@ -291,7 +285,7 @@ function EarningsBadge() {
   const [count, setCount] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/earnings/recent?limit=10')
+      apiFetch('/api/v1/earnings/recent?limit=10')
         .then(r => r.ok ? r.json() : [])
         .then(d => {
           const n = Array.isArray(d) ? d.length : 0;
@@ -314,13 +308,12 @@ function DoctorHealthBadge() {
   const [info, setInfo] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/portfolios/')
-        .then(r => r.json())
+      apiFetch('/api/v1/portfolios/')
         .then(portfolios => {
           if (!Array.isArray(portfolios) || portfolios.length === 0) { setInfo(null); return; }
           const pid = portfolios[0]?.id;
           if (!pid) return;
-          return fetch(`/api/v1/doctor/diagnose/${pid}`)
+          return apiFetch(`/api/v1/doctor/diagnose/${pid}`)
             .then(r => r.ok ? r.json() : null)
             .then(d => { if (d) setInfo({ score: d.overall_score, grade: d.overall_grade, critical: (d.findings || []).filter(f => f.severity === 'CRITICAL').length }); });
         })
@@ -343,8 +336,7 @@ function IPOBadge() {
   const [count, setCount] = useState(null);
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/ipo/stats/summary')
-        .then(r => r.json())
+      apiFetch('/api/v1/ipo/stats/summary')
         .then(d => {
           const n = d?.by_status?.open ?? 0;
           setCount(n > 0 ? n : null);
@@ -375,7 +367,7 @@ function ZerodhaDot() {
         // Best-effort: ticker status (separate endpoint, fast)
         let ticker = false;
         try {
-          const t = await fetch('/api/v1/zerodha/ticker/status').then(r => r.json());
+          const t = await apiFetch('/api/v1/zerodha/ticker/status');
           ticker = Boolean(t?.running);
         } catch { /* ignore */ }
         if (cancelled) return;

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { X, ChevronRight, RotateCcw } from 'lucide-react'
 import AllocationDonut from './AllocationDonut'
+import { apiFetch } from '../../api/client'
 
 const QUESTIONS = [
   {
@@ -97,12 +98,10 @@ export default function QuestionnaireModal({ isOpen, onClose, onComplete }) {
   async function submitAnswers(a) {
     setSubmitting(true)
     try {
-      const res  = await fetch('/api/v1/allocation/risk-profile', {
+      const data = await apiFetch('/api/v1/allocation/risk-profile', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(a),
+        body:   JSON.stringify(a),
       })
-      const data = await res.json()
       setResult(data)
     } catch { }
     setSubmitting(false)

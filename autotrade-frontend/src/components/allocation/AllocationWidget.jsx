@@ -5,6 +5,7 @@ import { ExternalLink, ArrowRight } from 'lucide-react'
 import { ASSET_CLASSES } from '../../hooks/useAllocation'
 import AllocationBars from './AllocationBars'
 import { formatINR } from '../../utils/indianFormat'
+import { apiFetch } from '../../api/client'
 
 function MiniDonut({ allocation, size = 100 }) {
   const data = Object.entries(allocation || {})
@@ -39,8 +40,7 @@ export default function AllocationWidget({ portfolioId, sipGoalIds = [], compact
     const params = new URLSearchParams({ risk_profile: 'moderate' })
     if (portfolioId) params.set('portfolio_id', portfolioId)
     sipGoalIds.forEach(id => params.append('sip_goal_ids', id))
-    fetch(`/api/v1/allocation/analysis?${params}`)
-      .then(r => r.json())
+    apiFetch(`/api/v1/allocation/analysis?${params}`)
       .then(d => { setAnalysis(d); setLoading(false) })
       .catch(() => setLoading(false))
   }, [portfolioId, JSON.stringify(sipGoalIds)])

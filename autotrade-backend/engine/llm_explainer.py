@@ -12,17 +12,10 @@ generate_trade_explanation(signal: TradingSignal) -> str
 format_paper_trade_notification(trade: PaperTrade, explanation: str) -> str
 """
 
-import httpx
-
 from db.models import PaperTrade
 from utils.config import settings
 from utils.logger import logger
-
-# ── Groq API constants ────────────────────────────────────────────────────────
-_GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL   = "llama-3.3-70b-versatile"
-_MAX_TOKENS   = 150
-_TIMEOUT      = 15.0
+from utils.llm import call_groq_chat
 
 # ── System prompt (same wording as the Claude spec — works with any LLM) ─────
 _SYSTEM_PROMPT = (
@@ -61,36 +54,13 @@ def _build_user_prompt(signal) -> str:
 # ── Groq API call ─────────────────────────────────────────────────────────────
 
 async def _call_groq(user_prompt: str) -> str | None:
-    """POST to Groq chat completions. Returns text or None on any failure."""
-    if not settings.groq_available:
-        return None
-
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type":  "application/json",
-    }
-    body = {
-        "model":      _GROQ_MODEL,
-        "max_tokens": _MAX_TOKENS,
-        "messages": [
+    return await call_groq_chat(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": user_prompt},
         ],
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(_GROQ_URL, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except httpx.HTTPStatusError as exc:
-        logger.warning(
-            f"Groq API HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-        )
-    except Exception as exc:
-        logger.warning(f"Groq API call failed: {exc}")
-    return None
+        max_tokens=150, temperature=0.3, timeout=15.0,
+    )
 
 
 # ── Fallback ──────────────────────────────────────────────────────────────────

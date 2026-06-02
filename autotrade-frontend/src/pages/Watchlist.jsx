@@ -8,6 +8,7 @@ import WatchlistDetailPanel      from '../components/watchlist/WatchlistDetailPa
 import WatchlistAlertsBar        from '../components/watchlist/WatchlistAlertsBar'
 import ChartModal                from '../components/chart/ChartModal'
 import toast                     from 'react-hot-toast'
+import { apiFetch } from '../api/client'
 
 function ISTClock({ marketStatus }) {
   const [time, setTime] = useState('')
@@ -59,8 +60,7 @@ export default function Watchlist() {
   // Poll market status
   useEffect(() => {
     const check = () =>
-      fetch('/api/v1/india/market-status')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/market-status')
         .then(d => setMarketStatus(d.nse_open ? 'OPEN' : 'CLOSED'))
         .catch(() => {})
     check()
@@ -71,7 +71,7 @@ export default function Watchlist() {
   async function handleRefresh() {
     setRefreshing(true)
     try {
-      const res  = await fetch('/api/v1/india/watchlist/refresh', { method: 'POST' })
+      const res  = await apiFetch('/api/v1/india/watchlist/refresh', { method: 'POST' })
       const data = await res.json()
       toast.success(`Refreshed ${data.refreshed_count} stocks in ${data.duration_ms}ms`)
     } catch {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../api/client'
 
 export function useSectors() {
   const [sectors,         setSectors]         = useState([])
@@ -8,8 +9,8 @@ export function useSectors() {
 
   const load = useCallback(() => {
     Promise.all([
-      fetch('/api/v1/india/sectors/summary').then(r => r.json()),
-      fetch('/api/v1/india/sectors/rotation').then(r => r.json()),
+      apiFetch('/api/v1/india/sectors/summary'),
+      apiFetch('/api/v1/india/sectors/rotation'),
     ]).then(([summary, rot]) => {
       setSectors(Array.isArray(summary) ? summary : [])
       setRotation(rot)
@@ -26,7 +27,7 @@ export function useSectors() {
   const selectSector = useCallback(async (sectorKey) => {
     if (!sectorKey) { setSelectedSector(null); return }
     try {
-      const r    = await fetch(`/api/v1/india/sectors/${sectorKey}`)
+      const r    = await apiFetch(`/api/v1/india/sectors/${sectorKey}`)
       const data = await r.json()
       setSelectedSector(data)
     } catch { /* ignore */ }
@@ -35,10 +36,10 @@ export function useSectors() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const r    = await fetch('/api/v1/india/sectors/refresh', { method: 'POST' })
+      const r    = await apiFetch('/api/v1/india/sectors/refresh', { method: 'POST' })
       const data = await r.json()
       setSectors(Array.isArray(data) ? data : [])
-      const rot = await fetch('/api/v1/india/sectors/rotation').then(r2 => r2.json())
+      const rot = await apiFetch('/api/v1/india/sectors/rotation')
       setRotation(rot)
     } finally {
       setLoading(false)

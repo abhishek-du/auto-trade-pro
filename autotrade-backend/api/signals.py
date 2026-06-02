@@ -9,7 +9,10 @@ from api.schemas import SignalOut, TriggerResult
 from crawler.price_feed import fetch_candles
 from db.database import get_db
 from db.models import Signal
-from engine.signal_generator import analyze_all_symbols, generate_signal, save_signal
+from engine.signal_generator import generate_signal, save_signal
+# India is the production engine; the base analyze_all_symbols is retained inside
+# signal_generator for forex/US flow only. Wire user-facing scans to India.
+from engine.india_signal_generator import analyze_all_india_symbols as analyze_all_symbols
 
 router = APIRouter(tags=["Signals"])
 

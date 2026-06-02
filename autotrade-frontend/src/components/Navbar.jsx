@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
-import { getZerodhaTokenStatus, getZerodhaLoginUrl } from '../api/client';
+import { getZerodhaTokenStatus, getZerodhaLoginUrl, apiFetch } from '../api/client';
 import ExpiryCountdown from './calendar/ExpiryCountdown';
 
 const PAGE_TITLES = {
@@ -179,7 +179,7 @@ function TradeModeBadge() {
 
   async function load() {
     try {
-      const r = await fetch('/api/v1/settings/mode');
+      const r = await apiFetch('/api/v1/settings/mode');
       if (r.ok) setMode(await r.json());
     } catch {}
   }
@@ -194,25 +194,25 @@ function TradeModeBadge() {
     if (!mode) return;
     if (mode.is_live) {
       // Switch back to paper — no confirm needed
-      const r = await fetch('/api/v1/settings/mode', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paper_mode: true }),
-      });
-      if (r.ok) load();
+      try {
+        await apiFetch('/api/v1/settings/mode', {
+          method: 'POST',
+          body:   JSON.stringify({ paper_mode: true }),
+        });
+        load();
+      } catch { /* swallow — load() will refresh state */ }
       return;
     }
     // Going LIVE — double confirm
     if (!confirm('Switch to LIVE mode? Real orders will be placed on Zerodha with REAL money.')) return;
     if (!confirm('Are you absolutely sure? Type-confirm in next prompt is locked.')) return;
-    const r = await fetch('/api/v1/settings/mode', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paper_mode: false, confirm: 'I_UNDERSTAND_REAL_MONEY' }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      alert('Could not switch to LIVE: ' + (err.detail || 'unknown error'));
+    try {
+      await apiFetch('/api/v1/settings/mode', {
+        method: 'POST',
+        body:   JSON.stringify({ paper_mode: false, confirm: 'I_UNDERSTAND_REAL_MONEY' }),
+      });
+    } catch (e) {
+      alert('Could not switch to LIVE: ' + (e.message || 'unknown error'));
     }
     load();
   }

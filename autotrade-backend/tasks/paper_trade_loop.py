@@ -22,7 +22,10 @@ async def _loop():
         generate_trade_explanation,
     )
     from engine.risk_manager import calculate_position_size, validate_signal
-    from engine.signal_generator import analyze_all_symbols
+    # Unified on the India 15-factor engine; the base signal_generator's
+    # analyze_all_symbols was US/forex-flavored and silently diverged from
+    # what the India scanner page showed users.
+    from engine.india_signal_generator import analyze_all_india_symbols as analyze_all_symbols
     from paper_trading.simulation_logger import SimLogger
     from paper_trading.trade_simulator import (
         open_paper_trade,

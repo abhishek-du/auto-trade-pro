@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { apiFetch } from '../../api/client'
 
 function urgencyClass(days) {
   if (days === 0) return 'text-red-400 border-red-500/40 bg-red-500/10'
@@ -14,8 +15,7 @@ export default function ExpiryCountdown() {
 
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/calendar/upcoming?days=14')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/calendar/upcoming?days=14')
         .then(d => setData(d))
         .catch(() => {})
     load()

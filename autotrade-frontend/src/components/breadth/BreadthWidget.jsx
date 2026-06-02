@@ -2,13 +2,13 @@ import { useEffect, useState } from 'react'
 import AdvanceDeclineBar from './AdvanceDeclineBar'
 import MarketMoodBadge   from './MarketMoodBadge'
 import { formatPct }     from '../../utils/indianFormat'
+import { apiFetch } from '../../api/client'
 
 function useBreadthSummary() {
   const [data, setData] = useState(null)
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/breadth/summary')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/breadth/summary')
         .then(setData)
         .catch(() => {})
     load()
@@ -63,8 +63,7 @@ export function BreadthWidget({ compact = false }) {
 
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/breadth')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/breadth')
         .then(setBreadth)
         .catch(() => {})
     load()

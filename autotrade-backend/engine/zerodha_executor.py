@@ -28,6 +28,21 @@ from utils.logger import logger
 
 # ── Safety gate helpers ───────────────────────────────────────────────────────
 
+def _live_confidence_floor() -> float:
+    """Read the live-order confidence floor from RuntimeConfig.
+
+    Returns the runtime DB-backed value when available; falls back to the
+    ``.env`` ``LIVE_CONFIDENCE_THRESHOLD`` (default 70). A hard minimum of
+    60 is enforced regardless of override — defense in depth so a misconfig
+    of the runtime slider can't loosen the safety gate.
+    """
+    try:
+        runtime = settings.LIVE_CONFIDENCE_THRESHOLD
+    except AttributeError:
+        runtime = 70.0
+    return max(60.0, float(runtime))
+
+
 def _check_safety_gates(
     signal_confidence: float,
     order_value: float,
@@ -45,10 +60,11 @@ def _check_safety_gates(
             "Zerodha not connected — complete login via /api/v1/zerodha/login-url first."
         )
 
-    if signal_confidence < 60:
+    floor = _live_confidence_floor()
+    if signal_confidence < floor:
         raise ValueError(
-            f"Signal confidence {signal_confidence:.1f}% is below the 60% minimum "
-            f"required for real order placement."
+            f"Signal confidence {signal_confidence:.1f}% is below the {floor:.0f}% "
+            f"minimum required for real order placement."
         )
 
     max_order_value = real_balance * 0.05
@@ -331,10 +347,11 @@ async def place_real_order(
     if not is_nse_market_open():
         raise RuntimeError("NSE market is closed — order rejected")
 
-    # Rule 3 — confidence
+    # Rule 3 — confidence (RuntimeConfig-aware, with 60% hard floor)
     confidence = float(getattr(signal, "confidence", 100.0)) if signal else 100.0
-    if confidence < 60:
-        raise ValueError(f"Signal confidence {confidence:.1f}% < 60% threshold")
+    floor = _live_confidence_floor()
+    if confidence < floor:
+        raise ValueError(f"Signal confidence {confidence:.1f}% < {floor:.0f}% threshold")
 
     # Determine price
     cur_price = price

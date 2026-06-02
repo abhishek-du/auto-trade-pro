@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { getHeatmapColor, getChangePctLabel } from '../../utils/heatmapColors'
+import { apiFetch } from '../../api/client'
 
 function useSectorSummary() {
   const [sectors, setSectors] = useState([])
   useEffect(() => {
     const load = () =>
-      fetch('/api/v1/india/sectors/summary')
-        .then(r => r.json())
+      apiFetch('/api/v1/india/sectors/summary')
         .then(d => setSectors(Array.isArray(d) ? d : []))
         .catch(() => {})
     load()
