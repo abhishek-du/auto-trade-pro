@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import {
-import { apiFetch } from '../api/client'
   Target, Plus, Calculator, X, ChevronRight,
   Shield, GraduationCap, Home, Car, Plane, Heart, TrendingUp,
   BarChart2, ListOrdered, Briefcase,
 } from 'lucide-react'
+import { apiFetch } from '../api/client'
 import { useSIPTracker } from '../hooks/useSIPTracker'
 import GoalCard           from '../components/sip/GoalCard'
 import GoalProgressPanel  from '../components/sip/GoalProgressPanel'
