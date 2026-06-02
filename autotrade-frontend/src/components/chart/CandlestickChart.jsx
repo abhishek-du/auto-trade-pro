@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import {
-import { apiFetch } from '../../api/client'
   createChart, CandlestickSeries, LineSeries, HistogramSeries,
 } from 'lightweight-charts'
+import { apiFetch } from '../../api/client'
 import {
   X, RefreshCw, TrendingUp, Zap, AlertCircle,
   ChevronDown,
