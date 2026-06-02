@@ -1,6 +1,6 @@
 """LLM-powered trade explanation for AutoTrade Pro.
 
-Primary  : Groq API (llama-3.1-8b-instant — fast, free tier available)
+Primary  : Groq API (llama-3.3-70b-versatile — strong reasoning, free tier available)
 Fallback : returns a plain-text summary built from signal.reasoning_points
 
 Designed so the primary can be swapped to Claude (Anthropic) later by
@@ -20,7 +20,7 @@ from utils.logger import logger
 
 # ── Groq API constants ────────────────────────────────────────────────────────
 _GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL   = "llama-3.1-8b-instant"
+_GROQ_MODEL   = "llama-3.3-70b-versatile"
 _MAX_TOKENS   = 150
 _TIMEOUT      = 15.0
 
@@ -111,7 +111,7 @@ def _fallback_explanation(signal) -> str:
 async def generate_trade_explanation(signal) -> str:
     """Generate a beginner-friendly explanation for a TradingSignal.
 
-    Calls Groq (llama-3.1-8b-instant) when GROQ_API_KEY is configured.
+    Calls Groq (llama-3.3-70b-versatile) when GROQ_API_KEY is configured.
     Falls back to a bullet-point summary when the key is absent or the call fails.
 
     NOTE: When ANTHROPIC_API_KEY is available, swap _call_groq() for _call_claude()

@@ -21,7 +21,7 @@ from utils.config import settings
 from utils.logger import logger
 
 _GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.1-8b-instant"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 _FH_BASE = "https://finnhub.io/api/v1"
 
