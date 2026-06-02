@@ -663,26 +663,50 @@ all_raw = rss_rows + newsdata_rows + newsapi_rows + finnhub_rows
 
 Each fetcher returns `{headline, source, url, published_at}` dicts and never raises — failures are logged and the source contributes an empty list.
 
-### Ticker extraction (`extract_tickers_from_headline`)
+### Ticker extraction (`extract_tickers_from_headline` + `_build_india_name_map`)
 
-Indian headlines say "HDFC Bank" or "Reliance Industries", not "HDFCBANK.NS". The extractor builds a name→symbol map at first call (cached via `lru_cache(maxsize=1)`):
+Indian headlines say "HDFC Bank", "Reliance Industries", or just "Cummins" — never "HDFCBANK.NS". The extractor builds a needle → NSE symbol map at the top of each `run_news_crawl` (TTL-cached for 6 hours) covering the **full NSE EQ universe** rather than the ~59 large-caps in `NSE_STOCK_LOOKUP`.
 
-```python
-_india_name_map() →  {
-    "hdfc bank":          "HDFCBANK.NS",
-    "reliance industries":"RELIANCE.NS",
-    "hdfcbank":           "HDFCBANK.NS",   # bare ticker also accepted
-    ...
-}   # built from engine/portfolio_service.NSE_STOCK_LOOKUP
+**Source priority** (see `_build_india_name_map(session)`):
+
+1. **`kite_instruments` DB table** — preferred, persistent across restarts. Populated daily at 08:00 IST by the `tasks.india_tasks.refresh_zerodha_instruments` Celery task, which downloads ~9.8k NSE rows from Kite. After filtering ETFs (suffixes `ETF`, `IETF`, `BEES`, `BETA`) and delivery-series variants (`SYMBOL-ST`, `SYMBOL-BE`), ~9.6k pure equities remain.
+2. **`crawler.zerodha_instruments.INSTRUMENT_CACHE`** — in-memory fallback when the DB table is empty (fresh deploy before the first refresh).
+3. **`engine.portfolio_service.NSE_STOCK_LOOKUP`** — last-resort 59-entry hardcoded list of curated aliases that supplements the Kite data and acts as a fallback if Kite isn't connected at all.
+
+**Three passes** populate the map via `setdefault` so earlier passes win the slot:
+
+```
+Pass A — bare tradingsymbols
+    "nmdc"   → NMDC.NS        "bhel"   → BHEL.NS
+    "zeel"   → ZEEL.NS        "indigo" → INDIGO.NS  ← airline, wins over INDIGOPNTS
+    "wipro"  → WIPRO.NS
+
+Pass B — full registered names (multi-word always pass; single-word: >4 chars, not stopword)
+    "reliance industries"      → RELIANCE.NS
+    "zee entertainment ent"    → ZEEL.NS
+    "interglobe aviation"      → INDIGO.NS
+    "cummins india"            → CUMMINSIND.NS
+
+Pass C — first significant token of the name as a short-brand alias
+    "cummins" → CUMMINSIND.NS   ("CUMMINS INDIA" — only one with token "cummins")
+    "patanjali" → PATANJALI.NS  ("PATANJALI FOODS"  — unique first-token)
 ```
 
-It then matches with `re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", hl_lower)` — whole-token only so "it" doesn't fire inside "wait". Three-pass matching:
+**Pass C guardrails** (critical for precision):
 
-1. **Indian company names + bare NSE tickers** (case-insensitive) — `_india_name_map()`
+- `_TICKER_STOPWORDS` (~200 words) blocks generic English, market jargon, industry words (`steel`, `bank`, `power`, `cement`, `oil`), family brands (`icici`, `bajaj`, `tata`, `jindal`, `reliance`, `mahindra`), Indian state names (`gujarat`, `maharashtra`, `andhra`), index names (`sensex`, `nifty`), and fund-name words (`growth`, `value`, `balanced`, `prudential`).
+- 5-character minimum + `.isalpha()` filter on candidate tokens.
+- **Uniqueness check** via `collections.Counter`: a first-token alias is only written when **exactly one** company in the universe has that token as its first significant word. Without this, `icici` would alias to whichever ICICI-prefixed company hit `setdefault` first, and `bajaj`/`jindal`/`tata` likewise.
+
+**Matching** then uses `re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", hl_lower)` — whole-token boundaries so `"it"` doesn't fire inside `"wait"`. The complete extraction chain:
+
+1. **Indian company names + bare NSE tickers + unique first-token brand aliases** — `_india_name_map()`
 2. **US watchlist tickers** (upper-case whole-word, e.g. `AAPL`)
 3. **Forex codes** (`USD`, `EUR`, etc.)
 
-Verified extractions: `"HDFC Bank target Rs 1,850"` → `HDFCBANK.NS`; `"Reliance Industries"` → `RELIANCE.NS`; `"Buy Bajaj Finance; target Rs 9000"` → `BAJFINANCE.NS`.
+**Verified positive matches**: `"HDFC Bank target Rs 1,850"` → `HDFCBANK.NS`; `"Cummins growth justify the valuation"` → `CUMMINSIND.NS`; `"Zee Entertainment share price"` → `ZEEL.NS`; `"AMFI: BSE, Vodafone Idea, Jindal Steel, BHEL"` → `[BHEL, IDEA, JINDALSTEL]`; `"Stocks to watch: IndiGo, NMDC, PB Fintech"` → `[INDIGO, NMDC, POLICYBZR]`; `"Patanjali Foods FMCG"` → `PATANJALI.NS`; `"Vedanta shares crash"` → `VEDL.NS`.
+
+**Verified negative tests** (must NOT match): `"India macro outlook"` → `[]`; `"Sensex crashes 500 points"` → `[]`; `"Steel sector outlook bleak"` → `[]`; `"Market value of all listed companies"` → `[]`.
 
 ### FinBERT Sentiment Scoring
 
