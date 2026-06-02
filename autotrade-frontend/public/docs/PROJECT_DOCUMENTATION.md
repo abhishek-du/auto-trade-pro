@@ -171,7 +171,7 @@ External APIs:
 | pandas + numpy | 2.x | Time-series, indicator calculations |
 | httpx | 0.27+ | Async HTTP for external APIs |
 | Pydantic v2 | 2.x | Settings + schema validation |
-| Groq via httpx | — | LLM inference (llama-3.1-8b-instant) |
+| Groq via httpx | — | LLM inference (llama-3.3-70b-versatile) |
 
 ### Frontend
 
@@ -602,7 +602,7 @@ Returns `entry_low/high`, `stop_loss`, `target_1/2`, `risk_reward`, `when_to_buy
 Uses **yfinance** as the primary source (nested under `content` key in the response). Falls back to Finnhub for US-listed stocks. Returns the 5 most recent headlines with title, source, URL, and sentiment.
 
 ### `groq_commentary(symbol, signal, score, reasoning, news)`
-Sends a compact prompt to Groq `llama-3.1-8b-instant` for a 2–3 sentence AI outlook. Returns empty string on any failure.
+Sends a compact prompt to Groq `llama-3.3-70b-versatile` for a 2–3 sentence AI outlook. Returns empty string on any failure.
 
 ---
 
@@ -722,7 +722,7 @@ The News page (`/news`) and `getNews()` API client require no changes — headli
 
 ## LLM Integration
 
-`engine/llm_explainer.py` — Groq `llama-3.1-8b-instant` for trade explanations. Full signal context sent as user message. Fallback joins top-three reasoning points into plain English when Groq is unavailable or not configured.
+`engine/llm_explainer.py` — Groq `llama-3.3-70b-versatile` for trade explanations. Full signal context sent as user message. Fallback joins top-three reasoning points into plain English when Groq is unavailable or not configured.
 
 ---
 
@@ -753,7 +753,7 @@ engine/stock_context_builder.py
     │    └── fundamentals        (yfinance info)
     │
     ▼
-_call_groq()  — llama-3.1-8b-instant with context-packed system prompt
+_call_groq()  — llama-3.3-70b-versatile with context-packed system prompt
     │
     ▼  (fallback when no GROQ_API_KEY)
 generate_no_ai_response()  — rule-based reply using indicator data
@@ -880,7 +880,7 @@ Mutual fund units are stored in the same `tracker_holdings` table using a `MF:{s
 Each finding has severity: `CRITICAL` (-25 points), `WARNING` (-10), `INFO` (-3), or `GOOD` (+2). Final 0–100 score maps to letter grades A/B/C/D/F.
 
 ### AI Narrative
-A "Dr. Arjun" persona is sent the structured findings via Groq llama-3.1-8b-instant. The model writes a 3-4 paragraph doctor's-style assessment with specific stock names and numbers. Falls back to rule-based summary when `GROQ_API_KEY` is unset.
+A "Dr. Arjun" persona is sent the structured findings via Groq llama-3.3-70b-versatile. The model writes a 3-4 paragraph doctor's-style assessment with specific stock names and numbers. Falls back to rule-based summary when `GROQ_API_KEY` is unset.
 
 ### Endpoints
 - `POST   /api/v1/doctor/diagnose` — full diagnosis (15–30s; calls fundamentals + AI)
@@ -910,7 +910,7 @@ For any NSE ticker outside the ~40-stock hardcoded `BSE_SCRIP_MAP`, `_resolve_bs
 Primary: **pdfplumber** (text-layer PDFs). Fallback: **PyPDF2**. Cleaning step removes page numbers, merges hyphenated line breaks, collapses repeated newlines, and trims trailing disclaimers ("Forward-Looking Statements", "DISCLAIMER", "Safe Harbour Statement").
 
 ### AI Summarization
-Sends the cleaned transcript text to Groq llama-3.1-8b-instant with a system prompt as Dr. Arjun (Indian equity research analyst). Returns a strict JSON object with:
+Sends the cleaned transcript text to Groq llama-3.3-70b-versatile with a system prompt as Dr. Arjun (Indian equity research analyst). Returns a strict JSON object with:
 
 - `financial_highlights` — 5 bullets with specific numbers (revenue, margins, segment perf, balance sheet, key operating metric)
 - `management_guidance` — 4 bullets (revenue/margin/capex/strategic timeline)

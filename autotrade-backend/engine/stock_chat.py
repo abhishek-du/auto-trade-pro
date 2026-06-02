@@ -17,7 +17,7 @@ from utils.logger import logger
 
 # ── Groq constants (same as llm_explainer.py) ────────────────────────────────
 _GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.1-8b-instant"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # ── Intent classification ─────────────────────────────────────────────────────
 

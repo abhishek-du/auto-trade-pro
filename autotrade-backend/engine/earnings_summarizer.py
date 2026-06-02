@@ -130,7 +130,7 @@ async def _call_groq_for_earnings(system: str, user: str, max_tokens: int = 2000
         "Content-Type":  "application/json",
     }
     body = {
-        "model":       "llama-3.1-8b-instant",
+        "model":       "llama-3.3-70b-versatile",
         "max_tokens":  max_tokens,
         "temperature": 0.2,
         "messages": [
