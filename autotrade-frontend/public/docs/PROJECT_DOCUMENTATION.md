@@ -359,7 +359,7 @@ autotrade-backend/
 | `db/models.py` (updated) | 10 new tables: `portfolio_diagnoses`, `earnings_call_summaries`, `agent_decisions`, `agent_trades`, `agent_positions`, `agent_performance`, `master_intelligence_scores`, `mf_intelligence_scores`, `hub_cycle_logs`, `tracker_holdings`+`tracker_transactions` enhancements |
 | `tasks/india_tasks.py` (updated) | 4 new tasks: `run_agent_cycle`, `agent_eod_reconcile`, `fetch_earnings_transcripts`, `run_master_intelligence_cycle` |
 | `tasks/celery_app.py` (updated) | Added `master-intelligence-every-15min` beat entry (cron-style: minute 14/29/44/59 of hours 3-10 UTC, Mon-Fri, +45s countdown) |
-| `utils/config.py` (updated) | `AGENT_*` settings, `PAPER/LIVE_CONFIDENCE_THRESHOLD`, `NEWSDATA_KEY` + `newsdata_available` property, NSE watchlist + ₹1L paper balance defaults, default `REDIS_URL=redis://localhost:6379/0` |
+| `utils/config.py` (updated) | `AGENT_*` settings, `PAPER/LIVE_CONFIDENCE_THRESHOLD`, `NEWSDATA_KEY` + `newsdata_available` property, NSE watchlist + ₹5L paper balance default (matches `AGENT_EQUITY`), default `REDIS_URL=redis://localhost:6379/0` |
 
 ---
 
@@ -1831,7 +1831,7 @@ ZERODHA_ENABLED=false                # set true after first successful login
 ZERODHA_PAPER_MODE=true              # SAFETY: set false ONLY for real orders
 
 # Paper trading parameters
-PAPER_TRADING_BALANCE=100000.0       # ₹1L — realistic Indian retail starter
+PAPER_TRADING_BALANCE=500000.0       # ₹5L — matches AGENT_EQUITY so simulator and agent start on the same base
 MAX_RISK_PER_TRADE=0.02              # 2% of balance per trade
 MAX_OPEN_POSITIONS=5
 MAX_DAILY_LOSS=0.05                  # halt when down 5% on the day
