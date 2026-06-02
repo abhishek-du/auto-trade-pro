@@ -1715,7 +1715,10 @@ async def get_watchlist_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     from crawler.live_prices import get_cached_price
 
     sym = symbol.upper()
-    if not sym.endswith(".NS"):
+    # Index symbols (^NSEI, ^BSESN, ^NSEBANK, ^INDIAVIX) and forex codes pass
+    # through unchanged. Only equity symbols get the ".NS" suffix added.
+    _is_index_or_forex = sym.startswith("^") or "=" in sym or "/" in sym
+    if not _is_index_or_forex and not sym.endswith(".NS"):
         sym = sym + ".NS"
 
     cached = get_cached_price(sym)

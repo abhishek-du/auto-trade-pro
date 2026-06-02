@@ -127,9 +127,13 @@ async def sync_all_nse_candles(
     *,
     timeframe: str = "1d",
     days_back: int = 120,
-    delay_sec: float = 0.3,
+    delay_sec: float = 0.5,
 ) -> dict:
-    """Iterate settings.nse_symbols (+ mid caps) and persist daily candles."""
+    """Iterate settings.nse_symbols (+ mid caps) and persist daily candles.
+
+    ``delay_sec`` defaults to 0.5 to stay under Kite's 3 req/sec historical
+    rate limit with headroom — 0.35 (≈2.85 req/sec) hit 429s in practice.
+    """
     symbols: Iterable[str] = settings.nse_symbols + settings.nse_mid_symbols
     total_saved = 0
     total_fetched = 0

@@ -542,7 +542,12 @@ def _load_finbert_pipeline():
         logger.info("FinBERT loaded successfully")
         return pipe
     except Exception as exc:
-        logger.warning(f"FinBERT unavailable ({exc}) — using keyword fallback")
+        # Log with full traceback — the bare str(exc) hides the real cause when
+        # transformers/torch lazily imports submodules and one fails mid-import.
+        logger.warning(
+            f"FinBERT unavailable ({exc.__class__.__name__}: {exc}) — using keyword fallback",
+            exc_info=True,
+        )
         return None
 
 

@@ -32,6 +32,20 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"DB init skipped — will retry on first request: {exc}")
 
+    # ── Preload NSE token map from kite_instruments ──────────────────────────
+    # The hardcoded NSE_TOKENS dict only covers ~30 large-caps. If the daily
+    # refresh hasn't run yet (fresh deploy, post-truncate, weekend), historical
+    # fetches for everything else log "No instrument token" warnings. Hydrate
+    # the in-memory map from the DB on startup so every persisted instrument
+    # is immediately resolvable.
+    try:
+        from db.database import AsyncSessionLocal
+        from crawler.zerodha_market import hydrate_tokens_from_db
+        async with AsyncSessionLocal() as _sess:
+            await hydrate_tokens_from_db(_sess)
+    except Exception as exc:
+        logger.debug(f"[startup] kite token hydration skipped: {exc}")
+
     # ── Live price refresh background task ───────────────────────────────────
     import asyncio as _asyncio
     from crawler.india_price_feed import is_nse_market_open

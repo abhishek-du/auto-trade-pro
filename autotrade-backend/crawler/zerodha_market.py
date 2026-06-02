@@ -180,6 +180,35 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
     return len(batch)
 
 
+async def hydrate_tokens_from_db(session: AsyncSession) -> int:
+    """Preload NSE_TOKENS from kite_instruments at startup.
+
+    Without this, the in-memory ``NSE_TOKENS`` dict only contains the 30
+    hardcoded fallbacks until the daily ``kite_refresh_instruments`` task
+    runs at 08:00 IST. Any historical-fetch caller that doesn't pass a
+    ``session`` (and thus can't hit ``_get_token_from_db``) will fail
+    with "No instrument token" warnings for legitimate symbols.
+
+    Idempotent: safe to call on every startup. Returns the count loaded.
+    """
+    rows = (await session.execute(
+        select(KiteInstrument.tradingsymbol, KiteInstrument.instrument_token).where(
+            KiteInstrument.exchange == "NSE",
+            KiteInstrument.instrument_type == "EQ",
+        )
+    )).all()
+    loaded = 0
+    for ts, token in rows:
+        if not ts or not token:
+            continue
+        sym = f"{ts}.NS"
+        NSE_TOKENS[sym] = int(token)
+        _TOKEN_TO_SYMBOL[int(token)] = sym
+        loaded += 1
+    logger.info(f"[zerodha_market] Hydrated NSE_TOKENS from DB: {loaded} symbols")
+    return loaded
+
+
 async def _get_token_from_db(symbol: str, session: AsyncSession | None) -> int | None:
     """Look up instrument_token from kite_instruments DB table."""
     if session is None:
