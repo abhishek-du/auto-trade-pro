@@ -101,6 +101,29 @@ class AgentExecutionManager:
         for symbol, pos in list(portfolio_ctx.open_positions.items()):
             price_data = current_prices.get(symbol, {})
             price = float(price_data.get("price", 0) or 0)
+
+            # PRICE_CACHE is empty after market hours (KiteTicker stops at 15:30
+            # IST, yfinance cache TTL expires) — fall back to the most recent
+            # 1h candle close so end-of-day SL/target sweeps still process.
+            if price <= 0:
+                try:
+                    from db.models import Candle
+                    from sqlalchemy import select
+                    row = (await session.execute(
+                        select(Candle.close)
+                        .where(Candle.symbol == symbol, Candle.timeframe == "1h")
+                        .order_by(Candle.timestamp.desc())
+                        .limit(1)
+                    )).scalar_one_or_none()
+                    if row:
+                        price = float(row)
+                        logger.debug(
+                            f"[exits] {symbol}: PRICE_CACHE empty, "
+                            f"using last 1h candle ₹{price:.2f}"
+                        )
+                except Exception as exc:
+                    logger.debug(f"[exits] candle fallback failed {symbol}: {exc}")
+
             if price <= 0:
                 continue
 
@@ -108,10 +131,83 @@ class AgentExecutionManager:
             exit_reason  = ""
 
             if pos["side"] == "BUY":
-                if pos["stop"] > 0 and price <= pos["stop"]:
-                    should_close = True; exit_reason = "STOP_HIT"
-                elif pos["target"] > 0 and price >= pos["target"]:
-                    should_close = True; exit_reason = "TARGET_HIT"
+                # ── Multi-target exit ladder ──────────────────────────────────
+                # Stage 1 — SL hit (trailing if set after T1, else original stop).
+                # Stage 2 — T1 hit: close 50%, trail SL to near-breakeven.
+                # Stage 3 — T2 hit (after T1): close remaining 50%.
+                # Stage 4 — Trailing SL update after T1: trail by 1.5× initial risk
+                #           below price (ATR proxy); only widen, never tighten.
+                # Stage 5 — Max-hold escape: full close after 10 days if T1 never hit.
+                entry        = pos["entry"]
+                stop_orig    = pos["stop"]
+                t1           = pos.get("target1") or (entry + abs(entry - stop_orig))
+                t2           = (
+                    pos.get("target2")
+                    or pos.get("target")
+                    or (entry + 2 * abs(entry - stop_orig))
+                )
+                partial_done = pos.get("partial_done", False)
+                trailing_sl  = pos.get("trailing_sl")
+                entry_ts_str = pos.get("entry_ts")
+                qty          = pos.get("qty", 1)
+
+                effective_stop = trailing_sl if trailing_sl else stop_orig
+
+                should_partial    = False
+                should_full_close = False
+
+                if effective_stop > 0 and price <= effective_stop:
+                    should_full_close = True
+                    exit_reason = "SL_HIT"
+                elif not partial_done and price >= t1:
+                    should_partial = True
+                    exit_reason = "T1_PARTIAL"
+                elif partial_done and price >= t2:
+                    should_full_close = True
+                    exit_reason = "T2_TARGET"
+                elif partial_done:
+                    # Widen trailing SL only — never pull it back
+                    atr_proxy = abs(entry - stop_orig)
+                    new_trail = price - 1.5 * atr_proxy
+                    current_trail = pos.get("trailing_sl") or (entry + 0.1 * atr_proxy)
+                    if new_trail > current_trail:
+                        portfolio_ctx.open_positions[symbol]["trailing_sl"] = round(new_trail, 2)
+                        logger.debug(f"[exits] {symbol}: trailing SL → ₹{new_trail:.2f}")
+
+                # Max-hold escape (only checked if no other exit fired)
+                if (
+                    not should_full_close
+                    and not should_partial
+                    and not partial_done
+                    and entry_ts_str
+                ):
+                    try:
+                        entry_ts = datetime.fromisoformat(entry_ts_str)
+                        if (datetime.utcnow() - entry_ts).days > 10:
+                            should_full_close = True
+                            exit_reason = "MAX_HOLD_EXCEEDED"
+                    except Exception:
+                        pass
+
+                # Execute partial — split the position, move SL to near-breakeven
+                if should_partial:
+                    half_qty = max(1, qty // 2)
+                    partial_pnl = half_qty * (price - entry)
+                    portfolio_ctx.open_positions[symbol]["qty"]          = qty - half_qty
+                    portfolio_ctx.open_positions[symbol]["partial_done"] = True
+                    new_sl = entry + 0.1 * abs(entry - stop_orig)
+                    portfolio_ctx.open_positions[symbol]["trailing_sl"]  = round(new_sl, 2)
+                    portfolio_ctx.cash += half_qty * price
+                    await self._record_exit(symbol, price, "T1_PARTIAL", partial_pnl, session)
+                    logger.info(
+                        f"[{'PAPER' if settings.AGENT_PAPER_MODE else 'LIVE'}] "
+                        f"T1 HIT {symbol} @ ₹{price:.2f} | "
+                        f"Sold {half_qty} of {qty} | pnl=₹{partial_pnl:,.2f} | "
+                        f"SL moved to breakeven ₹{new_sl:.2f}"
+                    )
+                # Defer the shared full-close handler below
+                elif should_full_close:
+                    should_close = True
             else:
                 if pos["stop"] > 0 and price >= pos["stop"]:
                     should_close = True; exit_reason = "STOP_HIT"

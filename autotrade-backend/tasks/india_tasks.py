@@ -713,6 +713,14 @@ def run_master_intelligence_cycle():
                             order_id = await executor.execute(decision, session)
                             if order_id:
                                 portfolio.add_position(decision)
+                                # Multi-target exit keys (mirror agent_loop._process_symbol)
+                                _sym  = decision.symbol
+                                _risk = abs(decision.entry - decision.stop)
+                                portfolio.open_positions[_sym]["target1"]      = round(decision.entry + 1.0 * _risk, 2)
+                                portfolio.open_positions[_sym]["target2"]      = round(decision.entry + 2.0 * _risk, 2)
+                                portfolio.open_positions[_sym]["partial_done"] = False
+                                portfolio.open_positions[_sym]["trailing_sl"]  = None
+                                portfolio.open_positions[_sym]["entry_ts"]     = datetime.utcnow().isoformat()
                                 decisions_made += 1
                                 logger.info(
                                     f"[hub] TRADE {decision.action} {decision.qty} {stock.symbol} "

@@ -180,6 +180,17 @@ async def _process_symbol(
 
     if order_id:
         portfolio.add_position(decision)
+        # Multi-target exit keys consumed by check_and_close_positions:
+        #   target1 = 1:1 R:R (partial 50% exit + SL → near-breakeven)
+        #   target2 = 2:1 R:R (full exit of remainder)
+        #   partial_done / trailing_sl / entry_ts drive stage transitions
+        _sym  = decision.symbol
+        _risk = abs(decision.entry - decision.stop)
+        portfolio.open_positions[_sym]["target1"]      = round(decision.entry + 1.0 * _risk, 2)
+        portfolio.open_positions[_sym]["target2"]      = round(decision.entry + 2.0 * _risk, 2)
+        portfolio.open_positions[_sym]["partial_done"] = False
+        portfolio.open_positions[_sym]["trailing_sl"]  = None
+        portfolio.open_positions[_sym]["entry_ts"]     = datetime.utcnow().isoformat()
 
     return decision.to_dict()
 

@@ -117,8 +117,11 @@ class Settings(BaseSettings):
     AGENT_CONFIDENCE_THRESHOLD: int   = 70
 
     # Universe / timing
-    AGENT_TIMEFRAME:            str   = "15m"
-    AGENT_WARMUP_BARS:          int   = 210
+    # 1h matches what the candles table actually has (282k 1h rows, 0 rows at 15m).
+    # 60 bars ≈ 8 NSE trading days — enough for RSI/EMA50 settling on liquid names
+    # without locking out mid-caps that have less history persisted.
+    AGENT_TIMEFRAME:            str   = "1h"
+    AGENT_WARMUP_BARS:          int   = 60
     AGENT_SESSION_START:        str   = "09:20"
     AGENT_SESSION_END:          str   = "15:20"
 
