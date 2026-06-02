@@ -746,13 +746,16 @@ async def deep_analysis(symbol: str):
 # Auto-scanner — scan full NSE universe, return all BUY+ signals
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Extra popular NSE stocks beyond the configured watchlists
+# Extra popular NSE stocks beyond the configured watchlists.
+# TATAMOTORS removed: demerged Oct 2024 → TATAMOTORS (PV) + TMLPV (CV);
+# yfinance reports the legacy symbol as delisted.
+# LTIM removed: merged into LTIMINDTREE post the L&T-Mindtree merger.
 _EXTRA_NSE = [
-    "TITAN", "BAJAJFINSV", "INDUSINDBK", "TATAMOTORS", "JSWSTEEL",
+    "TITAN", "BAJAJFINSV", "INDUSINDBK", "JSWSTEEL",
     "TATASTEEL", "TECHM", "HINDALCO", "DIVISLAB", "CIPLA",
     "ADANIPORTS", "BPCL", "HEROMOTOCO", "EICHERMOT", "ONGC",
     "CHOLAFIN", "MARICO", "DABUR", "LUPIN", "TORNTPHARM",
-    "FEDERALBNK", "DLF", "GODREJPROP", "LTIM", "MPHASIS",
+    "FEDERALBNK", "DLF", "GODREJPROP", "LTIMINDTREE", "MPHASIS",
     "TATAPOWER", "BANKBARODA", "CANBK", "AUROPHARMA", "BIOCON",
     "ESCORTS", "SUZLON", "IRCTC", "HAL", "BEL", "BHEL",
     "RECLTD", "PFC", "IRFC", "NHPC",
@@ -938,8 +941,10 @@ async def _analyse_mf(code: str) -> dict:
             "error":        None,
         }
     except Exception as exc:
-        logger.warning(f"[zerodha] MF analysis failed for {code}: {exc}")
-        return {"scheme_code": code, "error": str(exc)}
+        # repr() so empty-string exceptions (e.g. some httpx errors) still
+        # produce something useful in the log instead of a blank suffix.
+        logger.warning(f"[zerodha] MF analysis failed for {code}: {exc!r}", exc_info=True)
+        return {"scheme_code": code, "error": repr(exc)}
 
 
 @router.get("/mf-analysis")

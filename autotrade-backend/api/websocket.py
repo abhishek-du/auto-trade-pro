@@ -321,7 +321,9 @@ async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h"):
                 ],
             })
     except Exception as exc:
-        logger.warning(f"[ws/candles] init failed for {sym}: {exc}")
+        # repr() captures empty-string exception messages too, so the log line
+        # stops looking like "init failed for ^NSEI: " with nothing after it.
+        logger.warning(f"[ws/candles] init failed for {sym}: {exc!r}")
 
     try:
         while True:
