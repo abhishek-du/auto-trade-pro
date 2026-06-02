@@ -123,8 +123,9 @@ class Settings(BaseSettings):
     AGENT_SESSION_END:          str   = "15:20"
 
     # ── Paper trading parameters ──────────────────────────────────────────────
-    # Default ₹1,00,000 — realistic for Indian retail (₹1L is the typical starter)
-    PAPER_TRADING_BALANCE: float = 100000.0
+    # Default ₹5,00,000 — matches AGENT_EQUITY so the simulator wallet and the
+    # AI Trading Agent equity start from the same base.
+    PAPER_TRADING_BALANCE: float = 500000.0
     MAX_RISK_PER_TRADE: float = 0.02       # fraction of balance risked per trade
     MAX_OPEN_POSITIONS: int = 5
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance
