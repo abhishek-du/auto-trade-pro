@@ -252,13 +252,230 @@ async def fetch_free_rss_news() -> list[dict]:
     return all_rows
 
 
-@lru_cache(maxsize=1)
-def _india_name_map() -> dict[str, str]:
-    """Build {lowercase company-name → NSE symbol} and {bare-ticker → NSE symbol}.
+# Common English / market-speak / industry tokens that collide with short NSE
+# tradingsymbols and would produce false-positive ticker tags if left in the
+# name map (e.g. "FOCUS" is a tradingsymbol but headlines say "in focus today").
+# Industry words like "STEEL", "BANK", "POWER" appear in many company names AND
+# in generic copy, so we never register them as needles.
+_TICKER_STOPWORDS: frozenset[str] = frozenset({
+    # Articles, prepositions, common short English
+    "the","and","for","not","you","can","all","any","own","new","old",
+    "big","low","top","day","key","est","one","two","via","yes",
+    # Generic industry / sector words
+    "bank","steel","power","cement","oil","gas","coal","auto","tyre",
+    "tyres","metal","metals","mining","tech","textile","fashion","retail",
+    "pharma","drugs","drug","sugar","tea","tobacco","food","foods","cable",
+    "paint","paints","paper","glass","wood","carbon","chem","chemical",
+    "chemicals","fertilizer","fertilizers","plastic","plastics","mfg",
+    "manufacturing","industries","industrial","corp","corporation","ltd",
+    "limited","company","group","international","intl","national","india",
+    "bharat","global","world","systems","services","solutions","holdings",
+    "enterprises","investments","capital","finance","financial","logistics",
+    "telecom","communications","energy","resources","power","engineering",
+    "construction","builders","developers","realty","estate","hospitality",
+    "hotels","healthcare","health","medical","life","sciences","insurance",
+    # Money / market jargon
+    "ipo","gst","tax","fno","fdi","gdp","cpi","wpi","rbi","sebi","sec",
+    "nse","bse","fii","dii","etf","eps","pat","ebitda","ebit","yoy","qoq",
+    "mom","best","worst","live","next","last","more","less","over","under",
+    "stock","stocks","share","shares","price","value","today","week","year",
+    "month","time","data","news","report","alert","update","read","watch",
+    "view","add","cut","raise","hike","fall","rise","gain","drop","jump",
+    "slide","rally","surge","crash","plunge","soar","tumble","slump",
+    "decline","outperform","underperform","accumulate","reduce","hold",
+    "target","rs","inr","usd","trade","trades","close","open","cse","ats",
+    "nfo","mcx","cdsl","nsdl","gmp","fpi","ofs","fpo","qib","hni","amfi",
+    "amf","nav","sip","mfs","focus","reach","scope","peak","mark","level",
+    "core","prime","major","minor","star","stars","fresh","first","next",
+    "ace","arc","spot","plus","step","edge","mega","alpha","beta","delta",
+    # Family brand names shared across many group companies — they have their
+    # own bare tradingsymbol (RELIANCE, BAJFINANCE, …) so we don't need an
+    # extra short alias for these, and aliasing them caused false positives.
+    "icici","hdfc","tata","adani","bajaj","jindal","reliance","mahindra",
+    "kotak","birla","godrej","murugappa","piramal","essar","essel","ruia",
+    "dabur","mukesh","ambani","srei","aditya","wadia","sanmar","nilkamal",
+    "saregama","jaiprakash","jsw",
+    # Indian states / regions (often appear as company-name first tokens)
+    "gujarat","andhra","kerala","punjab","haryana","rajasthan","odisha",
+    "orissa","tamilnadu","maharashtra","karnataka","telangana","goa",
+    "jammu","kashmir","uttar","bengal","bihar","assam","sikkim","mumbai",
+    "chennai","delhi","kolkata","bangalore","hyderabad","pune","ahmedabad",
+    "north","south","east","west","central",
+    # Index names — appear in ETF names like "SBI NIFTY 50 ETF"
+    "sensex","nifty","bharat","midcap","smallcap","largecap",
+    # Corporate suffixes / generic name words
+    "securities","industries","products","ventures","holdings","enterprises",
+    "investments","developers","builders","carriers","telecommunications",
+    # Common mutual-fund / ETF naming words (HDFC GROWTH FUND, ICICI VALUE …)
+    "growth","value","balanced","dynamic","advantage","select","premier",
+    "leader","leaders","vision","equity","income","bond","liquid","arbitrage",
+    "hybrid","multicap","midcap","smallcap","largecap","focused","quality",
+    "momentum","prudential","mutual","fund","scheme","plan","direct","regular",
+    "dividend","reinvest","cumulative","series","tracker","passive",
+})
 
-    Indian headlines say "Reliance Industries" or "HDFC Bank", not "RELIANCE.NS",
-    so we match on company names (from NSE_STOCK_LOOKUP) and bare tickers.
+# Module-level cache for the India name → NSE symbol map, populated by
+# _build_india_name_map() at the start of each crawl. We deliberately avoid
+# lru_cache here so each crawl can refresh from the DB; we cache via a TTL.
+_india_name_map_cache: dict[str, str] = {}
+_india_name_map_built_at: float = 0.0
+_INDIA_MAP_TTL_SECONDS: int = 6 * 3600   # rebuild at most every 6 hours
+
+
+async def _build_india_name_map(session: AsyncSession) -> dict[str, str]:
+    """Build {needle.lower() → NSE symbol} from the Kite instrument master.
+
+    Priority of sources:
+      1. ``kite_instruments`` DB table (~9.6k NSE EQ rows when populated)
+      2. In-memory ``INSTRUMENT_CACHE`` from ``zerodha_instruments``
+      3. ``engine.portfolio_service.NSE_STOCK_LOOKUP`` fallback (~59 large-caps)
+
+    For each EQ row we add three needles:
+      • the bare tradingsymbol (``NMDC``, ``ZEEL``, ``BHEL`` …)
+      • the full company ``name`` field as published by NSE
+      • the first significant token of the name (``INTERGLOBE`` for IndiGo,
+        ``CUMMINS`` for ``CUMMINS INDIA`` …) — most headlines use a short
+        brand alias, not the full registered name.
+
+    Short tokens (< 3 chars) and stopwords in :data:`_TICKER_STOPWORDS` are
+    skipped to keep precision high.
     """
+    global _india_name_map_cache, _india_name_map_built_at
+
+    if _india_name_map_cache and (time.time() - _india_name_map_built_at) < _INDIA_MAP_TTL_SECONDS:
+        return _india_name_map_cache
+
+    out: dict[str, str] = {}
+
+    def _accept(needle: str) -> bool:
+        n = needle.strip().lower()
+        return bool(n) and len(n) >= 3 and n not in _TICKER_STOPWORDS
+
+    # ── Source 1: kite_instruments DB table (preferred — persistent across restarts)
+    # Two passes: (A) bare tradingsymbols win the slot, (B) full names fill in the rest.
+    # Multi-word company names always pass; single-word names must be > 4 chars and
+    # not collide with stopwords. We never alias on a single name token — that's how
+    # the earlier version ended up mapping "india" → ABB and "steel" → SAIL.
+    try:
+        from collections import Counter
+        from db.models import KiteInstrument
+        rows = (await session.execute(
+            select(KiteInstrument.tradingsymbol, KiteInstrument.name).where(
+                KiteInstrument.instrument_type == "EQ",
+                KiteInstrument.segment == "NSE",
+            )
+        )).all()
+        # Filter to pure equity tradingsymbols. Excludes:
+        #   - delivery-series variants (BE/ST/SG suffix via "-")
+        #   - ETFs and index trackers (ETF/IETF/BEES/BETA suffix)
+        _ETF_SUFFIXES = ("ETF", "IETF", "BEES", "BETA")
+        clean_rows = [
+            ((ts or "").strip().upper(), (name or "").strip())
+            for ts, name in rows
+            if ts
+            and "-" not in (ts or "").upper()
+            and not any((ts or "").upper().endswith(s) for s in _ETF_SUFFIXES)
+        ]
+
+        # Pass A — bare tradingsymbols (e.g. "NMDC", "BHEL", "ZEEL", "INDIGO")
+        for ts, _name in clean_rows:
+            if _accept(ts):
+                out.setdefault(ts.lower(), f"{ts}.NS")
+
+        # Pass B — full registered company names (e.g. "ZEE ENTERTAINMENT ENT")
+        for ts, name in clean_rows:
+            if not name:
+                continue
+            name_low = name.lower()
+            # Multi-word names are always safe — at least one token is distinctive.
+            # Single-word names: require length > 4 and not a stopword.
+            is_multi = len(name_low.split()) > 1
+            if is_multi or (len(name_low) > 4 and name_low not in _TICKER_STOPWORDS):
+                out.setdefault(name_low, f"{ts}.NS")
+
+        # Pass C — first significant token of the name as a short-brand alias.
+        # This catches headlines that use the common brand ("Cummins", "Zee")
+        # instead of the full registered name ("CUMMINS INDIA", "ZEE
+        # ENTERTAINMENT ENT"). Three guardrails keep precision high:
+        #   1. Stopwords + isalpha + 5-char minimum filter generic words
+        #      ("india", "steel", "power", "bank", "icici", "bajaj", ...).
+        #   2. Bare tradingsymbols processed in Pass A keep their slot via
+        #      setdefault (so "indigo" stays → INDIGO.NS, not INDIGOPNTS.NS).
+        #   3. UNIQUENESS — we only alias on a first token if exactly one
+        #      company in the universe has that token as its first word.
+        #      Without this, "icici" would alias to whichever ICICI-* company
+        #      hit setdefault first, and "bajaj" / "jindal" / "tata" likewise.
+        first_tokens: list[tuple[str, str]] = []
+        for ts, name in clean_rows:
+            if not name:
+                continue
+            for tok in name.split():
+                tok_norm = tok.strip(".,&()/").lower()
+                if (
+                    len(tok_norm) >= 5
+                    and tok_norm not in _TICKER_STOPWORDS
+                    and tok_norm.isalpha()
+                ):
+                    first_tokens.append((tok_norm, ts))
+                    break
+
+        token_counts = Counter(tok for tok, _ in first_tokens)
+        for tok, ts in first_tokens:
+            if token_counts[tok] == 1:
+                out.setdefault(tok, f"{ts}.NS")
+    except Exception as exc:
+        logger.debug(f"[news_crawler] kite_instruments read failed: {exc}")
+
+    # ── Source 2: in-memory Kite cache (when DB row count is zero on first run)
+    if not out:
+        try:
+            from crawler.zerodha_instruments import INSTRUMENT_CACHE
+            clean_mem = [
+                (ts.upper(), (meta.get("name") or "").strip())
+                for ts, meta in INSTRUMENT_CACHE.items()
+                if meta.get("instrument_type") == "EQ"
+                and meta.get("segment") == "NSE"
+                and "-" not in ts.upper()
+            ]
+            for ts, _name in clean_mem:
+                if _accept(ts):
+                    out.setdefault(ts.lower(), f"{ts}.NS")
+            for ts, name in clean_mem:
+                if not name:
+                    continue
+                name_low = name.lower()
+                if len(name_low.split()) > 1 or (len(name_low) > 4 and name_low not in _TICKER_STOPWORDS):
+                    out.setdefault(name_low, f"{ts}.NS")
+        except Exception as exc:
+            logger.debug(f"[news_crawler] INSTRUMENT_CACHE read failed: {exc}")
+
+    # ── Source 3: NSE_STOCK_LOOKUP fallback / supplement (curated aliases)
+    try:
+        from engine.portfolio_service import NSE_STOCK_LOOKUP
+        for name, symbol in NSE_STOCK_LOOKUP.items():
+            if _accept(name):
+                out.setdefault(name.lower(), symbol)
+            bare = symbol.replace(".NS", "").replace(".BO", "")
+            if _accept(bare):
+                out.setdefault(bare.lower(), symbol)
+    except Exception as exc:
+        logger.debug(f"[news_crawler] NSE_STOCK_LOOKUP read failed: {exc}")
+
+    _india_name_map_cache = out
+    _india_name_map_built_at = time.time()
+    logger.info(f"[news_crawler] India name map built: {len(out)} needles")
+    return out
+
+
+def _india_name_map() -> dict[str, str]:
+    """Return the cached India name → NSE symbol map.
+
+    Returns a small fallback derived from :data:`NSE_STOCK_LOOKUP` if the
+    crawler's pre-warm step (:func:`_build_india_name_map`) has not yet run
+    in this process — keeps the sync extractor callable from any context.
+    """
+    if _india_name_map_cache:
+        return _india_name_map_cache
     out: dict[str, str] = {}
     try:
         from engine.portfolio_service import NSE_STOCK_LOOKUP
@@ -500,6 +717,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         errors          — list of "<source>: <reason>" strings
     """
     errors: list[str] = []
+
+    # ── Pre-warm the India name → NSE symbol map from kite_instruments ────────
+    # Cheap (single SELECT, TTL-cached for 6h); ensures ticker extraction can
+    # tag mid- and small-caps (NMDC, ZEEL, BHEL, INDIGO, …) and not just the
+    # ~59 names in NSE_STOCK_LOOKUP.
+    await _build_india_name_map(session)
 
     # ── Fetch from all sources ────────────────────────────────────────────────
     newsapi_rows, finnhub_rows, newsdata_rows, rss_rows = await asyncio.gather(
