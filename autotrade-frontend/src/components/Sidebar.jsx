@@ -7,7 +7,7 @@ import {
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
   Bot, Stethoscope, FileText, BrainCircuit, Sparkles,
 } from 'lucide-react';
-import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist } from '../api/client';
+import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
 const MAIN_NAV = [
   { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
