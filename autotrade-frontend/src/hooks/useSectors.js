@@ -27,8 +27,8 @@ export function useSectors() {
   const selectSector = useCallback(async (sectorKey) => {
     if (!sectorKey) { setSelectedSector(null); return }
     try {
-      const r    = await apiFetch(`/api/v1/india/sectors/${sectorKey}`)
-      const data = await r.json()
+      // apiFetch returns parsed JSON directly.
+      const data = await apiFetch(`/api/v1/india/sectors/${sectorKey}`)
       setSelectedSector(data)
     } catch { /* ignore */ }
   }, [])
@@ -36,8 +36,7 @@ export function useSectors() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const r    = await apiFetch('/api/v1/india/sectors/refresh', { method: 'POST' })
-      const data = await r.json()
+      const data = await apiFetch('/api/v1/india/sectors/refresh', { method: 'POST' })
       setSectors(Array.isArray(data) ? data : [])
       const rot = await apiFetch('/api/v1/india/sectors/rotation')
       setRotation(rot)

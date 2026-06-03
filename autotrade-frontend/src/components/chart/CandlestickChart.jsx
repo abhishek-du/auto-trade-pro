@@ -328,9 +328,9 @@ export default function CandlestickChart({
     setLoading(true)
     setError(null)
     try {
-      const r   = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}?timeframe=${tf}&limit=500`)
-      const res = await r.json()
-      if (!r.ok) throw new Error(res.detail || 'Fetch failed')
+      // apiFetch already returns parsed JSON and throws on non-2xx, so
+      // there's no Response object to call .json()/.ok on.
+      const res = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}?timeframe=${tf}&limit=500`)
       const { candles, current_price } = res
       if (!candles?.length) { setError('No candle data for this timeframe'); return }
 
@@ -369,8 +369,8 @@ export default function CandlestickChart({
 
   const loadIndicators = useCallback(async (tf) => {
     try {
-      const r   = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/indicators?timeframe=${tf}&limit=500`)
-      const ind = await r.json()
+      // apiFetch already returns parsed JSON.
+      const ind = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/indicators?timeframe=${tf}&limit=500`)
       const s   = seriesRefs.current
 
       if (ind.ema20?.length)  s.ema20?.setData(ind.ema20)
@@ -395,18 +395,26 @@ export default function CandlestickChart({
   }, [symbol])
 
   // ── WebSocket setup ─────────────────────────────────────────────────────────
+  // Build the WS URL relative to the page origin so the Vite dev proxy can
+  // forward it. The previous hardcoded ws://host:8000 bypassed the proxy,
+  // which (a) breaks in any deploy where backend isn't on :8000 and (b) in
+  // dev raced the React StrictMode double-mount: the first WS opened and
+  // was closed by the cleanup before the backend could send "init", which
+  // is what we were seeing as "init failed: WebSocketDisconnect" in the
+  // backend logs.
   const setupWS = useCallback((tf) => {
     wsRef.current?.close()
-    const host = window.location.hostname
-    const port = '8000'
-    const sym  = encodeURIComponent(symbol)
-    const ws   = new WebSocket(`ws://${host}:${port}/ws/candles/${sym}?timeframe=${tf}`)
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const sym   = encodeURIComponent(symbol)
+    const ws    = new WebSocket(`${proto}//${window.location.host}/ws/candles/${sym}?timeframe=${tf}`)
     wsRef.current = ws
+
+    let pollId = null
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
-        if (msg.type === 'candle_update') {
+        if (msg.type === 'candle_update' && msg.candle) {
           seriesRefs.current.candle?.update(msg.candle)
           if (seriesRefs.current.volume) {
             seriesRefs.current.volume.update({
@@ -421,27 +429,39 @@ export default function CandlestickChart({
       } catch { /* ignore parse errors */ }
     }
 
-    ws.onerror = () => {
-      // REST polling fallback
-      const id = setInterval(() => {
-        apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/latest?timeframe=${tf}`)
-          .then(r => r.json())
-          .then(c => {
-            if (c?.time) {
-              seriesRefs.current.candle?.update(c)
-              setLatestOhlcv(prev => ({ ...prev, ...c }))
-            }
-          }).catch(() => {})
+    const startPollingFallback = () => {
+      if (pollId) return
+      pollId = setInterval(async () => {
+        try {
+          // apiFetch already returns parsed JSON — don't call .json() again.
+          const c = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/latest?timeframe=${tf}`)
+          if (c?.time) {
+            seriesRefs.current.candle?.update(c)
+            setLatestOhlcv(prev => ({ ...prev, ...c }))
+          }
+        } catch { /* ignore */ }
       }, 15000)
-      return () => clearInterval(id)
+    }
+
+    ws.onerror = startPollingFallback
+    ws.onclose = (ev) => {
+      if (!ev.wasClean) startPollingFallback()
+    }
+
+    // Return a cleanup function that stops both the WS and any fallback poller.
+    return () => {
+      ws.close()
+      if (pollId) clearInterval(pollId)
     }
   }, [symbol])
 
   // ── On timeframe / symbol change ─────────────────────────────────────────────
   useEffect(() => {
     loadCandles(timeframe)
-    setupWS(timeframe)
-    return () => wsRef.current?.close()
+    const cleanupWS = setupWS(timeframe)
+    return () => {
+      cleanupWS?.()
+    }
   }, [symbol, timeframe, loadCandles, setupWS])
 
   // ── Derived display values ──────────────────────────────────────────────────
