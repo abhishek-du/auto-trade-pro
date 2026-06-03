@@ -25,7 +25,11 @@ const INDIA_NAV = [
   { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
   { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
   { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
-  { to: '/portfolio-tracker', label: 'My Portfolio',    Icon: Briefcase,   portfolioTracker: true },
+  // Unified portfolio. The Zerodha entry below was previously a separate
+  // read-only Kite mirror; it now points at the tracker UI which supports
+  // manual stocks + MFs + Sync-from-Kite + agent paper-trading activity.
+  // /portfolio-tracker remains as a backwards-compat alias.
+  { to: '/zerodha',          label: 'Zerodha',          Icon: Briefcase,   portfolioTracker: true, zerodha: true },
   { to: '/doctor',           label: 'Portfolio Doctor', Icon: Stethoscope, doctorBadge: true },
   { to: '/earnings',         label: 'Earnings AI',      Icon: FileText,    earningsBadge: true },
   { to: '/intelligence',     label: 'Intelligence Hub', Icon: Sparkles,    hubBadge: true },
@@ -33,8 +37,6 @@ const INDIA_NAV = [
   { to: '/calendar',          label: 'Market Calendar', Icon: CalendarDays, calendar: true },
   { to: '/india',           label: 'India Overview', Icon: Globe      },
   { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
-  { to: '/zerodha',         label: 'Zerodha',        Icon: Zap,         zerodha: true     },
-  { to: '/portfolio',       label: 'Simulator',      Icon: FlaskConical },
   { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
   { to: '/sip',             label: 'SIP Goals',      Icon: Target     },
   { to: '/tax',             label: 'Tax Calculator',    Icon: Receipt,   },
