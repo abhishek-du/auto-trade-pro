@@ -527,14 +527,95 @@ def _score_to_signal(score: float) -> str:
     return "STRONG_SELL"
 
 
+# Kite's historical-data API caps at 3 req/sec. Both watchlist-analysis and
+# auto-scan fan out asyncio.gather([_analyse_symbol(s) for s in universe])
+# over 50+ symbols at once. Without a gate, every call past the first 3
+# returns 429.
+#
+# Semaphore: 3 in-flight calls match Kite's burst budget so the universe
+# scan completes as fast as the upstream allows. Throttle: 0.35s minimum
+# between request *starts* keeps the observed rate at ~2.8 req/sec even
+# when responses come back quickly. Both gates are module-level so they
+# serialize across both routes — an auto-scan can't blow through the
+# budget mid-watchlist.
+_KITE_HISTORICAL_SEMAPHORE = asyncio.Semaphore(3)
+_KITE_HISTORICAL_MIN_INTERVAL = 0.35   # seconds between request starts
+_kite_historical_last_call: float = 0.0
+_kite_historical_lock = asyncio.Lock()
+
+
+async def _kite_throttle() -> None:
+    """Block until enough time has passed since the last Kite historical call."""
+    global _kite_historical_last_call
+    async with _kite_historical_lock:
+        import time as _t
+        now = _t.monotonic()
+        delta = now - _kite_historical_last_call
+        if delta < _KITE_HISTORICAL_MIN_INTERVAL:
+            await asyncio.sleep(_KITE_HISTORICAL_MIN_INTERVAL - delta)
+        _kite_historical_last_call = _t.monotonic()
+
+
+async def _candles_from_db(sym_ns: str, from_date: str) -> list[dict]:
+    """Return cached daily candles for ``sym_ns`` from the candles table.
+
+    Empty list when the cache is stale (latest bar > 2 days behind today's
+    NSE close) or absent. Lets the watchlist/auto-scan endpoints skip Kite
+    entirely when the daily kite_sync_candles task has already populated
+    the bar — a single SELECT is dramatically cheaper than ~80 Kite calls.
+    """
+    from db.database import AsyncSessionLocal
+    from db.models import Candle as _Candle
+    from sqlalchemy import select as _select
+    cutoff = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            _select(_Candle)
+            .where(
+                _Candle.symbol == sym_ns,
+                _Candle.timeframe == "1d",
+                _Candle.timestamp >= datetime.datetime.fromisoformat(from_date),
+            )
+            .order_by(_Candle.timestamp.asc())
+        )).scalars().all()
+    if not rows:
+        return []
+    # Staleness check: the most recent cached bar must be from within the
+    # last 2 calendar days. NSE is closed on weekends so this won't fire
+    # spuriously across a normal Monday morning.
+    latest = rows[-1].timestamp.date().isoformat()
+    if latest < cutoff:
+        return []
+    return [
+        {
+            "timestamp": r.timestamp,
+            "open":      float(r.open),
+            "high":      float(r.high),
+            "low":       float(r.low),
+            "close":     float(r.close),
+            "volume":    float(r.volume),
+        }
+        for r in rows
+    ]
+
+
 async def _analyse_symbol(sym: str, has_token: bool, ltp_map: dict, from_date: str, to_date: str) -> dict:
-    """Fetch 120d daily candles + compute indicators for one NSE symbol."""
+    """Fetch 120d daily candles + compute indicators for one NSE symbol.
+
+    Resolution order: DB cache → Kite historical (rate-limited) → yfinance.
+    The DB cache short-circuit means watchlist-analysis and auto-scan only
+    hit Kite when the daily candle-sync task hasn't run for the symbol.
+    """
     from crawler.india_price_feed import fetch_nse_candles
 
     try:
-        candles = []
-        if has_token:
-            candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
+        # Fast path: serve from the daily candles cache when fresh.
+        candles = await _candles_from_db(f"{sym}.NS", from_date)
+
+        if not candles and has_token:
+            async with _KITE_HISTORICAL_SEMAPHORE:
+                await _kite_throttle()
+                candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
 
         if not candles:
             loop = asyncio.get_event_loop()
@@ -652,9 +733,16 @@ async def deep_analysis(symbol: str):
     from_date = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
 
     # ── Fetch historical candles ──────────────────────────────────────────────
-    candles = []
-    if has_token:
-        candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
+    # Try the DB cache first — same rationale as _analyse_symbol. Only call
+    # Kite when the cached series is stale (>2 days behind) or missing.
+    candles = await _candles_from_db(f"{sym}.NS", from_date)
+    if not candles and has_token:
+        # Share the global throttle with _analyse_symbol so a deep-analysis
+        # request issued while watchlist-analysis is in flight can't tip the
+        # combined rate over Kite's 3 req/sec budget.
+        async with _KITE_HISTORICAL_SEMAPHORE:
+            await _kite_throttle()
+            candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
 
     if not candles:
         loop = asyncio.get_event_loop()

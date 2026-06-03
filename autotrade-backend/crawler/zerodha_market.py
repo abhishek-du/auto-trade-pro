@@ -421,6 +421,11 @@ async def sync_kite_candles_to_db(session: AsyncSession) -> dict:
     total_candles   = 0
     errors: list[str] = []
 
+    # Kite caps the historical endpoint at 3 req/sec. After the startup
+    # hydration NSE_TOKENS holds ~9.8k symbols, so a tight serial loop would
+    # still burst above the limit on cached connections. Sleep 0.4s between
+    # iterations → ~2.5 req/sec, with comfortable headroom.
+    import asyncio as _asyncio
     for symbol in NSE_TOKENS:
         try:
             candles = await get_kite_historical(symbol, from_date, to_date, interval, session)
@@ -431,6 +436,7 @@ async def sync_kite_candles_to_db(session: AsyncSession) -> dict:
         except Exception as exc:
             errors.append(f"{symbol}: {exc}")
             logger.warning(f"[zerodha_market] Candle sync error for {symbol}: {exc}")
+        await _asyncio.sleep(0.4)
 
     result = {
         "symbols_synced":    symbols_synced,
