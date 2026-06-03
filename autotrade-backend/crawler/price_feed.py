@@ -7,7 +7,10 @@ All data is OHLCV only — no real trading signals are generated here.
 """
 
 import asyncio
+import contextlib as _contextlib
 import datetime as _dt
+import io as _io
+import logging as _logging
 import time
 from datetime import datetime
 
@@ -20,6 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import Candle
 from utils.config import settings
 from utils.logger import logger
+
+# yfinance writes its own "$SYMBOL: possibly delisted" diagnostics directly
+# via print() AND through a "yfinance" / "peewee" stdlib logger. Both bypass
+# our loguru handler. Silence the loggers once at import time; the print()
+# path is handled per-call below via redirect_stdout/stderr.
+for _name in ("yfinance", "peewee", "urllib3", "yfinance.utils"):
+    _logging.getLogger(_name).setLevel(_logging.CRITICAL)
 
 # ── Symbol helpers ────────────────────────────────────────────────────────────
 
@@ -98,7 +108,13 @@ async def fetch_candles_yfinance(
 
     def _sync_fetch() -> list[dict]:
         try:
-            df = yf.Ticker(yf_sym).history(period=period, interval=yf_interval)
+            # Capture yfinance's chatty stdout/stderr ($SYMBOL: possibly
+            # delisted spam on transient Yahoo errors). The data return is
+            # what we actually care about — empty df below already signals
+            # "nothing usable" without yfinance writing to the process log.
+            _buf_out, _buf_err = _io.StringIO(), _io.StringIO()
+            with _contextlib.redirect_stdout(_buf_out), _contextlib.redirect_stderr(_buf_err):
+                df = yf.Ticker(yf_sym).history(period=period, interval=yf_interval)
             if df.empty:
                 logger.warning(f"yfinance: empty response for {yf_sym} ({interval})")
                 return []

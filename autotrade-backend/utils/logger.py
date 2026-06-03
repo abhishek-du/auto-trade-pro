@@ -1,8 +1,19 @@
 # Loguru-based logger shared across the entire application.
 # Structured JSON output in production; coloured console output in dev.
 
+import logging as _logging
 import sys
 from loguru import logger
+
+# Silence noisy third-party stdlib loggers that flood the console under
+# Celery prefork and otherwise bypass our loguru handler:
+#   yfinance — "$SYMBOL: possibly delisted" on Yahoo transient errors
+#   peewee   — yfinance's optional SQLite cache layer chatter
+#   urllib3  — connection-pool reset warnings during yfinance retries
+# Imported once here because utils.logger is imported by virtually every
+# module in the project.
+for _name in ("yfinance", "yfinance.utils", "peewee", "urllib3", "urllib3.connectionpool"):
+    _logging.getLogger(_name).setLevel(_logging.CRITICAL)
 
 # Remove the default handler so we control formatting ourselves
 logger.remove()
