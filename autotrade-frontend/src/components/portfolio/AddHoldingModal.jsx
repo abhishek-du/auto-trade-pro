@@ -157,9 +157,11 @@ function MFTab({ onAdd, onClose }) {
     debounceRef.current = setTimeout(async () => {
       setSearching(true)
       try {
-        const r = await apiFetch(`/api/v1/portfolios/search/mf?q=${encodeURIComponent(query)}`)
-        setResults(r.ok ? await r.json() : [])
-      } finally { setSearching(false) }
+        // apiFetch returns parsed JSON and throws on non-2xx — no .ok / .json() shim.
+        const data = await apiFetch(`/api/v1/portfolios/search/mf?q=${encodeURIComponent(query)}`)
+        setResults(Array.isArray(data) ? data : [])
+      } catch { setResults([]) }
+      finally { setSearching(false) }
     }, 300)
     return () => clearTimeout(debounceRef.current)
   }, [query])
@@ -169,11 +171,8 @@ function MFTab({ onAdd, onClose }) {
     setResults([])
     setNavLoading(true)
     try {
-      const r = await apiFetch(`/api/v1/portfolios/search/mf/${fund.scheme_code}/nav`)
-      if (r.ok) {
-        const d = await r.json()
-        setNav(d.nav.toFixed(4))
-      }
+      const d = await apiFetch(`/api/v1/portfolios/search/mf/${fund.scheme_code}/nav`)
+      if (d?.nav != null) setNav(d.nav.toFixed(4))
     } catch {}
     finally { setNavLoading(false) }
   }
