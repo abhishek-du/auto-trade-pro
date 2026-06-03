@@ -235,7 +235,14 @@ def _get_token(symbol: str) -> int | None:
 async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
     """Fetch last traded price for a list of .NS symbols via Kite LTP endpoint.
 
-    Returns {symbol: {price, last_price, change, change_pct}}
+    Returns {symbol: {price, last_price, change, change_pct}}.
+
+    Batches the input in chunks of 200 instruments per call: Kite's LTP
+    endpoint encodes instruments in the URL query string, and the gateway
+    rejects URLs longer than ~8KB with ``URL component 'query' too long``.
+    With NSE_TOKENS hydrated to ~9,800 symbols post-startup, a one-shot
+    call now overflows immediately — chunking keeps each request well
+    under the cap.
     """
     global _kite_quotes_available
 
@@ -244,31 +251,37 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
         return {}
 
     instruments = [_symbol_to_kite(s) for s in symbols]
-    try:
-        raw: dict = await kite.get_ltp(instruments)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 403:
-            _kite_quotes_available = False
-            _handle_market_data_403("LTP/quote")
-        else:
-            logger.warning(f"[zerodha_market] LTP fetch failed: {exc}")
-        return {}
-    except Exception as exc:
-        logger.warning(f"[zerodha_market] LTP fetch failed: {exc}")
+    if not instruments:
         return {}
 
+    _CHUNK = 200   # ~28 chars per "NSE:SYMBOL," × 200 ≈ 5.6KB query, safe margin
     result: dict[str, dict] = {}
-    for kite_sym, data in raw.items():
-        # Reverse-map kite_sym ("NSE:RELIANCE") to our symbol ("RELIANCE.NS")
-        bare = kite_sym.split(":")[-1]
-        our_sym = f"{bare}.NS"
-        ltp = float(data.get("last_price", 0.0))
-        result[our_sym] = {
-            "price":       ltp,
-            "last_price":  ltp,
-            "change":      0.0,   # LTP endpoint doesn't include change
-            "change_pct":  0.0,
-        }
+    for i in range(0, len(instruments), _CHUNK):
+        chunk = instruments[i:i + _CHUNK]
+        try:
+            raw: dict = await kite.get_ltp(chunk)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                _kite_quotes_available = False
+                _handle_market_data_403("LTP/quote")
+                return result
+            logger.warning(f"[zerodha_market] LTP chunk {i}+{len(chunk)} failed: {exc}")
+            continue
+        except Exception as exc:
+            logger.warning(f"[zerodha_market] LTP chunk {i}+{len(chunk)} failed: {exc}")
+            continue
+
+        for kite_sym, data in raw.items():
+            # Reverse-map kite_sym ("NSE:RELIANCE") to our symbol ("RELIANCE.NS")
+            bare = kite_sym.split(":")[-1]
+            our_sym = f"{bare}.NS"
+            ltp = float(data.get("last_price", 0.0))
+            result[our_sym] = {
+                "price":       ltp,
+                "last_price":  ltp,
+                "change":      0.0,   # LTP endpoint doesn't include change
+                "change_pct":  0.0,
+            }
     return result
 
 

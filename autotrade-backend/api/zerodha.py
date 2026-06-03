@@ -453,11 +453,30 @@ async def live_prices(
     if not kite.access_token:
         return {"source": "none", "prices": {}}
 
+    # When no ?symbols= filter is given, fall back to the configured
+    # watchlist (large + mid caps + extras). Returning all 9,800 hydrated
+    # NSE_TOKENS makes the URL blow Kite's 8KB query cap AND wastes a
+    # large chunk of the LTP rate budget on symbols nobody asked for.
     from crawler.zerodha_market import NSE_TOKENS
-    sym_list = (
-        [s.strip() for s in symbols.split(",") if s.strip()]
-        if symbols else list(NSE_TOKENS.keys())
-    )
+    if symbols:
+        sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    else:
+        watchlist = (
+            list(getattr(settings, "WATCHLIST_NSE_LARGE_CAP", []))
+            + list(getattr(settings, "WATCHLIST_NSE_MID_CAP", []))
+            + _EXTRA_NSE
+        )
+        # Dedup but preserve order
+        seen: set[str] = set()
+        sym_list = []
+        for s in watchlist:
+            bare = s.replace(".NS", "").strip()
+            if bare and bare not in seen:
+                seen.add(bare)
+                sym_list.append(f"{bare}.NS")
+        # Defensive cap — if the watchlist ever balloons, don't drag the
+        # whole NSE_TOKENS map into the request.
+        sym_list = sym_list[:500]
     try:
         prices = await get_live_prices(sym_list)
         return {"source": "rest_ltp", "prices": prices}

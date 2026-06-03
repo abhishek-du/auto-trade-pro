@@ -18,11 +18,25 @@ Do NOT import or install NSEpy (dead since 2018) or jugaad-trader
 from __future__ import annotations
 
 import asyncio
+import contextlib as _contextlib
 import datetime
+import io as _io
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
+
+
+def _silently(fn):
+    """Run a sync yfinance callable with stdout/stderr captured.
+
+    yfinance prints "$SYMBOL: possibly delisted" to stdout when Yahoo
+    transiently fails; those lines bypass Python logging and flood the
+    process log. Empty-DataFrame return below is sufficient to detect
+    the failure programmatically — we don't need the chatter.
+    """
+    with _contextlib.redirect_stdout(_io.StringIO()), _contextlib.redirect_stderr(_io.StringIO()):
+        return fn()
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.price_feed import save_candles_to_db
@@ -145,8 +159,7 @@ def fetch_nse_candles(
     Returns ``[]`` on any error — never raises.
     """
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
+        df = _silently(lambda: yf.Ticker(symbol).history(period=period, interval=interval))
 
         if df.empty:
             logger.warning(f"yfinance NSE: empty response for {symbol} ({interval})")
@@ -202,7 +215,7 @@ def fetch_nifty_indices() -> dict:
 
     for sym, name in NIFTY_INDEX_SYMBOLS.items():
         try:
-            info = yf.Ticker(sym).fast_info
+            info = _silently(lambda s=sym: yf.Ticker(s).fast_info)
             price      = _fast_info_float(info, "last_price")
             prev_close = _fast_info_float(info, "previous_close")
             change     = price - prev_close if prev_close else 0.0
@@ -239,7 +252,9 @@ def fetch_india_vix() -> float:
     """
     # Primary: yfinance history — more reliable than fast_info for index tickers
     try:
-        df = yf.Ticker("^INDIAVIX").history(period="5d", interval="1d", auto_adjust=False)
+        df = _silently(lambda: yf.Ticker("^INDIAVIX").history(
+            period="5d", interval="1d", auto_adjust=False
+        ))
         if not df.empty:
             value = float(df["Close"].dropna().iloc[-1])
             if value > 0:
@@ -250,8 +265,10 @@ def fetch_india_vix() -> float:
 
     # Fallback: yfinance download (different code path, sometimes succeeds when Ticker fails)
     try:
-        df2 = yf.download("^INDIAVIX", period="5d", interval="1d",
-                          progress=False, auto_adjust=False)
+        df2 = _silently(lambda: yf.download(
+            "^INDIAVIX", period="5d", interval="1d",
+            progress=False, auto_adjust=False
+        ))
         if not df2.empty:
             value = float(df2["Close"].dropna().iloc[-1])
             if value > 0:
