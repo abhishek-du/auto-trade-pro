@@ -157,6 +157,12 @@ export default function CandlestickChart({
   showVolume      = true,
   embedded        = false,
   onClose         = null,
+  // When true, the chart fills its parent (flex-1 + h-full) instead of
+  // taking a fixed pixel height. Used by the /chart page so a window
+  // resize doesn't strand the chart at its mount-time pixel size and
+  // doesn't clip the SignalPanel rows (Supertrend, EMA trend) on
+  // shorter viewports.
+  fillParent      = false,
 }) {
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
@@ -298,9 +304,15 @@ export default function CandlestickChart({
       }
     })
 
-    // Resize observer
+    // Resize observer — must track both width AND height. lightweight-charts
+    // does not auto-fit; without applying the new height the canvas keeps
+    // its mount-time dimensions and gets clipped when the parent shrinks
+    // (e.g. when the SignalPanel renders below it on the /chart page).
     const ro = new ResizeObserver(entries => {
-      chart.applyOptions({ width: entries[0].contentRect.width })
+      const { width, height } = entries[0].contentRect
+      if (width > 0 && height > 0) {
+        chart.applyOptions({ width, height })
+      }
     })
     ro.observe(containerRef.current)
 
@@ -476,8 +488,22 @@ export default function CandlestickChart({
   const priceUp   = priceDiff == null ? null : priceDiff >= 0
 
   return (
-    <div className="flex flex-col bg-[#080e1c] rounded-xl overflow-hidden border border-border"
-      style={{ height: embedded ? 'auto' : height }}>
+    <div
+      className={[
+        'flex flex-col bg-[#080e1c] rounded-xl border border-border',
+        // Only clip overflow in embedded mode (used inside panels). When
+        // rendered on the dedicated /chart page (fillParent) or with the
+        // SignalPanel below the chart, we must NOT clip — otherwise the
+        // SignalPanel bullets (Supertrend, EMA Trend, …) get hidden when
+        // the viewport is shorter than the chart's natural height.
+        embedded ? 'overflow-hidden' : '',
+        // fillParent: grow with parent flexbox + claim full height of
+        // its container. Otherwise fall back to a fixed pixel height for
+        // legacy callers.
+        fillParent ? 'flex-1 h-full min-h-0' : '',
+      ].filter(Boolean).join(' ')}
+      style={fillParent || embedded ? undefined : { height }}
+    >
 
       {/* ── Row 1: Stock info + price ─────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 gap-4 flex-wrap">
