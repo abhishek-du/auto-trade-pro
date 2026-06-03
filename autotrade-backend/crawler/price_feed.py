@@ -150,7 +150,19 @@ async def fetch_candles_yfinance(
             logger.error(f"yfinance fetch failed [{yf_sym} {interval}]: {exc}")
             return []
 
-    candles = await asyncio.get_event_loop().run_in_executor(None, _sync_fetch)
+    # Hard timeout per symbol — yfinance has no native timeout and can hang
+    # for minutes when Yahoo's gateway is degraded. Without this, the
+    # market_scan Celery task can blow past its 600s hard limit on a single
+    # bad symbol and get SIGKILLed.
+    try:
+        candles = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _sync_fetch),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"yfinance timeout (>20s) for {yf_sym} ({interval}) — skipping")
+        return []
+
     if candles:
         logger.info(
             f"yfinance  ✓  {symbol:<12}  {len(candles):4d} candles  "

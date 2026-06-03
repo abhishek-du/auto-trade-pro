@@ -571,13 +571,19 @@ async def run_india_price_crawl(
     total_symbols:  int        = 0
     errors:         list[str]  = []
 
-    # Step 1 — fetch candles for every symbol sequentially (avoids yfinance flood)
+    # Step 1 — fetch candles for every symbol sequentially (avoids yfinance flood).
+    # Per-symbol 20s timeout: yfinance has no native timeout and can hang for
+    # minutes when Yahoo's gateway is degraded. Without this guard a single
+    # bad symbol burned the whole task budget (Celery hard-limit 600s).
     for symbol in all_symbols:
         logger.info(f"  →  Fetching candles for {symbol} ...")
         try:
-            candles = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda s=symbol: fetch_nse_candles(s, interval="1h"),
+            candles = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda s=symbol: fetch_nse_candles(s, interval="1h"),
+                ),
+                timeout=20.0,
             )
             if candles:
                 total_symbols += 1
@@ -586,6 +592,9 @@ async def run_india_price_crawl(
             else:
                 logger.warning(f"  ✗  {symbol}: no candle data returned")
                 errors.append(f"{symbol}: empty response")
+        except asyncio.TimeoutError:
+            logger.warning(f"  ✗  {symbol}: yfinance timeout (>20s)")
+            errors.append(f"{symbol}: timeout")
         except Exception as exc:
             logger.warning(f"  ✗  Failed to fetch {symbol}: {exc}")
             errors.append(f"{symbol}: {exc}")

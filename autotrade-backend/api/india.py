@@ -338,14 +338,19 @@ async def get_candles(
     if len(rows) < 50:
         logger.info(f"[candles] DB sparse ({len(rows)}) for {sym}/{timeframe} — fetching from yfinance")
         try:
-            fresh = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: fetch_nse_candles(sym, interval=cfg["yf_interval"], period=cfg["yf_period"]),
+            fresh = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: fetch_nse_candles(sym, interval=cfg["yf_interval"], period=cfg["yf_period"]),
+                ),
+                timeout=20.0,
             )
             if fresh:
                 await save_candles_to_db(fresh, db)
                 await db.commit()
                 rows = await _query_db()
+        except asyncio.TimeoutError:
+            logger.warning(f"[candles] yfinance timeout (>20s) for {sym}")
         except Exception as exc:
             logger.warning(f"[candles] yfinance fetch failed for {sym}: {exc}")
 

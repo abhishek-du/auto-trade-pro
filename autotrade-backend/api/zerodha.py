@@ -637,10 +637,15 @@ async def _analyse_symbol(sym: str, has_token: bool, ltp_map: dict, from_date: s
                 candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
 
         if not candles:
-            loop = asyncio.get_event_loop()
-            candles = await loop.run_in_executor(
-                None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
-            )
+            try:
+                candles = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+                    ),
+                    timeout=20.0,
+                )
+            except asyncio.TimeoutError:
+                candles = []
 
         if not candles:
             return {"symbol": sym, "error": "No historical data"}
@@ -764,10 +769,15 @@ async def deep_analysis(symbol: str):
             candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
 
     if not candles:
-        loop = asyncio.get_event_loop()
-        candles = await loop.run_in_executor(
-            None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
-        )
+        try:
+            candles = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+                ),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            candles = []
 
     if not candles:
         raise HTTPException(status_code=404, detail=f"No historical data for {sym}")
