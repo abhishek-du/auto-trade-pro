@@ -270,7 +270,13 @@ def fetch_india_vix() -> float:
             progress=False, auto_adjust=False
         ))
         if not df2.empty:
-            value = float(df2["Close"].dropna().iloc[-1])
+            # yf.download returns a MultiIndex columns DataFrame when called
+            # with a single ticker as a string, so df2["Close"] is a 1-col
+            # DataFrame. Squeeze before float() to avoid the pandas
+            # FutureWarning about implicit float-on-Series casts.
+            close_series = df2["Close"].squeeze("columns") if hasattr(df2["Close"], "squeeze") else df2["Close"]
+            close_clean = close_series.dropna()
+            value = float(close_clean.iloc[-1]) if len(close_clean) else 0.0
             if value > 0:
                 logger.info(f"India VIX: {value:.2f}  (source: yfinance download)")
                 return value

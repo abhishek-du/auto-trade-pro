@@ -79,14 +79,79 @@ def on_ticks(ws, ticks: list[dict]) -> None:
 
 
 def on_connect(ws, response) -> None:
-    """Subscribe all configured tokens in MODE_FULL on connect."""
+    """Subscribe the configured watchlist tokens on connect.
+
+    Kite's WebSocket caps subscriptions per connection:
+      MODE_LTP    — ~3000 instruments  (least data, only last price)
+      MODE_QUOTE  — ~3000 instruments  (LTP + OHLC + volume + change)
+      MODE_FULL   — ~1000 instruments  (everything incl. 5-level depth)
+
+    Since the post-startup hydration loads ~9,800 tokens but we only
+    actually display ~80–100 of them, subscribe in two tiers:
+      1. The watchlist (large + mid + extras) + indices in MODE_QUOTE.
+      2. Anything else, capped at the remaining budget, in MODE_LTP.
+
+    This stops the "Can't subscribe to more than 4000 instruments" error
+    AND keeps the rich quote data flowing for the symbols the UI cares
+    about.
+    """
     global CONNECTED
     CONNECTED = True
-    tokens = list(set(NSE_TOKENS.values()) | set(INDEX_TOKENS.values()))
+
+    _QUOTE_BUDGET = 3000   # safe headroom below Kite's published cap
+    _LTP_TOTAL_CAP = 3000  # MODE_LTP shares the same connection budget
+
+    from utils.config import settings as _settings
+
+    # Build the priority list: hand-picked symbols first
+    priority_symbols: list[str] = []
+    seen: set[str] = set()
+    for src in (
+        getattr(_settings, "WATCHLIST_NSE_LARGE_CAP", []),
+        getattr(_settings, "WATCHLIST_NSE_MID_CAP", []),
+    ):
+        for s in src:
+            bare = (s or "").replace(".NS", "").strip().upper()
+            if bare and bare not in seen:
+                seen.add(bare)
+                priority_symbols.append(f"{bare}.NS")
+    # Include all indices (NIFTY 50 / Bank NIFTY etc.) — small, always useful.
+    for idx_sym in INDEX_TOKENS:
+        if idx_sym not in seen:
+            seen.add(idx_sym)
+            priority_symbols.append(idx_sym)
+
+    priority_tokens: list[int] = []
+    for sym in priority_symbols:
+        tok = NSE_TOKENS.get(sym) or INDEX_TOKENS.get(sym)
+        if tok and tok not in priority_tokens:
+            priority_tokens.append(tok)
+    priority_tokens = priority_tokens[:_QUOTE_BUDGET]
+
+    # Fill remaining budget from the hydrated map (everything else NSE has).
+    remaining_budget = max(0, _LTP_TOTAL_CAP - len(priority_tokens))
+    bulk_tokens: list[int] = []
+    if remaining_budget > 0:
+        priority_set = set(priority_tokens)
+        for tok in NSE_TOKENS.values():
+            if tok in priority_set:
+                continue
+            bulk_tokens.append(tok)
+            if len(bulk_tokens) >= remaining_budget:
+                break
+
     try:
-        ws.subscribe(tokens)
-        ws.set_mode(ws.MODE_FULL, tokens)
-        logger.info(f"[zerodha_ticker] Connected — subscribed {len(tokens)} tokens (MODE_FULL)")
+        if priority_tokens:
+            ws.subscribe(priority_tokens)
+            ws.set_mode(ws.MODE_QUOTE, priority_tokens)
+        if bulk_tokens:
+            ws.subscribe(bulk_tokens)
+            ws.set_mode(ws.MODE_LTP, bulk_tokens)
+        logger.info(
+            f"[zerodha_ticker] Connected — subscribed "
+            f"{len(priority_tokens)} QUOTE + {len(bulk_tokens)} LTP "
+            f"(of {len(NSE_TOKENS)} hydrated tokens)"
+        )
     except Exception as exc:
         logger.warning(f"[zerodha_ticker] Subscribe failed: {exc}")
 
