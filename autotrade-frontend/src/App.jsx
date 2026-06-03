@@ -56,7 +56,12 @@ export default function App() {
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
               <Route path="/backtest"      element={<Backtest />}          />
               <Route path="/portfolio"    element={<Portfolio />}         />
-              <Route path="/zerodha"      element={<Zerodha />}           />
+              {/* /zerodha now points at the unified portfolio (manual + MFs +
+                  Sync-from-Kite). The legacy Kite Connect mirror page (OAuth,
+                  GTT, MF orders, advanced features) is reachable at
+                  /zerodha/connect. */}
+              <Route path="/zerodha"          element={<PortfolioTracker />}  />
+              <Route path="/zerodha/connect"  element={<Zerodha />}           />
               <Route path="/live-market"  element={<LiveMarket />}        />
               <Route path="/watchlist"       element={<Watchlist />}         />
               <Route path="/chart"          element={<Chart />}             />

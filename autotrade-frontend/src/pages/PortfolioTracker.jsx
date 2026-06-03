@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2, ExternalLink, Zap, Stethoscope } from 'lucide-react'
+import { Briefcase, Plus, RefreshCw, List, PieChart as PieIcon, Receipt, BarChart2, ExternalLink, Zap, Stethoscope, BrainCircuit, AlertTriangle } from 'lucide-react'
 import toast from 'react-hot-toast'
 import LoadingSpinner from '../components/LoadingSpinner'
 import { usePortfolioTracker } from '../hooks/usePortfolioTracker'
+import { useAgent } from '../hooks/useAgent'
 import PortfolioSelector from '../components/portfolio/PortfolioSelector'
 import SummaryCards from '../components/portfolio/SummaryCards'
 import HoldingsTable from '../components/portfolio/HoldingsTable'
@@ -13,6 +14,116 @@ import AllocationCharts from '../components/portfolio/AllocationCharts'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
 import { formatINR } from '../utils/indianFormat'
 import { apiFetch } from '../api/client'
+
+/* ── Agent activity strip ──────────────────────────────────────────────────
+   Inline panel showing the AI agent's paper-trading state alongside the
+   user's real holdings. Surfaces wallet balance, open paper positions and
+   the last few decisions. Visible right inside the unified Zerodha page so
+   the user doesn't have to flip to /agent to see what the agent is doing.
+   Flips visual mode based on settings paper_mode (PAPER vs LIVE badge). */
+function AgentActivityPanel() {
+  const { status, decisions, positions } = useAgent()
+
+  if (!status) return null
+
+  const isEnabled  = !!status.enabled
+  const isPaper    = status.paper_mode !== false
+  const openCount  = Array.isArray(positions) ? positions.length : 0
+  const decoCount  = Array.isArray(decisions) ? decisions.length : 0
+  const equity     = Number(status?.portfolio?.equity ?? 0)
+  const cash       = Number(status?.portfolio?.cash ?? 0)
+
+  // Recent decisions feed — strictly informational, capped at 5
+  const recent = (decisions || []).slice(0, 5)
+
+  return (
+    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <BrainCircuit size={16} className="text-accent" />
+          <h3 className="text-slate-100 font-semibold text-sm">AI Agent</h3>
+          <span
+            className={[
+              'text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide border',
+              isPaper
+                ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+                : 'bg-red-500/15 text-red-300 border-red-500/30 animate-pulse',
+            ].join(' ')}
+          >
+            {isPaper ? 'Paper' : 'LIVE'}
+          </span>
+          <span
+            className={[
+              'text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide border',
+              isEnabled
+                ? 'bg-profit/15 text-profit border-profit/30'
+                : 'bg-surface/60 text-muted border-border',
+            ].join(' ')}
+          >
+            {isEnabled ? 'Enabled' : 'Disabled'}
+          </span>
+        </div>
+        <Link
+          to="/agent"
+          className="text-xs text-accent hover:text-accent/80 inline-flex items-center gap-1"
+        >
+          Open Agent <ExternalLink size={11} />
+        </Link>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+        <div>
+          <div className="text-muted text-[10px] uppercase tracking-wider">Equity</div>
+          <div className="text-slate-100 font-bold tabular-nums">{formatINR(equity)}</div>
+        </div>
+        <div>
+          <div className="text-muted text-[10px] uppercase tracking-wider">Cash</div>
+          <div className="text-slate-100 font-bold tabular-nums">{formatINR(cash)}</div>
+        </div>
+        <div>
+          <div className="text-muted text-[10px] uppercase tracking-wider">Open positions</div>
+          <div className="text-slate-100 font-bold tabular-nums">{openCount}</div>
+        </div>
+        <div>
+          <div className="text-muted text-[10px] uppercase tracking-wider">Decisions (24h)</div>
+          <div className="text-slate-100 font-bold tabular-nums">{decoCount}</div>
+        </div>
+      </div>
+
+      {!isPaper && (
+        <div className="flex items-center gap-2 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+          <AlertTriangle size={13} />
+          Live mode: the agent's next BUY will hit your real Zerodha account. Confirm before leaving this page.
+        </div>
+      )}
+
+      {recent.length > 0 && (
+        <div>
+          <div className="text-muted text-[10px] uppercase tracking-wider mb-1.5">Recent decisions</div>
+          <ul className="space-y-1">
+            {recent.map((d, i) => {
+              const action = (d.action || '').toUpperCase()
+              const actionCls = action === 'BUY'
+                ? 'text-profit' : action === 'SELL' ? 'text-loss' : 'text-muted'
+              return (
+                <li key={d.id ?? i} className="text-xs flex items-center gap-2 flex-wrap">
+                  <span className={`font-bold w-12 shrink-0 ${actionCls}`}>{action || '—'}</span>
+                  <span className="text-slate-200 font-mono text-[11px]">{d.symbol}</span>
+                  {d.confidence != null && (
+                    <span className="text-muted text-[10px]">{Number(d.confidence).toFixed(0)}% conf</span>
+                  )}
+                  {d.strategy && (
+                    <span className="text-muted text-[10px] truncate">· {d.strategy}</span>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function TaxQuickView({ portfolioId }) {
   const [status,  setStatus]  = useState(null)
@@ -143,9 +254,12 @@ export default function PortfolioTracker() {
         <div>
           <h1 className="text-slate-100 text-xl font-bold flex items-center gap-2">
             <Briefcase size={18} className="text-cyan" />
-            My Holdings
+            Zerodha Portfolio
           </h1>
-          <p className="text-muted text-sm mt-0.5">Track real stock holdings, live P&L and XIRR</p>
+          <p className="text-muted text-sm mt-0.5">
+            Stocks + mutual funds + Zerodha-synced holdings · agent paper-trades alongside until you flip
+            <code className="mx-1 px-1 py-0.5 rounded bg-surface/60 border border-border text-[10px]">PAPER_MODE=false</code>
+          </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -168,17 +282,18 @@ export default function PortfolioTracker() {
               <button
                 onClick={async () => {
                   try {
-                    const r = await apiFetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
-                    if (!r.ok) {
-                      const err = await r.json().catch(() => ({}))
-                      toast.error(err.detail || 'Zerodha sync failed — connect Zerodha first')
-                      return
-                    }
-                    const d = await r.json()
+                    // apiFetch returns parsed JSON and throws on non-2xx,
+                    // so an empty catch + error.message gives us both the
+                    // 4xx "connect Zerodha first" path and the transport
+                    // failure path without juggling Response objects.
+                    const d = await apiFetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
                     toast.success(`Synced ${d.synced} Zerodha holdings`)
                     reload()
-                  } catch {
-                    toast.error('Sync request failed')
+                  } catch (err) {
+                    const msg = (err?.message || '').includes('HTTP 4')
+                      ? 'Connect Zerodha first (Login link below)'
+                      : 'Zerodha sync failed'
+                    toast.error(msg)
                   }
                 }}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 transition-colors"
@@ -186,6 +301,16 @@ export default function PortfolioTracker() {
               >
                 Sync Zerodha
               </button>
+              {/* Live Kite Connect actions (OAuth, GTT, MF orders, etc.) live
+                  at /zerodha/connect now that this page is the unified
+                  Zerodha view. */}
+              <Link
+                to="/zerodha/connect"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-muted hover:text-blue-400 hover:border-blue-500/40 text-xs font-semibold transition-colors"
+                title="Kite Connect login, GTT, MF orders, advanced features"
+              >
+                Connect / Login <ExternalLink size={11} />
+              </Link>
               <button
                 onClick={() => setShowAdd(true)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-semibold hover:opacity-90 transition-opacity"
@@ -256,6 +381,9 @@ export default function PortfolioTracker() {
           ) : (
             <SummaryCards summary={summary} />
           )}
+
+          {/* Agent activity — paper-trading positions / decisions inline */}
+          <AgentActivityPanel />
 
           {/* Tab bar */}
           <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
