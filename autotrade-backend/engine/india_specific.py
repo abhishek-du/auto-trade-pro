@@ -45,10 +45,16 @@ SECTOR_MAP: dict[str, str] = {
 }
 
 SECTOR_INDEX: dict[str, str] = {
-    "IT":      "NIFTYIT.NS",
+    "IT":      "^CNXIT",
     "BANKING": "^NSEBANK",
-    "PHARMA":  "NIFTYPHARMA.NS",
-    "FMCG":    "NIFTYFMCG.NS",
+    "PHARMA":  "^CNXPHARMA",
+    "FMCG":    "^CNXFMCG",
+    "AUTO":    "^CNXAUTO",
+    "INFRA":   "^CNXINFRA",
+    "ENERGY":  "^CNXENERGY",
+    "METAL":   "^CNXMETAL",
+    "REALTY":  "^CNXREALTY",
+    "MEDIA":   "^CNXMEDIA",
 }
 
 _NIFTY50 = "^NSEI"
@@ -72,9 +78,18 @@ async def _fetch_candle_prices(
     session: AsyncSession,
     limit: int = 32,
 ) -> tuple[float, float] | tuple[None, None]:
-    """Return (price_now, price_30d_ago) from the last `limit` daily candles.
+    """Return (price_now, price_30d_ago) from the last ``limit`` daily candles.
 
-    Returns (None, None) when insufficient data is available.
+    Resolution order:
+      1. ``candles`` table at ``timeframe='1d'`` (fast path, hot during the
+         day once kite_sync_candles has populated it).
+      2. ``candles`` table at ``timeframe='1h'`` (we have these for ^NSEI
+         and ^NSEBANK already; rebuilt into a daily-close approximation).
+      3. yfinance on-demand fetch for sector indices (^CNXIT / ^CNXFMCG …)
+         that no scheduled task currently crawls. 30-second cache in
+         ``_YF_SECTOR_CACHE`` so the per-symbol cycle doesn't hammer Yahoo.
+
+    Returns (None, None) only when all three paths fail.
     """
     rows = (await session.execute(
         select(Candle)
@@ -83,12 +98,63 @@ async def _fetch_candle_prices(
         .limit(limit)
     )).scalars().all()
 
-    if len(rows) < 2:
-        return None, None
+    if len(rows) >= 2:
+        return float(rows[0].close), float(rows[-1].close)
 
-    price_now  = float(rows[0].close)
-    price_30d  = float(rows[-1].close)
-    return price_now, price_30d
+    # Fallback 1: 1h candles for the same ticker — sufficient for a
+    # 30-day comparison even with ~6 bars/day intraday density.
+    rows_1h = (await session.execute(
+        select(Candle)
+        .where(Candle.symbol == ticker, Candle.timeframe == "1h")
+        .order_by(desc(Candle.timestamp))
+        .limit(limit * 7)
+    )).scalars().all()
+    if len(rows_1h) >= 2:
+        return float(rows_1h[0].close), float(rows_1h[-1].close)
+
+    # Fallback 2: yfinance on-demand for sector indices we don't crawl.
+    return await _fetch_yfinance_close_pair(ticker)
+
+
+_YF_SECTOR_CACHE: dict[str, tuple[tuple[float | None, float | None], float]] = {}
+_YF_SECTOR_TTL = 30 * 60   # 30 minutes — sector indices change slowly intraday
+
+
+async def _fetch_yfinance_close_pair(ticker: str) -> tuple[float, float] | tuple[None, None]:
+    """Fetch (latest_close, ~30d-ago_close) from yfinance for ``ticker``.
+
+    Used only as a last resort by _fetch_candle_prices when the DB has no
+    cached candles for a sector index. Cached in-process for 30 minutes.
+    """
+    import time as _t
+    hit = _YF_SECTOR_CACHE.get(ticker)
+    if hit and (_t.monotonic() - hit[1]) < _YF_SECTOR_TTL:
+        return hit[0]
+
+    try:
+        import contextlib as _ctx
+        import io as _io
+        import yfinance as _yf
+
+        def _blocking():
+            with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(_io.StringIO()):
+                return _yf.Ticker(ticker).history(period="35d", interval="1d", auto_adjust=False)
+
+        df = await asyncio.to_thread(_blocking)
+        if df is None or df.empty or len(df) < 2:
+            _YF_SECTOR_CACHE[ticker] = ((None, None), _t.monotonic())
+            return None, None
+        closes = df["Close"].dropna()
+        if len(closes) < 2:
+            _YF_SECTOR_CACHE[ticker] = ((None, None), _t.monotonic())
+            return None, None
+        result = (float(closes.iloc[-1]), float(closes.iloc[0]))
+        _YF_SECTOR_CACHE[ticker] = (result, _t.monotonic())
+        return result
+    except Exception as exc:
+        logger.debug(f"_fetch_yfinance_close_pair {ticker} failed: {exc}")
+        _YF_SECTOR_CACHE[ticker] = ((None, None), _t.monotonic())
+        return None, None
 
 
 # ── 1. India VIX score ────────────────────────────────────────────────────────
@@ -166,15 +232,20 @@ async def calculate_sector_rotation_score(
     # Fetch sector index prices
     sect_now, sect_30d = await _fetch_candle_prices(index_ticker, session)
     if sect_now is None or sect_30d is None or sect_30d == 0:
-        logger.warning(
-            f"calculate_sector_rotation_score: insufficient data for {index_ticker}"
+        # Demoted from WARNING — this fires legitimately on a fresh DB until
+        # daily 1d candles are crawled. The DB + 1h fallback + yfinance
+        # fallback chain already covers the common cases; reaching here means
+        # all three failed, which is uncommon enough to leave at debug.
+        logger.debug(
+            f"calculate_sector_rotation_score: insufficient data for {index_ticker} "
+            f"(DB 1d + 1h + yfinance all empty)"
         )
         return 0.0
 
     # Fetch Nifty 50 benchmark prices
     nifty_now, nifty_30d = await _fetch_candle_prices(_NIFTY50, session)
     if nifty_now is None or nifty_30d is None or nifty_30d == 0:
-        logger.warning("calculate_sector_rotation_score: insufficient Nifty 50 data")
+        logger.debug("calculate_sector_rotation_score: insufficient Nifty 50 data")
         return 0.0
 
     sector_return = (sect_now  - sect_30d)  / sect_30d  * 100
