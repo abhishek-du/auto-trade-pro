@@ -136,27 +136,32 @@ function TradeDetailPanel({ trade }) {
 
 function InvestmentSummary({ wallet, trades }) {
   const openTrades    = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
-  const totalInvested = openTrades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
+  // size_usd is the NOTIONAL value of each position (units × entry). The capital
+  // actually committed is the 10% margin — the notional is market EXPOSURE, not
+  // money spent. Conflating the two inflated "Capital Deployed" and "Portfolio
+  // Value" to ₹14L/₹17L on a ₹5L account.
+  const _MARGIN_RATE  = 0.10;
+  const notional      = openTrades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
+  const marginUsed    = notional * _MARGIN_RATE;
   const realisedPnl   = wallet?.realised_pnl   ?? 0;
   const unrealisedPnl = wallet?.unrealised_pnl ?? 0;
   const totalPnl      = realisedPnl + unrealisedPnl;
   const balance       = wallet?.balance ?? 0;
 
-  // Portfolio Value = remaining cash + deployed capital + unrealised P&L
-  // wallet.balance already includes realised gains from closed trades.
-  // wallet.equity = balance + unrealisedPnl (excludes deployed capital — that's the bug).
-  const portfolioValue = balance + totalInvested + unrealisedPnl;
+  // Portfolio Value = the wallet's equity = cash + reserved margin + unrealised.
+  // The backend now computes this correctly, so use it directly rather than
+  // re-deriving (which previously added the full notional and over-counted).
+  const portfolioValue = wallet?.equity ?? (balance + marginUsed + unrealisedPnl);
 
   // ROI: always use backend-computed value (based on actual starting balance).
-  // Never use peak_balance as denominator — peak is the highest balance ever, not the start.
   const roiPct = wallet?.roi_percent ?? 0;
   const isGain = totalPnl >= 0;
 
   const cards = [
     {
       label: 'Capital Deployed',
-      value: fmt(totalInvested),
-      sub:   `${openTrades.length} open trade${openTrades.length !== 1 ? 's' : ''}`,
+      value: fmt(marginUsed),
+      sub:   `${openTrades.length} open · ${fmt(notional)} exposure`,
       icon:  Wallet,
       color: 'text-cyan',
       bg:    'bg-cyan/10',
@@ -228,7 +233,7 @@ function OpenPositionsSection({ positions }) {
           </h2>
         </div>
         <div className="flex items-center gap-4 text-xs">
-          <span className="text-muted">Total at risk: <span className="text-slate-300 font-medium">{fmt(totalInvested)}</span></span>
+          <span className="text-muted">Total exposure: <span className="text-slate-300 font-medium">{fmt(totalInvested)}</span></span>
           <span className={`font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
             {isGain ? '+' : ''}{fmt(totalUnrealised)} unrealised
           </span>
@@ -298,11 +303,12 @@ function OpenPositionsSection({ positions }) {
                 </div>
               </div>
 
-              {/* Row 4: invested → current value */}
+              {/* Row 4: exposure (notional) + margin committed → current value */}
               <div className="flex items-center justify-between bg-surface/50 rounded-lg px-3 py-2 text-xs">
                 <div>
-                  <p className="text-muted text-[10px]">Invested</p>
+                  <p className="text-muted text-[10px]">Exposure</p>
                   <p className="text-slate-300 tabular-nums font-medium">{fmt(pos.size_usd)}</p>
+                  <p className="text-muted text-[9px] mt-0.5">Margin {fmt((pos.size_usd ?? 0) * 0.10)}</p>
                 </div>
                 <ArrowUpRight size={14} className="text-muted" />
                 <div className="text-right">

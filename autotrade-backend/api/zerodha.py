@@ -538,12 +538,7 @@ async def token_status():
 # Watchlist analysis — technical signals for any NSE symbols
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _score_to_signal(score: float) -> str:
-    if score >= 60:  return "STRONG_BUY"
-    if score >= 25:  return "BUY"
-    if score >= -25: return "NEUTRAL"
-    if score >= -60: return "SELL"
-    return "STRONG_SELL"
+from engine.indicators import score_to_signal as _score_to_signal  # single source of truth
 
 
 # Kite's historical-data API caps at 3 req/sec. Both watchlist-analysis and
@@ -640,7 +635,7 @@ async def _analyse_symbol(sym: str, has_token: bool, ltp_map: dict, from_date: s
             try:
                 candles = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
-                        None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+                        None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="250d")
                     ),
                     timeout=20.0,
                 )
@@ -741,6 +736,27 @@ async def deep_analysis(symbol: str):
     when-to-buy/sell guidance, Finnhub news, and Groq AI commentary.
     Falls back to yfinance when Zerodha not connected.
     """
+    sym = symbol.strip().upper().replace(".NS", "")
+    
+    from utils.cache import get_redis
+    import json
+    redis = get_redis()
+    cache_key = f"deep_analysis:{sym}"
+    cached = await redis.get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    result = await _run_deep_analysis_core(sym)
+    
+    # Cache for 15 minutes to match the scanner frequency
+    await redis.setex(cache_key, 900, json.dumps(result))
+    return result
+
+
+async def _run_deep_analysis_core(sym: str) -> dict:
     from crawler.india_price_feed import fetch_nse_candles
     from engine.deep_analysis import (
         build_trade_setup,
@@ -748,22 +764,16 @@ async def deep_analysis(symbol: str):
         generate_reasoning,
         groq_commentary,
     )
+    import math
 
-    sym       = symbol.strip().upper().replace(".NS", "")
     kite      = get_kite_client()
     has_token = bool(kite.access_token)
 
     to_date   = datetime.date.today().strftime("%Y-%m-%d")
-    from_date = (datetime.date.today() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+    from_date = (datetime.date.today() - datetime.timedelta(days=250)).strftime("%Y-%m-%d")
 
-    # ── Fetch historical candles ──────────────────────────────────────────────
-    # Try the DB cache first — same rationale as _analyse_symbol. Only call
-    # Kite when the cached series is stale (>2 days behind) or missing.
     candles = await _candles_from_db(f"{sym}.NS", from_date)
     if not candles and has_token:
-        # Share the global throttle with _analyse_symbol so a deep-analysis
-        # request issued while watchlist-analysis is in flight can't tip the
-        # combined rate over Kite's 3 req/sec budget.
         async with _KITE_HISTORICAL_SEMAPHORE:
             await _kite_throttle()
             candles = await get_kite_historical(f"{sym}.NS", from_date, to_date, interval="1d")
@@ -772,7 +782,7 @@ async def deep_analysis(symbol: str):
         try:
             candles = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
-                    None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="120d")
+                    None, lambda: fetch_nse_candles(f"{sym}.NS", interval="1d", period="250d")
                 ),
                 timeout=20.0,
             )
@@ -786,10 +796,10 @@ async def deep_analysis(symbol: str):
     if len(df) < 15:
         raise HTTPException(status_code=422, detail=f"Insufficient data for {sym} ({len(df)} rows)")
 
-    # ── Compute indicators ────────────────────────────────────────────────────
+    df = df.tail(150).reset_index(drop=True)
+
     sig = compute_indicators(df)
 
-    # ── LTP ───────────────────────────────────────────────────────────────────
     ltp = float(df["close"].iloc[-1])
     if has_token:
         try:
@@ -807,7 +817,6 @@ async def deep_analysis(symbol: str):
     def _n(v: float):
         return None if math.isnan(v) else round(v, 2)
 
-    # ── Reasoning, trade setup, news, AI — run news+AI in parallel ───────────
     reasoning = generate_reasoning(sig, ltp)
     setup     = build_trade_setup(sig, ltp, signal_label)
 

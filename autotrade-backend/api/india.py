@@ -57,11 +57,18 @@ from db.models import (
     Candle,
     FIIDIIFlow,
     FundamentalData,
+    MarketShortlist,
     MutualFundNAV,
     OptionsChainSnapshot,
     Signal,
+    SimulationLog,
+    UserWatchlist,
 )
-from engine.fundamental_analyzer import get_fundamentals_for_symbol, run_fundamental_update
+from engine.fundamental_analyzer import (
+    get_fundamentals_for_symbol,
+    fetch_and_cache_fundamentals,
+    run_fundamental_update,
+)
 from engine.india_signal_generator import analyze_all_india_symbols
 from engine.india_specific import (
     SECTOR_INDEX,
@@ -808,9 +815,15 @@ async def get_options_chain_detail(
     )).scalar_one_or_none()
 
     if snap is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No options data for {sym} yet — Celery refreshes every 15 min during NSE hours (09:15–15:30 IST)",
+        return OptionsChainDetailOut(
+            spot_price=None,
+            expiry_date=None,
+            pcr=None,
+            max_pain=None,
+            support_levels=[],
+            resistance_levels=[],
+            options_score=None,
+            chain_data=[],
         )
 
     return OptionsChainDetailOut(
@@ -1111,11 +1124,20 @@ async def get_fundamentals(symbol: str, db: AsyncSession = Depends(get_db)):
     sym = symbol.upper()
     if not sym.endswith(".NS"):
         sym = sym + ".NS"
+    # Cached DB row first; if missing/stale, fetch on demand (yfinance + Screener)
+    # so the unified Stock Detail page has fundamentals for any NSE symbol —
+    # not just the curated weekly-batch list.
     row = await get_fundamentals_for_symbol(sym, db)
+    if row is None:
+        try:
+            row = await fetch_and_cache_fundamentals(sym, db)
+        except Exception as exc:
+            logger.debug("on-demand fundamentals failed for %s: %s", sym, exc)
+            row = None
     if row is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No fundamental data for {sym}. Run POST /fundamentals/refresh to populate.",
+            detail=f"No fundamental data for {sym} (on-demand fetch returned nothing).",
         )
     return _fund_out(row)
 
@@ -1249,22 +1271,34 @@ async def list_india_signals(
     - **mf** — mutual fund scheme signals
     """
     cat = (category or "").lower()
-    if cat == "stocks":
-        pool = settings.nse_symbols + settings.nse_mid_symbols
-    elif cat == "indices":
-        pool = settings.WATCHLIST_NIFTY_INDICES
-    elif cat == "forex":
-        pool = settings.WATCHLIST_INDIAN_FOREX
-    elif cat == "mf":
-        pool = list(getattr(settings, "WATCHLIST_MUTUAL_FUND_SCHEMES", []))
-    else:
-        pool = settings.all_indian_symbols
 
+    # Signals now come from market analysis (MasterIntelligenceScore + Signal table),
+    # not from a static hardcoded symbol list.
+    if cat == "indices":
+        pool_filter = Signal.symbol.in_(settings.WATCHLIST_NIFTY_INDICES)
+    elif cat == "forex":
+        pool_filter = Signal.symbol.in_(settings.WATCHLIST_INDIAN_FOREX)
+    elif cat == "mf":
+        pool_filter = Signal.symbol.in_(list(getattr(settings, "WATCHLIST_MUTUAL_FUND_SCHEMES", [])))
+    else:
+        # Dynamic: all NSE EQ signals from Signal table (populated by signal generator
+        # as it analyses market_shortlist symbols every 60s — fully dynamic, no static list)
+        pool_filter = Signal.symbol.like("%.NS")
+
+    # DISTINCT ON symbol: return only the latest signal per symbol, not one row per 60s cycle.
+    from sqlalchemy import func as _func
+    latest_subq = (
+        select(Signal.symbol, _func.max(Signal.created_at).label("max_ts"))
+        .where(pool_filter)
+        .group_by(Signal.symbol)
+        .order_by(desc("max_ts"))
+        .limit(limit)
+        .subquery()
+    )
     result = await db.execute(
         select(Signal)
-        .where(Signal.symbol.in_(pool))
+        .join(latest_subq, (Signal.symbol == latest_subq.c.symbol) & (Signal.created_at == latest_subq.c.max_ts))
         .order_by(desc(Signal.created_at))
-        .limit(limit)
     )
     return [_signal_out(s) for s in result.scalars().all()]
 
@@ -2113,3 +2147,186 @@ async def seed_calendar(db: AsyncSession = Depends(get_db)):
     from engine.calendar_engine import seed_calendar_events
     result = await seed_calendar_events(db, months_ahead=3)
     return result
+
+
+# ── User Watchlist ─────────────────────────────────────────────────────────────
+
+@router.get("/user-watchlist", summary="List all user-added watchlist symbols")
+async def get_user_watchlist(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(UserWatchlist).where(UserWatchlist.is_active == True).order_by(UserWatchlist.added_at.desc())
+    )
+    rows = result.scalars().all()
+    return {"symbols": [r.symbol for r in rows], "count": len(rows)}
+
+
+@router.post("/user-watchlist/{symbol}", summary="Add symbol to agent scan universe")
+async def add_to_user_watchlist(symbol: str, db: AsyncSession = Depends(get_db)):
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    ns_symbol = f"{sym}.NS"
+    existing = await db.execute(
+        select(UserWatchlist).where(UserWatchlist.symbol == ns_symbol)
+    )
+    row = existing.scalar_one_or_none()
+    if row:
+        row.is_active = True
+        await db.commit()
+        return {"status": "already_exists", "symbol": ns_symbol}
+    db.add(UserWatchlist(symbol=ns_symbol, is_active=True))
+    await db.commit()
+    return {"status": "added", "symbol": ns_symbol}
+
+
+@router.delete("/user-watchlist/{symbol}", summary="Remove symbol from agent scan universe")
+async def remove_from_user_watchlist(symbol: str, db: AsyncSession = Depends(get_db)):
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    ns_symbol = f"{sym}.NS"
+    result = await db.execute(
+        select(UserWatchlist).where(UserWatchlist.symbol == ns_symbol)
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return {"status": "not_found", "symbol": ns_symbol}
+    row.is_active = False
+    await db.commit()
+    return {"status": "removed", "symbol": ns_symbol}
+
+
+# ── Agent scan log ─────────────────────────────────────────────────────────────
+
+@router.get("/agent-log", summary="Recent agent analysis cycle decisions")
+async def get_agent_log(
+    limit: int = 100,
+    symbol: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns recent ANALYSIS_CYCLE events — latest decision per symbol, no duplicates."""
+    from sqlalchemy import desc, func as _func
+    conditions = [SimulationLog.event_type == "ANALYSIS_CYCLE"]
+    if symbol:
+        conditions.append(SimulationLog.symbol == symbol.upper())
+
+    # Latest entry per symbol only (agents run every 60s → many rows per symbol)
+    latest_subq = (
+        select(SimulationLog.symbol, _func.max(SimulationLog.timestamp).label("max_ts"))
+        .where(*conditions)
+        .group_by(SimulationLog.symbol)
+        .subquery()
+    )
+    result = await db.execute(
+        select(SimulationLog)
+        .join(latest_subq, (SimulationLog.symbol == latest_subq.c.symbol) & (SimulationLog.timestamp == latest_subq.c.max_ts))
+        .where(*conditions)
+        .order_by(desc(SimulationLog.timestamp))
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+    return {
+        "entries": [
+            {
+                "id":           r.id,
+                "symbol":       r.symbol,
+                "message":      r.message,
+                "timestamp":    r.timestamp.isoformat() if r.timestamp else None,
+                "action":       (r.data or {}).get("action"),
+                "confidence":   (r.data or {}).get("confidence"),
+                "final_score":  (r.data or {}).get("final_score"),
+                "trade_taken":  (r.data or {}).get("trade_taken"),
+                "reject_reason":(r.data or {}).get("reject_reason"),
+                "reasoning":    (r.data or {}).get("reasoning", []),
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }
+
+
+# ── Market Scanner ─────────────────────────────────────────────────────────────
+
+@router.get("/market-scanner/shortlist", summary="Current market scanner shortlist")
+async def get_market_shortlist(
+    min_score: float = 0.0,
+    sector: str | None = None,
+    signal: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns the current shortlist from the most recent scanner cycle."""
+    from sqlalchemy import desc as _desc, func as _func
+    # Filter by CONVICTION (|score|), not signed score — otherwise the default
+    # min_score=0 silently drops every SELL signal (which has a negative score).
+    conditions = [_func.abs(MarketShortlist.master_score) >= min_score]
+    if sector:
+        conditions.append(MarketShortlist.sector.ilike(f"%{sector}%"))
+    if signal:
+        conditions.append(MarketShortlist.signal == signal.upper())
+
+    result = await db.execute(
+        select(MarketShortlist)
+        .where(*conditions)
+        .order_by(MarketShortlist.rank)
+        .limit(limit)
+    )
+    rows = result.scalars().all()
+
+    # Get latest created_at for freshness indicator
+    freshness = rows[0].created_at.isoformat() if rows else None
+
+    # The agent only auto-trades signals at/above this confidence (= |master_score|).
+    # Surface it so the UI can mark which BUY/SELL labels the agent will actually act on.
+    auto_threshold = float(getattr(settings, "PAPER_CONFIDENCE_THRESHOLD", 40.0))
+
+    # Which of these symbols are in the Hub's 7-factor universe (deep-scored with
+    # news+fundamentals+earnings+macro+sector+options). The scanner ranks by Hub
+    # score, so shortlist rows are Hub-covered; this flag lets the UI badge them.
+    from db.models import MasterIntelligenceScore as _MIS
+    hub_syms_res = await db.execute(
+        select(_MIS.symbol).distinct()
+        .where(_MIS.scored_at >= func.now() - text("interval '30 minutes'"))
+    )
+    hub_covered_set = {s for s in hub_syms_res.scalars().all()}
+
+    return {
+        "shortlist": [
+            {
+                "rank":           r.rank,
+                "symbol":         r.symbol,
+                "ticker":         r.symbol.replace(".NS", ""),
+                "master_score":   round(r.master_score, 1),
+                "confidence":     round(abs(r.master_score), 1),
+                "signal":         r.signal,
+                "sector":         r.sector,
+                "volume_ratio":   round(r.volume_ratio, 2),
+                "rsi":            round(r.rsi, 1) if r.rsi else None,
+                "price_vs_ema20": round(r.price_vs_ema20, 2) if r.price_vs_ema20 else None,
+                # Covered by the Hub 7-factor universe (deep-scored, auto-trade eligible).
+                "hub_covered":    r.symbol in hub_covered_set,
+                # True when the agent will auto-trade this (actionable AND ≥ floor).
+                "agent_tradeable": (
+                    ("BUY" in r.signal or "SELL" in r.signal)
+                    and abs(r.master_score) >= auto_threshold
+                ),
+                "created_at":     r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+        "count":          len(rows),
+        "last_updated":   freshness,
+        "auto_trade_threshold": auto_threshold,
+        "hub_universe_size": len(hub_covered_set),
+    }
+
+
+@router.post("/market-scanner/run", summary="Trigger market scanner manually")
+async def trigger_market_scanner(db: AsyncSession = Depends(get_db)):
+    """Run the market scanner immediately (for testing / manual trigger)."""
+    try:
+        from tasks.market_scanner import run_market_scanner
+        result = run_market_scanner.delay(force=True)
+        return {"status": "queued", "task_id": str(result.id)}
+    except Exception as exc:
+        # Fallback: run inline if Celery is not available
+        from tasks.market_scanner import _run_market_scanner
+        result = await _run_market_scanner(force=True)
+        return {"status": "ran_inline", "result": result}
+

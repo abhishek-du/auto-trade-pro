@@ -29,6 +29,75 @@ def _today_start() -> datetime:
     return datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+# ── Dynamic trade-level computation ───────────────────────────────────────────
+
+def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
+    """Resolve stop-loss + two targets + ATR for a trade, in priority order.
+
+    1. **Dynamic** — from engine.deep_analysis.build_trade_setup() using the full
+       IndicatorSignals object (Supertrend / Bollinger / structure). Preferred:
+       these are the same levels shown on the /s/:symbol page.
+    2. **ATR-based** — stop = entry ± 2×ATR, T1 = entry ± 2×ATR, T2 = entry ± 4×ATR
+       (1:1 to the first checkpoint, 2:1 to the final target). Used when dynamic
+       levels are missing or invalid but ATR is available.
+    3. **Static** — stop = ∓5%, T1 = ±10% — last resort only.
+
+    Parameters
+    ----------
+    action : 'BUY' or 'SELL' (direction sets which side stop/targets sit on).
+    entry  : entry price.
+    sig    : optional IndicatorSignals (from compute_indicators) for paths 1 & 2.
+
+    Returns
+    -------
+    dict with keys: stop_loss, target_1, target_2, atr, source
+    """
+    import math
+    is_buy = action.upper() in ("BUY", "STRONG_BUY")
+    atr = 0.0
+    if sig is not None:
+        a = getattr(sig, "atr", None)
+        if a is not None and not (isinstance(a, float) and math.isnan(a)) and a > 0:
+            atr = float(a)
+
+    # ── 1. Dynamic from build_trade_setup ────────────────────────────────────
+    if sig is not None and entry > 0:
+        try:
+            from engine.deep_analysis import build_trade_setup
+            label = "BUY" if is_buy else "SELL"
+            setup = build_trade_setup(sig, entry, label)
+            sl, t1, t2 = setup.get("stop_loss"), setup.get("target_1"), setup.get("target_2")
+            valid = all(v is not None and not (isinstance(v, float) and math.isnan(v)) and v > 0
+                        for v in (sl, t1, t2))
+            # Sanity: stop on the correct side, targets beyond entry in trade direction
+            if valid:
+                if is_buy and sl < entry and t1 > entry and t2 > t1:
+                    return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
+                            "target_2": round(t2, 2), "atr": round(atr, 2), "source": "dynamic"}
+                if (not is_buy) and sl > entry and t1 < entry and t2 < t1:
+                    return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
+                            "target_2": round(t2, 2), "atr": round(atr, 2), "source": "dynamic"}
+        except Exception:
+            pass  # fall through to ATR
+
+    # ── 2. ATR-based ─────────────────────────────────────────────────────────
+    if atr > 0 and entry > 0:
+        if is_buy:
+            sl, t1, t2 = entry - 2 * atr, entry + 2 * atr, entry + 4 * atr
+        else:
+            sl, t1, t2 = entry + 2 * atr, entry - 2 * atr, entry - 4 * atr
+        return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
+                "target_2": round(t2, 2), "atr": round(atr, 2), "source": "atr"}
+
+    # ── 3. Static last resort ────────────────────────────────────────────────
+    if is_buy:
+        sl, t1, t2 = entry * 0.95, entry * 1.10, entry * 1.15
+    else:
+        sl, t1, t2 = entry * 1.05, entry * 0.90, entry * 0.85
+    return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
+            "target_2": round(t2, 2), "atr": 0.0, "source": "static"}
+
+
 async def _today_closed_pnl(session: AsyncSession) -> float:
     """Sum all PnL from trades closed today (UTC). Returns 0.0 if none."""
     result = await session.execute(
@@ -73,15 +142,48 @@ async def validate_signal(
 
     # Load live settings once (falls back to .env defaults if key not in DB)
     cfg = await RuntimeConfig.load(session)
-    max_pos       = cfg.max_open_positions
+    max_pos       = cfg.max_open_positions          # absolute safety ceiling
     max_dl        = cfg.max_daily_loss
     min_rr        = cfg.min_risk_reward
 
-    # ── Check 1: Maximum concurrent open positions ────────────────────────────
+    # Capital-utilization parameters (read directly — not DB-overridable yet)
+    max_port_risk   = float(getattr(settings, "MAX_PORTFOLIO_RISK", 0.15))
+    min_cash_buffer = float(getattr(settings, "MIN_CASH_BUFFER", 0.10))
+
+    # Reconstruct current capital state from open positions.
+    deployed_margin   = sum(p.size_usd * 0.1 for p in open_positions)
+    unrealised        = sum(getattr(p, "unrealised_pnl", 0.0) or 0.0 for p in open_positions)
+    equity            = wallet_balance + deployed_margin + unrealised
+    current_open_risk = sum(
+        abs(p.entry_price - p.stop_loss) * p.size_units for p in open_positions
+    )
+
+    # ── Check 1a: Absolute safety ceiling (bug guard, not the primary limiter) ─
     if len(open_positions) >= max_pos:
+        reason = f"Safety ceiling reached ({len(open_positions)}/{max_pos} positions)"
+        _log_rejection(signal.symbol, reason)
+        return False, reason
+
+    # ── Check 1b: Portfolio risk budget ───────────────────────────────────────
+    # The PRIMARY gate: keep opening while summed open-risk stays under budget.
+    # Size this trade first so we can test the incremental risk it adds.
+    this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
+    this_risk = this_pos["risk_amount"]
+    if equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
         reason = (
-            f"Max {max_pos} positions limit reached "
-            f"({len(open_positions)} currently open)"
+            f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
+            f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
+        )
+        _log_rejection(signal.symbol, reason)
+        return False, reason
+
+    # ── Check 1c: Cash buffer ─────────────────────────────────────────────────
+    # Never deploy so much margin that dry cash drops below the buffer.
+    this_margin = this_pos["usd_value"] * 0.1
+    if equity > 0 and (deployed_margin + this_margin) > (1 - min_cash_buffer) * equity:
+        reason = (
+            f"Cash buffer guard: deploying ₹{this_margin:.0f} margin would breach "
+            f"the {min_cash_buffer*100:.0f}% cash reserve"
         )
         _log_rejection(signal.symbol, reason)
         return False, reason
@@ -101,7 +203,11 @@ async def validate_signal(
             return False, reason
 
     # ── Check 3: Minimum signal confidence ───────────────────────────────────
-    _MIN_CONFIDENCE = 40.0
+    # Single source of truth: PAPER_CONFIDENCE_THRESHOLD (.env / runtime config).
+    # Calibrated to the active scoring scale — the 7-factor Hub blend compresses
+    # the range vs. pure technical, so this floor moves with it. Must match the
+    # pre-filter in tasks/india_tasks._india_trade_loop so the two gates agree.
+    _MIN_CONFIDENCE = float(getattr(settings, "PAPER_CONFIDENCE_THRESHOLD", 40.0))
     if signal.confidence < _MIN_CONFIDENCE:
         reason = (
             f"Confidence too low: {signal.confidence:.0f}% "
@@ -111,8 +217,14 @@ async def validate_signal(
         return False, reason
 
     # ── Check 4: Risk:Reward ratio ────────────────────────────────────────────
+    # Measure reward to the FINAL target (target_2) the position actually rides
+    # to, not target_1 (which is just the trailing-stop trigger). With ATR levels
+    # T1 = 2×ATR (1:1) but T2 = 4×ATR (2:1) — so checking T1 would wrongly reject
+    # every dynamically-managed trade. Fall back to take_profit (T1) for legacy
+    # signals that don't carry a target_2.
+    final_target = getattr(signal, "target_2", 0.0) or signal.take_profit
     risk   = abs(signal.entry_price - signal.stop_loss)
-    reward = abs(signal.take_profit  - signal.entry_price)
+    reward = abs(final_target - signal.entry_price)
 
     if risk <= 0:
         reason = "Stop-loss is equal to entry price — cannot calculate R:R ratio"
@@ -120,7 +232,7 @@ async def validate_signal(
         return False, reason
 
     rr = reward / risk
-    if rr < min_rr:
+    if rr < min_rr - 1e-6:   # epsilon: 2×ATR/4×ATR can land at 1.9999… == 2.0
         reason = (
             f"R:R ratio {rr:.2f} below minimum {min_rr:.1f} "
             f"(risk=${risk:.5f}  reward=${reward:.5f})"
@@ -128,16 +240,15 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 5: Sufficient virtual balance ───────────────────────────────────
-    pos = calculate_position_size(signal, wallet_balance, cfg=cfg)
-    # Require that the 10% margin for this position doesn't exceed
-    # 50% of the available balance (leaves room for other positions).
+    # ── Check 5: Single-position concentration cap ────────────────────────────
+    # No single position's margin may exceed 40% of available cash (prevents one
+    # tight-stop name from hogging the book even within the risk budget).
+    pos = this_pos   # already sized above
     required_margin = pos["usd_value"] * 0.1
-    if required_margin > wallet_balance * 0.5:
+    if required_margin > wallet_balance * 0.4:
         reason = (
-            f"Insufficient virtual balance for this position "
-            f"(need ${required_margin:.2f} margin, "
-            f"50% of balance = ${wallet_balance * 0.5:.2f})"
+            f"Single-position cap: margin ₹{required_margin:.0f} > 40% of cash "
+            f"(₹{wallet_balance * 0.4:.0f})"
         )
         _log_rejection(signal.symbol, reason)
         return False, reason
@@ -151,10 +262,10 @@ async def validate_signal(
 
     logger.info(
         f"RISK OK    │ {signal.symbol:<12} │ "
-        f"conf={signal.confidence:.0f}%  "
-        f"RR={rr:.2f}  "
-        f"size=${pos['usd_value']:.2f}  "
-        f"open={len(open_positions)}/{max_pos}"
+        f"conf={signal.confidence:.0f}%  RR={rr:.2f}  "
+        f"risk={pos['risk_percent']:.1f}%  size=₹{pos['usd_value']:.0f}  "
+        f"open={len(open_positions)}/{max_pos}  "
+        f"port_risk={(current_open_risk + this_risk)/equity*100:.1f}%/{max_port_risk*100:.0f}%"
     )
     return True, "OK"
 
@@ -167,27 +278,37 @@ def _log_rejection(symbol: str, reason: str) -> None:
 # 2. Position sizing
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _conviction_risk_pct() -> tuple[float, float, float]:
+    """(min_risk, max_risk, high_conf) for conviction-scaled sizing."""
+    return (
+        float(getattr(settings, "RISK_PER_TRADE_MIN", 0.015)),
+        float(getattr(settings, "RISK_PER_TRADE_MAX", 0.030)),
+        float(getattr(settings, "CONVICTION_HIGH", 70.0)),
+    )
+
+
 def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> dict:
-    """Compute virtual position size using fixed fractional risk.
+    """Compute virtual position size, risking a CONVICTION-SCALED fraction.
 
-    Sizes the trade so that a stop-loss hit costs exactly
-    ``MAX_RISK_PER_TRADE × balance`` in virtual dollars.
-
-    Parameters
-    ----------
-    signal  : TradingSignal with entry_price and stop_loss populated.
-    balance : Current virtual wallet balance.
+    Instead of a flat fraction, the agent commits more capital to higher-
+    conviction setups: risk scales linearly from RISK_PER_TRADE_MIN at the
+    confidence floor up to RISK_PER_TRADE_MAX at CONVICTION_HIGH. So the agent
+    "analyses" how much to deploy per trade rather than sizing everything equally.
 
     Returns
     -------
-    dict with keys:
-        units        — number of units to trade
-        usd_value    — total notional value of the position (units × entry)
-        risk_amount  — virtual dollars at risk on this trade
-        risk_percent — risk as a percentage of balance (e.g. 2.0 for 2%)
+    dict: units, usd_value (notional), risk_amount (₹ at risk), risk_percent.
     """
-    max_risk      = cfg.max_risk_per_trade if cfg is not None else settings.MAX_RISK_PER_TRADE
-    risk_amount   = balance * max_risk
+    min_risk, max_risk, high_conf = _conviction_risk_pct()
+    floor = float(getattr(settings, "PAPER_CONFIDENCE_THRESHOLD", 30.0))
+    conf  = float(getattr(signal, "confidence", 0.0) or 0.0)
+
+    # Linear interpolate risk% by where confidence sits in [floor, high_conf].
+    span = max(high_conf - floor, 1e-6)
+    t    = max(0.0, min(1.0, (conf - floor) / span))
+    risk_frac = min_risk + (max_risk - min_risk) * t
+
+    risk_amount   = balance * risk_frac
     risk_per_unit = abs(signal.entry_price - signal.stop_loss)
 
     units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
@@ -197,7 +318,7 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
         "units":        round(units, 6),
         "usd_value":    round(usd_value, 4),
         "risk_amount":  round(risk_amount, 4),
-        "risk_percent": round(max_risk * 100, 2),
+        "risk_percent": round(risk_frac * 100, 2),
     }
 
     logger.debug(

@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AutoTrade Pro · /s/:symbol — Decision-First v2 · Visual Mock</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui'],
+          mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+        },
+        colors: {
+          bg:       '#070A14',
+          board:    '#0B1020',
+          surface:  '#10172A',
+          card:     '#141C33',
+          cardHi:   '#1A2240',
+          line:     '#212B49',
+          ink:      '#E6EAF5',
+          ink2:     '#A8B0CC',
+          ink3:     '#6B7493',
+          bull:     '#10B981',
+          bullSoft: '#053b2d',
+          bear:     '#EF4444',
+          bearSoft: '#3a1212',
+          neutral:  '#F59E0B',
+          ai:       '#8B5CF6',
+          aiSoft:   '#2a1d4d',
+          accent:   '#38BDF8',
+        },
+      },
+    },
+  };
+</script>
+<style>
+  body { background: #070A14; font-family: 'Inter', sans-serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; font-feature-settings: 'tnum' 1, 'ss01' 1; }
+  .frame { background: #0B1020; border: 1px solid #212B49; border-radius: 14px; box-shadow: 0 30px 80px -40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.02); overflow: hidden; }
+  .ticker-grid { background-image: linear-gradient(rgba(56,189,248,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(56,189,248,0.03) 1px, transparent 1px); background-size: 36px 36px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 500; }
+  .chip-soft { background: rgba(168,176,204,0.08); color: #A8B0CC; border: 1px solid rgba(168,176,204,0.12); }
+  .chip-bull { background: rgba(16,185,129,0.12); color: #10B981; border: 1px solid rgba(16,185,129,0.25); }
+  .chip-bear { background: rgba(239,68,68,0.12); color: #EF4444; border: 1px solid rgba(239,68,68,0.25); }
+  .chip-ai   { background: rgba(139,92,246,0.15); color: #C4B5FD; border: 1px solid rgba(139,92,246,0.3); }
+  .chip-neut { background: rgba(245,158,11,0.12); color: #F59E0B; border: 1px solid rgba(245,158,11,0.25); }
+  .ring-dot { width: 6px; height: 6px; border-radius: 9999px; display: inline-block; }
+  .scrollbar-none::-webkit-scrollbar { display: none; } .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+  .divider { border-color: #212B49; }
+  .glow-bull { box-shadow: 0 0 0 1px rgba(16,185,129,0.4), 0 0 48px -8px rgba(16,185,129,0.35); }
+  .glow-ai { box-shadow: 0 0 0 1px rgba(139,92,246,0.4), 0 0 60px -10px rgba(139,92,246,0.45); }
+  .kbd { font-family: 'JetBrains Mono', monospace; font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #1A2240; border: 1px solid #232B47; color: #A8B0CC; }
+</style>
+</head>
+<body class="text-ink">
+
+<div class="max-w-[1480px] mx-auto px-6 py-10">
+
+  <!-- Board header -->
+  <div class="flex items-end justify-between mb-10">
+    <div>
+      <div class="text-ink3 text-xs uppercase tracking-[0.18em] mb-2">AutoTrade Pro · Design Board · <span class="text-ai">v2 — Decision-first</span></div>
+      <h1 class="text-3xl font-bold text-ink">Stock Detail — <span class="text-ai">/s/:symbol</span> · re-prioritized for "what to do right now"</h1>
+      <p class="text-ink2 text-sm mt-2 max-w-3xl">Hierarchy: <span class="text-ink">Decision Center</span> → Intelligence Snapshot → Chart (collapsed indicators) → AI Research → News+Timeline → Deep tabs as <em>secondary</em>. Plus Global Search ⌘K. All sections wire to existing backend endpoints — no new APIs for v1.</p>
+    </div>
+    <div class="text-right text-xs text-ink3"><div>v0.2 · Decision-first</div><div>2026-06-03</div></div>
+  </div>
+
+<!-- ============================================================== -->
+<!-- FRAME 01 — GLOBAL SEARCH ⌘K (mandatory)                         -->
+<!-- ============================================================== -->
+<div class="mb-6 flex items-center gap-3">
+  <span class="chip chip-ai">Frame 01 · CRITICAL</span>
+  <span class="text-ink text-sm font-semibold">Global Search palette · ⌘K · full NSE/BSE universe + MFs</span>
+</div>
+
+<div class="frame mb-16 relative" style="min-height: 720px;">
+  <!-- Dimmed page behind -->
+  <div class="absolute inset-0 bg-board opacity-90"></div>
+  <div class="absolute inset-0 backdrop-blur-sm" style="background: radial-gradient(circle at 50% 30%, rgba(139,92,246,0.06), transparent 70%);"></div>
+
+  <!-- Faded page chrome behind -->
+  <div class="relative px-6 pt-6 opacity-30 pointer-events-none">
+    <div class="h-12 bg-surface border border-line rounded-lg"></div>
+    <div class="mt-4 h-40 bg-card border border-line rounded-xl"></div>
+    <div class="mt-4 grid grid-cols-3 gap-4">
+      <div class="h-24 bg-card border border-line rounded-xl"></div>
+      <div class="h-24 bg-card border border-line rounded-xl"></div>
+      <div class="h-24 bg-card border border-line rounded-xl"></div>
+    </div>
+  </div>
+
+  <!-- Search palette -->
+  <div class="absolute top-20 left-1/2 -translate-x-1/2 w-[700px] bg-gradient-to-b from-card to-board rounded-2xl border border-line shadow-2xl overflow-hidden" style="box-shadow: 0 30px 80px -10px rgba(0,0,0,0.7), 0 0 0 1px rgba(139,92,246,0.15);">
+    <!-- Input -->
+    <div class="flex items-center gap-3 px-5 h-14 border-b border-line">
+      <svg class="w-5 h-5 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input class="flex-1 bg-transparent outline-none text-ink text-base placeholder:text-ink3" value="reli" placeholder="Search stock, MF, sector, news…" />
+      <span class="kbd">ESC</span>
+    </div>
+
+    <!-- Recent -->
+    <div class="px-3 pt-3 pb-1 text-[10px] text-ink3 uppercase tracking-wider flex items-center justify-between">
+      <span>Recent</span>
+      <button class="text-ink3 hover:text-ink">Clear</button>
+    </div>
+    <div class="px-2 pb-2">
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span class="mono text-ink text-sm">HDFCBANK</span>
+        <span class="text-ink3 text-xs">HDFC Bank</span>
+        <span class="ml-auto mono text-ink text-sm">₹1,620.40</span>
+        <span class="text-bull text-xs mono">+1.21%</span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span class="mono text-ink text-sm">TCS</span>
+        <span class="text-ink3 text-xs">Tata Consultancy Services</span>
+        <span class="ml-auto mono text-ink text-sm">₹3,804.10</span>
+        <span class="text-bear text-xs mono">-0.42%</span>
+      </div>
+    </div>
+
+    <!-- Stocks -->
+    <div class="px-3 pt-3 pb-1 text-[10px] text-ink3 uppercase tracking-wider">Stocks · 4 matches</div>
+    <div class="px-2 pb-2">
+      <div class="flex items-center gap-3 px-3 py-2.5 bg-cardHi/70 border border-ai/30 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-gradient-to-br from-blue-700 to-blue-500 grid place-items-center text-white text-xs font-bold">R</div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2">
+            <span class="mono text-ink text-sm font-semibold">RELIANCE</span>
+            <span class="chip chip-soft text-[10px]">NSE</span>
+            <span class="chip chip-soft text-[10px]">F&O</span>
+            <span class="chip chip-bull text-[10px]">AI BUY 78</span>
+          </div>
+          <div class="text-ink3 text-[11px]">Reliance Industries Ltd · Oil &amp; Gas</div>
+        </div>
+        <div class="text-right">
+          <div class="mono text-ink text-sm">₹2,847.50</div>
+          <div class="text-bull text-[11px] mono">+0.86%</div>
+        </div>
+        <span class="kbd">↵</span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-cardHi grid place-items-center text-ink2 text-xs">R</div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2"><span class="mono text-ink text-sm">RELINFRA</span><span class="chip chip-soft text-[10px]">NSE</span></div>
+          <div class="text-ink3 text-[11px]">Reliance Infrastructure Ltd · Power</div>
+        </div>
+        <div class="text-right"><div class="mono text-ink text-sm">₹312.40</div><div class="text-bear text-[11px] mono">-0.31%</div></div>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-cardHi grid place-items-center text-ink2 text-xs">R</div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2"><span class="mono text-ink text-sm">RPOWER</span><span class="chip chip-soft text-[10px]">NSE</span></div>
+          <div class="text-ink3 text-[11px]">Reliance Power Ltd · Power</div>
+        </div>
+        <div class="text-right"><div class="mono text-ink text-sm">₹54.20</div><div class="text-bull text-[11px] mono">+2.40%</div></div>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-cardHi grid place-items-center text-ink2 text-xs">R</div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2"><span class="mono text-ink text-sm">RELIGARE</span><span class="chip chip-soft text-[10px]">NSE</span></div>
+          <div class="text-ink3 text-[11px]">Religare Enterprises · Financials</div>
+        </div>
+        <div class="text-right"><div class="mono text-ink text-sm">₹248.80</div><div class="text-bull text-[11px] mono">+0.62%</div></div>
+      </div>
+    </div>
+
+    <!-- Mutual Funds -->
+    <div class="px-3 pt-3 pb-1 text-[10px] text-ink3 uppercase tracking-wider">Mutual Funds · 2 matches</div>
+    <div class="px-2 pb-2">
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-cardHi grid place-items-center text-ai text-[9px] font-bold">MF</div>
+        <div class="flex-1">
+          <div class="text-ink text-sm">Nippon India Large Cap Fund · Direct Growth</div>
+          <div class="text-ink3 text-[11px]">Large Cap · NAV ₹86.42 · AUM ₹38.4 KCr</div>
+        </div>
+        <span class="chip chip-bull text-[10px]">3Y 18.2%</span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <div class="w-7 h-7 rounded bg-cardHi grid place-items-center text-ai text-[9px] font-bold">MF</div>
+        <div class="flex-1">
+          <div class="text-ink text-sm">Tata Reliance Inst. Dynamic Fund · Direct Growth</div>
+          <div class="text-ink3 text-[11px]">Dynamic Allocation · NAV ₹42.18</div>
+        </div>
+        <span class="chip chip-neut text-[10px]">3Y 11.4%</span>
+      </div>
+    </div>
+
+    <!-- News -->
+    <div class="px-3 pt-3 pb-1 text-[10px] text-ink3 uppercase tracking-wider">News · 3 matches</div>
+    <div class="px-2 pb-2">
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <span class="ring-dot bg-bull mt-1"></span>
+        <div class="flex-1">
+          <div class="text-ink text-sm">"Reliance Q4 results beat estimates, Jio ARPU at ₹201"</div>
+          <div class="text-ink3 text-[11px]">MoneyControl · 2h ago · positive 0.78</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <span class="ring-dot bg-bull mt-1"></span>
+        <div class="flex-1">
+          <div class="text-ink text-sm">"Morgan Stanley upgrades Reliance to Overweight, TP ₹3,280"</div>
+          <div class="text-ink3 text-[11px]">Bloomberg · 5h ago · positive 0.62</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick actions -->
+    <div class="px-3 pt-3 pb-1 text-[10px] text-ink3 uppercase tracking-wider">Quick actions</div>
+    <div class="px-2 pb-3">
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-ai" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 9.5 8.5 2 12l7.5 3.5L12 22l2.5-6.5L22 12l-7.5-3.5z"/></svg>
+        <span class="text-ink text-sm">Run AI analysis on <span class="mono">RELIANCE</span></span>
+        <span class="ml-auto kbd">⌘ ↵</span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-neutral" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+        <span class="text-ink text-sm">Add <span class="mono">RELIANCE</span> to watchlist</span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 2"/></svg>
+        <span class="text-ink text-sm">Set price alert on <span class="mono">RELIANCE</span></span>
+      </div>
+      <div class="flex items-center gap-3 px-3 py-2 hover:bg-cardHi/50 rounded-lg cursor-pointer">
+        <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17l-5-5 5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+        <span class="text-ink text-sm">Compare <span class="mono">RELIANCE</span> with peers</span>
+      </div>
+    </div>
+
+    <!-- Footer hints -->
+    <div class="border-t border-line px-4 py-2.5 bg-board flex items-center gap-4 text-[10px] text-ink3">
+      <span class="flex items-center gap-1"><span class="kbd">↑</span><span class="kbd">↓</span> Navigate</span>
+      <span class="flex items-center gap-1"><span class="kbd">↵</span> Open</span>
+      <span class="flex items-center gap-1"><span class="kbd">⌘ ↵</span> AI analysis</span>
+      <span class="flex items-center gap-1"><span class="kbd">⌘ K</span> Toggle</span>
+      <span class="ml-auto flex items-center gap-2"><span class="ring-dot bg-bull"></span>Indexes 2,154 stocks + 1,820 MFs</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================== -->
+<!-- FRAME 02 — /s/:symbol — DECISION-FIRST FULL PAGE                -->
+<!-- ============================================================== -->
+<div class="mb-6 flex items-center gap-3">
+  <span class="chip chip-ai">Frame 02 · HERO</span>
+  <span class="text-ink text-sm font-semibold">/s/RELIANCE — single long-scroll page · decision-first hierarchy</span>
+</div>
+
+<div class="frame mb-16">
+  <!-- App Navbar -->
+  <div class="bg-surface border-b border-line">
+    <div class="px-5 h-14 flex items-center gap-6">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-md bg-gradient-to-br from-ai to-accent grid place-items-center font-bold text-white text-sm">A</div>
+        <div class="font-semibold text-ink tracking-tight">AutoTrade<span class="text-ai">Pro</span></div>
+      </div>
+      <nav class="flex items-center gap-1 text-sm text-ink2">
+        <a class="px-3 py-1.5 rounded-md hover:bg-card">Terminal</a>
+        <a class="px-3 py-1.5 rounded-md hover:bg-card">Discover</a>
+        <a class="px-3 py-1.5 rounded-md bg-card text-ink">Stocks</a>
+        <a class="px-3 py-1.5 rounded-md hover:bg-card">Portfolio</a>
+        <a class="px-3 py-1.5 rounded-md hover:bg-card">Intel</a>
+      </nav>
+      <div class="flex-1 max-w-xl mx-auto">
+        <div class="flex items-center gap-2 bg-card border border-line rounded-lg px-3 h-9 text-ink3 text-sm cursor-text">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <span>Search any stock, MF, news…</span>
+          <span class="ml-auto kbd">⌘K</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 text-ink2">
+        <div class="chip chip-soft mono"><span class="ring-dot bg-bull"></span> LIVE</div>
+        <div class="w-8 h-8 rounded-full bg-card border border-line grid place-items-center text-xs font-semibold">AD</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compact symbol strip (sticky on scroll) -->
+  <div class="bg-board border-b border-line px-5 py-3 flex items-center gap-4">
+    <button class="text-ink3 hover:text-ink text-sm flex items-center gap-1"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
+    <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-900 to-blue-600 grid place-items-center font-bold text-white text-sm">R</div>
+    <div>
+      <div class="flex items-center gap-2">
+        <h2 class="text-ink font-semibold text-base">Reliance Industries Ltd</h2>
+        <span class="chip chip-soft mono">RELIANCE</span>
+        <span class="chip chip-soft">NSE · EQ · F&O</span>
+      </div>
+      <div class="text-ink3 text-[11px] mt-0.5">Oil &amp; Gas · NIFTY 50 component · Mkt cap ₹19.2 L Cr</div>
+    </div>
+    <div class="ml-6 flex items-baseline gap-2">
+      <div class="mono text-2xl font-bold text-ink">₹2,847.50</div>
+      <div class="text-bull mono text-sm font-semibold">+24.30 (+0.86%) ▲</div>
+    </div>
+    <div class="ml-auto flex items-center gap-2">
+      <button class="chip chip-soft hover:bg-cardHi"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg> Watchlist</button>
+      <button class="chip chip-soft hover:bg-cardHi"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 2"/></svg> Alert</button>
+      <button class="chip chip-soft hover:bg-cardHi"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> Share</button>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 1 — DECISION CENTER (HERO) ===== -->
+  <div class="bg-gradient-to-b from-board to-bg px-5 pt-7 pb-8">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-[10px] text-ai uppercase tracking-[0.2em] font-bold">Section 1 · Decision center</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">Updated 14:21 IST · refresh every 30s</span>
+    </div>
+
+    <h3 class="text-ink2 text-[13px] uppercase tracking-wider mb-3 font-semibold">What should I do right now?</h3>
+
+    <div class="bg-gradient-to-br from-card via-card to-aiSoft/40 rounded-2xl p-6 relative overflow-hidden glow-bull">
+      <div class="absolute -right-20 -top-20 w-96 h-96 bg-bull/15 blur-3xl rounded-full"></div>
+      <div class="absolute -left-20 -bottom-20 w-80 h-80 bg-ai/15 blur-3xl rounded-full"></div>
+
+      <div class="relative grid grid-cols-12 gap-6">
+
+        <!-- Verdict pill -->
+        <div class="col-span-12 lg:col-span-3 flex flex-col items-start justify-center border-r border-line pr-6">
+          <div class="text-ai text-[10px] uppercase tracking-[0.18em] font-bold mb-2">AI Verdict</div>
+          <div class="flex items-center gap-3 mb-3">
+            <div class="text-6xl font-black text-bull tracking-tighter">BUY</div>
+            <div>
+              <div class="text-ink3 text-[10px]">Confidence</div>
+              <div class="mono text-ai text-3xl font-bold leading-none">78<span class="text-base text-ink3">%</span></div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 mb-3">
+            <span class="chip chip-ai text-[10px]">SWING</span>
+            <span class="chip chip-soft text-[10px]">5–15 trading days</span>
+          </div>
+          <div class="text-[11px] text-ink2 leading-relaxed">
+            Strong long-term hold with a <span class="text-bull font-semibold">tactical swing entry</span> opening this week.
+          </div>
+        </div>
+
+        <!-- Trade plan -->
+        <div class="col-span-12 lg:col-span-5 grid grid-cols-2 gap-2.5">
+          <div class="bg-board/70 border border-line rounded-lg p-3">
+            <div class="text-ink3 text-[10px] uppercase tracking-wider">Entry zone</div>
+            <div class="mono text-ink text-lg font-bold">₹2,840 – 2,855</div>
+            <div class="text-[10px] text-bull mt-0.5">Currently in zone · CMP ₹2,847.50</div>
+          </div>
+          <div class="bg-board/70 border border-line rounded-lg p-3">
+            <div class="text-ink3 text-[10px] uppercase tracking-wider">Stop loss</div>
+            <div class="mono text-bear text-lg font-bold">₹2,795</div>
+            <div class="text-[10px] text-ink3 mt-0.5">-1.84% from CMP · 1× ATR</div>
+          </div>
+          <div class="bg-board/70 border border-line rounded-lg p-3 col-span-2">
+            <div class="text-ink3 text-[10px] uppercase tracking-wider">Targets</div>
+            <div class="flex items-center gap-3 mt-1 mono">
+              <div><div class="text-[10px] text-ink3">T1</div><div class="text-bull text-base font-bold">₹2,890</div></div>
+              <svg class="w-3 h-3 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+              <div><div class="text-[10px] text-ink3">T2</div><div class="text-bull text-base font-bold">₹2,940</div></div>
+              <svg class="w-3 h-3 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+              <div><div class="text-[10px] text-ink3">T3</div><div class="text-bull text-base font-bold">₹3,010</div></div>
+              <div class="ml-auto"><div class="text-[10px] text-ink3">R : R</div><div class="text-ink text-base font-bold">1 : 3.1</div></div>
+            </div>
+          </div>
+          <div class="bg-board/70 border border-line rounded-lg p-3">
+            <div class="text-ink3 text-[10px] uppercase tracking-wider">Horizon</div>
+            <div class="text-ink text-sm font-semibold mt-1">SWING · 5–15 days</div>
+            <div class="text-[10px] text-ink3">Hold to T2 · trail SL above T1</div>
+          </div>
+          <div class="bg-board/70 border border-line rounded-lg p-3">
+            <div class="text-ink3 text-[10px] uppercase tracking-wider">Best buy window</div>
+            <div class="text-ink text-sm font-semibold mt-1">Today 14:00 – 15:15</div>
+            <div class="text-[10px] text-ink3">Last hour · highest win-rate historically</div>
+          </div>
+        </div>
+
+        <!-- Why now + What changed -->
+        <div class="col-span-12 lg:col-span-4 space-y-3">
+          <div class="bg-board/70 border border-bull/30 rounded-lg p-3">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-3.5 h-3.5 text-bull" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+              <span class="text-bull text-[10px] uppercase tracking-wider font-bold">Why now? · 3 reasons</span>
+            </div>
+            <ul class="space-y-1.5 text-[12px] text-ink2">
+              <li class="flex gap-2"><span class="text-bull mono">›</span><span>Bullish stack EMA 20&gt;50&gt;200, Supertrend BUY since May 14</span></li>
+              <li class="flex gap-2"><span class="text-bull mono">›</span><span>FII net buyer 3 of last 4 sessions — accumulation visible</span></li>
+              <li class="flex gap-2"><span class="text-bull mono">›</span><span>Q4 beat consensus, mgmt guided FY27 capex strong</span></li>
+            </ul>
+          </div>
+          <div class="bg-board/70 border border-accent/30 rounded-lg p-3">
+            <div class="flex items-center gap-2 mb-2">
+              <svg class="w-3.5 h-3.5 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              <span class="text-accent text-[10px] uppercase tracking-wider font-bold">What changed today</span>
+            </div>
+            <ul class="space-y-1.5 text-[12px] text-ink2">
+              <li class="flex gap-2"><span class="text-bull">↑</span><span>Broke above ₹2,840 resistance on 28% above-avg volume</span></li>
+              <li class="flex gap-2"><span class="text-bull">↑</span><span>Brent eased to $87.40 — refining margin tailwind</span></li>
+              <li class="flex gap-2"><span class="text-ink3">→</span><span>News sentiment +0.42 · 3 broker upgrades this week</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <!-- CTA row -->
+      <div class="relative mt-5 flex items-center gap-3">
+        <button class="flex-1 bg-bull/15 hover:bg-bull/25 border border-bull/40 text-bull font-bold rounded-lg py-3 flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          Open trade ticket
+        </button>
+        <button class="flex-1 bg-card border border-line text-ink hover:bg-cardHi font-semibold rounded-lg py-3 flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 2"/></svg>
+          Set price alert
+        </button>
+        <button class="flex-1 bg-card border border-line text-ink hover:bg-cardHi font-semibold rounded-lg py-3 flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+          Add to watchlist
+        </button>
+        <button class="bg-card border border-line text-ink2 hover:bg-cardHi rounded-lg p-3"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="3" r="1.2" fill="currentColor"/><circle cx="12" cy="21" r="1.2" fill="currentColor"/></svg></button>
+      </div>
+
+      <!-- Conviction trail -->
+      <div class="relative mt-4 pt-4 border-t divider flex items-center gap-3 text-[11px]">
+        <span class="text-ink3">Master Intel score</span>
+        <div class="w-32 h-1.5 bg-line rounded-full overflow-hidden">
+          <div class="h-full bg-gradient-to-r from-neutral to-bull" style="width:73%"></div>
+        </div>
+        <span class="mono text-ink font-semibold">73 / 100</span>
+        <span class="text-ink3">·</span>
+        <span class="text-ink3">7-component ensemble</span>
+        <span class="ml-auto text-ink3">Sources: 12 · <button class="text-ai hover:underline">View trail</button></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 2 — INTELLIGENCE SNAPSHOT ===== -->
+  <div class="bg-bg px-5 pt-2 pb-7">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-[10px] text-ai uppercase tracking-[0.2em] font-bold">Section 2 · Intelligence snapshot</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">7-component ensemble · click any chip for detail</span>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      <!-- Technical -->
+      <div class="bg-card border border-line hover:border-bull/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Technical</span>
+          <span class="ring-dot bg-bull"></span>
+        </div>
+        <div class="mono text-bull text-3xl font-black leading-none">82</div>
+        <div class="text-[10px] text-bull mt-1 font-semibold">STRONG</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">EMA stack bullish · MACD cross · ADX trending</div>
+      </div>
+      <!-- Fundamentals -->
+      <div class="bg-card border border-line hover:border-bull/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Fundamentals</span>
+          <span class="ring-dot bg-bull"></span>
+        </div>
+        <div class="mono text-bull text-3xl font-black leading-none">73</div>
+        <div class="text-[10px] text-bull mt-1 font-semibold">GOOD</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">ROE 18% · ROCE 14.6% · cash-flow positive 8y</div>
+      </div>
+      <!-- Sentiment -->
+      <div class="bg-card border border-line hover:border-bull/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Sentiment</span>
+          <span class="ring-dot bg-bull"></span>
+        </div>
+        <div class="mono text-bull text-3xl font-black leading-none">+0.42</div>
+        <div class="text-[10px] text-bull mt-1 font-semibold">BULLISH</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">42 news 7d · 3 upgrades · tone positive</div>
+      </div>
+      <!-- Valuation -->
+      <div class="bg-card border border-line hover:border-neutral/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Valuation</span>
+          <span class="ring-dot bg-neutral"></span>
+        </div>
+        <div class="mono text-neutral text-3xl font-black leading-none">68</div>
+        <div class="text-[10px] text-neutral mt-1 font-semibold">FAIR</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">PE 28.4 (5y med 27.6) · premium to sector</div>
+      </div>
+      <!-- Risk -->
+      <div class="bg-card border border-line hover:border-neutral/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Risk</span>
+          <span class="ring-dot bg-neutral"></span>
+        </div>
+        <div class="mono text-neutral text-3xl font-black leading-none">42</div>
+        <div class="text-[10px] text-neutral mt-1 font-semibold">MODERATE</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">Brent + telecom · debt mod · governance low</div>
+      </div>
+      <!-- Smart Money -->
+      <div class="bg-card border border-line hover:border-bull/40 rounded-xl p-4 transition cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ink3 uppercase tracking-wider">Smart money</span>
+          <span class="ring-dot bg-bull"></span>
+        </div>
+        <div class="mono text-bull text-3xl font-black leading-none">↑</div>
+        <div class="text-[10px] text-bull mt-1 font-semibold">ACCUMULATING</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">FII 21/30d net buy · 0 promoter pledge</div>
+      </div>
+      <!-- Overall -->
+      <div class="bg-gradient-to-br from-card to-aiSoft/40 border border-ai/40 rounded-xl p-4 cursor-pointer">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] text-ai uppercase tracking-wider font-semibold">Overall conviction</span>
+          <span class="ring-dot bg-ai"></span>
+        </div>
+        <div class="mono text-ai text-3xl font-black leading-none">78</div>
+        <div class="text-[10px] text-ai mt-1 font-bold">BUY</div>
+        <div class="text-[10px] text-ink3 mt-2 leading-snug">Ensemble · weighted by historical hit-rate</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 3 — CHART + TECHNICALS (collapsible indicators) ===== -->
+  <div class="bg-board px-5 pt-2 pb-7 border-t border-line">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-[10px] text-ai uppercase tracking-[0.2em] font-bold">Section 3 · Chart</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">Default clean view · advanced indicators collapsed</span>
+    </div>
+
+    <div class="bg-card border border-line rounded-xl overflow-hidden">
+      <!-- Minimal chart toolbar -->
+      <div class="flex items-center gap-2 px-3 h-11 border-b border-line">
+        <div class="flex items-center gap-0.5 bg-surface rounded-md p-0.5 text-xs">
+          <span class="px-2 py-1 rounded text-ink3">1m</span>
+          <span class="px-2 py-1 rounded text-ink3">5m</span>
+          <span class="px-2 py-1 rounded text-ink3">15m</span>
+          <span class="px-2 py-1 rounded bg-cardHi text-ink font-semibold">1h</span>
+          <span class="px-2 py-1 rounded text-ink3">1D</span>
+          <span class="px-2 py-1 rounded text-ink3">1W</span>
+          <span class="px-2 py-1 rounded text-ink3">1M</span>
+        </div>
+        <div class="h-5 w-px bg-line mx-1"></div>
+        <button class="chip chip-soft hover:bg-cardHi"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Indicator</button>
+        <button class="chip chip-soft hover:bg-cardHi"><svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18z"/></svg> Draw</button>
+        <span class="text-ink3 text-[11px] ml-auto">Trade plan overlay <span class="chip chip-bull text-[10px]">ON</span></span>
+        <button class="text-ink3 hover:text-ink w-7 h-7 grid place-items-center rounded hover:bg-surface"><svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/></svg></button>
+      </div>
+
+      <!-- Chart -->
+      <div class="ticker-grid relative h-[380px] px-3 py-4">
+        <svg viewBox="0 0 800 360" class="w-full h-full">
+          <g stroke="#212B49" stroke-dasharray="2 4" stroke-width="0.5">
+            <line x1="0" y1="80" x2="800" y2="80"/>
+            <line x1="0" y1="160" x2="800" y2="160"/>
+            <line x1="0" y1="240" x2="800" y2="240"/>
+            <line x1="0" y1="320" x2="800" y2="320"/>
+          </g>
+          <path d="M0,230 C100,220 200,210 300,200 S500,170 600,160 700,150 800,130" fill="none" stroke="#38BDF8" stroke-width="1.2" opacity="0.7"/>
+
+          <!-- candle batch (compact) -->
+          <g>
+            <g transform="translate(20,0)"><line x1="0" y1="200" x2="0" y2="240" stroke="#EF4444"/><rect x="-4" y="210" width="8" height="20" fill="#EF4444"/></g>
+            <g transform="translate(45,0)"><line x1="0" y1="195" x2="0" y2="245" stroke="#EF4444"/><rect x="-4" y="215" width="8" height="22" fill="#EF4444"/></g>
+            <g transform="translate(70,0)"><line x1="0" y1="190" x2="0" y2="235" stroke="#10B981"/><rect x="-4" y="198" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(95,0)"><line x1="0" y1="185" x2="0" y2="220" stroke="#10B981"/><rect x="-4" y="192" width="8" height="18" fill="#10B981"/></g>
+            <g transform="translate(120,0)"><line x1="0" y1="180" x2="0" y2="215" stroke="#10B981"/><rect x="-4" y="188" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(145,0)"><line x1="0" y1="175" x2="0" y2="210" stroke="#EF4444"/><rect x="-4" y="185" width="8" height="18" fill="#EF4444"/></g>
+            <g transform="translate(170,0)"><line x1="0" y1="170" x2="0" y2="205" stroke="#10B981"/><rect x="-4" y="180" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(195,0)"><line x1="0" y1="165" x2="0" y2="200" stroke="#10B981"/><rect x="-4" y="172" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(220,0)"><line x1="0" y1="160" x2="0" y2="195" stroke="#EF4444"/><rect x="-4" y="168" width="8" height="20" fill="#EF4444"/></g>
+            <g transform="translate(245,0)"><line x1="0" y1="155" x2="0" y2="190" stroke="#10B981"/><rect x="-4" y="162" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(270,0)"><line x1="0" y1="150" x2="0" y2="185" stroke="#10B981"/><rect x="-4" y="158" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(295,0)"><line x1="0" y1="145" x2="0" y2="180" stroke="#EF4444"/><rect x="-4" y="155" width="8" height="18" fill="#EF4444"/></g>
+            <g transform="translate(320,0)"><line x1="0" y1="140" x2="0" y2="175" stroke="#10B981"/><rect x="-4" y="148" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(345,0)"><line x1="0" y1="135" x2="0" y2="170" stroke="#10B981"/><rect x="-4" y="142" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(370,0)"><line x1="0" y1="130" x2="0" y2="165" stroke="#EF4444"/><rect x="-4" y="138" width="8" height="20" fill="#EF4444"/></g>
+            <g transform="translate(395,0)"><line x1="0" y1="125" x2="0" y2="160" stroke="#10B981"/><rect x="-4" y="132" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(420,0)"><line x1="0" y1="120" x2="0" y2="155" stroke="#10B981"/><rect x="-4" y="128" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(445,0)"><line x1="0" y1="115" x2="0" y2="150" stroke="#10B981"/><rect x="-4" y="120" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(470,0)"><line x1="0" y1="110" x2="0" y2="145" stroke="#EF4444"/><rect x="-4" y="118" width="8" height="20" fill="#EF4444"/></g>
+            <g transform="translate(495,0)"><line x1="0" y1="105" x2="0" y2="140" stroke="#10B981"/><rect x="-4" y="112" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(520,0)"><line x1="0" y1="100" x2="0" y2="135" stroke="#10B981"/><rect x="-4" y="108" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(545,0)"><line x1="0" y1="95" x2="0" y2="130" stroke="#EF4444"/><rect x="-4" y="102" width="8" height="22" fill="#EF4444"/></g>
+            <g transform="translate(570,0)"><line x1="0" y1="90" x2="0" y2="125" stroke="#10B981"/><rect x="-4" y="98" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(595,0)"><line x1="0" y1="85" x2="0" y2="120" stroke="#10B981"/><rect x="-4" y="92" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(620,0)"><line x1="0" y1="80" x2="0" y2="115" stroke="#10B981"/><rect x="-4" y="85" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(645,0)"><line x1="0" y1="75" x2="0" y2="110" stroke="#EF4444"/><rect x="-4" y="80" width="8" height="20" fill="#EF4444"/></g>
+            <g transform="translate(670,0)"><line x1="0" y1="70" x2="0" y2="105" stroke="#10B981"/><rect x="-4" y="78" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(695,0)"><line x1="0" y1="65" x2="0" y2="100" stroke="#10B981"/><rect x="-4" y="72" width="8" height="22" fill="#10B981"/></g>
+            <g transform="translate(720,0)"><line x1="0" y1="60" x2="0" y2="95" stroke="#10B981"/><rect x="-4" y="68" width="8" height="20" fill="#10B981"/></g>
+            <g transform="translate(745,0)"><line x1="0" y1="55" x2="0" y2="90" stroke="#10B981"/><rect x="-4" y="62" width="8" height="22" fill="#10B981"/></g>
+          </g>
+
+          <!-- Trade plan overlay (BIG TRUST SIGNAL) -->
+          <rect x="0" y="70" width="800" height="20" fill="#10B981" opacity="0.1"/>
+          <line x1="0" y1="70" x2="800" y2="70" stroke="#10B981" stroke-width="1" stroke-dasharray="6 4"/>
+          <line x1="0" y1="90" x2="800" y2="90" stroke="#10B981" stroke-width="1" stroke-dasharray="6 4"/>
+          <text x="8" y="66" font-size="11" fill="#10B981" font-family="JetBrains Mono" font-weight="700">ENTRY 2,840 – 2,855</text>
+
+          <line x1="0" y1="30" x2="800" y2="30" stroke="#10B981" stroke-width="1" stroke-dasharray="6 4"/>
+          <text x="8" y="26" font-size="11" fill="#10B981" font-family="JetBrains Mono" font-weight="700">T3 3,010</text>
+          <line x1="0" y1="110" x2="800" y2="110" stroke="#10B981" stroke-width="0.8" stroke-dasharray="6 4" opacity="0.6"/>
+          <text x="8" y="106" font-size="10" fill="#10B981" font-family="JetBrains Mono" opacity="0.8">T1 2,890 · T2 2,940</text>
+
+          <line x1="0" y1="140" x2="800" y2="140" stroke="#EF4444" stroke-width="1" stroke-dasharray="6 4"/>
+          <text x="8" y="136" font-size="11" fill="#EF4444" font-family="JetBrains Mono" font-weight="700">STOP 2,795</text>
+
+          <rect x="755" y="78" width="45" height="20" fill="#10B981" rx="2"/>
+          <text x="760" y="92" font-size="11" fill="#fff" font-family="JetBrains Mono" font-weight="700">2847.5</text>
+        </svg>
+      </div>
+
+      <!-- Collapsed indicators -->
+      <div class="border-t border-line">
+        <button class="w-full px-4 py-3 flex items-center gap-2 text-ink2 hover:bg-cardHi/40 text-[12px]">
+          <svg class="w-3.5 h-3.5 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          <span class="font-semibold text-ink">Technical indicators</span>
+          <span class="text-ink3">— RSI · MACD · Supertrend · BB · ADX · VWAP · Ichimoku</span>
+          <span class="ml-auto chip chip-bull text-[10px]">7 / 7 bullish</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 4 — AI RESEARCH ANALYST ===== -->
+  <div class="bg-bg px-5 pt-2 pb-7 border-t border-line">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-[10px] text-ai uppercase tracking-[0.2em] font-bold">Section 4 · AI research analyst</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">Premium narrative · refreshes on news / event</span>
+    </div>
+
+    <!-- Headline -->
+    <div class="bg-gradient-to-br from-card via-card to-aiSoft/30 rounded-2xl p-6 mb-4 glow-ai">
+      <div class="flex items-start justify-between mb-4">
+        <div>
+          <div class="text-ai text-[10px] uppercase tracking-[0.2em] font-bold mb-2 flex items-center gap-2">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 9.5 8.5 2 12l7.5 3.5L12 22l2.5-6.5L22 12l-7.5-3.5z"/></svg>
+            Analyst brief · Generated 14:21 IST
+          </div>
+          <h3 class="text-2xl font-bold text-ink leading-tight">A <span class="text-bull">strong long-term hold</span> with a tactical swing entry — but watch crude and the FY27 capex cycle.</h3>
+        </div>
+        <div class="text-right shrink-0 ml-6">
+          <div class="text-[10px] text-ink3">Conviction</div>
+          <div class="text-3xl font-black text-ai mono">78%</div>
+        </div>
+      </div>
+      <p class="text-ink2 text-sm leading-relaxed">
+        Reliance enters a favorable window after consolidating between ₹2,780 – ₹2,850 for four weeks. The break above ₹2,840 on rising volume confirms the swing-low pivot from May 14. Operationally, Jio platforms continues to compound (28% YoY EBITDA), Retail margins are stabilizing, and the chemicals cycle is bottoming. The single biggest swing risk is Brent — every $5/bbl above $90 trims standalone EBITDA by ~₹1,200 Cr/qtr.
+      </p>
+    </div>
+
+    <div class="grid grid-cols-12 gap-4">
+      <!-- Bull case -->
+      <div class="col-span-12 lg:col-span-4 bg-card border border-bull/25 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-bull text-[12px] font-bold flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+            BULL CASE
+          </div>
+          <span class="chip chip-bull text-[10px]">62%</span>
+        </div>
+        <ul class="space-y-2.5 text-[12px] text-ink2 leading-relaxed">
+          <li><span class="text-bull mono">›</span> Jio ARPU expansion + 22% digital EBITDA CAGR through FY27</li>
+          <li><span class="text-bull mono">›</span> New energy capex (solar gigafactory, hydrogen) earnings-positive FY26</li>
+          <li><span class="text-bull mono">›</span> Retail demerger / listing unlocks SOTP value</li>
+          <li><span class="text-bull mono">›</span> Strong promoter 50.4% · no pledge · top-quartile governance</li>
+          <li><span class="text-bull mono">›</span> Index inclusions + FII re-allocation lifts technical demand</li>
+        </ul>
+      </div>
+
+      <!-- Bear case -->
+      <div class="col-span-12 lg:col-span-4 bg-card border border-bear/25 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-bear text-[12px] font-bold flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>
+            BEAR CASE
+          </div>
+          <span class="chip chip-bear text-[10px]">38%</span>
+        </div>
+        <ul class="space-y-2.5 text-[12px] text-ink2 leading-relaxed">
+          <li><span class="text-bear mono">›</span> Brent &gt; $95 sustained → refining margin compression ~150 bps</li>
+          <li><span class="text-bear mono">›</span> TRAI tariff cap on entry plans hits Jio cash flow</li>
+          <li><span class="text-bear mono">›</span> New-energy capex execution risk — first-of-kind tech</li>
+          <li><span class="text-bear mono">›</span> Retail like-for-like growth slowing vs Q-commerce</li>
+          <li><span class="text-bear mono">›</span> Heavy ₹3.1 L Cr debt · refinance cost up 80 bps in 6 months</li>
+        </ul>
+      </div>
+
+      <!-- Key risks -->
+      <div class="col-span-12 lg:col-span-4 bg-card border border-neutral/25 rounded-xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-neutral text-[12px] font-bold flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 2 10 18H2L12 2z"/><line x1="12" y1="9" x2="12" y2="14"/></svg>
+            KEY RISKS · Top 5
+          </div>
+          <span class="chip chip-neut text-[10px]">Watch</span>
+        </div>
+        <ul class="space-y-2.5 text-[12px] text-ink2 leading-relaxed">
+          <li><span class="text-neutral mono">!</span> Brent crude $89 → trigger above $95 (probability 28%)</li>
+          <li><span class="text-neutral mono">!</span> TRAI tariff ruling expected Q3 (probability 12%)</li>
+          <li><span class="text-neutral mono">!</span> Q1 FY27 earnings 5 weeks out — guidance event-risk</li>
+          <li><span class="text-neutral mono">!</span> USD/INR &gt; 86 sustained — refinery import cost</li>
+          <li><span class="text-neutral mono">!</span> Sector regulatory tone (telecom tariff floor lobbying)</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Fair value bar -->
+    <div class="bg-card border border-line rounded-xl p-5 mt-4">
+      <div class="flex items-center justify-between mb-4">
+        <div class="text-ink text-sm font-semibold">Fair valuation</div>
+        <div class="flex gap-2"><span class="chip chip-soft">SOTP</span><span class="chip chip-soft">PE band</span><span class="chip chip-soft">DCF</span></div>
+      </div>
+      <div class="relative h-12 mb-3">
+        <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 rounded-full bg-gradient-to-r from-bear via-neutral to-bull"></div>
+        <div class="absolute top-1/2 -translate-y-1/2" style="left:14%">
+          <div class="w-0.5 h-6 bg-ink3 mx-auto"></div>
+          <div class="text-[10px] mono text-ink3 mt-1 -translate-x-1/2 absolute">Floor 2,400</div>
+        </div>
+        <div class="absolute top-1/2 -translate-y-1/2" style="left:42%">
+          <div class="w-0.5 h-7 bg-ink mx-auto"></div>
+          <div class="text-[10px] mono text-ink mt-1 -translate-x-1/2 absolute font-bold">CMP 2,847</div>
+        </div>
+        <div class="absolute top-1/2 -translate-y-1/2" style="left:62%">
+          <div class="w-0.5 h-7 bg-bull mx-auto"></div>
+          <div class="text-[10px] mono text-bull mt-1 -translate-x-1/2 absolute font-bold">Fair 3,150</div>
+        </div>
+        <div class="absolute top-1/2 -translate-y-1/2" style="left:78%">
+          <div class="w-0.5 h-6 bg-bull mx-auto"></div>
+          <div class="text-[10px] mono text-bull mt-1 -translate-x-1/2 absolute">Bull TP 3,280</div>
+        </div>
+      </div>
+      <div class="text-[12px] text-ink2 leading-relaxed">
+        Upside to fair value <span class="text-bull mono font-bold">+10.6%</span>, to bull-case TP <span class="text-bull mono font-bold">+15.2%</span>.
+        Downside to bear floor <span class="text-bear mono font-bold">-15.7%</span>. Asymmetric R:R <span class="text-ink font-bold">1 : 1.8</span> at CMP.
+      </div>
+    </div>
+
+    <!-- Entry / Exit + Suitability + Alternatives -->
+    <div class="grid grid-cols-12 gap-4 mt-4">
+      <div class="col-span-12 lg:col-span-4 bg-card border border-line rounded-xl p-4">
+        <div class="text-ink text-sm font-semibold mb-3 flex items-center gap-2">
+          <svg class="w-4 h-4 text-bull" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="5 12 19 12"/><polyline points="13 6 19 12 13 18"/></svg>
+          Entry strategy
+        </div>
+        <ul class="space-y-2 text-[12px] text-ink2 leading-relaxed">
+          <li><span class="text-ink font-semibold">Staggered:</span> 40% @ ₹2,840 · 35% on dip ₹2,810 · 25% on breakout ₹2,890</li>
+          <li><span class="text-ink font-semibold">Window:</span> last hour (14:00–15:15) — 64% positive close historically when RSI &gt; 55</li>
+          <li><span class="text-ink font-semibold">Avoid:</span> first 15 min after open — gap volatility</li>
+        </ul>
+      </div>
+      <div class="col-span-12 lg:col-span-4 bg-card border border-line rounded-xl p-4">
+        <div class="text-ink text-sm font-semibold mb-3 flex items-center gap-2">
+          <svg class="w-4 h-4 text-bear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="19 12 5 12"/><polyline points="11 18 5 12 11 6"/></svg>
+          Exit strategy
+        </div>
+        <ul class="space-y-2 text-[12px] text-ink2 leading-relaxed">
+          <li><span class="text-ink font-semibold">Trail SL:</span> shift to cost at T1 · trail 1× ATR (~₹35) above 50-EMA after T2</li>
+          <li><span class="text-ink font-semibold">Partial book:</span> 33% T1 · 33% T2 · let remainder run with trail</li>
+          <li><span class="text-ink font-semibold">Hard exit:</span> close &lt; ₹2,795 daily OR RSI &lt; 40 + negative news</li>
+        </ul>
+      </div>
+      <div class="col-span-12 lg:col-span-4 bg-card border border-line rounded-xl p-4">
+        <div class="text-ink text-sm font-semibold mb-3">Suitability</div>
+        <div class="space-y-2 text-[11px]">
+          <div>
+            <div class="flex items-center justify-between mb-1"><span class="text-ink2">Long-term wealth (5y+)</span><span class="chip chip-bull text-[10px]">Highly suitable</span></div>
+            <div class="h-1.5 bg-line rounded-full overflow-hidden"><div class="h-full bg-bull rounded-full" style="width:88%"></div></div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1"><span class="text-ink2">Swing (5–15 days)</span><span class="chip chip-bull text-[10px]">Suitable</span></div>
+            <div class="h-1.5 bg-line rounded-full overflow-hidden"><div class="h-full bg-bull rounded-full" style="width:74%"></div></div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1"><span class="text-ink2">High-risk / high-growth</span><span class="chip chip-neut text-[10px]">Moderate fit</span></div>
+            <div class="h-1.5 bg-line rounded-full overflow-hidden"><div class="h-full bg-neutral rounded-full" style="width:55%"></div></div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1"><span class="text-ink2">Dividend income</span><span class="chip chip-neut text-[10px]">Marginal</span></div>
+            <div class="h-1.5 bg-line rounded-full overflow-hidden"><div class="h-full bg-neutral rounded-full" style="width:32%"></div></div>
+          </div>
+          <div>
+            <div class="flex items-center justify-between mb-1"><span class="text-ink2">Intraday scalp</span><span class="chip chip-soft text-[10px]">Not ideal</span></div>
+            <div class="h-1.5 bg-line rounded-full overflow-hidden"><div class="h-full bg-ink3 rounded-full" style="width:20%"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Better alternatives in sector -->
+    <div class="bg-card border border-line rounded-xl p-4 mt-4">
+      <div class="flex items-center justify-between mb-3">
+        <div class="text-ink text-sm font-semibold">Better alternatives in same sector?</div>
+        <span class="text-ink3 text-[10px]">ranked by AI conviction</span>
+      </div>
+      <div class="overflow-hidden rounded-lg border border-line">
+        <table class="w-full text-[12px]">
+          <thead class="bg-board text-ink3 text-[10px] uppercase tracking-wider">
+            <tr><th class="text-left px-3 py-2">Symbol</th><th class="text-left px-3 py-2">Thesis match</th><th class="text-right px-3 py-2">AI score</th><th class="text-right px-3 py-2">Upside</th><th class="text-right px-3 py-2">Risk</th><th class="text-right px-3 py-2 pr-4">Action</th></tr>
+          </thead>
+          <tbody class="divide-y divider">
+            <tr class="hover:bg-cardHi/40">
+              <td class="px-3 py-2.5 mono text-ink font-semibold">ONGC</td>
+              <td class="px-3 py-2.5 text-ink2">Energy cycle play · lower valuation</td>
+              <td class="px-3 py-2.5 mono text-right text-bull font-semibold">81</td>
+              <td class="px-3 py-2.5 mono text-right text-bull">+14.2%</td>
+              <td class="px-3 py-2.5 text-right"><span class="chip chip-neut text-[10px]">Mod</span></td>
+              <td class="px-3 py-2.5 text-right pr-4"><button class="chip chip-ai text-[10px]">Open →</button></td>
+            </tr>
+            <tr class="hover:bg-cardHi/40">
+              <td class="px-3 py-2.5 mono text-ink font-semibold">BHARTIARTL</td>
+              <td class="px-3 py-2.5 text-ink2">Telecom growth without commodity drag</td>
+              <td class="px-3 py-2.5 mono text-right text-bull font-semibold">76</td>
+              <td class="px-3 py-2.5 mono text-right text-bull">+9.6%</td>
+              <td class="px-3 py-2.5 text-right"><span class="chip chip-bull text-[10px]">Low</span></td>
+              <td class="px-3 py-2.5 text-right pr-4"><button class="chip chip-ai text-[10px]">Open →</button></td>
+            </tr>
+            <tr class="hover:bg-cardHi/40">
+              <td class="px-3 py-2.5 mono text-ink font-semibold">DMART</td>
+              <td class="px-3 py-2.5 text-ink2">Retail compounder · cleaner balance sheet</td>
+              <td class="px-3 py-2.5 mono text-right text-bull font-semibold">72</td>
+              <td class="px-3 py-2.5 mono text-right text-bull">+7.1%</td>
+              <td class="px-3 py-2.5 text-right"><span class="chip chip-bull text-[10px]">Low</span></td>
+              <td class="px-3 py-2.5 text-right pr-4"><button class="chip chip-ai text-[10px]">Open →</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 5 — NEWS + TIMELINE (What changed) ===== -->
+  <div class="bg-board px-5 pt-2 pb-7 border-t border-line">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-[10px] text-ai uppercase tracking-[0.2em] font-bold">Section 5 · News &amp; timeline</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">What changed · merged feed sorted by impact recency</span>
+    </div>
+
+    <!-- Sentiment ribbon + filter -->
+    <div class="bg-card border border-line rounded-xl p-4 mb-4">
+      <div class="flex items-center gap-4 mb-3">
+        <div class="text-ink text-sm font-semibold">Sentiment last 7 days</div>
+        <div class="flex-1 h-2 rounded-full bg-line overflow-hidden flex">
+          <div class="bg-bull" style="width:58%"></div>
+          <div class="bg-ink3" style="width:24%"></div>
+          <div class="bg-bear" style="width:18%"></div>
+        </div>
+        <span class="mono text-bull text-sm font-bold">+0.42</span>
+        <span class="text-ink3 text-[11px]">42 articles · 24 bullish · 10 neutral · 8 bearish</span>
+      </div>
+      <div class="flex items-center gap-2 text-[11px]">
+        <span class="text-ink3 mr-1">Filter:</span>
+        <span class="chip bg-ai/15 text-ai border border-ai/30 cursor-pointer">All · 42</span>
+        <span class="chip chip-soft cursor-pointer">Earnings · 8</span>
+        <span class="chip chip-soft cursor-pointer">Upgrades/downgrades · 5</span>
+        <span class="chip chip-soft cursor-pointer">Mgmt commentary · 4</span>
+        <span class="chip chip-soft cursor-pointer">Sector impact · 9</span>
+        <span class="chip chip-soft cursor-pointer">Corporate actions · 3</span>
+        <span class="chip chip-soft cursor-pointer">Regulatory · 2</span>
+      </div>
+    </div>
+
+    <!-- Merged news + event timeline -->
+    <div class="bg-card border border-line rounded-xl overflow-hidden">
+      <div class="divide-y divider">
+        <!-- Event -->
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-bull mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-bull text-[10px]">Bullish</span>
+              <span class="chip chip-soft text-[10px]">Upgrade</span>
+              <span class="text-ink3 text-[10px] mono">Today 11:42 IST</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">Morgan Stanley upgrades Reliance to Overweight · TP raised to ₹3,280</div>
+            <div class="text-ink2 text-[12px] mt-1">"Margin recovery in O2C + Jio ARPU expansion makes risk-reward attractive at current PE." Cites 14% upside.</div>
+            <div class="flex items-center gap-3 text-[10px] text-ink3 mt-2">
+              <span>Bloomberg</span>
+              <span>· Impact +0.62</span>
+              <span>· Reaction: 1h after stock +1.1%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-bull mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-bull text-[10px]">Bullish</span>
+              <span class="chip chip-soft text-[10px]">Sector</span>
+              <span class="text-ink3 text-[10px] mono">Today 09:15 IST</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">Brent eases to $87.40 as OPEC+ delays production cut decision</div>
+            <div class="text-ink2 text-[12px] mt-1">Energy sector index +2.4% intraday. Refining margin tailwind for integrated O&amp;G players.</div>
+            <div class="flex items-center gap-3 text-[10px] text-ink3 mt-2"><span>Reuters</span><span>· Impact +0.48</span><span>· Sector NIFTYENERGY +2.4%</span></div>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-bull mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-bull text-[10px]">Bullish</span>
+              <span class="chip chip-soft text-[10px]">Earnings</span>
+              <span class="text-ink3 text-[10px] mono">Apr 26 · 16:42 IST</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">Q4 FY26 beat: Revenue ₹2.41 L Cr (+11.2% YoY) · PAT ₹19,290 Cr (+8.9%) · Jio ARPU ₹201.4</div>
+            <div class="text-ink2 text-[12px] mt-1">Beat on Jio ARPU and retail (28% YoY). O2C margin slightly soft. FY27 capex guidance ₹1.4 L Cr.</div>
+            <div class="flex items-center gap-3 text-[10px] text-ink3 mt-2"><span>BSE filing</span><span>· Impact +0.78</span><span>· Stock 1D +3.2% · 5D +4.6%</span></div>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-ai mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-ai text-[10px]">Mgmt commentary</span>
+              <span class="text-ink3 text-[10px] mono">Apr 26 · earnings call</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">CFO: "New-energy gigafactory commissioning on track for Q3 FY27"</div>
+            <div class="text-ink2 text-[12px] mt-1">First commercial revenue expected H2 FY27. Capex peak FY26, then declining. Tone: <span class="text-bull">POSITIVE</span>.</div>
+            <div class="flex items-center gap-3 text-[10px] text-ink3 mt-2"><span>AI Earnings summary</span><span>· <a class="text-ai hover:underline cursor-pointer">Read full</a></span></div>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-ink3 mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-soft text-[10px]">Corporate action</span>
+              <span class="text-ink3 text-[10px] mono">Aug 22 2025 · ex-date</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">Dividend declared · ₹10.00 per share</div>
+            <div class="text-ink2 text-[12px] mt-1">Final dividend FY25. Record date Aug 22, 2025. Yield contribution 0.36%.</div>
+          </div>
+        </div>
+
+        <div class="px-4 py-3 flex items-start gap-3 hover:bg-cardHi/40">
+          <span class="ring-dot bg-bear mt-2"></span>
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="chip chip-bear text-[10px]">Bearish</span>
+              <span class="chip chip-soft text-[10px]">Regulatory</span>
+              <span class="text-ink3 text-[10px] mono">Jul 02 2025</span>
+            </div>
+            <div class="text-ink text-sm font-semibold">TRAI tariff consultation paper · potential cap on entry-level prepaid</div>
+            <div class="text-ink2 text-[12px] mt-1">Sector-wide. Modelled Jio impact: -1.4% EBITDA worst case. Resolved Aug 18, 2025 — no cap imposed.</div>
+            <div class="flex items-center gap-3 text-[10px] text-ink3 mt-2"><span>TRAI</span><span>· Impact -0.32</span><span>· Stock 1D -2.1% · 30D +5.8%</span></div>
+          </div>
+        </div>
+      </div>
+
+      <button class="w-full px-4 py-3 bg-board hover:bg-cardHi/40 text-ink2 text-[12px] flex items-center justify-center gap-2 border-t border-line">
+        Load older events
+        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ===== SECTION 6 — DEEP TABS (secondary) ===== -->
+  <div class="bg-bg px-5 pt-2 pb-8 border-t border-line">
+    <div class="flex items-center gap-3 mb-3">
+      <span class="text-[10px] text-ink3 uppercase tracking-[0.2em] font-semibold">Section 6 · Deeper analysis</span>
+      <div class="flex-1 h-px bg-line"></div>
+      <span class="text-ink3 text-[10px]">Optional — open only if you need it</span>
+    </div>
+    <p class="text-ink3 text-[12px] mb-4 max-w-2xl">Most decisions are answered above. These deep dives are here for power users, due-diligence, or specific scenarios. Each section lazy-loads on expand.</p>
+
+    <div class="space-y-2">
+      <!-- Company -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Company</div>
+            <div class="text-ink3 text-[11px]">History · founders · management · business segments · subsidiaries</div>
+          </div>
+          <span class="text-ink3 text-[10px]">est. 4 min read</span>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+
+      <!-- Financials -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Financials</div>
+            <div class="text-ink3 text-[11px]">P&amp;L · balance sheet · cash flow · ratios trend · 5y annual + quarterly</div>
+          </div>
+          <span class="chip chip-bull text-[10px]">8 / 10 qtrs beat</span>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+
+      <!-- Ownership -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Ownership &amp; smart money</div>
+            <div class="text-ink3 text-[11px]">Promoter · FII · DII · pledge · MF holders · FII/DII flow</div>
+          </div>
+          <span class="chip chip-bull text-[10px]">FII accumulating</span>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+
+      <!-- Peers -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Peers</div>
+            <div class="text-ink3 text-[11px]">Side-by-side comparison · radar chart · "why RELIANCE vs ONGC"</div>
+          </div>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+
+      <!-- Technicals -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Technicals (advanced)</div>
+            <div class="text-ink3 text-[11px]">Full indicator dashboard · pivots · Fib · pattern detection · backtest mini</div>
+          </div>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+
+      <!-- Options -->
+      <div class="bg-card border border-line rounded-xl hover:border-cardHi cursor-pointer">
+        <div class="px-4 py-3 flex items-center gap-3">
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <div class="flex-1">
+            <div class="text-ink text-sm font-semibold">Options</div>
+            <div class="text-ink3 text-[11px]">Chain · OI · IV · max pain · PCR (F&amp;O symbols only)</div>
+          </div>
+          <span class="chip chip-soft text-[10px]">F&amp;O eligible</span>
+          <svg class="w-4 h-4 text-ink3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer note -->
+  <div class="bg-surface px-5 py-3 border-t border-line flex items-center justify-between text-[11px] text-ink3">
+    <span>Decision-first layout · Section 1+2 answer most users without scrolling further</span>
+    <span class="flex items-center gap-3">
+      <span><span class="ring-dot bg-bull mr-1"></span> live WS</span>
+      <span>↻ verdict refresh 30s · narrative refresh on news event</span>
+    </span>
+  </div>
+</div>
+
+<!-- ============================================================== -->
+<!-- FRAME 03 — MOBILE: same decision-first hierarchy                -->
+<!-- ============================================================== -->
+<div class="mb-6 flex items-center gap-3">
+  <span class="chip chip-soft">Frame 03</span>
+  <span class="text-ink text-sm font-semibold">Mobile (<span class="mono">390 × 800</span>) · same hierarchy</span>
+</div>
+
+<div class="flex flex-wrap gap-8 justify-center mb-16">
+
+  <!-- Phone 1: Decision Center top -->
+  <div class="flex flex-col items-center">
+    <div class="text-[11px] text-ink3 mb-3">Top of page — Decision Center</div>
+    <div class="w-[390px] h-[800px] bg-board rounded-[40px] border-[10px] border-black overflow-hidden relative shadow-2xl">
+      <div class="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-6 bg-black rounded-b-2xl z-30"></div>
+
+      <div class="bg-surface border-b border-line h-12 flex items-center px-3 gap-2 pt-1">
+        <button class="text-ink2"><svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
+        <div class="flex-1 flex items-center gap-2">
+          <span class="mono text-ink font-semibold text-sm">RELIANCE</span>
+          <span class="text-bull mono text-[11px]">+0.86%</span>
+        </div>
+        <button class="text-ink2"><svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+      </div>
+
+      <div class="px-3 py-2.5">
+        <div class="flex items-baseline gap-2">
+          <div class="mono text-2xl font-bold text-ink">₹2,847.50</div>
+          <div class="text-bull mono text-xs font-semibold">+24.30 ▲</div>
+        </div>
+        <div class="text-ink3 text-[10px]">Day 2,820–2,855 · Vol 8.21M</div>
+      </div>
+
+      <!-- Decision Center hero -->
+      <div class="px-3 pb-3">
+        <div class="text-[9px] text-ai uppercase tracking-[0.18em] font-bold mb-2">What to do now</div>
+        <div class="bg-gradient-to-br from-card to-aiSoft/40 border border-bull/40 rounded-xl p-3 glow-bull">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-4xl font-black text-bull tracking-tighter">BUY</div>
+            <div class="text-right">
+              <div class="text-[9px] text-ink3">Confidence</div>
+              <div class="mono text-ai text-2xl font-bold leading-none">78%</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-1.5 mb-3">
+            <span class="chip chip-ai text-[9px]">SWING</span>
+            <span class="chip chip-soft text-[9px]">5–15 days</span>
+            <span class="ml-auto text-[9px] text-bull">In zone</span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-1.5 mb-2">
+            <div class="bg-board/70 border border-line rounded p-1.5">
+              <div class="text-[8px] text-ink3 uppercase">Entry</div>
+              <div class="mono text-ink text-[11px] font-bold">2,840–2,855</div>
+            </div>
+            <div class="bg-board/70 border border-line rounded p-1.5">
+              <div class="text-[8px] text-ink3 uppercase">Stop</div>
+              <div class="mono text-bear text-[11px] font-bold">2,795</div>
+            </div>
+            <div class="bg-board/70 border border-line rounded p-1.5 col-span-2">
+              <div class="text-[8px] text-ink3 uppercase">T1 · T2 · T3 · R:R</div>
+              <div class="mono text-bull text-[11px] font-bold">2,890 · 2,940 · 3,010 <span class="text-ink ml-1">1:3.1</span></div>
+            </div>
+          </div>
+
+          <div class="bg-board/70 border border-bull/30 rounded p-2 mb-2">
+            <div class="text-bull text-[9px] uppercase tracking-wider font-bold mb-1">Why now</div>
+            <ul class="text-[10px] text-ink2 space-y-0.5">
+              <li>› EMA stack bullish · Supertrend BUY May 14</li>
+              <li>› FII net buyer 3/4 sessions</li>
+              <li>› Q4 beat · capex guidance strong</li>
+            </ul>
+          </div>
+          <div class="bg-board/70 border border-accent/30 rounded p-2">
+            <div class="text-accent text-[9px] uppercase tracking-wider font-bold mb-1">What changed today</div>
+            <ul class="text-[10px] text-ink2 space-y-0.5">
+              <li>↑ Broke ₹2,840 on 28% above-avg vol</li>
+              <li>↑ Brent eased to $87.40</li>
+            </ul>
+          </div>
+
+          <button class="w-full bg-bull/15 border border-bull/40 text-bull font-bold rounded-lg py-2 mt-3 text-[11px]">Open trade ticket</button>
+        </div>
+      </div>
+
+      <!-- Snapshot scroll preview -->
+      <div class="px-3 pb-1">
+        <div class="text-[9px] text-ai uppercase tracking-[0.18em] font-bold mb-1.5">Intelligence snapshot</div>
+        <div class="flex gap-2 overflow-x-auto scrollbar-none pb-1">
+          <div class="bg-card border border-line rounded-lg p-2 min-w-[80px]"><div class="text-[8px] text-ink3 uppercase">Tech</div><div class="mono text-bull text-lg font-black">82</div></div>
+          <div class="bg-card border border-line rounded-lg p-2 min-w-[80px]"><div class="text-[8px] text-ink3 uppercase">Fund</div><div class="mono text-bull text-lg font-black">73</div></div>
+          <div class="bg-card border border-line rounded-lg p-2 min-w-[80px]"><div class="text-[8px] text-ink3 uppercase">Sent</div><div class="mono text-bull text-lg font-black">+0.42</div></div>
+          <div class="bg-card border border-line rounded-lg p-2 min-w-[80px]"><div class="text-[8px] text-ink3 uppercase">Val</div><div class="mono text-neutral text-lg font-black">68</div></div>
+          <div class="bg-card border border-line rounded-lg p-2 min-w-[80px]"><div class="text-[8px] text-ink3 uppercase">Risk</div><div class="mono text-neutral text-lg font-black">42</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phone 2: scrolled to AI Research -->
+  <div class="flex flex-col items-center">
+    <div class="text-[11px] text-ink3 mb-3">Scrolled — AI Research analyst</div>
+    <div class="w-[390px] h-[800px] bg-board rounded-[40px] border-[10px] border-black overflow-hidden relative shadow-2xl">
+      <div class="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-6 bg-black rounded-b-2xl z-30"></div>
+
+      <div class="bg-surface border-b border-line h-12 flex items-center px-3 gap-2 pt-1">
+        <button class="text-ink2"><svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg></button>
+        <div class="flex-1 flex items-center gap-2">
+          <span class="mono text-ink font-semibold text-sm">RELIANCE</span>
+          <span class="mono text-ink text-xs">₹2,847</span>
+          <span class="text-bull mono text-[11px]">+0.86%</span>
+        </div>
+      </div>
+
+      <div class="px-3 py-3 overflow-y-auto" style="height: calc(100% - 48px);">
+        <div class="text-[9px] text-ai uppercase tracking-[0.18em] font-bold mb-2">AI Research analyst</div>
+
+        <div class="bg-gradient-to-br from-card to-aiSoft/40 border border-ai/30 rounded-xl p-3 mb-3 glow-ai">
+          <div class="text-ai text-[9px] uppercase tracking-wider font-bold mb-2">Analyst brief</div>
+          <div class="text-ink text-[12px] font-semibold leading-snug">A strong long-term hold with a tactical swing entry — but watch crude and FY27 capex.</div>
+          <div class="mt-2 flex items-center gap-2">
+            <span class="text-[9px] text-ink3">Conviction</span>
+            <div class="flex-1 h-1 bg-line rounded-full overflow-hidden"><div class="h-full bg-gradient-to-r from-ai to-bull" style="width:78%"></div></div>
+            <span class="mono text-ai text-[10px] font-bold">78%</span>
+          </div>
+        </div>
+
+        <div class="bg-card border border-bull/25 rounded-xl p-3 mb-2">
+          <div class="text-bull text-[10px] font-bold mb-1.5">BULL CASE · 62%</div>
+          <ul class="space-y-1 text-[11px] text-ink2">
+            <li>› Jio ARPU + 22% digital EBITDA CAGR FY27</li>
+            <li>› New energy capex earnings-positive FY26</li>
+            <li>› Retail demerger unlocks SOTP value</li>
+          </ul>
+        </div>
+        <div class="bg-card border border-bear/25 rounded-xl p-3 mb-2">
+          <div class="text-bear text-[10px] font-bold mb-1.5">BEAR CASE · 38%</div>
+          <ul class="space-y-1 text-[11px] text-ink2">
+            <li>› Brent &gt; $95 → refining margin -150 bps</li>
+            <li>› TRAI tariff cap risk on Jio</li>
+            <li>› ₹3.1L Cr debt · refinance cost rising</li>
+          </ul>
+        </div>
+        <div class="bg-card border border-neutral/25 rounded-xl p-3 mb-3">
+          <div class="text-neutral text-[10px] font-bold mb-1.5">KEY RISKS</div>
+          <ul class="space-y-1 text-[11px] text-ink2">
+            <li>! Brent crude trigger above $95 (28%)</li>
+            <li>! Q1 FY27 results 5w out — guidance risk</li>
+          </ul>
+        </div>
+
+        <div class="bg-card border border-line rounded-xl p-3 mb-3">
+          <div class="text-ink text-[11px] font-semibold mb-2">Fair valuation</div>
+          <div class="relative h-10">
+            <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1.5 rounded-full bg-gradient-to-r from-bear via-neutral to-bull"></div>
+            <div class="absolute top-0 -translate-x-1/2" style="left:42%"><div class="text-[8px] mono text-ink font-bold">CMP</div><div class="w-0.5 h-5 bg-ink mx-auto"></div></div>
+            <div class="absolute top-0 -translate-x-1/2" style="left:62%"><div class="text-[8px] mono text-bull font-bold">Fair</div><div class="w-0.5 h-5 bg-bull mx-auto"></div></div>
+            <div class="absolute top-0 -translate-x-1/2" style="left:78%"><div class="text-[8px] mono text-bull">TP</div><div class="w-0.5 h-5 bg-bull mx-auto"></div></div>
+          </div>
+          <div class="text-[10px] text-ink2 mt-2">Upside <span class="text-bull mono">+10.6%</span> · Bull TP <span class="text-bull mono">+15.2%</span></div>
+        </div>
+
+        <div class="bg-card border border-line rounded-xl p-3">
+          <div class="text-ink text-[11px] font-semibold mb-2">Suitability</div>
+          <div class="space-y-1.5 text-[10px]">
+            <div class="flex items-center justify-between"><span class="text-ink2">Long-term 5y+</span><span class="chip chip-bull text-[9px]">88</span></div>
+            <div class="flex items-center justify-between"><span class="text-ink2">Swing 5–15d</span><span class="chip chip-bull text-[9px]">74</span></div>
+            <div class="flex items-center justify-between"><span class="text-ink2">Dividend</span><span class="chip chip-neut text-[9px]">32</span></div>
+            <div class="flex items-center justify-between"><span class="text-ink2">Intraday scalp</span><span class="chip chip-soft text-[9px]">20</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================== -->
+<!-- WIRING NOTE — every section maps to an existing backend route   -->
+<!-- ============================================================== -->
+<div class="frame p-6 mb-16">
+  <div class="text-ink font-semibold mb-2 flex items-center gap-2">
+    <svg class="w-4 h-4 text-bull" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+    Every section above maps to an existing backend route
+  </div>
+  <p class="text-ink3 text-[12px] mb-4">No new APIs for v1. Thin aggregations where flagged. Genuine gaps (insider trades, MF-holdings reverse index, block deals, quarterly shareholding history) are <span class="text-neutral">deferred to v2</span>.</p>
+  <div class="grid grid-cols-12 gap-4 text-[12px]">
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 1 · Decision Center</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">GET /zerodha/deep-analysis/{symbol}</code> → entry / SL / T1·T2·T3 / R:R / when-to-buy</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">GET /intelligence/score-breakdown/{symbol}</code> → BUY/SELL · confidence · components</li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> "Horizon" mapper (confidence + ATR + timeframe → swing / positional)</li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> "What changed today" = filter <code class="mono">NewsItem</code> by ticker since 09:00 IST + price-action delta</li>
+      </ul>
+    </div>
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 2 · Intelligence Snapshot</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Same <code class="mono text-accent">/score-breakdown</code> components (technical / news / fundamental / sector / earnings / options / portfolio)</li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Sentiment chip = avg of <code class="mono">NewsItem.score</code> last 7d via <code class="mono">tickers_affected</code></li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Smart-money chip = derive from <code class="mono">FundamentalData.fii_holding</code> Δ + recent FII/DII totals</li>
+      </ul>
+    </div>
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 3 · Chart</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">GET /india/candles/{symbol}</code> (multi-timeframe)</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">GET /india/candles/{symbol}/indicators</code> (RSI/MACD/EMA/Supertrend/BB/VWAP/Ichimoku)</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Existing <code class="mono">CandlestickChart.jsx</code> + drawing tools</li>
+      </ul>
+    </div>
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 4 · AI Research</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">engine/deep_analysis.groq_commentary</code> + <code class="mono">engine/llm_explainer</code></li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Bull/Bear/Risk fork — one extra LLM prompt over existing reasoning</li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Better-alternatives = <code class="mono">MasterIntelligenceScore</code> filtered by sector, ordered by score</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Suitability bars = mapper over existing components</li>
+      </ul>
+    </div>
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 5 · News &amp; Timeline</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">NewsItem</code> by <code class="mono">tickers_affected</code> + FinBERT sentiment</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> <code class="mono text-accent">GET /earnings/summary/{symbol}</code> for mgmt commentary</li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Corporate actions = expose <code class="mono">fundamental_analyzer.fetch_bse_corporate_actions</code></li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Sector impact = <code class="mono">GET /india/sectors</code></li>
+      </ul>
+    </div>
+    <div class="col-span-12 md:col-span-6 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Section 6 · Deep tabs</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Company info via <code class="mono">fundamental_analyzer.fetch_fundamentals_screener</code></li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Financials via yfinance + Screener.in (already in the same module)</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> Ownership · Peers · Technicals · Options all already covered</li>
+        <li><span class="chip chip-bear text-[10px]">v2</span> Insider · block deals · MF-holdings reverse index · quarterly shareholding history</li>
+      </ul>
+    </div>
+    <div class="col-span-12 bg-card border border-line rounded-xl p-4">
+      <div class="text-ink text-sm font-semibold mb-2">Critical infra (Section 0)</div>
+      <ul class="space-y-1.5 text-ink2">
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Global Search ⌘K → rewrite <code class="mono">engine/portfolio_service.search_stocks()</code> to query <code class="mono">kite_instruments</code> table (full NSE/BSE universe) instead of 60-symbol dict</li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> MF search via existing <code class="mono">/portfolio-tracker/search/mf</code></li>
+        <li><span class="chip chip-bull text-[10px]">REUSE</span> News search by header text via <code class="mono">NewsItem</code></li>
+        <li><span class="chip chip-neut text-[10px]">WRAP</span> Recent searches stored in <code class="mono">localStorage</code></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="text-center text-ink3 text-[11px] mb-10">
+  Decision-first v2 mock · No code in <span class="mono">autotrade-frontend/</span> or <span class="mono">autotrade-backend/</span> has been changed.
+</div>
+
+</div>
+</body>
+</html>

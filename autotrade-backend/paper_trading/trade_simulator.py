@@ -21,6 +21,7 @@ from datetime import datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from db.models import Candle, OpenPosition, PaperTrade, TradeDirection, TradeStatus
 from paper_trading.simulation_logger import SimulationLogger
@@ -158,6 +159,30 @@ async def open_paper_trade(
     units     = position_size["units"]
     usd_value = position_size["usd_value"]
 
+    # ── Trade management levels ───────────────────────────────────────────────
+    # signal.take_profit = Target 1 (first checkpoint / trailing trigger).
+    # signal.target_2    = final target — the position RIDES to T2 with a 1×ATR
+    # trailing stop activated once T1 is touched (see update_positions_…).
+    # If target_2 wasn't set (legacy caller), the position uses T1 as its TP.
+    target_1 = signal.take_profit
+    target_2 = getattr(signal, "target_2", 0.0) or target_1
+    atr      = getattr(signal, "atr", 0.0) or 0.0
+    # Trail distance: 1×ATR when available, else 2% of entry as a degraded proxy.
+    trail_dist = atr if atr > 0 else round(actual_entry * 0.02, 4)
+    # The position's hard take-profit is the FINAL target so winners can run.
+    position_tp = target_2
+
+    trade_meta = {
+        "target_1":   round(target_1, 4),
+        "target_2":   round(target_2, 4),
+        "atr":        round(atr, 4),
+        "trail_dist": round(trail_dist, 4),
+        "trailing":   False,                 # becomes True once T1 is hit
+        "peak_price": round(actual_entry, 6),
+        "level_source": next((p.split("[", 1)[1].split("]", 1)[0]
+                              for p in signal.reasoning_points if p.startswith("Trade levels [")), "unknown"),
+    }
+
     # ── Step 2a: Persist PaperTrade ───────────────────────────────────────────
     trade = PaperTrade(
         symbol=signal.symbol,
@@ -165,7 +190,7 @@ async def open_paper_trade(
         status=TradeStatus.OPEN,
         entry_price=round(actual_entry, 6),
         stop_loss=signal.stop_loss,
-        take_profit=signal.take_profit,
+        take_profit=position_tp,
         size_units=units,
         size_usd=usd_value,
         signal_confidence=signal.confidence,
@@ -176,6 +201,7 @@ async def open_paper_trade(
             "pattern_score":   signal.pattern_score,
             "sentiment_score": signal.sentiment_score,
             "final_score":     signal.final_score,
+            "trade_mgmt":      trade_meta,
         },
         news_sentiment_score=signal.sentiment_score / 100.0,
         slippage_applied=round(slippage_applied, 6),
@@ -191,7 +217,7 @@ async def open_paper_trade(
         entry_price=round(actual_entry, 6),
         current_price=round(actual_entry, 6),
         stop_loss=signal.stop_loss,
-        take_profit=signal.take_profit,
+        take_profit=position_tp,
         size_units=units,
         size_usd=usd_value,
         unrealised_pnl=0.0,
@@ -360,7 +386,11 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         One entry per auto-closed position — useful for WebSocket broadcast.
         Each dict: {trade_id, symbol, reason, exit_price, pnl}
     """
-    result    = await session.execute(select(OpenPosition))
+    # Eager-load the linked PaperTrade so we can read/update its trade_mgmt JSON
+    # (trailing-stop state) without triggering a lazy load in async context.
+    result    = await session.execute(
+        select(OpenPosition).options(selectinload(OpenPosition.trade))
+    )
     positions = list(result.scalars().all())
 
     auto_closed: list[dict] = []
@@ -379,19 +409,61 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             continue
 
         price = candle.close
+        is_buy = pos.direction == TradeDirection.BUY
 
-        # ── SL/TP check ────────────────────────────────────────────────────────
+        # ── Trailing stop after Target 1 ──────────────────────────────────────
+        # Once price touches T1, ratchet the stop to trail the high-water mark by
+        # 1×ATR (or 2% proxy). The position then rides toward T2 (its take_profit)
+        # protected by the trailed stop. Stop only ever tightens, never loosens.
+        trailed = False
+        snap = (pos.trade.indicator_snapshot or {}) if pos.trade else {}
+        tm   = snap.get("trade_mgmt") if isinstance(snap, dict) else None
+        if tm:
+            t1         = tm.get("target_1")
+            trail_dist = tm.get("trail_dist") or 0.0
+            trailing   = bool(tm.get("trailing"))
+            peak       = tm.get("peak_price") or pos.entry_price
+
+            if is_buy:
+                peak = max(peak, price)
+                if not trailing and t1 and price >= t1:
+                    trailing = True
+                if trailing and trail_dist > 0:
+                    new_stop = peak - trail_dist
+                    if new_stop > pos.stop_loss:
+                        pos.stop_loss = round(new_stop, 4)
+                        trailed = True
+            else:  # SELL — best price is the lowest
+                peak = min(peak, price)
+                if not trailing and t1 and price <= t1:
+                    trailing = True
+                if trailing and trail_dist > 0:
+                    new_stop = peak + trail_dist
+                    if new_stop < pos.stop_loss:
+                        pos.stop_loss = round(new_stop, 4)
+                        trailed = True
+
+            # Persist mutated trailing state (reassign dict so SQLAlchemy detects it)
+            if trailing != bool(tm.get("trailing")) or peak != tm.get("peak_price") or trailed:
+                tm = {**tm, "trailing": trailing, "peak_price": round(peak, 6)}
+                pos.trade.indicator_snapshot = {**snap, "trade_mgmt": tm}
+                if trailing and not bool(snap.get("trade_mgmt", {}).get("trailing")):
+                    pos.take_profit = round(tm.get("target_2") or pos.take_profit, 4)
+
+        # ── SL/TP check (uses the possibly-trailed stop) ──────────────────────
         hit_sl = (
-            pos.direction == TradeDirection.BUY  and price <= pos.stop_loss
-            or pos.direction == TradeDirection.SELL and price >= pos.stop_loss
+            is_buy and price <= pos.stop_loss
+            or (not is_buy) and price >= pos.stop_loss
         )
         hit_tp = (
-            pos.direction == TradeDirection.BUY  and price >= pos.take_profit
-            or pos.direction == TradeDirection.SELL and price <= pos.take_profit
+            is_buy and price >= pos.take_profit
+            or (not is_buy) and price <= pos.take_profit
         )
 
         if hit_sl or hit_tp:
-            reason       = "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
+            is_trailing = bool(tm.get("trailing")) if tm else False
+            reason = ("TRAIL_STOP" if hit_sl and is_trailing
+                      else "STOP_LOSS" if hit_sl else "TAKE_PROFIT")
             closed_trade = await close_paper_trade(pos, price, reason, session)
             auto_closed.append({
                 "trade_id":   closed_trade.id,
