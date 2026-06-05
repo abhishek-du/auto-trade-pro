@@ -590,6 +590,99 @@ async def get_fundamentals_for_symbol(
     )).scalar_one_or_none()
 
 
+# How long a cached fundamentals row stays fresh before an on-demand refetch.
+_FUND_TTL = datetime.timedelta(days=7)
+
+
+async def fetch_and_cache_fundamentals(
+    symbol: str,
+    session: AsyncSession,
+) -> FundamentalData | None:
+    """Return fundamentals for *symbol*, fetching on demand if the DB row is
+    missing or stale (>7 days).
+
+    Unlike the weekly batch ``run_fundamental_update`` (which only covers the
+    curated large/mid-cap list), this lets the unified Stock Detail page show
+    fundamentals for ANY of the ~9,600 searchable NSE symbols. Reuses the same
+    yfinance + Screener.in fetchers and the same scoring/upsert logic.
+    """
+    sym  = symbol if symbol.endswith(".NS") else symbol + ".NS"
+    bare = sym.replace(".NS", "")
+
+    existing = (await session.execute(
+        select(FundamentalData).where(FundamentalData.symbol == sym)
+    )).scalar_one_or_none()
+
+    fresh = (
+        existing is not None
+        and existing.last_updated is not None
+        and (datetime.datetime.utcnow() - existing.last_updated) < _FUND_TTL
+    )
+    if fresh:
+        return existing
+
+    loop = asyncio.get_event_loop()
+    try:
+        yf_data = await asyncio.wait_for(
+            loop.run_in_executor(None, fetch_fundamentals_yfinance, sym),
+            timeout=20.0,
+        )
+    except Exception as exc:
+        logger.debug(f"[fundamentals on-demand] yfinance {sym}: {exc}")
+        yf_data = {}
+    try:
+        sc_data = await fetch_fundamentals_screener(bare)
+    except Exception as exc:
+        logger.debug(f"[fundamentals on-demand] screener {bare}: {exc}")
+        sc_data = {}
+
+    merged: dict = {**yf_data, **sc_data}
+    if not merged:
+        # Nothing fetched — return any stale row we have rather than nothing.
+        return existing
+
+    score = calculate_fundamental_score(merged)
+    now   = datetime.datetime.utcnow()
+
+    if existing:
+        for field in (
+            "company_name", "pe_ratio", "pb_ratio", "roe", "roce",
+            "debt_to_equity", "current_ratio", "revenue_growth_3yr",
+            "profit_growth_3yr", "promoter_holding", "fii_holding",
+            "pledged_pct", "market_cap_cr", "dividend_yield",
+        ):
+            if merged.get(field) is not None:
+                setattr(existing, field, merged[field])
+        existing.fundamental_score = score
+        existing.last_updated      = now
+        row = existing
+    else:
+        row = FundamentalData(
+            symbol=sym,
+            company_name=merged.get("company_name", ""),
+            pe_ratio=merged.get("pe_ratio"),
+            pb_ratio=merged.get("pb_ratio"),
+            roe=merged.get("roe"),
+            roce=merged.get("roce"),
+            debt_to_equity=merged.get("debt_to_equity"),
+            current_ratio=merged.get("current_ratio"),
+            revenue_growth_3yr=merged.get("revenue_growth_3yr"),
+            profit_growth_3yr=merged.get("profit_growth_3yr"),
+            promoter_holding=merged.get("promoter_holding"),
+            fii_holding=merged.get("fii_holding"),
+            pledged_pct=merged.get("pledged_pct"),
+            market_cap_cr=merged.get("market_cap_cr"),
+            dividend_yield=merged.get("dividend_yield"),
+            fundamental_score=score,
+            last_updated=now,
+        )
+        session.add(row)
+
+    await session.flush()
+    await session.commit()
+    return row
+
+
 # ── Optional: BSE corporate actions ──────────────────────────────────────────
 
 def fetch_bse_corporate_actions(bse_code: str) -> list[dict]:

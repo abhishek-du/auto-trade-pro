@@ -56,7 +56,7 @@ class TradingSignal:
     confidence:         float            # 0–100 %
     entry_price:        float
     stop_loss:          float
-    take_profit:        float
+    take_profit:        float            # Target 1 — first checkpoint / trailing trigger
     pattern_score:      float            # normalised candlestick contribution
     indicator_score:    float            # from indicators.composite_score
     sentiment_score:    float            # news_score * 100  →  -100..+100
@@ -64,6 +64,12 @@ class TradingSignal:
     patterns_detected:  list[str]        = field(default_factory=list)
     reasoning_points:   list[str]        = field(default_factory=list)
     timestamp:          datetime         = field(default_factory=datetime.utcnow)
+    # Dynamic trade-management fields (ATR/technical-derived). Default 0/""/None
+    # so legacy callers that don't set them still construct cleanly.
+    target_2:           float            = 0.0   # final target — position rides here
+    atr:                float            = 0.0   # ATR at entry → 1× trailing stop distance
+    risk_reward_ratio:  float            = 0.0
+    regime:             str              = ""
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

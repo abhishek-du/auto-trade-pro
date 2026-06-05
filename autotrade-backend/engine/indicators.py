@@ -630,6 +630,21 @@ class IndicatorSignals:
         return {k: _clean(v) for k, v in self.__dict__.items()}
 
 
+# ── Composite-score → signal label (single source of truth) ────────────────────
+# Used by the deep-analysis endpoint, the market scanner, and the trade loop so
+# every surface (stock detail page, scanner UI, agent) derives the SAME signal
+# from the SAME composite_score. Thresholds: ±25 actionable, ±60 strong.
+
+def score_to_signal(score: float) -> str:
+    if score is None or (isinstance(score, float) and math.isnan(score)):
+        return "NEUTRAL"
+    if score >= 60:  return "STRONG_BUY"
+    if score >= 25:  return "BUY"
+    if score >= -25: return "NEUTRAL"
+    if score >= -60: return "SELL"
+    return "STRONG_SELL"
+
+
 # ── Edge-case bundle ──────────────────────────────────────────────────────────
 
 def _nan_bundle() -> IndicatorSignals:

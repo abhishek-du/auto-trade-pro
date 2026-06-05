@@ -38,8 +38,26 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
 )
 async def get_open_positions(db: AsyncSession = Depends(get_db)):
     positions = await PositionTracker.get_open_positions(db)
-    return [
-        OpenPositionOut(
+
+    # Pull trade-management state (targets, ATR, trailing flag) from the linked
+    # PaperTrade.indicator_snapshot so the UI can show trailing-stop status.
+    from db.models import PaperTrade
+    trade_ids = [p.trade_id for p in positions]
+    mgmt_by_trade: dict[int, dict] = {}
+    if trade_ids:
+        rows = (await db.execute(
+            select(PaperTrade.id, PaperTrade.indicator_snapshot)
+            .where(PaperTrade.id.in_(trade_ids))
+        )).all()
+        for tid, snap in rows:
+            tm = (snap or {}).get("trade_mgmt") if isinstance(snap, dict) else None
+            if tm:
+                mgmt_by_trade[tid] = tm
+
+    out = []
+    for p in positions:
+        tm = mgmt_by_trade.get(p.trade_id, {})
+        out.append(OpenPositionOut(
             id=p.id,
             symbol=p.symbol,
             direction=p.direction.value,
@@ -54,9 +72,13 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
             trade_id=p.trade_id,
             opened_at=p.opened_at,
             last_updated=p.last_updated,
-        )
-        for p in positions
-    ]
+            target_1=tm.get("target_1"),
+            target_2=tm.get("target_2"),
+            atr=tm.get("atr"),
+            trailing=bool(tm.get("trailing", False)),
+            level_source=tm.get("level_source"),
+        ))
+    return out
 
 
 @router.get(

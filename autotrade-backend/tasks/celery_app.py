@@ -32,6 +32,8 @@ celery_app = Celery(
         "tasks.news_scan",
         "tasks.paper_trade_loop",
         "tasks.india_tasks",
+        "tasks.market_scanner",
+        "tasks.pre_diagnose",
     ],
 )
 
@@ -111,6 +113,29 @@ celery_app.conf.beat_schedule = {
     "india-fundamentals-weekly": {
         "task":     "tasks.india_fundamental_update",
         "schedule": crontab(day_of_week=0, hour=18, minute=30),
+    },
+
+    # Weekly Sunday 01:00 UTC (06:30 IST, before market open): refresh last week
+    # of daily candles for the FULL NSE universe via Zerodha Kite. Keeps every
+    # symbol's bars current so the scanner/agent cover the whole market.
+    "full-nse-candles-weekly": {
+        "task":     "tasks.refresh_full_nse_candles",
+        "schedule": crontab(day_of_week="sunday", hour=1, minute=0),
+    },
+
+    # Daily 02:50 UTC (08:20 IST, after candle/instrument refresh, before open):
+    # rebuild the Hub's ~500-name deep-score universe by 30-day avg turnover.
+    "rebuild-hub-universe-daily": {
+        "task":     "tasks.rebuild_hub_universe",
+        "schedule": crontab(hour=2, minute=50),
+    },
+
+    # Every 15 min during NSE hours: score full NSE universe → market_shortlist
+    # (runs 45 s before the hub cycle so the shortlist is always fresh)
+    "market-scanner-every-15min": {
+        "task":     "tasks.market_scanner.run_market_scanner",
+        "schedule": 900,
+        "options":  {"countdown": 30},
     },
 
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle

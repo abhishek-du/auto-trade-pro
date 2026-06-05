@@ -1242,14 +1242,25 @@ export default function Zerodha() {
   }, [fetchStatus, fetchAll, stopFastPoll]);
 
   async function handleConnect() {
+    // Open the popup SYNCHRONOUSLY inside the click gesture. If we wait for the
+    // await below first, the browser's popup blocker silently kills window.open
+    // (it's no longer tied to a user gesture) — which is why clicking did nothing.
+    // Do NOT use 'noopener' — the popup needs window.opener to postMessage back.
+    const popup = window.open('about:blank', 'zerodha_login', 'width=600,height=700,left=200,top=100');
     try {
       const res = await getZerodhaLoginUrl();
       if (res.redirect_url) setRedirectUrl(res.redirect_url);
-      // Do NOT use 'noopener' — the popup needs window.opener to send postMessage back
-      window.open(res.url, 'zerodha_login', 'width=600,height=700,left=200,top=100');
-      toast('Complete login in the popup window…');
-      startFastPoll(); // also poll in case postMessage is blocked
+      if (popup && !popup.closed) {
+        popup.location.href = res.url;        // redirect the already-open popup
+        toast('Complete login in the popup window…');
+        startFastPoll();                      // poll /status in case postMessage is blocked
+      } else {
+        // Popup was blocked — fall back to same-tab navigation. The backend
+        // callback saves the token and shows a success page; come back here after.
+        window.location.href = res.url;
+      }
     } catch (err) {
+      if (popup && !popup.closed) popup.close();
       toast.error(err?.response?.data?.detail || 'Could not fetch login URL — check ZERODHA_API_KEY in .env');
     }
   }

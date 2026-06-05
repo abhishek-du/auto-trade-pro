@@ -548,23 +548,52 @@ async def run_india_price_crawl(
             "errors":             [],
         }
 
-    # Build full symbol list — large-cap + mid-cap + indices + INR forex + commodities
-    all_symbols: list[str] = (
-        settings.nse_symbols
-        + settings.nse_mid_symbols
-        + settings.WATCHLIST_NIFTY_INDICES
-        + settings.WATCHLIST_INDIAN_FOREX
-        + settings.WATCHLIST_COMMODITIES
+    # Build symbol list dynamically from market_shortlist (full-market scanner output).
+    # Fallback: top 50 NSE EQ symbols from kite_instruments (bootstrap / cold start).
+    # Always include the mandatory indices and VIX symbols regardless of shortlist.
+    from sqlalchemy import select as _sel, text as _text
+    from db.models import MarketShortlist, KiteInstrument
+
+    # 1. Mandatory: indices + VIX (needed for macro/VIX scoring in hub)
+    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES)
+
+    # 2. Dynamic equity universe from market_shortlist
+    sl_result = await session.execute(
+        _sel(MarketShortlist.symbol).order_by(MarketShortlist.rank).limit(100)
     )
+    shortlist_syms = [r.symbol for r in sl_result.all()]
+
+    if shortlist_syms:
+        equity_syms = shortlist_syms
+        source = f"market_shortlist ({len(equity_syms)} symbols)"
+    else:
+        # Cold start: top 50 NSE EQ from kite_instruments alphabetically
+        ki_result = await session.execute(
+            _sel(KiteInstrument.tradingsymbol)
+            .where(
+                KiteInstrument.instrument_type == "EQ",
+                KiteInstrument.segment == "NSE",
+                KiteInstrument.name != "",
+            )
+            .order_by(KiteInstrument.tradingsymbol)
+            .limit(50)
+        )
+        equity_syms = [f"{r.tradingsymbol}.NS" for r in ki_result.all()]
+        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols)"
+
+    # 3. User watchlist additions
+    from db.models import UserWatchlist
+    wl_result = await session.execute(
+        _sel(UserWatchlist.symbol).where(UserWatchlist.is_active == True)
+    )
+    user_syms = [s for s in wl_result.scalars().all() if s not in equity_syms]
+
+    all_symbols: list[str] = mandatory + equity_syms + user_syms
 
     logger.info(
         f"━━ India price crawl START ━━  {len(all_symbols)} symbols  "
         f"market_open={market_open}  ignore_market_hours={ignore_market_hours}  "
-        f"({len(settings.nse_symbols)} large-cap  "
-        f"{len(settings.nse_mid_symbols)} mid-cap  "
-        f"{len(settings.WATCHLIST_NIFTY_INDICES)} indices  "
-        f"{len(settings.WATCHLIST_INDIAN_FOREX)} INR forex  "
-        f"{len(settings.WATCHLIST_COMMODITIES)} commodities)"
+        f"source={source}  user_extra={len(user_syms)}"
     )
 
     all_candles:    list[dict] = []

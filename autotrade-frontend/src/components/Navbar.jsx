@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { AlertTriangle, TrendingUp, TrendingDown, Zap } from 'lucide-react';
+import { AlertTriangle, TrendingUp, TrendingDown, Zap, Search } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { getZerodhaTokenStatus, getZerodhaLoginUrl, apiFetch } from '../api/client';
 import ExpiryCountdown from './calendar/ExpiryCountdown';
@@ -115,21 +115,34 @@ function BalanceTicker({ portfolio }) {
   const pnl      = (portfolio.realised_pnl ?? 0) + (portfolio.unrealised_pnl ?? 0);
   const pct      = portfolio.roi_percent ?? 0;
   const positive = pnl >= 0;
+  // Compact rupee format for the mobile balance (e.g. ₹5.00L)
+  const short = (n) => {
+    const a = Math.abs(n);
+    if (a >= 1e7) return '₹' + (a / 1e7).toFixed(2) + 'Cr';
+    if (a >= 1e5) return '₹' + (a / 1e5).toFixed(2) + 'L';
+    return '₹' + new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(a);
+  };
+
   return (
-    <div className="flex items-center gap-3">
-      <div className="text-right">
-        <p className="text-slate-100 font-bold text-base tabular-nums leading-none">
-          {'₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(balance)}
+    <div className="flex items-center gap-2 md:gap-3 min-w-0">
+      <div className="text-right min-w-0">
+        {/* Full precision on desktop, compact on mobile */}
+        <p className="text-slate-100 font-bold text-sm md:text-base tabular-nums leading-none truncate">
+          <span className="hidden sm:inline">
+            {'₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(balance)}
+          </span>
+          <span className="sm:hidden">{short(balance)}</span>
         </p>
-        <p className={`text-xs font-semibold tabular-nums mt-0.5 ${positive ? 'text-profit' : 'text-loss'}`}>
-          {positive ? '+' : ''}
-          {'₹' + new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(pnl)}
-          {' '}({positive ? '+' : ''}{pct.toFixed(2)}%)
+        <p className={`text-[10px] md:text-xs font-semibold tabular-nums mt-0.5 ${positive ? 'text-profit' : 'text-loss'}`}>
+          {positive ? '+' : ''}{pct.toFixed(2)}%
+          <span className="hidden md:inline">
+            {' '}({positive ? '+' : ''}{'₹' + new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(pnl)})
+          </span>
         </p>
       </div>
       {positive
-        ? <TrendingUp  size={18} className="text-profit" />
-        : <TrendingDown size={18} className="text-loss" />}
+        ? <TrendingUp  size={18} className="text-profit shrink-0" />
+        : <TrendingDown size={18} className="text-loss shrink-0" />}
     </div>
   );
 }
@@ -236,7 +249,7 @@ function TradeModeBadge() {
 
 // ── Navbar ────────────────────────────────────────────────────────────────────
 
-export default function Navbar() {
+export default function Navbar({ onSearchOpen }) {
   const { pathname } = useLocation();
   const { portfolio } = usePortfolio();
   const title = PAGE_TITLES[pathname] ?? 'AutoTrade Pro';
@@ -254,19 +267,43 @@ export default function Navbar() {
       </div>
 
       {/* Main row */}
-      <div className="flex items-center justify-between px-6 py-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-slate-100 font-bold text-lg">{title}</h1>
+      <div className="flex items-center justify-between gap-2 md:gap-3 px-4 md:px-6 py-3">
+        <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          <h1 className="text-slate-100 font-bold text-base md:text-lg whitespace-nowrap">{title}</h1>
           <TradeModeBadge />
         </div>
-        <div className="flex items-center gap-5">
-          <ZerodhaTokenBanner />
-          <ExpiryCountdown />
-          <MarketStatusDots />
-          <div className="w-px h-8 bg-border" />
+
+        {/* ⌘K Search trigger (desktop) — shrinks before the title does */}
+        {onSearchOpen && (
+          <button
+            onClick={onSearchOpen}
+            className="hidden md:flex items-center gap-2 flex-1 min-w-0 max-w-sm mx-2 lg:mx-6 bg-white/[0.04] border border-border hover:border-accent/40 rounded-lg px-3 h-9 text-muted text-sm transition-colors"
+          >
+            <Search size={14} className="shrink-0" />
+            <span className="flex-1 text-left truncate">Search any stock, MF…</span>
+            <kbd className="hidden lg:inline text-[10px] font-mono bg-white/5 border border-white/10 px-1.5 py-0.5 rounded text-muted shrink-0">⌘K</kbd>
+          </button>
+        )}
+
+        <div className="flex items-center gap-2 md:gap-4 lg:gap-5 shrink-0">
+          {/* Mobile search icon */}
+          {onSearchOpen && (
+            <button onClick={onSearchOpen} className="md:hidden text-muted hover:text-slate-300 p-1" aria-label="Search">
+              <Search size={18} />
+            </button>
+          )}
+          {/* Token warning — only when relevant; hide on the smallest screens */}
+          <div className="hidden sm:block"><ZerodhaTokenBanner /></div>
+          {/* Expiry countdown — desktop only */}
+          <div className="hidden xl:block"><ExpiryCountdown /></div>
+          {/* Market status dots — large screens */}
+          <div className="hidden lg:flex"><MarketStatusDots /></div>
+          <div className="hidden lg:block w-px h-8 bg-border" />
+          {/* Balance — always visible (core info), compact on mobile */}
           <BalanceTicker portfolio={portfolio} />
-          <div className="w-px h-8 bg-border" />
-          <LiveClock />
+          {/* Live clock — tablet and up */}
+          <div className="hidden md:block w-px h-8 bg-border" />
+          <div className="hidden md:block"><LiveClock /></div>
         </div>
       </div>
     </header>

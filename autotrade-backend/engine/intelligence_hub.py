@@ -150,6 +150,9 @@ class MasterContext:
     earnings:  EarningsContext
     options:   OptionsContext
     portfolio: PortfolioContext
+    # symbol → fundamental_score (0–100), pre-loaded once from FundamentalData
+    # so scoring 500 symbols needs ZERO live fundamental API calls.
+    fundamentals_by_symbol: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -403,10 +406,22 @@ async def build_master_context(agent_portfolio, session: AsyncSession) -> Master
     portfolio = await build_portfolio_context(agent_portfolio, session)
     sectors   = build_sector_context()  # sync, cache-only
 
+    # Pre-load cached fundamental scores once (DB only — no live yfinance calls).
+    # FundamentalData is keyed on the bare ticker (e.g. "RELIANCE").
+    from db.models import FundamentalData
+    fund_rows = (await session.execute(
+        select(FundamentalData.symbol, FundamentalData.fundamental_score)
+    )).all()
+    fundamentals_by_symbol = {
+        r.symbol.replace(".NS", ""): float(r.fundamental_score)
+        for r in fund_rows if r.fundamental_score is not None
+    }
+
     now = datetime.utcnow().isoformat()
     ctx = MasterContext(
         built_at=now, bar_time=now, macro=macro, sectors=sectors,
         news=news, earnings=earnings, options=options, portfolio=portfolio,
+        fundamentals_by_symbol=fundamentals_by_symbol,
     )
 
     # Publish to module caches for macro agent / decision engine / chat
@@ -426,7 +441,6 @@ _EARNINGS_SCORE = {"OPTIMISTIC": 30, "NEUTRAL": 0, "CAUTIOUS": -20, "NEGATIVE": 
 async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, session: AsyncSession) -> ScoredStock:
     from engine.indicators import compute_indicators
     from engine.agent.analyzer import MarketAnalyzerAgent
-    from engine.agent.fundamentals import FundamentalsAgent
 
     analyzer = MarketAnalyzerAgent()
 
@@ -455,11 +469,14 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     tone = ctx.earnings.tones_by_symbol.get(symbol, "NEUTRAL")
     earnings_score = _EARNINGS_SCORE.get(tone, 0)
 
-    # 6. Fundamental (10%)
-    try:
-        fund_score, fund_grade = await FundamentalsAgent().get_cached_grade(symbol)
-    except Exception:
-        fund_score, fund_grade = 50, "WATCHLIST"
+    # 6. Fundamental (10%) — DB-cached score only (no live API call per symbol).
+    # Neutral 50 when the symbol isn't in FundamentalData yet (weekly task fills it).
+    bare = symbol.replace(".NS", "")
+    fund_score = ctx.fundamentals_by_symbol.get(bare, 50.0)
+    fund_grade = (
+        "STRONG" if fund_score >= 70 else "GOOD" if fund_score >= 55
+        else "WATCHLIST" if fund_score >= 40 else "WEAK"
+    )
     fundamental_score = (fund_score - 50) * 1.0
 
     # 7. Options (5%) — index-wide bias applied lightly to every name

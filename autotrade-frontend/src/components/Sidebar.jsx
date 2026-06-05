@@ -1,78 +1,80 @@
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot, Stethoscope, FileText, BrainCircuit, Sparkles,
+  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
-const MAIN_NAV = [
-  { to: '/',            label: 'Dashboard',     Icon: LayoutDashboard },
-  { to: '/trades',      label: 'Trades',        Icon: ArrowLeftRight  },
-  { to: '/analytics',   label: 'Analytics',     Icon: BarChart2       },
-  { to: '/news',        label: 'News',          Icon: Newspaper       },
-  { to: '/simulation',  label: 'Simulation',    Icon: FlaskConical    },
-  { to: '/settings',    label: 'Settings',      Icon: Settings        },
-  { to: '/documentation', label: 'Documentation', Icon: BookOpenText  },
+// ── 6-section information architecture ────────────────────────────────────────
+// Collapses ~25 routes into 6 collapsible groups: Terminal · Discover · Stocks ·
+// Portfolio · Intel · Tools.  `badge` keys map to the live status components
+// defined below (see BADGE_MAP).
+export const SECTIONS = [
+  {
+    key: 'terminal', label: 'Terminal', Icon: LayoutDashboard,
+    items: [
+      { to: '/', label: 'Dashboard', Icon: LayoutDashboard, end: true },
+    ],
+  },
+  {
+    key: 'discover', label: 'Discover', Icon: Compass,
+    items: [
+      { to: '/discover/scanner', label: 'Market Scanner', Icon: Zap },
+      { to: '/india',            label: 'India Overview', Icon: Globe },
+      { to: '/india/signals',    label: 'NSE Signals',    Icon: Target },
+      { to: '/fundamentals',     label: 'Screener',       Icon: LineChart },
+      { to: '/sector-heatmap',   label: 'Sector Heatmap', Icon: LayoutGrid, badge: 'sectorHeatmap' },
+      { to: '/mutual-funds',     label: 'Mutual Funds',   Icon: Wallet },
+      { to: '/ipo',              label: 'IPO Tracker',    Icon: Rocket, badge: 'ipoTracker' },
+    ],
+  },
+  {
+    key: 'stocks', label: 'Stocks', Icon: ChartIcon,
+    items: [
+      { to: '/watchlist',   label: 'Watchlist',   Icon: BookMarked, badge: 'watchlist' },
+      { to: '/chart',       label: 'Charts',      Icon: ChartIcon },
+      { to: '/live-market', label: 'Live Market', Icon: Radio, badge: 'liveMarket' },
+    ],
+  },
+  {
+    key: 'portfolio', label: 'Portfolio', Icon: Briefcase,
+    items: [
+      { to: '/zerodha',     label: 'Portfolio',        Icon: Briefcase, badge: 'zerodha' },
+      { to: '/agent',       label: 'Trading Agent',    Icon: BrainCircuit, badge: 'agentBadge' },
+      { to: '/doctor',      label: 'Portfolio Doctor', Icon: Stethoscope, badge: 'doctorBadge' },
+      { to: '/allocation',  label: 'Asset Allocation', Icon: IndianRupee, badge: 'allocation' },
+      { to: '/sip',         label: 'SIP Goals',        Icon: Target },
+      { to: '/tax',         label: 'Tax Calculator',   Icon: Receipt },
+    ],
+  },
+  {
+    key: 'intel', label: 'Intel', Icon: Sparkles,
+    items: [
+      { to: '/intelligence',   label: 'Intelligence Hub', Icon: Sparkles, badge: 'hubBadge' },
+      { to: '/agent-log',      label: 'Agent Log',        Icon: ClipboardList },
+      { to: '/news',           label: 'News',             Icon: Newspaper },
+      { to: '/earnings',       label: 'Earnings AI',      Icon: FileText, badge: 'earningsBadge' },
+      { to: '/market-breadth', label: 'Market Breadth',   Icon: Activity, badge: 'breadth' },
+      { to: '/calendar',       label: 'Calendar',         Icon: CalendarDays, badge: 'calendar' },
+    ],
+  },
+  {
+    key: 'tools', label: 'Tools', Icon: FlaskConical,
+    items: [
+      { to: '/chat',          label: 'Avishk AI Analyst', Icon: Bot },
+      { to: '/backtest',      label: 'Backtest',          Icon: TestTube2 },
+      { to: '/trades',        label: 'Trades',            Icon: ArrowLeftRight },
+      { to: '/analytics',     label: 'Analytics',         Icon: BarChart2 },
+      { to: '/simulation',    label: 'Simulation',        Icon: FlaskConical },
+      { to: '/settings',      label: 'Settings',          Icon: Settings },
+      { to: '/documentation', label: 'Documentation',     Icon: BookOpenText },
+    ],
+  },
 ];
-
-const INDIA_NAV = [
-  { to: '/live-market',     label: 'Live Market',    Icon: Radio,       liveMarket: true  },
-  { to: '/watchlist',       label: 'Watchlist',      Icon: BookMarked,  watchlist: true   },
-  { to: '/chart',           label: 'Charts',         Icon: ChartIcon  },
-  { to: '/market-breadth',  label: 'Breadth',        Icon: Activity,    breadth: true      },
-  { to: '/sector-heatmap', label: 'Sector Heatmap', Icon: LayoutGrid,  sectorHeatmap: true },
-  // Unified portfolio. The Zerodha entry below was previously a separate
-  // read-only Kite mirror; it now points at the tracker UI which supports
-  // manual stocks + MFs + Sync-from-Kite + agent paper-trading activity.
-  // /portfolio-tracker remains as a backwards-compat alias.
-  { to: '/zerodha',          label: 'Zerodha',          Icon: Briefcase,   portfolioTracker: true, zerodha: true },
-  { to: '/doctor',           label: 'Portfolio Doctor', Icon: Stethoscope, doctorBadge: true },
-  { to: '/earnings',         label: 'Earnings AI',      Icon: FileText,    earningsBadge: true },
-  { to: '/intelligence',     label: 'Intelligence Hub', Icon: Sparkles,    hubBadge: true },
-  { to: '/agent',            label: 'Trading Agent',    Icon: BrainCircuit, agentBadge: true },
-  { to: '/calendar',          label: 'Market Calendar', Icon: CalendarDays, calendar: true },
-  { to: '/india',           label: 'India Overview', Icon: Globe      },
-  { to: '/india/signals',   label: 'NSE Signals',    Icon: Zap        },
-  { to: '/mutual-funds',    label: 'Mutual Funds',   Icon: Wallet     },
-  { to: '/sip',             label: 'SIP Goals',      Icon: Target     },
-  { to: '/tax',             label: 'Tax Calculator',    Icon: Receipt,   },
-  { to: '/allocation',      label: 'Asset Allocation',  Icon: IndianRupee, allocation: true },
-  { to: '/ipo',            label: 'IPO Tracker',       Icon: Rocket,      ipoTracker: true },
-  { to: '/fundamentals',    label: 'Fundamentals',   Icon: LineChart  },
-  { to: '/backtest',        label: 'Backtest',       Icon: TestTube2  },
-];
-
-function NavItem({ to, label, Icon, end }) {
-  return (
-    <NavLink
-      to={to}
-      end={end}
-      className={({ isActive }) => [
-        'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
-        isActive
-          ? 'text-white border border-accent/20'
-          : 'text-muted hover:text-slate-200 hover:bg-white/5',
-      ].join(' ')}
-      style={({ isActive }) =>
-        isActive
-          ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
-          : {}
-      }
-    >
-      {({ isActive }) => (
-        <>
-          <Icon size={16} className={isActive ? 'text-cyan' : ''} />
-          {label}
-          {isActive && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-cyan shrink-0" />}
-        </>
-      )}
-    </NavLink>
-  );
-}
 
 function MarketDot() {
   const [status, setStatus] = useState(null);
@@ -424,16 +426,93 @@ function ZerodhaDot() {
   );
 }
 
+// Maps a nav item's `badge` key to its live status component.
+const BADGE_MAP = {
+  zerodha:       ZerodhaDot,
+  liveMarket:    MarketDot,
+  watchlist:     WatchlistBadge,
+  breadth:       BreadthDot,
+  sectorHeatmap: SectorStrip,
+  calendar:      CalendarBadge,
+  allocation:    AllocationDot,
+  ipoTracker:    IPOBadge,
+  doctorBadge:   DoctorHealthBadge,
+  earningsBadge: EarningsBadge,
+  agentBadge:    AgentStatusBadge,
+  hubBadge:      HubBiasBadge,
+};
+
+// ── One nav row inside a section ──────────────────────────────────────────────
+function SectionItem({ to, label, Icon, badge, end }) {
+  const Dot = badge ? BADGE_MAP[badge] : null;
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) => [
+        'flex items-center gap-3 pl-9 pr-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150',
+        isActive ? 'text-white' : 'text-muted hover:text-slate-200 hover:bg-white/5',
+      ].join(' ')}
+      style={({ isActive }) =>
+        isActive
+          ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
+          : {}
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Icon size={15} className={isActive ? 'text-cyan' : ''} />
+          <span className="flex-1">{label}</span>
+          {Dot && <Dot />}
+          {isActive && !Dot && <span className="w-1.5 h-1.5 rounded-full bg-cyan shrink-0" />}
+        </>
+      )}
+    </NavLink>
+  );
+}
+
+// ── Collapsible section group ─────────────────────────────────────────────────
+function SectionGroup({ section, defaultOpen }) {
+  const [open, setOpen] = useState(defaultOpen);
+  // Keep the active section expanded if the route changes into it.
+  useEffect(() => { if (defaultOpen) setOpen(true); }, [defaultOpen]);
+
+  const { label, Icon, items } = section;
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold text-slate-300 hover:text-white hover:bg-white/5 transition-all duration-150"
+      >
+        <Icon size={16} className={open ? 'text-cyan' : 'text-muted'} />
+        <span className="flex-1 text-left">{label}</span>
+        <ChevronDown size={14} className={`text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="mt-0.5 space-y-0.5 pb-1">
+          {items.map(item => <SectionItem key={item.to} {...item} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Sidebar() {
+  const { pathname } = useLocation();
+
+  // Determine which section owns the current route so it auto-expands.
+  const activeKey = SECTIONS.find(s =>
+    s.items.some(i => i.end ? pathname === i.to : pathname.startsWith(i.to) && i.to !== '/')
+  )?.key ?? (pathname === '/' ? 'terminal' : null);
+
   return (
     <aside
-      className="flex flex-col w-60 shrink-0 h-screen border-r border-border"
+      className="hidden md:flex flex-col w-60 shrink-0 h-screen border-r border-border"
       style={{ background: 'linear-gradient(180deg,#0A1120 0%,#080D1A 100%)' }}
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-5 py-5 border-b border-border">
-        <div className="p-2 rounded-xl"
-          style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
+        <div className="p-2 rounded-xl" style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
           <TrendingUp size={18} className="text-white" />
         </div>
         <div className="leading-tight">
@@ -442,78 +521,15 @@ export default function Sidebar() {
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-
-        {/* Avishk AI — top of nav */}
-        <NavLink
-          to="/chat"
-          className={({ isActive }) => [
-            'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all duration-150 mb-2',
-            isActive
-              ? 'text-white border border-accent/40'
-              : 'text-slate-300 border border-accent/20 hover:border-accent/40 hover:text-white',
-          ].join(' ')}
-          style={({ isActive }) => ({
-            background: isActive
-              ? 'linear-gradient(135deg,rgba(29,78,216,0.25),rgba(8,145,178,0.15))'
-              : 'linear-gradient(135deg,rgba(29,78,216,0.1),rgba(8,145,178,0.06))',
-          })}
-        >
-          {({ isActive }) => (
-            <>
-              <Bot size={16} className={isActive ? 'text-cyan' : 'text-accent'} />
-              Avishk AI Analyst
-              <span className="ml-auto flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-profit shrink-0 arjun-pulse" />
-              </span>
-            </>
-          )}
-        </NavLink>
-
-        {/* Main section */}
-        <p className="px-3 pt-1 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
-          Menu
-        </p>
-        {MAIN_NAV.map(({ to, label, Icon }) => (
-          <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/'} />
+      {/* Navigation — 6 collapsible sections */}
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        {SECTIONS.map(section => (
+          <SectionGroup
+            key={section.key}
+            section={section}
+            defaultOpen={section.key === activeKey || section.key === 'terminal'}
+          />
         ))}
-
-        {/* Indian Market section */}
-        <p className="px-3 pt-5 pb-2.5 text-[10px] font-semibold uppercase tracking-widest text-muted">
-          Indian Market
-        </p>
-        {INDIA_NAV.map(({ to, label, Icon, zerodha: isZerodha, liveMarket: isLiveMarket, watchlist: isWatchlist, breadth: isBreadth, sectorHeatmap: isSectorHeatmap, calendar: isCalendar, portfolioTracker: isPortfolioTracker, allocation: isAllocation, ipoTracker: isIPOTracker, doctorBadge: isDoctorBadge, earningsBadge: isEarningsBadge, agentBadge: isAgentBadge, hubBadge: isHubBadge }) => {
-          if (isZerodha || isLiveMarket || isWatchlist || isBreadth || isSectorHeatmap || isCalendar || isPortfolioTracker || isAllocation || isIPOTracker || isDoctorBadge || isEarningsBadge || isAgentBadge || isHubBadge) {
-            const Dot = isZerodha ? ZerodhaDot : isLiveMarket ? MarketDot : isWatchlist ? WatchlistBadge : isBreadth ? BreadthDot : isSectorHeatmap ? SectorStrip : isCalendar ? CalendarBadge : isAllocation ? AllocationDot : isIPOTracker ? IPOBadge : isDoctorBadge ? DoctorHealthBadge : isEarningsBadge ? EarningsBadge : isAgentBadge ? AgentStatusBadge : isHubBadge ? HubBiasBadge : PortfolioValueBadge;
-            return (
-              <NavLink
-                key={to}
-                to={to}
-                className={({ isActive }) => [
-                  'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150',
-                  isActive
-                    ? 'text-white border border-accent/20'
-                    : 'text-muted hover:text-slate-200 hover:bg-white/5',
-                ].join(' ')}
-                style={({ isActive }) =>
-                  isActive
-                    ? { background: 'linear-gradient(135deg,rgba(59,130,246,0.15),rgba(6,182,212,0.08))' }
-                    : {}
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    <Icon size={16} className={isActive ? 'text-cyan' : ''} />
-                    {label}
-                    <Dot />
-                  </>
-                )}
-              </NavLink>
-            );
-          }
-          return <NavItem key={to} to={to} label={label} Icon={Icon} end={to === '/india'} />;
-        })}
       </nav>
 
       {/* Paper Mode badge */}

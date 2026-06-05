@@ -554,20 +554,89 @@ async def sell_holding(
 
 # ── Stock search ──────────────────────────────────────────────────────────────
 
-def search_stocks(query: str) -> list[dict]:
-    """Fast dict search for the known ~60 stocks."""
-    q = query.lower().strip()
-    results = []
-    for name, symbol in NSE_STOCK_LOOKUP.items():
-        ticker = symbol.replace(".NS", "")
-        if q in name.lower() or q in ticker.lower() or q in symbol.lower():
-            results.append({
-                "name":   name,
-                "symbol": symbol,
-                "ticker": ticker,
-                "sector": NSE_SECTOR_MAP.get(symbol, "Other"),
-            })
-    return results[:10]
+# Words that look like acronyms but are actually generic English; force title-case.
+_FORCE_TITLE_CASE = {
+    "BANK", "BANKS", "GOLD", "FUND", "FUNDS", "STEEL", "POWER", "AUTO",
+    "OIL", "GAS", "CARD", "CARDS", "INFRA", "INDIA", "INDS", "IND", "LTD",
+    "LIMITED", "GROUP", "LIFE", "MOTOR", "MOTORS", "CHEM", "CEMENT", "FOODS",
+    "PHARMA", "PHARM", "PRO", "PLUS", "NEXT", "PAY", "PAYS", "SERV", "SER",
+    "INDUSTRIES", "INSURANCE", "TEXTILES", "FIN", "FINANCE",
+}
+
+def _proper_case_name(raw: str) -> str:
+    """Convert SCREAMING instrument names ("HDFC BANK") to presentable form ("HDFC Bank").
+
+    Heuristic: short (2–6 char) all-caps tokens stay as-is *unless* they are
+    in the deny-list of generic English words. HDFC / ICICI / SBI / ONGC pass
+    through; BANK / GOLD / FUND get title-cased.
+    """
+    if not raw:
+        return ""
+    out = []
+    for w in raw.split():
+        bare = w.strip(".,&-")
+        if (bare.isupper() and 2 <= len(bare) <= 6
+                and bare not in _FORCE_TITLE_CASE):
+            out.append(w)
+        else:
+            out.append(w.title())
+    return " ".join(out)
+
+
+async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
+    """Search the full NSE equity universe via the kite_instruments table.
+
+    Ranking: exact tradingsymbol > tradingsymbol prefix > name prefix > substring.
+    """
+    from sqlalchemy import case, func, or_
+    from db.models import KiteInstrument
+
+    q = query.strip()
+    if not q:
+        return []
+
+    q_upper   = q.upper()
+    q_pattern = f"%{q_upper}%"
+    q_prefix  = f"{q_upper}%"
+
+    stmt = (
+        select(KiteInstrument)
+        .where(
+            KiteInstrument.instrument_type == "EQ",
+            KiteInstrument.segment == "NSE",
+            # Exclude bonds / NCDs / SDLs / G-Secs which are also stored as EQ.
+            KiteInstrument.name != "",                       # bonds often have blank names
+            ~KiteInstrument.name.like(r"%\%%"),              # interest-rate bearing instruments
+            ~KiteInstrument.tradingsymbol.like("%-SG"),      # State Government securities
+            ~KiteInstrument.tradingsymbol.like("%-SK"),
+            ~KiteInstrument.tradingsymbol.like("%-TB"),      # GOI T-Bills
+            or_(
+                func.upper(KiteInstrument.tradingsymbol).like(q_pattern),
+                func.upper(KiteInstrument.name).like(q_pattern),
+            ),
+        )
+        .order_by(
+            case(
+                (func.upper(KiteInstrument.tradingsymbol) == q_upper, 1),
+                (func.upper(KiteInstrument.tradingsymbol).like(q_prefix), 2),
+                (func.upper(KiteInstrument.name).like(q_prefix), 3),
+                else_=4,
+            ),
+            KiteInstrument.tradingsymbol,
+        )
+        .limit(15)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    return [
+        {
+            "name":   _proper_case_name(r.name) or r.tradingsymbol,
+            "symbol": f"{r.tradingsymbol}.NS",
+            "ticker": r.tradingsymbol,
+            "sector": NSE_SECTOR_MAP.get(f"{r.tradingsymbol}.NS", "Other"),
+        }
+        for r in rows
+    ]
 
 
 def search_stocks_live(query: str) -> list[dict]:

@@ -204,13 +204,11 @@ async def _india_trade_loop():
     from sqlalchemy import select
 
     from db.models import OpenPosition
-    from engine.india_signal_generator import analyze_all_india_symbols
     from engine.llm_explainer import (
         format_paper_trade_notification,
         generate_trade_explanation,
     )
     from engine.risk_manager import calculate_position_size, validate_signal
-    from engine.signal_generator import save_signal
     from paper_trading.simulation_logger import SimLogger
     from paper_trading.trade_simulator import (
         open_paper_trade,
@@ -237,15 +235,122 @@ async def _india_trade_loop():
                 f"[india_trade_loop] {len(auto_closed)} position(s) auto-closed"
             )
 
-        # Step 2: generate signals for all Indian watchlist symbols
-        signals = await analyze_all_india_symbols(session)
-        for sig in signals:
-            await save_signal(sig, session)
+        # Step 2: read actionable signals from market_shortlist — the SINGLE source of
+        # truth produced by the market scanner (compute_indicators → composite_score →
+        # signal). This is exactly what the scanner UI and the /s/:symbol page show, so
+        # the agent now trades precisely what the user sees. Fast (one DB read).
+        from utils.config import settings
+        from db.models import MasterIntelligenceScore
+        from crawler.price_feed import get_latest_candles
+        from crawler.live_prices import PRICE_CACHE
+        from engine.signal_generator import TradingSignal as _TS
+        from engine.india_specific import SECTOR_MAP
+
+        conf_threshold = float(getattr(settings, "PAPER_CONFIDENCE_THRESHOLD", 40.0))
+        _ACTIONABLE = ["BUY", "STRONG_BUY", "SELL", "STRONG_SELL"]
+
+        # ── Candidate universe: Hub 7-factor scores ONLY. Every tradeable symbol
+        # is deep-scored by the Master Intelligence Hub (technical + news +
+        # fundamentals + earnings + sector + macro + options) over the ~500-name
+        # turnover-ranked universe. Symbols without a Hub score are NOT eligible —
+        # the technical-only fallback was removed so the agent never trades a name
+        # it hasn't fully vetted. The Hub recomputes every 15 min → cheap DB read.
+
+        hub_subq = (
+            select(
+                MasterIntelligenceScore.symbol,
+                MasterIntelligenceScore.master_score,
+                MasterIntelligenceScore.signal,
+            )
+            .distinct(MasterIntelligenceScore.symbol)
+            .where(
+                MasterIntelligenceScore.is_blocked == False,
+                MasterIntelligenceScore.signal.in_(_ACTIONABLE),
+                MasterIntelligenceScore.symbol.like("%.NS"),
+            )
+            .order_by(
+                MasterIntelligenceScore.symbol,
+                MasterIntelligenceScore.scored_at.desc(),
+            )
+        ).subquery()
+        hub_rows = (await session.execute(select(hub_subq))).all()
+
+        candidates: list[dict] = [
+            {
+                "symbol": r.symbol, "score": float(r.master_score), "signal": r.signal,
+                "source": "hub", "sector": SECTOR_MAP.get(r.symbol.replace(".NS", ""), ""),
+                "rsi": None,
+            }
+            for r in hub_rows
+        ]
+
+        if not candidates:
+            logger.warning(
+                "[india_trade_loop] no Hub-scored actionable symbols — "
+                "agent idle this cycle (Hub may not have run yet)"
+            )
+        logger.info(
+            f"[india_trade_loop] candidates: {len(candidates)} (Hub 7-factor only)"
+        )
+
+        signals: list = []
+        for c in candidates:
+            conf = min(100.0, abs(c["score"]))
+            if conf < conf_threshold:
+                continue
+            action = "BUY" if "BUY" in c["signal"] else "SELL"
+
+            # Current price: live cache → last candle close
+            sym_base = c["symbol"].replace(".NS", "")
+            cached = PRICE_CACHE.get(c["symbol"]) or PRICE_CACHE.get(sym_base)
+            entry_price = float(cached.get("price", 0) if isinstance(cached, dict) else getattr(cached, "price", 0) if cached else 0)
+            if entry_price <= 0:
+                try:
+                    last_candles = await get_latest_candles(c["symbol"], "1d", 1, session)
+                    entry_price = float(last_candles[-1].close) if last_candles else 0.0
+                except Exception:
+                    entry_price = 0.0
+            if entry_price <= 0:
+                continue   # can't size a trade without a price
+
+            # Provisional levels for ranking only — REAL dynamic SL/targets are
+            # computed below (compute_indicators → compute_trade_levels) for just
+            # the top candidates, so we don't recompute indicators for all ~70.
+            if action == "BUY":
+                stop_loss, take_profit = entry_price * 0.95, entry_price * 1.10
+            else:
+                stop_loss, take_profit = entry_price * 1.05, entry_price * 0.90
+
+            if c["source"] == "hub":
+                why = (f"Hub 7-factor score {c['score']:+.0f} → {c['signal']} "
+                       f"(technical+news+fundamentals+sector+macro+earnings+options)")
+            else:
+                why = f"Technical score {c['score']:+.0f} → {c['signal']}"
+            if c["sector"]:
+                why += f" · {c['sector']}"
+
+            signals.append(_TS(
+                symbol=c["symbol"],
+                action=action,
+                confidence=conf,
+                final_score=float(c["score"]),
+                pattern_score=0.0,
+                indicator_score=float(c["score"]),
+                sentiment_score=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                risk_reward_ratio=2.0,
+                patterns_detected=[],
+                reasoning_points=[why],
+                regime="UNKNOWN",
+                timeframe="1d",
+            ))
 
         actionable = [s for s in signals if s.action in ("BUY", "SELL")]
         logger.info(
-            f"[india_trade_loop] generated={len(signals)}  "
-            f"actionable={len(actionable)}"
+            f"[india_trade_loop] candidates={len(candidates)}  "
+            f"above_{conf_threshold:.0f}%={len(actionable)}"
         )
 
         if not actionable:
@@ -253,14 +358,55 @@ async def _india_trade_loop():
             await session.commit()
             return
 
-        # Step 3: current wallet state
+        # Step 4: rank by confidence. The agent no longer opens a fixed "top 5" —
+        # it works down the ranked list and keeps opening while the portfolio risk
+        # budget and cash buffer allow (enforced inside validate_signal), up to a
+        # per-cycle new-entry cap. Capital is deployed by ANALYSIS, not a count.
+        actionable.sort(key=lambda s: s.confidence, reverse=True)
+        max_new = int(getattr(settings, "MAX_NEW_ENTRIES_PER_CYCLE", 8))
+        # Compute dynamic levels for a pool large enough to fill the cap after
+        # rejections (dup symbols, budget) — cap the indicator work at 24/cycle.
+        level_pool = actionable[: min(len(actionable), max(max_new * 3, 12), 24)]
+
+        # Step 4b: compute REAL dynamic SL/targets for the pool.
+        from engine.indicators import compute_indicators
+        from engine.risk_manager import compute_trade_levels
+        import pandas as pd
+        for signal in level_pool:
+            try:
+                candles = await get_latest_candles(signal.symbol, "1d", 200, session)
+                sig_ind = None
+                if len(candles) >= 20:
+                    df = pd.DataFrame([{"open": c.open, "high": c.high, "low": c.low,
+                        "close": c.close, "volume": c.volume, "timestamp": c.timestamp}
+                        for c in candles])
+                    sig_ind = compute_indicators(df)
+                lv = compute_trade_levels(signal.action, signal.entry_price, sig=sig_ind)
+                signal.stop_loss = lv["stop_loss"]
+                signal.take_profit = lv["target_1"]   # T1 = first checkpoint / trailing trigger
+                signal.target_2 = lv["target_2"]      # final target — position rides here
+                signal.atr = lv["atr"]
+                risk = abs(signal.entry_price - lv["stop_loss"])
+                signal.risk_reward_ratio = round(abs(lv["target_2"] - signal.entry_price) / risk, 2) if risk > 0 else 0.0
+                signal.reasoning_points.append(
+                    f"Trade levels [{lv['source']}]: SL ₹{lv['stop_loss']} · T1 ₹{lv['target_1']} · T2 ₹{lv['target_2']}"
+                    + (f" · ATR ₹{lv['atr']}" if lv['atr'] else "")
+                )
+            except Exception as exc:
+                logger.debug(f"[india_trade_loop] {signal.symbol} level calc failed: {exc}")
+
+        # Step 5: current wallet state
         summary        = await VirtualWallet.get_summary(session)
         balance        = summary["balance"]
         pos_result     = await session.execute(select(OpenPosition))
         open_positions = list(pos_result.scalars().all())
 
-        # Step 4: risk-gate each signal and open trades
-        for signal in actionable:
+        # Step 6: work down the ranked pool, opening until the risk budget / cash
+        # buffer (inside validate_signal) or the per-cycle cap stops us.
+        opened = 0
+        for signal in level_pool:
+            if opened >= max_new:
+                break
             validated, reason = await validate_signal(
                 signal, balance, open_positions, session
             )
@@ -269,12 +415,18 @@ async def _india_trade_loop():
                 rejected=not validated,
                 reject_reason=reason if not validated else None,
             )
+            # Budget-full / ceiling rejections mean no further candidate will fit
+            # either — stop the cycle early rather than logging 20 identical fails.
             if not validated:
+                if "budget" in reason.lower() or "ceiling" in reason.lower() or "cash buffer" in reason.lower():
+                    logger.info(f"[india_trade_loop] capital fully deployed — {reason}")
+                    break
                 continue
 
             pos_size       = calculate_position_size(signal, balance)
             trade          = await open_paper_trade(signal, pos_size, session)
             balance       -= pos_size["usd_value"] * 0.1
+            opened        += 1
             pos_result     = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 
@@ -282,13 +434,15 @@ async def _india_trade_loop():
             notification = format_paper_trade_notification(trade, explanation)
             logger.info(notification)
 
-        # Step 5: persist daily performance snapshot
+        logger.info(f"[india_trade_loop] opened {opened} new position(s) this cycle")
+
+        # Step 8: persist daily performance snapshot
         await VirtualWallet.take_daily_snapshot(session)
         final = await VirtualWallet.get_summary(session)
         logger.info(
             f"[india_trade_loop] cycle done — "
-            f"balance=${final['balance']:.2f}  "
-            f"equity=${final['equity']:.2f}  "
+            f"balance=₹{final['balance']:.0f}  "
+            f"equity=₹{final['equity']:.0f}  "
             f"roi={final['roi_percent']:+.2f}%  "
             f"open={len(open_positions)}"
         )
@@ -588,7 +742,11 @@ def run_agent_cycle_task():
     return {"status": "done"}
 
 
-@celery_app.task(name="tasks.run_master_intelligence_cycle")
+@celery_app.task(
+    name="tasks.run_master_intelligence_cycle",
+    soft_time_limit=600,   # ~500 symbols × candle-load + indicators; raise from the 300s default
+    time_limit=720,
+)
 def run_master_intelligence_cycle():
     """Master brain cycle: build unified context, score the NSE universe,
     drive the agent on top opportunities, score MFs, log the cycle."""
@@ -639,8 +797,13 @@ def run_master_intelligence_cycle():
                     f"news={len(ctx.news.scores_by_symbol)} earnings={len(ctx.earnings.tones_by_symbol)}"
                 )
 
-                universe = settings.nse_symbols
-                scored = await score_universe(universe, ctx, session)
+                from engine.hub_universe import get_hub_universe
+                universe = await get_hub_universe(session)
+                logger.info(f"[hub] scoring universe of {len(universe)} symbols")
+                # Daily candles: the 500-name universe is backfilled at 1d (only
+                # the ~22 legacy large-caps have live 1h bars). Score on '1d' so
+                # the whole universe is covered, not just the hourly-fed names.
+                scored = await score_universe(universe, ctx, session, timeframe="1d")
                 await persist_scores(scored, cycle_start, session)
 
                 top_buys = [
@@ -985,3 +1148,43 @@ async def _purge_old_news(days: int = 60) -> dict:
 def purge_old_news_task(days: int = 60):
     """Weekly cleanup: delete news_items older than ``days`` (default 60)."""
     return _run_async(_purge_old_news(days))
+
+
+# ── Weekly full-NSE candle refresh (Zerodha) ─────────────────────────────────
+
+async def _refresh_full_nse_candles(days_back: int = 7):
+    from crawler.zerodha_historical import sync_full_nse_universe
+    from tasks._db import celery_session
+    async with celery_session() as session:
+        return await sync_full_nse_universe(session, days_back=days_back, delay_sec=0.5)
+
+
+@celery_app.task(
+    name="tasks.refresh_full_nse_candles",
+    soft_time_limit=7200,   # ~8000 syms × 0.5s ≈ 70 min; allow headroom
+    time_limit=7800,
+)
+def refresh_full_nse_candles_task(days_back: int = 7):
+    """Weekly: refresh the last ~week of daily candles for EVERY NSE EQ symbol
+    via Zerodha Kite, keeping the agent's full-market universe fresh.
+    PAPER TRADING — read-only market data, no orders."""
+    logger.info("[refresh_full_nse_candles] starting weekly full-universe refresh")
+    return _run_async(_refresh_full_nse_candles(days_back))
+
+
+async def _rebuild_hub_universe(top_n: int | None = None, min_turnover_cr: float | None = None):
+    from engine.hub_universe import rebuild_hub_universe
+    from tasks._db import celery_session
+    from utils.config import settings
+    top_n = top_n or int(getattr(settings, "HUB_UNIVERSE_SIZE", 500))
+    min_turnover_cr = min_turnover_cr if min_turnover_cr is not None else float(getattr(settings, "HUB_UNIVERSE_MIN_TURNOVER_CR", 5.0))
+    async with celery_session() as session:
+        return await rebuild_hub_universe(session, top_n=top_n, min_turnover_cr=min_turnover_cr)
+
+
+@celery_app.task(name="tasks.rebuild_hub_universe")
+def rebuild_hub_universe_task(top_n: int | None = None, min_turnover_cr: float | None = None):
+    """Daily: rebuild the Hub's deep-score universe (top-N NSE equities by
+    30-day avg turnover). Size from HUB_UNIVERSE_SIZE env (default 500)."""
+    logger.info("[rebuild_hub_universe] starting daily universe rebuild")
+    return _run_async(_rebuild_hub_universe(top_n, min_turnover_cr))

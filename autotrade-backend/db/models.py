@@ -1098,3 +1098,72 @@ class MFIntelligenceScore(Base):
 
     def __repr__(self) -> str:
         return f"<MFIntelligenceScore {self.scheme_code} {self.master_score:.1f} {self.signal}>"
+
+
+# ── User Watchlist ─────────────────────────────────────────────────────────────
+
+class MarketShortlist(Base):
+    """Top-N NSE symbols the market scanner selected in the latest 15-min cycle.
+
+    Overwritten each cycle — always reflects the current best opportunities.
+    The trade loop reads this instead of the hardcoded watchlist so the agent
+    covers the full NSE universe without having to deep-analyse 9,600 stocks
+    every 60 seconds.
+    """
+    __tablename__ = "market_shortlist"
+    __table_args__ = (
+        Index("ix_msl_rank",       "rank"),
+        Index("ix_msl_created_at", "created_at"),
+    )
+
+    id:            Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:        Mapped[str]      = mapped_column(String(30), nullable=False)
+    master_score:  Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    volume_ratio:  Mapped[float]    = mapped_column(Float, nullable=False, default=1.0)
+    rsi:           Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_vs_ema20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    signal:        Mapped[str]      = mapped_column(String(15), nullable=False, default="HOLD")
+    sector:        Mapped[str]      = mapped_column(String(80), nullable=False, default="")
+    rank:          Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    created_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<MarketShortlist #{self.rank} {self.symbol} score={self.master_score:.1f}>"
+
+
+class UserWatchlist(Base):
+    """Symbols the user has manually added to the agent scan universe.
+
+    These are appended to the hardcoded WATCHLIST_NSE_LARGE_CAP/MID_CAP lists
+    so the automated paper-trade loop also analyses and trades them.
+    """
+    __tablename__ = "user_watchlist"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:     Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)
+    added_at:   Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    is_active:  Mapped[bool]     = mapped_column(Boolean, default=True, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<UserWatchlist {self.symbol}>"
+
+
+class HubUniverse(Base):
+    """The configurable universe the Master Intelligence Hub deep-scores each
+    cycle (7-factor). Rebuilt daily as the top-N NSE equities by average daily
+    turnover (₹ volume × close), excluding bonds/SME. Replaces the old hardcoded
+    ~22-symbol list so news/fundamentals/earnings/macro apply to ~500 liquid names.
+    """
+    __tablename__ = "hub_universe"
+    __table_args__ = (
+        Index("ix_hub_universe_rank", "rank"),
+    )
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:      Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)
+    turnover_cr: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    rank:        Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    updated_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<HubUniverse #{self.rank} {self.symbol} ₹{self.turnover_cr:.1f}Cr/day>"

@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     AGENT_CONSEC_LOSS_LOCKOUT:  int   = 2
     AGENT_CONFIDENCE_THRESHOLD: int   = 70
 
+    # Master Intelligence Hub universe. Empty → use the hub_universe DB table
+    # (top-N by turnover, rebuilt daily). Set a comma-separated list to override.
+    HUB_SYMBOLS:               str   = ""
+    HUB_UNIVERSE_SIZE:         int   = 500    # top-N NSE equities by 30-day turnover
+    HUB_UNIVERSE_MIN_TURNOVER_CR: float = 5.0  # min ₹ Cr/day to qualify
+
     # Universe / timing
     # 1h matches what the candles table actually has (282k 1h rows, 0 rows at 15m).
     # 60 bars ≈ 8 NSE trading days — enough for RSI/EMA50 settling on liquid names
@@ -129,10 +135,21 @@ class Settings(BaseSettings):
     # Default ₹5,00,000 — matches AGENT_EQUITY so the simulator wallet and the
     # AI Trading Agent equity start from the same base.
     PAPER_TRADING_BALANCE: float = 500000.0
-    MAX_RISK_PER_TRADE: float = 0.02       # fraction of balance risked per trade
-    MAX_OPEN_POSITIONS: int = 5
+    MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
+    MAX_OPEN_POSITIONS: int = 20           # SAFETY CEILING (bug guard) — not the primary limiter
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance
     PAPER_MODE: bool = True
+
+    # ── Capital-utilization model (replaces the rigid "max 5 positions") ──────
+    # The agent deploys capital by ANALYSIS, not a fixed count: it keeps opening
+    # positions while total open risk stays under the budget and a cash buffer is
+    # preserved, sizing each trade by conviction. Tuned "Aggressive".
+    MAX_PORTFOLIO_RISK:    float = 0.15    # sum of all open-position risks ≤ 15% of equity
+    MIN_CASH_BUFFER:       float = 0.10    # always keep ≥10% of equity as dry cash
+    RISK_PER_TRADE_MIN:    float = 0.015   # risk on a floor-confidence signal
+    RISK_PER_TRADE_MAX:    float = 0.030   # risk on a high-conviction signal
+    CONVICTION_HIGH:       float = 70.0    # confidence at which risk hits RISK_PER_TRADE_MAX
+    MAX_NEW_ENTRIES_PER_CYCLE: int = 8     # don't fill the whole budget in one 60s cycle
 
     # ── Risk / trade sizing ───────────────────────────────────────────────────
     ATR_MULTIPLIER: float = 2.0       # stop = entry ± ATR × this
