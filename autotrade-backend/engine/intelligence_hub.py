@@ -249,10 +249,12 @@ def build_sector_context() -> SectorContext:
 async def build_news_context(session: AsyncSession) -> NewsContext:
     from db.models import NewsItem
 
-    cutoff = datetime.utcnow() - timedelta(hours=24)
+    # 7-day window: yfinance NSE articles are typically 2-5 days old;
+    # same-day RSS items are always within range and still dominate the average.
+    cutoff = datetime.utcnow() - timedelta(days=7)
     items = (await session.execute(
         select(NewsItem).where(NewsItem.published_at >= cutoff)
-        .order_by(desc(NewsItem.published_at)).limit(500)
+        .order_by(desc(NewsItem.published_at)).limit(2000)
     )).scalars().all()
 
     # tickers_affected stores full NSE symbols today (e.g. "INFY.NS") because
