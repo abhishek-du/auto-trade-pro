@@ -259,6 +259,7 @@ export default function StockDetail() {
   const [deepSettled, setDeepSettled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
+  const [autoFloor, setAutoFloor] = useState(30);   // live agent auto-trade threshold
   const [inWatchlist, setInWatchlist] = useState(false);
   const [wlLoading,   setWlLoading]   = useState(false);
 
@@ -293,6 +294,12 @@ export default function StockDetail() {
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
         .then(d => setInWatchlist((d.symbols || []).includes(nsSymbol)))
+        .catch(() => {});
+
+      // Live agent auto-trade threshold (so the "signal only" floor stays in
+      // sync with the backend PAPER_CONFIDENCE_THRESHOLD instead of hardcoding).
+      apiFetch('/api/v1/india/market-scanner/shortlist?limit=1')
+        .then(d => { if (d?.auto_trade_threshold != null) setAutoFloor(d.auto_trade_threshold); })
         .catch(() => {});
     } catch (e) {
       setError(e.message || 'Failed to load');
@@ -355,13 +362,13 @@ export default function StockDetail() {
   // low-confidence and a neutral score look 50%-confident.
   const conf = score != null ? Math.min(100, Math.round(Math.abs(score))) : null;
 
-  // The agent only auto-trades signals at/above this confidence (matches backend
-  // PAPER_CONFIDENCE_THRESHOLD). Below it, a BUY/SELL is a suggestion only.
-  const AUTO_TRADE_FLOOR = 40;
+  // The agent only auto-trades signals at/above this confidence (live value from
+  // the backend PAPER_CONFIDENCE_THRESHOLD). Below it, a BUY/SELL is suggestion only.
+  const AUTO_TRADE_FLOOR = autoFloor;
 
-  // Conviction label aligned to the agent's 40% trade threshold:
-  // a setup the agent would actually act on (≥40%) is at least MEDIUM.
-  const convictionLabel = conf == null ? '—' : conf >= 60 ? 'HIGH' : conf >= 40 ? 'MEDIUM' : 'LOW';
+  // Conviction label aligned to the agent's trade threshold: a setup the agent
+  // would actually act on (≥ the auto-trade floor) is at least MEDIUM.
+  const convictionLabel = conf == null ? '—' : conf >= 60 ? 'HIGH' : conf >= AUTO_TRADE_FLOOR ? 'MEDIUM' : 'LOW';
 
   // Verdict is pending while the fast batch is in flight, OR while we have no
   // hub score yet and deep-analysis hasn't settled. Once deep settles (success

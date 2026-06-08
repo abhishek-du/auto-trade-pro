@@ -448,6 +448,15 @@ async def _india_trade_loop():
         )
         await session.commit()
 
+        # ── Mirror the trade ledger to the spreadsheet journal (best-effort) ──
+        # Idempotent: appends new trades, updates ones that just closed. Never
+        # raises into the trade loop — journal failures must not affect trading.
+        try:
+            from integrations.sheet_logger import sync_journal
+            await sync_journal(session)
+        except Exception as exc:
+            logger.warning(f"[india_trade_loop] journal sync skipped: {exc}")
+
 
 @celery_app.task(name="tasks.india_trade_loop")
 def india_trade_loop():
@@ -458,6 +467,26 @@ def india_trade_loop():
     """
     logger.info("[india_trade_loop] Starting cycle")
     _run_async(_india_trade_loop())
+
+
+# ── Trade journal sync — keeps the spreadsheet up to date out-of-band ─────────
+
+async def _sync_trade_journal():
+    from integrations.sheet_logger import sync_journal
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        return await sync_journal(session)
+
+
+@celery_app.task(name="tasks.india_tasks.sync_trade_journal")
+def sync_trade_journal_task():
+    """Reconcile the spreadsheet trade journal with the trades table.
+
+    Idempotent and safe to run on a schedule — picks up trades that closed
+    after market hours (when the 60 s trade loop isn't running).
+    """
+    return _run_async(_sync_trade_journal())
 
 
 # ── 7. ML model training — kept for beat schedule compatibility ───────────────
@@ -744,8 +773,8 @@ def run_agent_cycle_task():
 
 @celery_app.task(
     name="tasks.run_master_intelligence_cycle",
-    soft_time_limit=600,   # ~500 symbols × candle-load + indicators; raise from the 300s default
-    time_limit=720,
+    soft_time_limit=1080,  # ~758 symbols × candle-load + indicators; raise from the 300s default
+    time_limit=1200,
 )
 def run_master_intelligence_cycle():
     """Master brain cycle: build unified context, score the NSE universe,

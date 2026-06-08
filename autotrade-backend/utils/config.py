@@ -119,8 +119,8 @@ class Settings(BaseSettings):
     # Master Intelligence Hub universe. Empty → use the hub_universe DB table
     # (top-N by turnover, rebuilt daily). Set a comma-separated list to override.
     HUB_SYMBOLS:               str   = ""
-    HUB_UNIVERSE_SIZE:         int   = 500    # top-N NSE equities by 30-day turnover
-    HUB_UNIVERSE_MIN_TURNOVER_CR: float = 5.0  # min ₹ Cr/day to qualify
+    HUB_UNIVERSE_SIZE:         int   = 2000    # top-N NSE equities by 30-day turnover
+    HUB_UNIVERSE_MIN_TURNOVER_CR: float = 20.0  # min ₹ Cr/day to qualify
 
     # Universe / timing
     # 1h matches what the candles table actually has (282k 1h rows, 0 rows at 15m).
@@ -154,6 +154,32 @@ class Settings(BaseSettings):
     # ── Risk / trade sizing ───────────────────────────────────────────────────
     ATR_MULTIPLIER: float = 2.0       # stop = entry ± ATR × this
     MIN_RISK_REWARD: float = 2.0      # take-profit = entry ± risk × this
+
+    # ── Trade journal → spreadsheet ──────────────────────────────────────────
+    # Logs every trade (why bought, targets, ETA, which target hit, duration,
+    # P&L, AI expert note) to a spreadsheet. Backend is pluggable: "local" writes
+    # an .xlsx file; "google" writes a Google Sheet. Switching is a one-line
+    # config change — the column schema and sync logic are backend-agnostic.
+    SHEET_LOG_ENABLED:  bool = True
+    SHEET_LOG_BACKEND:  str  = "local"           # "local" | "google"
+    SHEET_LOG_USE_LLM:  bool = True              # AI expert notes via Groq (template fallback)
+    # Local Excel backend
+    SHEET_LOG_LOCAL_PATH: str = "logs/trade_journal.xlsx"
+    # Google Sheets backend (only used when SHEET_LOG_BACKEND="google")
+    GOOGLE_SHEETS_ID:            str = "11JVm7QmkPadJvk_dsQZa_5WbIBjH66CPDzUPiznHlmc"
+    GOOGLE_SHEETS_WORKSHEET:     str = "Trades"  # tab name within the spreadsheet
+    # OAuth 2.0 Desktop credentials (your own Google account — no sheet sharing needed)
+    GOOGLE_OAUTH_CLIENT_SECRET_JSON: str = ""    # path to downloaded client_secret_*.json
+    GOOGLE_OAUTH_TOKEN_PATH:         str = "logs/google_token.pickle"  # saved after first auth
+    # Legacy service-account path (kept for compatibility — OAuth is preferred)
+    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""
+
+    @property
+    def google_sheets_available(self) -> bool:
+        # OAuth (preferred) or service-account
+        return bool(self.GOOGLE_SHEETS_ID and (
+            self.GOOGLE_OAUTH_CLIENT_SECRET_JSON or self.GOOGLE_SERVICE_ACCOUNT_JSON
+        ))
 
     @property
     def kite_available(self) -> bool:

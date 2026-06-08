@@ -61,3 +61,9 @@ slowapi
 # ── Zerodha Kite portfolio tracker ───────────────────────────────────────────
 kiteconnect>=4.2.0   # Zerodha KiteConnect v3 — full trading + GTT + ticker
 scipy                # XIRR calculation via brentq root solver
+
+# ── Trade journal → spreadsheet ──────────────────────────────────────────────
+openpyxl             # local .xlsx trade journal (SHEET_LOG_BACKEND="local")
+gspread              # Google Sheets backend (SHEET_LOG_BACKEND="google")
+google-auth          # Google OAuth token refresh
+google-auth-oauthlib # OAuth 2.0 Desktop flow (your own account, no sheet sharing needed)
