@@ -2300,13 +2300,15 @@ async def get_market_shortlist(
                 "rsi":            round(r.rsi, 1) if r.rsi else None,
                 "price_vs_ema20": round(r.price_vs_ema20, 2) if r.price_vs_ema20 else None,
                 # Covered by the Hub 7-factor universe (deep-scored, auto-trade eligible).
-                "hub_covered":    r.symbol in hub_covered_set,
+                "hub_covered":         r.symbol in hub_covered_set,
                 # True when the agent will auto-trade this (actionable AND ≥ floor).
                 "agent_tradeable": (
                     ("BUY" in r.signal or "SELL" in r.signal)
                     and abs(r.master_score) >= auto_threshold
                 ),
-                "created_at":     r.created_at.isoformat(),
+                "upper_circuit_days":  r.upper_circuit_days or 0,
+                "volume_surge":        round(r.volume_surge or 1.0, 2),
+                "created_at":          r.created_at.isoformat(),
             }
             for r in rows
         ],

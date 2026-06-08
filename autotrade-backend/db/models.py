@@ -1116,16 +1116,18 @@ class MarketShortlist(Base):
         Index("ix_msl_created_at", "created_at"),
     )
 
-    id:            Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol:        Mapped[str]      = mapped_column(String(30), nullable=False)
-    master_score:  Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
-    volume_ratio:  Mapped[float]    = mapped_column(Float, nullable=False, default=1.0)
-    rsi:           Mapped[float | None] = mapped_column(Float, nullable=True)
-    price_vs_ema20: Mapped[float | None] = mapped_column(Float, nullable=True)
-    signal:        Mapped[str]      = mapped_column(String(15), nullable=False, default="HOLD")
-    sector:        Mapped[str]      = mapped_column(String(80), nullable=False, default="")
-    rank:          Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
-    created_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    id:                  Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:              Mapped[str]      = mapped_column(String(30), nullable=False)
+    master_score:        Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    volume_ratio:        Mapped[float]    = mapped_column(Float, nullable=False, default=1.0)
+    rsi:                 Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_vs_ema20:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    signal:              Mapped[str]      = mapped_column(String(15), nullable=False, default="HOLD")
+    sector:              Mapped[str]      = mapped_column(String(80), nullable=False, default="")
+    rank:                Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    upper_circuit_days:  Mapped[int | None]   = mapped_column(Integer, nullable=True, default=0)
+    volume_surge:        Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
+    created_at:          Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     def __repr__(self) -> str:
         return f"<MarketShortlist #{self.rank} {self.symbol} score={self.master_score:.1f}>"
