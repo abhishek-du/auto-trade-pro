@@ -39,6 +39,8 @@ _KNOWN_KEYS: dict[str, type] = {
     # Risk / sizing
     "atr_multiplier":         float,
     "min_risk_reward":        float,
+    "max_portfolio_risk":     float,   # total stop-loss risk across all open positions
+    "min_cash_buffer":        float,   # minimum dry cash as fraction of equity
     # Indian market
     "indian_market_max_risk": float,
     "indian_intraday_sl_pct": float,
@@ -139,6 +141,14 @@ class RuntimeConfig:
         return float(self._get("min_risk_reward", settings.MIN_RISK_REWARD))
 
     @property
+    def max_portfolio_risk(self) -> float:
+        return float(self._get("max_portfolio_risk", getattr(settings, "MAX_PORTFOLIO_RISK", 0.15)))
+
+    @property
+    def min_cash_buffer(self) -> float:
+        return float(self._get("min_cash_buffer", getattr(settings, "MIN_CASH_BUFFER", 0.10)))
+
+    @property
     def indian_market_max_risk(self) -> float:
         return float(self._get("indian_market_max_risk", settings.INDIAN_MARKET_MAX_RISK))
 
@@ -197,6 +207,8 @@ class RuntimeConfig:
             "min_risk_reward":         self.min_risk_reward,
             "indian_market_max_risk":  self.indian_market_max_risk,
             "indian_intraday_sl_pct":  self.indian_intraday_sl_pct,
+            "max_portfolio_risk":      self.max_portfolio_risk,
+            "min_cash_buffer":         self.min_cash_buffer,
             "enable_fii_dii_analysis": self.enable_fii_dii_analysis,
             "enable_options_chain":    self.enable_options_chain,
             "enable_india_vix":        self.enable_india_vix,
