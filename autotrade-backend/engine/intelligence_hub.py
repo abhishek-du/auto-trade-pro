@@ -484,14 +484,29 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     # 7. Options (5%) — index-wide bias applied lightly to every name
     options_score = ctx.options.nifty_bias * 15
 
+    # Renormalize: factors with no real data (default/missing) get 0 weight
+    # so blank factors don't dilute symbols that only have technical data.
+    _w = {
+        "technical":   0.35,
+        "news":        0.15 if symbol in ctx.news.scores_by_symbol else 0.0,
+        "sector":      0.15 if sector in ctx.sectors.sector_biases else 0.0,
+        "macro":       0.10,
+        "earnings":    0.10 if symbol in ctx.earnings.tones_by_symbol else 0.0,
+        "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
+        "options":     0.05,
+    }
+    _total_w = sum(_w.values())
+    if _total_w > 0:
+        _w = {k: v / _total_w for k, v in _w.items()}
+
     master_score = (
-        technical_score   * 0.35 +
-        news_score        * 0.15 +
-        sector_score      * 0.15 +
-        macro_score       * 0.10 +
-        earnings_score    * 0.10 +
-        fundamental_score * 0.10 +
-        options_score     * 0.05
+        technical_score   * _w["technical"] +
+        news_score        * _w["news"] +
+        sector_score      * _w["sector"] +
+        macro_score       * _w["macro"] +
+        earnings_score    * _w["earnings"] +
+        fundamental_score * _w["fundamental"] +
+        options_score     * _w["options"]
     )
 
     # Blocking + penalties
@@ -535,6 +550,7 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "sector_mood": sector_mood, "fund_grade": fund_grade,
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
         "headlines": ctx.news.headlines_by_symbol.get(symbol, []),
+        "active_weights": {k: round(v, 3) for k, v in _w.items()},
     }
 
     return ScoredStock(
