@@ -75,9 +75,13 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
 
 @router.post("/cycle/trigger")
 async def trigger_cycle(db: AsyncSession = Depends(get_db)):
-    """Manually trigger one agent evaluation cycle."""
+    """Manually trigger one agent evaluation cycle.
+
+    Always runs regardless of market hours or the AGENT_ENABLED flag —
+    user explicitly requested it.
+    """
     from engine.agent.agent_loop import run_agent_cycle
-    result = await run_agent_cycle(db)
+    result = await run_agent_cycle(db, force=True)
     return result
 
 
