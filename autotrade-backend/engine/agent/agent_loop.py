@@ -56,16 +56,21 @@ def _is_trading_day() -> bool:
     return datetime.now().weekday() < 5  # Mon-Fri
 
 
-async def run_agent_cycle(session: AsyncSession) -> dict:
-    """Top-level entry point called by the Celery task."""
+async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
+    """Top-level entry point called by the Celery task.
 
-    if not settings.AGENT_ENABLED:
+    force=True bypasses the enabled flag and market-hours check — used by the
+    manual trigger button and always allowed in paper trading mode.
+    """
+    is_paper = getattr(settings, "PAPER_MODE", True)
+
+    if not force and not settings.AGENT_ENABLED:
         return {"status": "disabled"}
 
-    if not _is_trading_day():
+    if not force and not _is_trading_day():
         return {"status": "non_trading_day"}
 
-    if not _is_market_hours():
+    if not force and not _is_market_hours():
         return {"status": "outside_market_hours"}
 
     portfolio = _get_portfolio()
