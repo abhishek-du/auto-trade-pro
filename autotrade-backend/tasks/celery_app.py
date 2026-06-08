@@ -145,6 +145,14 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 15},
     },
 
+    # Every 5 min: reconcile the spreadsheet trade journal (catches trades that
+    # close after the 60 s trade loop stops running post-market).
+    "trade-journal-sync-5min": {
+        "task":     "tasks.india_tasks.sync_trade_journal",
+        "schedule": 300,
+        "options":  {"countdown": 30},
+    },
+
     # Weekly Saturday 20:30 UTC = Sunday 02:00 IST: LSTM + RF model training
     "ml-model-training-weekly": {
         "task":     "tasks.india_tasks.train_ml_models_task",

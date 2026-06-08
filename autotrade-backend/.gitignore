@@ -50,3 +50,8 @@ Thumbs.db
 # ── Alembic generated ─────────────────────────────────────────────────────────
 db/migrations/versions/
 celerybeat-schedule
+
+# ── Trade journal / Google auth ───────────────────────────────────────────────
+logs/trade_journal.xlsx
+logs/google_token.pickle
+logs/.~lock.*
