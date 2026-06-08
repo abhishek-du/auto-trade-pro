@@ -161,7 +161,7 @@ function InvestmentSummary({ wallet, trades }) {
     {
       label: 'Capital Deployed',
       value: fmt(marginUsed),
-      sub:   `${openTrades.length} open · ${fmt(notional)} exposure`,
+      sub:   `Margin (10%) · ${fmt(notional)} notional exposure`,
       icon:  Wallet,
       color: 'text-cyan',
       bg:    'bg-cyan/10',
@@ -488,7 +488,7 @@ export default function Trades() {
               <tr className="border-b border-border">
                 {[
                   'Date', 'Symbol', 'Direction',
-                  'Invested', 'Entry', 'Current / Exit',
+                  'Exposure', 'Entry', 'Current / Exit',
                   'Current Value', 'P&L', 'P&L %', 'Status',
                 ].map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-muted text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
@@ -514,9 +514,10 @@ export default function Trades() {
                   /* P&L: use live unrealised for open, realised pnl for closed */
                   const pnl      = isOpen ? (pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
                   const pnlPct   = isOpen ? (pos?.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
-                  const invested = t.size_usd ?? 0;
+                  const notional = t.size_usd ?? 0;           // units × entry (full notional)
+                  const margin   = notional * 0.10;           // actual capital committed (10%)
                   const curPrice = isOpen ? (pos?.current_price ?? null) : (t.exit_price ?? null);
-                  const curVal   = invested + pnl;
+                  const curVal   = notional + pnl;
                   const isGain   = pnl >= 0;
 
                   return (
@@ -545,13 +546,13 @@ export default function Trades() {
                         <DirectionBadge direction={t.direction ?? t.side} />
                       </td>
 
-                      {/* Invested */}
+                      {/* Exposure (notional) + margin committed */}
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-0.5">
-                          <span className="text-slate-200 tabular-nums font-medium">{fmt(invested)}</span>
-                          {t.size_units != null && (
-                            <span className="text-muted text-[10px]">{t.size_units} units</span>
-                          )}
+                          <span className="text-slate-200 tabular-nums font-medium">{fmt(notional)}</span>
+                          <span className="text-cyan/70 text-[10px] tabular-nums">
+                            Margin ₹{Math.round(margin).toLocaleString('en-IN')}
+                          </span>
                         </div>
                       </td>
 
@@ -565,8 +566,8 @@ export default function Trades() {
                             <span className={`tabular-nums font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
                               {fmt(pos.current_price)}
                             </span>
-                            <span className={`text-[10px] ${isGain ? 'text-profit/70' : 'text-loss/70'}`}>
-                              {isGain ? '▲' : '▼'} {fmt(Math.abs(pos.current_price - t.entry_price))}
+                            <span className={`text-[10px] text-muted`}>
+                              {pos.current_price >= t.entry_price ? '▲' : '▼'} {fmt(Math.abs(pos.current_price - t.entry_price))}
                             </span>
                           </div>
                         ) : curPrice ? (
