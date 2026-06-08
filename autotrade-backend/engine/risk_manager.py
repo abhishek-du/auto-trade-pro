@@ -146,9 +146,9 @@ async def validate_signal(
     max_dl        = cfg.max_daily_loss
     min_rr        = cfg.min_risk_reward
 
-    # Capital-utilization parameters (read directly — not DB-overridable yet)
-    max_port_risk   = float(getattr(settings, "MAX_PORTFOLIO_RISK", 0.15))
-    min_cash_buffer = float(getattr(settings, "MIN_CASH_BUFFER", 0.10))
+    # Capital-utilization parameters — now DB-overridable via /api/v1/settings
+    max_port_risk   = cfg.max_portfolio_risk
+    min_cash_buffer = cfg.min_cash_buffer
 
     # Reconstruct current capital state from open positions.
     deployed_margin   = sum(p.size_usd * 0.1 for p in open_positions)

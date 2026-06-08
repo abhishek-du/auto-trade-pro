@@ -11,6 +11,8 @@ const DEFAULT_SETTINGS = {
   take_profit_pct:     4,
   max_daily_loss_pct:  5,
   max_open_positions:  5,
+  max_portfolio_risk:  15,
+  min_cash_buffer:     10,
   watchlist:           ['BTC/USD', 'ETH/USD', 'SOL/USD'],
 };
 
@@ -103,7 +105,13 @@ export default function Settings() {
 
   useEffect(() => {
     getSettings()
-      .then((d) => setCfg({ ...DEFAULT_SETTINGS, ...d }))
+      .then((d) => setCfg({
+        ...DEFAULT_SETTINGS,
+        ...d,
+        // API returns fractions; display as percentages
+        max_portfolio_risk: d.max_portfolio_risk != null ? Math.round(d.max_portfolio_risk * 100) : DEFAULT_SETTINGS.max_portfolio_risk,
+        min_cash_buffer:    d.min_cash_buffer    != null ? Math.round(d.min_cash_buffer    * 100) : DEFAULT_SETTINGS.min_cash_buffer,
+      }))
       .catch(() => setCfg(DEFAULT_SETTINGS))
       .finally(() => setLoading(false));
   }, []);
@@ -113,7 +121,12 @@ export default function Settings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await saveSettings(cfg);
+      await saveSettings({
+        ...cfg,
+        // Convert % display values back to fractions for the API
+        max_portfolio_risk: (cfg.max_portfolio_risk ?? DEFAULT_SETTINGS.max_portfolio_risk) / 100,
+        min_cash_buffer:    (cfg.min_cash_buffer    ?? DEFAULT_SETTINGS.min_cash_buffer)    / 100,
+      });
       toast.success('Settings saved');
     } catch {
       toast.error('Failed to save settings');
@@ -160,6 +173,18 @@ export default function Settings() {
           </FieldRow>
           <FieldRow label="Max Open Positions" hint="Maximum concurrent open trades">
             <NumberInput value={cfg.max_open_positions} onChange={set('max_open_positions')} min={1} max={20} step={1} />
+          </FieldRow>
+          <FieldRow
+            label="Portfolio Risk Budget"
+            hint="Max total stop-loss risk across all open positions (sum of each trade's entry−stop × units). Raise this to let the agent take more concurrent positions."
+          >
+            <NumberInput value={cfg.max_portfolio_risk} onChange={set('max_portfolio_risk')} min={5} max={50} step={1} suffix="%" />
+          </FieldRow>
+          <FieldRow
+            label="Min Cash Buffer"
+            hint="Always keep this much equity as dry cash. Prevents the agent from deploying 100% of capital in margin."
+          >
+            <NumberInput value={cfg.min_cash_buffer} onChange={set('min_cash_buffer')} min={0} max={50} step={1} suffix="%" />
           </FieldRow>
         </div>
       </div>

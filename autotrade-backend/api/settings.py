@@ -40,6 +40,8 @@ class RuntimeSettingsOut(BaseModel):
     paper_mode:              bool
     paper_confidence_threshold: float
     live_confidence_threshold:  float
+    max_portfolio_risk:      float
+    min_cash_buffer:         float
 
 
 class SettingsPatch(BaseModel):
@@ -62,6 +64,8 @@ class SettingsPatch(BaseModel):
     paper_mode:              bool  | None = None
     paper_confidence_threshold: float | None = None
     live_confidence_threshold:  float | None = None
+    max_portfolio_risk:      float | None = None
+    min_cash_buffer:         float | None = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
