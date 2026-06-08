@@ -62,6 +62,24 @@ function RsiChip({ rsi }) {
 
 const SIGNAL_FILTERS = ['ALL', 'BUY', 'STRONG_BUY', 'SELL', 'HOLD'];
 
+function UpperCircuitBadge({ days, surge }) {
+  if (!days || days < 1) return null;
+  const intense = days >= 3;
+  return (
+    <span
+      className={`text-[8px] font-bold px-1 rounded leading-tight border inline-flex items-center gap-0.5 ${
+        intense
+          ? 'text-orange-200 bg-orange-500/20 border-orange-400/40'
+          : 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+      }`}
+      title={`${days} consecutive day${days > 1 ? 's' : ''} closing at day high — upper circuit / strong buying pressure${surge >= 1.5 ? ` · Volume ${surge.toFixed(1)}× avg` : ''}`}
+    >
+      {/* Stacked upward arrows indicate streak length */}
+      {days >= 5 ? '▲▲▲' : days >= 3 ? '▲▲' : '▲'}&nbsp;UC{days}D
+    </span>
+  );
+}
+
 export default function MarketScanner() {
   const [rows,       setRows]      = useState([]);
   const [loading,    setLoading]   = useState(true);
@@ -71,6 +89,7 @@ export default function MarketScanner() {
   const [sigFilter,  setSigFilter] = useState('ALL');
   const [minScore,   setMinScore]  = useState(0);
   const [search,     setSearch]    = useState('');
+  const [ucOnly,     setUcOnly]    = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -101,8 +120,10 @@ export default function MarketScanner() {
     }
   };
 
+  const ucCount  = rows.filter(r => (r.upper_circuit_days || 0) >= 1).length;
   const filtered = rows.filter(r => {
     if (sigFilter !== 'ALL' && r.signal !== sigFilter) return false;
+    if (ucOnly && !(r.upper_circuit_days >= 1)) return false;
     if (search && !r.ticker?.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -196,6 +217,25 @@ export default function MarketScanner() {
             ))}
           </select>
         </div>
+        {/* Upper circuit filter */}
+        <button
+          onClick={() => setUcOnly(v => !v)}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${
+            ucOnly
+              ? 'bg-orange-500/20 border-orange-400/50 text-orange-200'
+              : 'bg-card border-border text-muted hover:text-slate-300'
+          }`}
+          title="Show only stocks in an upper circuit / buy-locked streak"
+        >
+          <span>▲▲</span>
+          Upper Circuit
+          {ucCount > 0 && (
+            <span className={`text-[9px] px-1 rounded-full ${ucOnly ? 'bg-orange-400/30 text-orange-100' : 'bg-white/10 text-muted'}`}>
+              {ucCount}
+            </span>
+          )}
+        </button>
+
         {/* Symbol search */}
         <input
           type="text"
@@ -248,7 +288,10 @@ export default function MarketScanner() {
             {filtered.map((r, i) => (
               <div
                 key={r.symbol}
-                className={`grid grid-cols-1 md:grid-cols-[40px_1fr_90px_100px_70px_70px_90px_100px] gap-2 md:gap-3 px-4 py-3 items-center hover:bg-white/[0.02] transition-colors ${i > 0 ? 'border-t border-border' : ''}`}
+                className={`grid grid-cols-1 md:grid-cols-[40px_1fr_90px_100px_70px_70px_90px_100px] gap-2 md:gap-3 px-4 py-3 items-center hover:bg-white/[0.02] transition-colors ${i > 0 ? 'border-t border-border' : ''} ${
+                  (r.upper_circuit_days || 0) >= 3 ? 'bg-orange-500/[0.04] hover:bg-orange-500/[0.07]' :
+                  (r.upper_circuit_days || 0) >= 1 ? 'bg-amber-500/[0.03]' : ''
+                }`}
               >
                 {/* Rank */}
                 <span className="text-muted text-xs font-mono hidden md:block">{r.rank}</span>
@@ -280,6 +323,7 @@ export default function MarketScanner() {
                           AUTO
                         </span>
                       )}
+                      <UpperCircuitBadge days={r.upper_circuit_days} surge={r.volume_surge} />
                     </Link>
                     {r.sector && <div className="text-muted text-[10px] truncate">{r.sector}</div>}
                   </div>
@@ -293,11 +337,16 @@ export default function MarketScanner() {
                 {/* Score bar */}
                 <div><ScoreBar score={r.master_score} /></div>
 
-                {/* Volume ratio */}
-                <div>
+                {/* Volume ratio + surge for circuit stocks */}
+                <div className="flex flex-col gap-0.5">
                   <span className={`font-mono text-[11px] ${r.volume_ratio >= 2 ? 'text-cyan font-bold' : r.volume_ratio >= 1.5 ? 'text-profit' : 'text-muted'}`}>
                     {fmt(r.volume_ratio, 1)}×
                   </span>
+                  {(r.upper_circuit_days >= 1) && (r.volume_surge >= 1.5) && (
+                    <span className="text-[9px] text-orange-300/80 font-mono leading-none">
+                      {fmt(r.volume_surge, 1)}× surge
+                    </span>
+                  )}
                 </div>
 
                 {/* RSI */}
