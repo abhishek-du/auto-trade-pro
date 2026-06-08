@@ -153,10 +153,10 @@ function InvestCard({ tradeSetup, ltp, signal }) {
 
 // ── Intelligence chip card ─────────────────────────────────────────────────────
 
-function IntelChip({ label, rawScore, note, icon: Icon, noData }) {
-  if (noData) {
+function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded }) {
+  if (noData || excluded) {
     return (
-      <div className="bg-card border border-border rounded-xl p-4 opacity-60">
+      <div className="bg-card border border-border rounded-xl p-4 opacity-50">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-1.5">
             {Icon && <Icon size={12} className="text-muted" />}
@@ -165,7 +165,9 @@ function IntelChip({ label, rawScore, note, icon: Icon, noData }) {
           <span className="w-2 h-2 rounded-full shrink-0 bg-slate-600" />
         </div>
         <div className="text-base font-bold leading-tight text-slate-500">No data</div>
-        <div className="text-[10px] text-muted mt-2 leading-snug">Not in tracked universe</div>
+        <div className="text-[10px] text-muted mt-2 leading-snug">
+          {excluded ? 'No data · excluded from score' : 'Not in tracked universe'}
+        </div>
       </div>
     );
   }
@@ -345,6 +347,7 @@ export default function StockDetail() {
   const score      = intel?.master_score ?? deep?.composite_score ?? null;
   const comp       = intel?.components ?? {};
   const reasoning  = intel?.full_reasoning ?? {};
+  const aw         = reasoning.active_weights ?? {};
   const ts         = deep?.trade_setup ?? {};
   const indicators = deep?.indicators ?? {};
   const news       = deep?.news ?? [];
@@ -843,11 +846,11 @@ export default function StockDetail() {
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
             {/* Technical works for every symbol — from hub score, else derived from deep composite. */}
             <IntelChip label="Technical"    rawScore={isTracked ? comp.technical : (deep?.composite_score ?? 0)} icon={Activity} note={indicators.rsi ? `RSI ${fmt(indicators.rsi,1)} · ${indicators.ema_trend||''}` : null} />
-            <IntelChip label="Fundamentals" rawScore={comp.fundamental}  icon={BookOpen}  noData={!isTracked && !fund} note={fund ? `ROE ${fmt(fund.roe)}% · ROCE ${fmt(fund.roce)}%` : null} />
-            <IntelChip label="Sentiment"    rawScore={comp.news}         icon={Zap}       noData={!isTracked} note={reasoning.news_tone ? `${reasoning.news_tone}` : null} />
-            <IntelChip label="Sector"       rawScore={comp.sector}       icon={PieChart}  noData={!isTracked} note={reasoning.sector_name ? `${reasoning.sector_name} · ${reasoning.sector_mood||''}` : null} />
+            <IntelChip label="Fundamentals" rawScore={comp.fundamental}  icon={BookOpen}  noData={!isTracked && !fund} excluded={isTracked && aw.fundamental === 0} note={fund ? `ROE ${fmt(fund.roe)}% · ROCE ${fmt(fund.roce)}%` : null} />
+            <IntelChip label="Sentiment"    rawScore={comp.news}         icon={Zap}       noData={!isTracked} excluded={isTracked && aw.news === 0} note={reasoning.news_tone ? `${reasoning.news_tone}` : null} />
+            <IntelChip label="Sector"       rawScore={comp.sector}       icon={PieChart}  noData={!isTracked} excluded={isTracked && aw.sector === 0} note={reasoning.sector_name ? `${reasoning.sector_name} · ${reasoning.sector_mood||''}` : null} />
             <IntelChip label="Macro"        rawScore={comp.macro}        icon={BarChart2} noData={!isTracked} note={reasoning.regime ? `Regime: ${reasoning.regime}` : null} />
-            <IntelChip label="Earnings"     rawScore={comp.earnings}     icon={BookOpen}  noData={!isTracked} note={reasoning.fund_grade ? `Grade: ${reasoning.fund_grade}` : null} />
+            <IntelChip label="Earnings"     rawScore={comp.earnings}     icon={BookOpen}  noData={!isTracked} excluded={isTracked && aw.earnings === 0} note={reasoning.fund_grade ? `Grade: ${reasoning.fund_grade}` : null} />
             <div className="bg-gradient-to-br from-card to-blue-900/20 border border-cyan/30 rounded-xl p-4 cursor-pointer">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] text-cyan uppercase tracking-wider font-semibold">Overall</span>
