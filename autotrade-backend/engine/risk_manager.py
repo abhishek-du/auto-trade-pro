@@ -164,12 +164,13 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 1b: Portfolio risk budget ───────────────────────────────────────
-    # The PRIMARY gate: keep opening while summed open-risk stays under budget.
-    # Size this trade first so we can test the incremental risk it adds.
+    # ── Check 1b: Portfolio risk budget (live trading only) ───────────────────
+    # Paper trading has unlimited virtual capital — skip the cap so every
+    # signal the agent wants to take can actually be taken.
     this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
     this_risk = this_pos["risk_amount"]
-    if equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
+    is_paper  = cfg.paper_mode
+    if not is_paper and equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
         reason = (
             f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
             f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
@@ -177,10 +178,9 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 1c: Cash buffer ─────────────────────────────────────────────────
-    # Never deploy so much margin that dry cash drops below the buffer.
+    # ── Check 1c: Cash buffer (live trading only) ─────────────────────────────
     this_margin = this_pos["usd_value"] * 0.1
-    if equity > 0 and (deployed_margin + this_margin) > (1 - min_cash_buffer) * equity:
+    if not is_paper and equity > 0 and (deployed_margin + this_margin) > (1 - min_cash_buffer) * equity:
         reason = (
             f"Cash buffer guard: deploying ₹{this_margin:.0f} margin would breach "
             f"the {min_cash_buffer*100:.0f}% cash reserve"

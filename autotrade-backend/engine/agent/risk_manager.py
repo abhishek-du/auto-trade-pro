@@ -52,15 +52,15 @@ class RiskManagerAgent:
         if trade_risk_pct > settings.AGENT_MAX_RISK_PER_TRADE:
             return False, "OVERSIZE_TRADE"
 
-        # ── Portfolio risk cap (Varsity M9.1) ─────────────────────────────────
-        if ctx.get("open_risk_pct", 0) + trade_risk_pct > settings.AGENT_MAX_OPEN_RISK:
-            return False, "PORTFOLIO_RISK_CAP"
-
-        # ── Cash buffer (Varsity M11) ─────────────────────────────────────────
-        trade_value = qty * candidate.entry
-        cash        = ctx.get("cash", equity)
-        if cash - trade_value < settings.AGENT_CASH_BUFFER_MIN * equity:
-            return False, "CASH_BUFFER"
+        # ── Portfolio risk cap + cash buffer (live only) ──────────────────────
+        # Paper trading uses virtual capital — these gates only apply to real money.
+        if not settings.PAPER_MODE:
+            if ctx.get("open_risk_pct", 0) + trade_risk_pct > settings.AGENT_MAX_OPEN_RISK:
+                return False, "PORTFOLIO_RISK_CAP"
+            trade_value = qty * candidate.entry
+            cash        = ctx.get("cash", equity)
+            if cash - trade_value < settings.AGENT_CASH_BUFFER_MIN * equity:
+                return False, "CASH_BUFFER"
 
         # ── Diversification ───────────────────────────────────────────────────
         if candidate.symbol in ctx.get("open_symbols", []):

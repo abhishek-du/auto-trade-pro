@@ -5,9 +5,8 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import { getSettings, saveSettings, apiFetch } from '../api/client';
 
 const DEFAULT_CFG = {
-  max_open_positions:  5,
-  max_portfolio_risk:  15,   // displayed as %, stored as fraction
-  min_cash_buffer:     10,   // displayed as %, stored as fraction
+  max_open_positions: 5,
+  min_cash_buffer:    10,   // displayed as %, stored as fraction
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -37,47 +36,6 @@ function NumberInput({ value, onChange, min, max, step = 1, suffix }) {
         className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-slate-200 tabular-nums focus:outline-none focus:border-accent"
       />
       {suffix && <span className="text-muted text-sm shrink-0">{suffix}</span>}
-    </div>
-  );
-}
-
-// ── Risk Budget Meter ─────────────────────────────────────────────────────────
-
-function RiskBudgetMeter({ usedPct, capPct, onCapChange }) {
-  const ratio     = capPct > 0 ? Math.min(1, usedPct / capPct) : 0;
-  const barColor  = ratio >= 1 ? 'bg-red-500' : ratio >= 0.8 ? 'bg-amber-400' : 'bg-emerald-500';
-  const textColor = ratio >= 1 ? 'text-red-400' : ratio >= 0.8 ? 'text-amber-400' : 'text-emerald-400';
-  const barWidth  = `${Math.min(100, ratio * 100).toFixed(1)}%`;
-
-  return (
-    <div className="space-y-3">
-      {/* Used / cap bar */}
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-muted">Current stop-loss risk across open positions</span>
-          <span className={`font-mono font-bold ${textColor}`}>
-            {usedPct != null ? `${usedPct.toFixed(1)}%` : '—'}
-            <span className="text-muted font-normal"> / {capPct}%</span>
-          </span>
-        </div>
-        <div className="h-2 bg-white/5 rounded-full overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all ${barColor}`}
-            style={{ width: barWidth }}
-          />
-        </div>
-        {ratio >= 0.9 && (
-          <p className="text-amber-400/80 text-[10px]">
-            Near limit — raise the cap below or wait for positions to close / stop out.
-          </p>
-        )}
-      </div>
-
-      {/* Cap knob */}
-      <div className="flex items-center gap-3">
-        <span className="text-muted text-xs w-16 shrink-0">Budget cap</span>
-        <NumberInput value={capPct} onChange={onCapChange} min={5} max={50} step={1} suffix="%" />
-      </div>
     </div>
   );
 }
@@ -193,9 +151,8 @@ export default function Settings() {
     ]).then(([d, status]) => {
       setCfg({
         ...DEFAULT_CFG,
-        max_open_positions:  d.max_open_positions  ?? DEFAULT_CFG.max_open_positions,
-        max_portfolio_risk:  d.max_portfolio_risk  != null ? Math.round(d.max_portfolio_risk * 100) : DEFAULT_CFG.max_portfolio_risk,
-        min_cash_buffer:     d.min_cash_buffer     != null ? Math.round(d.min_cash_buffer    * 100) : DEFAULT_CFG.min_cash_buffer,
+        max_open_positions: d.max_open_positions ?? DEFAULT_CFG.max_open_positions,
+        min_cash_buffer:    d.min_cash_buffer != null ? Math.round(d.min_cash_buffer * 100) : DEFAULT_CFG.min_cash_buffer,
       });
       // open_risk_pct from agent status (already in %)
       if (status?.portfolio?.open_risk_pct != null) {
@@ -211,8 +168,7 @@ export default function Settings() {
     try {
       await saveSettings({
         max_open_positions: cfg.max_open_positions,
-        max_portfolio_risk: cfg.max_portfolio_risk / 100,
-        min_cash_buffer:    cfg.min_cash_buffer    / 100,
+        min_cash_buffer:    cfg.min_cash_buffer / 100,
       });
       toast.success('Settings saved — takes effect on next cycle');
     } catch {
@@ -245,26 +201,23 @@ export default function Settings() {
         <div className="px-5 divide-y divide-border/50">
 
           <FieldRow
-            label="Portfolio Risk Budget"
-            hint="Max combined stop-loss risk across all open positions. When open positions fill this budget the agent stops opening new trades. Raise it to allow more concurrent positions."
-          >
-            <RiskBudgetMeter
-              usedPct={openRisk}
-              capPct={cfg.max_portfolio_risk}
-              onCapChange={set('max_portfolio_risk')}
-            />
-          </FieldRow>
-
-          <FieldRow
             label="Max Open Positions"
-            hint="Hard ceiling on simultaneous open trades — a safety backstop independent of the risk budget."
+            hint="Hard ceiling on simultaneous open trades."
           >
-            <NumberInput value={cfg.max_open_positions} onChange={set('max_open_positions')} min={1} max={30} step={1} suffix="positions" />
+            <div className="space-y-2">
+              <NumberInput value={cfg.max_open_positions} onChange={set('max_open_positions')} min={1} max={30} step={1} suffix="positions" />
+              {openRisk != null && (
+                <p className="text-muted text-[11px]">
+                  Current stop-loss risk deployed: <span className="text-slate-300 font-mono">{openRisk.toFixed(1)}%</span> of equity
+                  <span className="text-green-500/70 ml-1">(no cap in paper mode)</span>
+                </p>
+              )}
+            </div>
           </FieldRow>
 
           <FieldRow
             label="Min Cash Buffer"
-            hint="Always keep this fraction of equity as dry cash. Prevents the agent from deploying 100% capital in margin."
+            hint="Always keep this fraction of equity as dry cash. Only enforced in live trading."
           >
             <NumberInput value={cfg.min_cash_buffer} onChange={set('min_cash_buffer')} min={0} max={50} step={1} suffix="%" />
           </FieldRow>
