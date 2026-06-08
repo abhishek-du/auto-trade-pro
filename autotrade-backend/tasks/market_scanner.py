@@ -164,16 +164,25 @@ async def _run_market_scanner(force: bool = False):
                     if ema20 and ema20 == ema20 and ema20 != 0 else None
                 )
 
+                uc_days = getattr(sig, "upper_circuit_days", 0)
                 candidates.append({
-                    "symbol":         ns_sym,
-                    "master_score":   round(score, 1),
-                    "signal":         signal,
-                    "sector":         SECTOR_MAP.get(base, ""),
-                    "volume_ratio":   round(vol_ratio, 2),
-                    "rsi":            rsi,
-                    "price_vs_ema20": price_vs_ema20,
-                    "rank_score":     abs(score) + min(vol_ratio - 1.0, 2.0) * 3,
-                    "is_user":        ns_sym in user_syms,
+                    "symbol":              ns_sym,
+                    "master_score":        round(score, 1),
+                    "signal":              signal,
+                    "sector":              SECTOR_MAP.get(base, ""),
+                    "volume_ratio":        round(vol_ratio, 2),
+                    "rsi":                 rsi,
+                    "price_vs_ema20":      price_vs_ema20,
+                    "upper_circuit_days":  uc_days,
+                    "volume_surge":        getattr(sig, "volume_surge", 1.0),
+                    # Boost rank for circuit stocks so they surface even when
+                    # absolute score lags (Hub re-scores on next cycle).
+                    "rank_score": (
+                        abs(score)
+                        + min(vol_ratio - 1.0, 2.0) * 3
+                        + uc_days * 8
+                    ),
+                    "is_user":             ns_sym in user_syms,
                 })
 
         logger.info(f"[market_scanner] scored {scored_ok} symbols ({'hub' if use_hub else 'technical'})")
@@ -212,6 +221,8 @@ async def _run_market_scanner(force: bool = False):
                 signal=c["signal"],
                 sector=c["sector"],
                 rank=rank,
+                upper_circuit_days=c.get("upper_circuit_days", 0),
+                volume_surge=c.get("volume_surge", 1.0),
             ))
 
         await session.commit()
