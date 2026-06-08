@@ -349,14 +349,30 @@ function TopSignals({ shortlist, loading }) {
           </div>
           {ranked.slice(0, 8).map((s) => (
             <Link key={s.symbol} to={`/s/${s.ticker}`}
-              className="grid grid-cols-2 md:grid-cols-[1fr_72px_120px_70px_64px] gap-2 md:gap-3 px-5 py-2.5 items-center hover:bg-white/[0.02] transition-colors">
+              className={`grid grid-cols-2 md:grid-cols-[1fr_72px_120px_70px_64px] gap-2 md:gap-3 px-5 py-2.5 items-center hover:bg-white/[0.02] transition-colors ${
+                (s.upper_circuit_days || 0) >= 3 ? 'bg-orange-500/[0.04]' : ''
+              }`}>
               <div className="flex items-center gap-2 min-w-0">
                 <span className="w-7 h-7 rounded-lg grid place-items-center text-[11px] font-bold text-white shrink-0"
                   style={{ background: `hsl(${(s.ticker?.charCodeAt(0) || 65) * 41 % 360},45%,28%)` }}>
                   {s.ticker?.[0]}
                 </span>
                 <div className="min-w-0">
-                  <p className="text-slate-200 text-sm font-semibold truncate">{s.ticker}</p>
+                  <div className="flex items-center gap-1 flex-wrap">
+                    <p className="text-slate-200 text-sm font-semibold truncate">{s.ticker}</p>
+                    {(s.upper_circuit_days || 0) >= 1 && (
+                      <span
+                        className={`text-[7px] font-bold px-1 rounded border leading-tight ${
+                          (s.upper_circuit_days || 0) >= 3
+                            ? 'text-orange-200 bg-orange-500/20 border-orange-400/40'
+                            : 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+                        }`}
+                        title={`${s.upper_circuit_days} day upper circuit streak`}
+                      >
+                        {s.upper_circuit_days >= 5 ? '▲▲▲' : s.upper_circuit_days >= 3 ? '▲▲' : '▲'} UC{s.upper_circuit_days}D
+                      </span>
+                    )}
+                  </div>
                   {s.sector && <p className="text-muted text-[10px] truncate">{s.sector}</p>}
                 </div>
               </div>
