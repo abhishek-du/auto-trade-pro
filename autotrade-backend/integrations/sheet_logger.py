@@ -1227,6 +1227,12 @@ class GoogleSheetsSink:
             if k not in _CI:
                 continue
             col = _CI[k] + 1  # 1-based
+            # Numeric fields must use numberValue so SUMIF/COUNTIFS treat them as
+            # numbers — stringValue makes ">0" comparisons silently return 0.
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                cell_val = {"numberValue": float(v)}
+            else:
+                cell_val = {"stringValue": str(v)}
             self._pending_updates.append({
                 "updateCells": {
                     "range": {
@@ -1236,7 +1242,7 @@ class GoogleSheetsSink:
                         "startColumnIndex": col - 1,
                         "endColumnIndex":   col,
                     },
-                    "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}}]}],
+                    "rows": [{"values": [{"userEnteredValue": cell_val}]}],
                     "fields": "userEnteredValue",
                 }
             })
