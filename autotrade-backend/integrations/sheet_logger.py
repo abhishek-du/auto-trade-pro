@@ -638,14 +638,14 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
          "",
          "",
          "Best Trade ₹",
-         f"=IFERROR(MAX('{T}'!{pnl_c}2:{pnl_c}),\"—\")",
+         f'=IFERROR(IF(COUNTIF(\'{T}\'!{st_c}2:{st_c},"<>OPEN")=0,"—",MAX(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
          "", ""],
         ["Closed (Loss)",
          f"=COUNTIFS('{T}'!{st_c}2:{st_c},\"<>OPEN\",'{T}'!{pnl_c}2:{pnl_c},\"<0\")",
          "",
          "",
          "Worst Trade ₹",
-         f"=IFERROR(MIN('{T}'!{pnl_c}2:{pnl_c}),\"—\")",
+         f'=IFERROR(IF(COUNTIF(\'{T}\'!{st_c}2:{st_c},"<>OPEN")=0,"—",MIN(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
          "", ""],
         ["Win Rate",
          f"=IFERROR(TEXT(B7/(B7+B8),\"0.0%\"),\"—\")",
@@ -659,14 +659,14 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
          "",
          "",
          "Avg Hold Duration (days)",
-         f"=IFERROR(AVERAGEIF('{T}'!{days_c}2:{days_c},\"<>—\",'{T}'!{days_c}2:{days_c}),\"—\")",
+         f"=IFERROR(ROUND(AVERAGEIF('{T}'!{days_c}2:{days_c},\"<>—\",'{T}'!{days_c}2:{days_c}),1),\"—\")",
          "", ""],
         ["SELL trades",
          f"=COUNTIF('{T}'!{dir_c}2:{dir_c},\"SELL\")",
          "",
          "",
          "Avg Confidence %",
-         f"=IFERROR(AVERAGE('{T}'!{conf_c}2:{conf_c}),\"—\")",
+         f"=IFERROR(ROUND(AVERAGE('{T}'!{conf_c}2:{conf_c}),1),\"—\")",
          "", ""],
         ["", "", "", "", "", "", "", ""],
 
@@ -735,6 +735,30 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
         # Open positions rows alternate shading
         _repeat(ws_id, 14, 22, 0, n,
             _cell_fmt(halign="CENTER"), "horizontalAlignment"),
+        # Number formats — KPI value column (F, col 5): ₹ currency with commas
+        {"repeatCell": {
+            "range": {"sheetId": ws_id, "startRowIndex": 4, "endRowIndex": 11,
+                      "startColumnIndex": 5, "endColumnIndex": 6},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
+            "fields": "userEnteredFormat.numberFormat"}},
+        # Open positions: Live P&L ₹ (col E = idx 4) → comma-separated integer
+        {"repeatCell": {
+            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+                      "startColumnIndex": 4, "endColumnIndex": 5},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
+            "fields": "userEnteredFormat.numberFormat"}},
+        # Open positions: Live P&L % (col F = idx 5) → 0.46 shown as "0.46%" (literal %)
+        {"repeatCell": {
+            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+                      "startColumnIndex": 5, "endColumnIndex": 6},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": '0.00"%"'}}},
+            "fields": "userEnteredFormat.numberFormat"}},
+        # Open positions: Entry ₹ and Live ₹ (cols C,D = idx 2,3) → 2 decimal places
+        {"repeatCell": {
+            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+                      "startColumnIndex": 2, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
+            "fields": "userEnteredFormat.numberFormat"}},
         # Sparkline row height
         {"updateDimensionProperties": {
             "range": {"sheetId": ws_id, "dimension": "ROWS",
