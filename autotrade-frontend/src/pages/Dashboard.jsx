@@ -141,23 +141,21 @@ function StatChip({ label, value, tone = 'text-slate-200' }) {
 
 function PortfolioHero({ portfolio }) {
   const { status } = useAgent();
-  const balance = portfolio?.balance ?? 0;
-  const roi     = portfolio?.roi_percent ?? 0;
-  const realised   = portfolio?.realised_pnl ?? 0;
+  // equity = total portfolio value (cash + positions + unrealised).
+  // balance = cash remaining after trade deductions (may be much lower when positions are open).
+  const equity     = portfolio?.equity   ?? portfolio?.balance ?? 0;
+  const cash       = portfolio?.balance  ?? 0;
+  const roi        = portfolio?.roi_percent ?? 0;
+  const realised   = portfolio?.realised_pnl   ?? 0;
   const unrealised = portfolio?.unrealised_pnl ?? 0;
   const totalPnl   = realised + unrealised;
   const winRate    = portfolio?.win_rate ?? 0;
   const trades     = portfolio?.total_trades ?? 0;
-  const pnlUp = totalPnl >= 0;
+  const pnlUp      = totalPnl >= 0;
 
   const agentOn   = !!status?.enabled;
   const paper     = status?.paper_mode !== false;
-  // Real open positions come from the paper-trading book (portfolio.positions),
-  // NOT the separate Varsity-agent portfolio in /agent/status (which is a
-  // different, often-empty account). This keeps the dashboard consistent with
-  // the Simulation page and the open_positions table.
   const openPos   = portfolio?.positions?.length ?? 0;
-  const cash      = balance;
   const decisions = status?.decisions_today ?? 0;
 
   return (
@@ -170,7 +168,10 @@ function PortfolioHero({ portfolio }) {
             <span className="text-muted text-[11px] font-semibold uppercase tracking-widest">Paper Portfolio</span>
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-warn/12 text-warn border border-warn/25">VIRTUAL</span>
           </div>
-          <p className="text-slate-50 text-3xl font-extrabold tabular-nums mt-1.5">{rupeeShort(balance)}</p>
+          <p className="text-slate-50 text-3xl font-extrabold tabular-nums mt-1.5">{rupeeShort(equity)}</p>
+          <p className="text-muted text-[11px] tabular-nums mt-0.5">
+            {rupeeShort(cash)} cash free
+          </p>
           <p className={`text-xs font-semibold tabular-nums mt-0.5 ${pnlUp ? 'text-profit' : 'text-loss'}`}>
             {pct(roi)} all-time · {pnlUp ? '+' : ''}{rupeeShort(totalPnl)} P&L
           </p>

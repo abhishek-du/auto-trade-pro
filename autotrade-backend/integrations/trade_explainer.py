@@ -1,23 +1,22 @@
-# Builds the human-readable, expert-style narrative + a time-to-target ETA for a
-# trade, used by the spreadsheet journal. Everything here is best-effort and
-# synchronous (it runs inside a worker thread from the journal sync) — it never
-# raises into the caller and always degrades to a clean template if the LLM or
-# any field is missing.
+# Builds the human-readable, expert-style narrative for every trade lifecycle stage:
+#   • build_expert_note()    — "Why Bought" at entry (entry rationale + forward plan)
+#   • build_hold_analysis()  — "Why Still Holding" for open positions (live monitoring)
+#   • build_postmortem_note() — "Profit/Loss Explanation" when trade closes
+#
+# Synchronous by design — runs in a worker thread inside the journal sync.
+# Falls back gracefully to deterministic templates if Groq is unavailable.
 
 from __future__ import annotations
 
 from utils.config import settings
 from utils.logger import logger
 
-# Groq via raw HTTP (httpx) — avoids the optional `groq` SDK package. Mirrors
-# utils.llm.call_groq_chat but is synchronous, so it runs inside the journal's
-# worker thread without touching the event loop.
 _GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
-def _groq_sync(prompt: str, system: str, *, max_tokens: int = 320,
-               timeout: float = 12.0) -> str:
+def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
+               timeout: float = 15.0) -> str:
     if not getattr(settings, "GROQ_API_KEY", ""):
         return ""
     try:
@@ -29,31 +28,22 @@ def _groq_sync(prompt: str, system: str, *, max_tokens: int = 320,
             json={"model": _GROQ_MODEL,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": prompt}],
-                  "max_tokens": max_tokens, "temperature": 0.3},
+                  "max_tokens": max_tokens, "temperature": 0.25},
             timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
         return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
     except Exception as exc:
-        logger.warning(f"[trade_explainer] Groq HTTP call failed: {exc}")
+        logger.warning(f"[trade_explainer] Groq call failed: {exc}")
         return ""
 
 
-# ── ETA to first target ───────────────────────────────────────────────────────
+# ── ETA to first target ────────────────────────────────────────────────────────
 
 def estimate_eta_to_target(entry: float, target_1: float, atr: float,
                            direction: str) -> str:
-    """Rough time-to-Target-1 estimate from ATR-based daily velocity.
-
-    Daily ATR ≈ the stock's typical one-day range. A trending name covers
-    roughly 0.6×ATR of *directional* progress per day, so:
-
-        days ≈ distance_to_T1 / (0.6 × ATR)
-
-    Returns a human range like "≈ 3–6 trading days". Falls back gracefully
-    when ATR is unknown.
-    """
+    """ATR-based time-to-Target-1 estimate."""
     try:
         dist = abs(target_1 - entry)
         if atr and atr > 0 and dist > 0:
@@ -61,18 +51,199 @@ def estimate_eta_to_target(entry: float, target_1: float, atr: float,
             lo = max(1, round(days * 0.7))
             hi = max(lo + 1, round(days * 1.4))
             return f"≈ {lo}–{hi} trading days"
-        # No ATR — fall back to the engine's standard swing horizon.
         return "≈ 5–15 trading days"
     except Exception:
         return "≈ 5–15 trading days"
 
 
-# ── Expert narrative ──────────────────────────────────────────────────────────
+# ── Deterministic templates (always available, no LLM needed) ─────────────────
 
-def _template_note(symbol: str, direction: str, entry: float, stop: float,
-                   target_1: float, target_2: float, confidence: float,
-                   hub: dict | None, reasoning: str) -> str:
-    """Deterministic expert-style note — always available, no LLM needed."""
+def _entry_template(symbol: str, side: str, entry: float, stop: float,
+                    target_1: float, target_2: float, confidence: float,
+                    hub: dict | None, reasoning: str, strategy: str,
+                    regime: str) -> str:
+    """Rich template for 'Why Bought' — covers all 7 factors and plan."""
+    rr = 0.0
+    risk = abs(entry - stop)
+    try:
+        if risk > 0:
+            rr = abs(target_1 - entry) / risk
+    except Exception:
+        pass
+
+    sl_pct  = abs(entry - stop) / entry * 100 if entry else 0
+    t1_pct  = abs(target_1 - entry) / entry * 100 if entry else 0
+    action  = "LONG" if side == "BUY" else "SHORT"
+
+    lines = [
+        f"📥 {action} {symbol} @ ₹{entry:,.2f}  |  Conviction: {confidence:.0f}%  |  Regime: {regime}  |  Strategy: {strategy}",
+        "",
+        "📊 SIGNAL RATIONALE",
+    ]
+
+    if hub:
+        scored = [(k, v) for k, v in hub.items() if isinstance(v, (int, float))]
+        drivers  = [(k, v) for k, v in scored if v >= 40]
+        neutral  = [(k, v) for k, v in scored if 10 <= v < 40]
+        headwind = [(k, v) for k, v in scored if v < 10]
+        if drivers:
+            lines.append("  ✅ Strong: " + ", ".join(f"{k.upper()}={v:+.0f}" for k, v in drivers))
+        if neutral:
+            lines.append("  ➡ Neutral: " + ", ".join(f"{k.upper()}={v:+.0f}" for k, v in neutral))
+        if headwind:
+            lines.append("  ⚠️ Headwind: " + ", ".join(f"{k.upper()}={v:+.0f}" for k, v in headwind))
+    else:
+        lines.append("  Hub scores not available at entry.")
+
+    if reasoning:
+        lines.append("")
+        lines.append("🔍 ENTRY SIGNALS")
+        for ln in [l.strip() for l in reasoning.splitlines() if l.strip()][:6]:
+            lines.append(f"  • {ln}")
+
+    lines += [
+        "",
+        "📐 TRADE LEVELS",
+        f"  Stop-loss   : ₹{stop:,.2f}  ({sl_pct:.1f}% risk — max loss if wrong)",
+        f"  Target 1    : ₹{target_1:,.2f}  ({t1_pct:.1f}% gain — book 50% here)",
+        f"  Target 2    : ₹{target_2:,.2f}  (trail remaining with tightened stop)",
+        f"  Risk:Reward : 1:{rr:.1f}",
+        "",
+        "📋 EXIT PLAN",
+        "  • Book 40–50% at T1, move stop to break-even on the balance.",
+        "  • Trail remaining position toward T2 using ATR-based stop.",
+        f"  • Hard cut below ₹{stop:,.2f} — no averaging down.",
+    ]
+
+    return "\n".join(lines)
+
+
+def _hold_template(symbol: str, side: str, entry: float, current: float,
+                   stop: float, target_1: float, target_2: float,
+                   pnl: float, pnl_pct: float, days_held: int,
+                   hub: dict | None, strategy: str) -> str:
+    """Template for 'Why Still Holding' — live monitoring note."""
+    risk       = abs(entry - stop)
+    dist_stop  = abs(current - stop)
+    dist_t1    = abs(target_1 - current)
+    pct_stop   = dist_stop / risk * 100 if risk > 0 else 0
+    pct_t1     = dist_t1 / abs(target_1 - entry) * 100 if abs(target_1 - entry) > 0 else 0
+    momentum   = "▲ IN PROFIT" if pnl >= 0 else "▼ IN DRAWDOWN"
+    sl_status  = "✅ Well above stop" if pct_stop > 60 else ("⚠️ Stop nearby!" if pct_stop < 25 else "ℹ️ Approaching stop zone")
+
+    lines = [
+        f"⏳ HOLDING: {symbol} since {days_held}d  |  P&L: ₹{pnl:+,.0f} ({pnl_pct:+.2f}%)  |  {momentum}",
+        "",
+        "📍 POSITION STATUS",
+        f"  Entry          : ₹{entry:,.2f}",
+        f"  Current        : ₹{current:,.2f}  ({(current-entry)/entry*100:+.1f}% from entry)",
+        f"  Distance to SL : ₹{dist_stop:,.2f}  ({pct_stop:.0f}% of original risk remaining)  {sl_status}",
+        f"  Distance to T1 : ₹{dist_t1:,.2f}  ({100-pct_t1:.0f}% of way to target)",
+        "",
+        "🔍 WHY STILL HOLDING",
+    ]
+
+    reasons = []
+    if pnl >= 0:
+        reasons.append(f"Position is profitable (+₹{pnl:,.0f}). Thesis is playing out — letting winners run.")
+    else:
+        reasons.append(f"Position is in drawdown (₹{pnl:,.0f}). Still above the stop-loss — thesis being tested.")
+
+    if hub:
+        scored = [(k, v) for k, v in hub.items() if isinstance(v, (int, float))]
+        positive = [(k, v) for k, v in scored if v >= 20]
+        if positive:
+            reasons.append("Hub intelligence still supports: " + ", ".join(f"{k}({v:+.0f})" for k, v in positive[:4]))
+        else:
+            reasons.append("Hub scores are weakening — watch for exit signal.")
+
+    reasons.append(f"Strategy '{strategy}' — position within valid range, stop intact.")
+    for r in reasons:
+        lines.append(f"  • {r}")
+
+    lines += [
+        "",
+        "🚨 EXIT CONDITIONS TO WATCH",
+        f"  • Immediate exit: close below ₹{stop:,.2f} (stop-loss hit)",
+        f"  • Book 50% profit: price reaches ₹{target_1:,.2f} (T1)",
+        f"  • Full target: price reaches ₹{target_2:,.2f} (T2)",
+        "  • Early exit: Hub 7-factor score turns negative",
+        "  • Review if held >10 days without progress toward T1",
+    ]
+
+    return "\n".join(lines)
+
+
+def _postmortem_template(symbol: str, side: str, entry: float, exit_price: float,
+                         pnl: float, pnl_pct: float, reason: str,
+                         target_achieved: str, duration: str) -> str:
+    """Rich template for 'Expert Note' on closed trade."""
+    outcome  = "PROFIT" if pnl >= 0 else "LOSS"
+    emoji    = "✅" if pnl >= 0 else "❌"
+    move_pct = abs(exit_price - entry) / entry * 100 if entry else 0
+    direction_text = "above" if (side == "BUY" and exit_price > entry) or (side == "SELL" and exit_price < entry) else "against"
+
+    lines = [
+        f"{emoji} CLOSED: {side} {symbol} | Outcome: {outcome} ₹{pnl:+,.0f} ({pnl_pct:+.1f}%) | Duration: {duration}",
+        "",
+        "📊 TRADE SUMMARY",
+        f"  Entry price  : ₹{entry:,.2f}",
+        f"  Exit price   : ₹{exit_price:,.2f}  (moved {move_pct:.1f}% {direction_text} entry)",
+        f"  Exit reason  : {reason}",
+        f"  Target status: {target_achieved}",
+        "",
+    ]
+
+    if pnl >= 0:
+        lines += [
+            "✅ WHAT WORKED",
+            f"  The trade moved as expected. ",
+            "  • Price respected the entry zone and moved in the planned direction.",
+            "  • Risk management held — stop was never threatened before T1.",
+            f"  • Booked ₹{pnl:,.0f} within {duration}. Capital recycled for next setup.",
+        ]
+    else:
+        lines += [
+            "❌ WHAT WENT WRONG",
+            "  The trade moved against the entry thesis.",
+            f"  • Price hit stop-loss at ₹{exit_price:,.2f} before reaching T1.",
+            "  • Stop-loss worked as designed — contained the loss to the planned 1% risk.",
+            f"  • Lost ₹{abs(pnl):,.0f} ({abs(pnl_pct):.1f}%) — within pre-defined max risk per trade.",
+        ]
+
+    lines += [
+        "",
+        "📚 LESSON",
+    ]
+
+    if "STOP" in reason.upper() or "SL" in reason.upper():
+        lines.append("  Stop-loss exit was correct — do not second-guess risk management rules.")
+        lines.append("  Review if stop placement was too tight relative to ATR on next similar setup.")
+    elif "T1" in reason.upper() or "TARGET" in reason.upper():
+        lines.append("  Good discipline booking at T1. Consider trailing stop on next similar trade.")
+        lines.append("  If stock continued beyond T2, evaluate if partial exit and trailing was missed.")
+    elif "HUB" in reason.upper():
+        lines.append("  Intelligence-driven exit. Hub scores are a valuable early exit signal.")
+    else:
+        lines.append("  Manual or time-based exit. Define clearer mechanical exit rules going forward.")
+
+    return "\n".join(lines)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def build_expert_note(symbol: str, direction: str, entry: float, stop: float,
+                      target_1: float, target_2: float, confidence: float,
+                      hub: dict | None, reasoning: str,
+                      strategy: str = "HUB_SIGNAL", regime: str = "UNKNOWN") -> str:
+    """Entry rationale: 'Why Bought'. Uses Groq when enabled, else rich template."""
+    template = _entry_template(symbol, direction, entry, stop, target_1, target_2,
+                               confidence, hub, reasoning, strategy, regime)
+
+    if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
+        return template
+
+    hub_txt = ", ".join(f"{k}={v:+.0f}" for k, v in (hub or {}).items())
     rr = 0.0
     try:
         risk = abs(entry - stop)
@@ -81,78 +252,88 @@ def _template_note(symbol: str, direction: str, entry: float, stop: float,
     except Exception:
         pass
 
-    bits = [
-        f"{direction} {symbol} at ₹{entry:,.2f}. Conviction {confidence:.0f}%."
-    ]
-    if hub:
-        strong = [k for k, v in hub.items() if isinstance(v, (int, float)) and v >= 40]
-        weak   = [k for k, v in hub.items() if isinstance(v, (int, float)) and v <= -10]
-        if strong:
-            bits.append(f"Driven by strong {', '.join(strong)}.")
-        if weak:
-            bits.append(f"Headwind from {', '.join(weak)}.")
-    bits.append(
-        f"Stop ₹{stop:,.2f}, T1 ₹{target_1:,.2f}, T2 ₹{target_2:,.2f} "
-        f"(R:R ≈ 1:{rr:.1f}). Booking 40–50% at T1, trailing the rest to T2."
-    )
-    if reasoning:
-        first = [ln.strip() for ln in reasoning.splitlines() if ln.strip()][:2]
-        if first:
-            bits.append("Signals: " + "; ".join(first) + ".")
-    return " ".join(bits)
+    prompt = f"""You are a senior Indian equity swing trader writing a professional trade journal entry.
+Write a 4-5 sentence expert note explaining WHY this trade was taken.
+Be specific, use market terminology, mention the key factors driving the setup.
+No bullet points — flowing professional prose like a seasoned fund manager.
+
+Trade: {direction} {symbol}
+Entry ₹{entry:.2f} | Stop ₹{stop:.2f} | T1 ₹{target_1:.2f} | T2 ₹{target_2:.2f} | R:R 1:{rr:.1f}
+Confidence: {confidence:.0f}% | Strategy: {strategy} | Regime: {regime}
+7-Factor Hub: {hub_txt or 'n/a'}
+Signals: {reasoning[:500]}
+
+Cover: (1) why bought at this level, (2) what technical/fundamental factor is the primary driver,
+(3) what the R:R implies, (4) the single biggest risk to this trade."""
+
+    note = _groq_sync(prompt, "You are an expert Indian equity trader and journal writer. Write clear, professional, jargon-appropriate prose.")
+    return note or template
 
 
-def build_expert_note(symbol: str, direction: str, entry: float, stop: float,
-                      target_1: float, target_2: float, confidence: float,
-                      hub: dict | None, reasoning: str) -> str:
-    """Expert trade rationale. Uses Groq when enabled, else a rich template.
+def build_hold_analysis(symbol: str, side: str, entry: float, current: float,
+                        stop: float, target_1: float, target_2: float,
+                        pnl: float, pnl_pct: float, days_held: int,
+                        hub: dict | None, strategy: str,
+                        reasoning: str = "") -> str:
+    """Open position monitoring note: 'Why Still Holding + What to Watch'.
 
-    Synchronous by design — call from a worker thread, not the event loop.
+    Called for each OPEN trade during every journal sync so the hold analysis
+    stays current with latest prices and hub scores.
     """
-    template = _template_note(symbol, direction, entry, stop, target_1,
-                              target_2, confidence, hub, reasoning)
+    template = _hold_template(symbol, side, entry, current, stop, target_1, target_2,
+                              pnl, pnl_pct, days_held, hub, strategy)
 
-    if not getattr(settings, "SHEET_LOG_USE_LLM", False):
-        return template
-    if not getattr(settings, "GROQ_API_KEY", ""):
+    if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
         return template
 
-    hub_txt = ", ".join(f"{k}={v}" for k, v in (hub or {}).items())
-    prompt = (
-        f"You are a veteran Indian-market swing trader writing a one-paragraph "
-        f"journal note for a paper trade. Be concrete, calm and professional — "
-        f"no hype, no disclaimers.\n\n"
-        f"Trade: {direction} {symbol}\n"
-        f"Entry ₹{entry:.2f} | Stop ₹{stop:.2f} | Target1 ₹{target_1:.2f} | "
-        f"Target2 ₹{target_2:.2f} | Confidence {confidence:.0f}%\n"
-        f"7-factor Hub score: {hub_txt or 'n/a'}\n"
-        f"Engine reasoning: {reasoning[:600]}\n\n"
-        f"In 3-4 sentences explain WHY this trade was taken, which factor is "
-        f"carrying it, what the targets imply, and the single biggest risk."
-    )
-    note = _groq_sync(prompt, "You are an expert equities trader and journal writer.")
+    hub_txt  = ", ".join(f"{k}={v:+.0f}" for k, v in (hub or {}).items())
+    sl_dist  = abs(current - stop)
+    t1_dist  = abs(target_1 - current)
+    risk_pct = sl_dist / entry * 100 if entry else 0
+
+    prompt = f"""You are a senior Indian equity trader monitoring an open swing trade.
+Write a 4-5 sentence expert assessment of whether to HOLD, TIGHTEN STOP, or EXIT.
+Be honest and analytical — if the trade is at risk, say so clearly.
+Use market terminology, reference specific levels.
+
+Trade: {side} {symbol} — OPEN {days_held} days
+Entry ₹{entry:.2f} | Current ₹{current:.2f} | Stop ₹{stop:.2f} | T1 ₹{target_1:.2f} | T2 ₹{target_2:.2f}
+Live P&L: ₹{pnl:+,.0f} ({pnl_pct:+.2f}%)
+Distance to stop: ₹{sl_dist:.2f} ({risk_pct:.1f}% of entry)
+Distance to T1: ₹{t1_dist:.2f}
+Hub 7-Factor: {hub_txt or 'n/a'}
+Original signals: {reasoning[:300]}
+
+Cover: (1) is the original thesis still intact, (2) key price level to watch,
+(3) whether to tighten stop or let it run, (4) estimated timeline to resolution."""
+
+    note = _groq_sync(prompt, "You are an expert Indian equity trader reviewing an open position. Be analytical and direct.",
+                      max_tokens=350)
     return note or template
 
 
 def build_postmortem_note(symbol: str, direction: str, entry: float, exit_price: float,
                           pnl: float, pnl_pct: float, reason: str,
                           target_achieved: str, duration: str) -> str:
-    """Short retrospective written when a trade closes."""
-    outcome = "profit" if pnl >= 0 else "loss"
-    template = (
-        f"Closed {direction} {symbol} at ₹{exit_price:,.2f} for a {outcome} of "
-        f"₹{pnl:,.0f} ({pnl_pct:+.1f}%) after {duration}. "
-        f"Exit reason: {reason}. {target_achieved}."
-    )
+    """Profit/Loss explanation for a closed trade."""
+    template = _postmortem_template(symbol, direction, entry, exit_price, pnl,
+                                    pnl_pct, reason, target_achieved, duration)
+
     if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
         return template
-    prompt = (
-        f"You are a swing trader writing a one-paragraph post-mortem for a closed "
-        f"paper trade. Be honest and instructive.\n\n"
-        f"{direction} {symbol}: entry ₹{entry:.2f} → exit ₹{exit_price:.2f}, "
-        f"P&L ₹{pnl:.0f} ({pnl_pct:+.1f}%), held {duration}, "
-        f"exit reason {reason}, {target_achieved}.\n\n"
-        f"In 2-3 sentences: did the thesis play out, was the exit good, and one lesson."
-    )
-    note = _groq_sync(prompt, "You are an expert equities trader reviewing your own trade.")
+
+    outcome = "profit" if pnl >= 0 else "loss"
+    prompt = f"""You are a senior Indian equity trader writing a post-mortem for a closed trade.
+Write 4-5 sentences of professional analysis. Be honest — if it was a loss, explain what failed.
+If it was a profit, explain what worked. One concrete lesson at the end.
+
+{direction} {symbol}: entry ₹{entry:.2f} → exit ₹{exit_price:.2f}
+P&L: ₹{pnl:+,.0f} ({pnl_pct:+.1f}%) | Held: {duration} | Exit: {reason}
+Result: {target_achieved}
+
+Cover: (1) did the trade thesis play out, (2) was the exit timing/price good,
+(3) what went right or wrong, (4) one actionable lesson for the next similar setup."""
+
+    note = _groq_sync(prompt, "You are an expert equity trader reviewing your closed trades honestly.",
+                      max_tokens=380)
     return note or template

@@ -19,12 +19,12 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import PaperTrade, MasterIntelligenceScore, TradeStatus
+from db.models import PaperTrade, MasterIntelligenceScore, TradeStatus, AgentTrade, AgentDecision, AgentPosition
 from integrations.trade_explainer import (
-    build_expert_note, build_postmortem_note, estimate_eta_to_target,
+    build_expert_note, build_hold_analysis, build_postmortem_note, estimate_eta_to_target,
 )
 from utils.config import settings
 from utils.logger import logger
@@ -39,6 +39,7 @@ SCHEMA: list[tuple[str, str]] = [
     ("opened_at",     "Bought (IST)"),
     ("symbol",        "Symbol"),
     ("direction",     "Dir"),
+    ("qty",           "Qty"),
     # ── Levels ─────────────────────────────────────────────────────────────
     ("entry",         "Entry ₹"),
     ("stop",          "SL ₹"),
@@ -247,6 +248,7 @@ def _open_row(trade: PaperTrade, hub) -> dict:
         "opened_at":   _ist(trade.opened_at),
         "symbol":      trade.symbol.replace(".NS", ""),
         "direction":   direction,
+        "qty":         int(round(units)),
         "entry":       round(entry, 2),
         "stop":        round(stop, 2),
         "stop_pct":    f"{_pct(stop, entry):+.1f}%",
@@ -296,6 +298,139 @@ def _close_partial(trade: PaperTrade) -> dict:
         "pnl_pct":     round(pct, 2),
         "expert_note": note,
     }
+
+# ── Agent Trade row builders ──────────────────────────────────────────────────
+
+def _agent_why_bought(trade: AgentTrade, decision: "AgentDecision | None") -> str:
+    """Build the 'Why Bought' narrative for an agent trade."""
+    parts = []
+    parts.append(f"[AI Agent — {trade.strategy}]")
+    parts.append(f"Regime: {trade.regime}")
+    parts.append(f"Product: {trade.product}")
+    if decision:
+        parts.append(f"Confidence: {decision.confidence}%")
+        if decision.reasons:
+            for r in decision.reasons[:8]:   # cap to keep readable
+                parts.append(f"• {r}")
+    return "\n".join(parts)
+
+
+def _agent_exit_status(exit_reason: str | None) -> tuple[str, str]:
+    """Map agent exit_reason → (status label, target_hit label)."""
+    r = (exit_reason or "").upper()
+    if "SL_HIT" in r or "STOP_HIT" in r:
+        return "STOPPED ❌", "Stop-loss triggered"
+    if "T2_TARGET" in r:
+        return "T2 HIT ✅", "T2 full target reached"
+    if "T1_PARTIAL" in r:
+        return "T1 HIT ✅", "T1 partial target reached"
+    if "HUB_REVERSAL" in r:
+        return "HUB EXIT ⚠️", f"Intelligence reversal: {exit_reason}"
+    if "HUB_DETERIORATION" in r:
+        return "HUB EXIT ⚠️", f"Score deteriorated: {exit_reason}"
+    if "MIS_SQUAREOFF" in r:
+        return "MIS EOD ✅", "Intraday square-off at 3:15 PM"
+    if "MAX_HOLD" in r:
+        return "MAX HOLD ⏰", "10-day max hold exceeded"
+    if "DUPLICATE" in r:
+        return "CANCELLED", "Duplicate cleanup"
+    return "CLOSED", exit_reason or "Manual close"
+
+
+def _agent_open_row(trade: AgentTrade, decision: "AgentDecision | None", hub) -> dict:
+    entry   = trade.entry_price
+    stop    = trade.stop_price
+    t1      = trade.target_price
+    risk    = abs(entry - stop)
+    t2      = round(entry + 2 * (t1 - entry), 2) if trade.side == "BUY" else round(entry - 2 * (entry - t1), 2)
+    atr     = round(risk / 2.0, 2)          # stop = entry ± 2×ATR → ATR = risk/2
+    size_rs = round(trade.qty * entry, 0)
+    max_risk_rs = round(trade.qty * risk, 0)
+    conf    = decision.confidence if decision else 0
+    hub_scores = _hub_scores(hub)
+    hub_note = {k.replace("hub_", ""): v for k, v in hub_scores.items()} if hub_scores else None
+    why = _agent_why_bought(trade, decision)
+    note = build_expert_note(
+        trade.symbol, trade.side, entry, stop, t1, t2, conf, hub_note, why
+    )
+    row = {
+        "trade_id":    trade.id,          # UUID string — handled by updated existing_ids()
+        "opened_at":   _ist(trade.entry_ts),
+        "symbol":      trade.symbol.replace(".NS", ""),
+        "direction":   trade.side,
+        "qty":         trade.qty,
+        "entry":       round(entry, 2),
+        "stop":        round(stop, 2),
+        "stop_pct":    f"{_pct(stop, entry):+.1f}%",
+        "target_1":    round(t1, 2),
+        "t1_pct":      f"{_pct(t1, entry):+.1f}%",
+        "target_2":    round(t2, 2),
+        "t2_pct":      f"{_pct(t2, entry):+.1f}%",
+        "rr":          f"1:{_rr(entry, stop, t1)}",
+        "atr":         atr,
+        "confidence":  conf,
+        "size_rs":     size_rs,
+        "max_risk_rs": max_risk_rs,
+        "why_bought":  note,
+        "eta_t1":      estimate_eta_to_target(entry, t1, atr, trade.side),
+        "status":      "OPEN",
+    }
+    row.update(hub_scores)
+    row.update(_live_formulas())
+    return row
+
+
+def _agent_close_row(trade: AgentTrade) -> dict:
+    exit_p = trade.exit_price or 0.0
+    status, hit = _agent_exit_status(trade.exit_reason)
+    dur  = _fmt_duration(trade.entry_ts, trade.exit_ts) if trade.exit_ts else ""
+    pnl  = trade.pnl or 0.0
+    pct  = trade.pnl_pct or 0.0
+    note = build_postmortem_note(
+        trade.symbol, trade.side, trade.entry_price,
+        exit_p, pnl, pct, status, hit, dur,
+    )
+    return {
+        "status":      status,
+        "target_hit":  hit,
+        "closed_at":   _ist(trade.exit_ts),
+        "duration":    dur,
+        "pnl_rs":      round(pnl, 0),
+        "pnl_pct":     round(pct, 2),
+        "expert_note": note,
+    }
+
+
+def _agent_hold_update(trade: AgentTrade, current_price: float,
+                       pnl: float, pnl_pct: float, days_held: int,
+                       hub) -> dict:
+    """Refresh 'Expert Note' with live hold analysis for an open agent position."""
+    hub_scores_raw = _hub_scores(hub) if hub else {}
+    hub_note = {k.replace("hub_", ""): v for k, v in hub_scores_raw.items()} or None
+    entry = trade.entry_price
+    t1    = trade.target_price
+    t2    = round(entry + 2 * (t1 - entry), 2) if trade.side == "BUY" \
+            else round(entry - 2 * (entry - t1), 2)
+    analysis = build_hold_analysis(
+        symbol=trade.symbol,
+        side=trade.side,
+        entry=entry,
+        current=current_price,
+        stop=trade.stop_price,
+        target_1=t1,
+        target_2=t2,
+        pnl=pnl,
+        pnl_pct=pnl_pct,
+        days_held=days_held,
+        hub=hub_note,
+        strategy=trade.strategy or "HUB_SIGNAL",
+    )
+    return {
+        "expert_note":  analysis,
+        "live_pnl_rs":  round(pnl, 0),
+        "live_pnl_pct": round(pnl_pct, 2),
+    }
+
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
 def _cell_fmt(bg=None, fg=None, bold=False, halign=None, wrap=False):
@@ -652,10 +787,13 @@ class LocalExcelSink:
         for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
             if not row or row[0] in (None, ""):
                 continue
-            try:
-                tid = int(row[0])
-            except (ValueError, TypeError):
-                continue
+            # Accept both int IDs (paper trades) and string IDs (agent trades)
+            tid = row[0] if isinstance(row[0], str) else None
+            if tid is None:
+                try:
+                    tid = int(row[0])
+                except (ValueError, TypeError):
+                    continue
             status = row[ci_st] if len(row) > ci_st else ""
             out[tid] = (i, status or "")
         wb.close()
@@ -709,12 +847,211 @@ class LocalExcelSink:
                 ws.cell(row_number, _CI["status"]+1).fill = fill
             wb.save(self.path)
 
+    def write_summary_sheet(self, open_trades: list[dict], closed_trades: list[dict]):
+        """Create/replace the '📊 Portfolio Summary' sheet with three sections.
+
+        Each section has: overview stats, HOLDING (open), PROFIT, LOSS.
+        open_trades and closed_trades are dicts with keys from SCHEMA plus
+        extra 'current_price', 'pnl', 'pnl_pct', 'hold_note', 'expert_note'.
+        """
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        with _FILE_LOCK:
+            # Load or create the main workbook
+            if os.path.exists(self.path):
+                wb = openpyxl.load_workbook(self.path)
+            else:
+                wb = openpyxl.Workbook()
+
+            # Remove old summary sheet if it exists
+            if "📊 Portfolio Summary" in wb.sheetnames:
+                del wb["📊 Portfolio Summary"]
+
+            ws = wb.create_sheet("📊 Portfolio Summary", 0)   # first tab
+
+            # ── Styles ───────────────────────────────────────────────────────────
+            def hdr_style(bg, fg="FFFFFF", bold=True, sz=11):
+                return Font(bold=bold, color=fg, size=sz), PatternFill("solid", fgColor=bg)
+
+            title_font, title_fill   = hdr_style("0F172A", "94E3FF", sz=14)
+            sec_font, sec_fill_hold  = hdr_style("064E3B", "A7F3D0", sz=11)
+            sec_font2, sec_fill_prof = hdr_style("14532D", "BBF7D0", sz=11)
+            sec_font3, sec_fill_loss = hdr_style("7F1D1D", "FECACA", sz=11)
+            col_font, col_fill       = hdr_style("1E293B", "CBD5E1", sz=9)
+            center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            wrap   = Alignment(horizontal="left",   vertical="top",    wrap_text=True)
+            thin_border = Border(
+                bottom=Side(style="thin", color="475569"),
+            )
+
+            profits = [t for t in closed_trades if (t.get("pnl") or 0) >= 0]
+            losses  = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
+            total_pnl = sum((t.get("pnl") or 0) for t in closed_trades)
+            unrealised = sum((t.get("pnl") or 0) for t in open_trades)
+            start_capital = 2_500_000
+            equity  = start_capital + total_pnl + unrealised
+            roi_pct = (equity - start_capital) / start_capital * 100
+            win_rate = len(profits) / max(1, len(closed_trades)) * 100
+
+            # ── Overview block ────────────────────────────────────────────────────
+            row = 1
+            ws.merge_cells(f"A{row}:H{row}")
+            ws[f"A{row}"] = "📊 AUTOTRADE PRO — PORTFOLIO SUMMARY"
+            ws[f"A{row}"].font  = title_font
+            ws[f"A{row}"].fill  = title_fill
+            ws[f"A{row}"].alignment = center
+            ws.row_dimensions[row].height = 26
+            row += 1
+
+            from datetime import datetime
+            ws.merge_cells(f"A{row}:H{row}")
+            ws[f"A{row}"] = f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}   |   Agent Solo Mode   |   ₹25L Capital"
+            ws[f"A{row}"].font = Font(color="64748B", italic=True, size=9)
+            ws[f"A{row}"].alignment = center
+            row += 2
+
+            kpis = [
+                ("Portfolio Equity",   f"₹{equity:,.0f}",           "94FAD0"),
+                ("Start Capital",      f"₹{start_capital:,.0f}",    "E2E8F0"),
+                ("Total Realised P&L", f"₹{total_pnl:+,.0f}",       "BBF7D0" if total_pnl >= 0 else "FECACA"),
+                ("Unrealised P&L",     f"₹{unrealised:+,.0f}",      "BBF7D0" if unrealised >= 0 else "FECACA"),
+                ("ROI",                f"{roi_pct:+.2f}%",           "BBF7D0" if roi_pct >= 0 else "FECACA"),
+                ("Win Rate",           f"{win_rate:.1f}%",           "BBF7D0" if win_rate >= 50 else "FEF3C7"),
+                ("Open Positions",     str(len(open_trades)),        "DBEAFE"),
+                ("Closed Trades",      str(len(closed_trades)),      "E0E7FF"),
+            ]
+            for col_idx, (label, value, color) in enumerate(kpis, 1):
+                cl = get_column_letter(col_idx)
+                ws[f"{cl}{row}"]   = label
+                ws[f"{cl}{row}"].font = Font(bold=True, size=8, color="64748B")
+                ws[f"{cl}{row}"].alignment = center
+                ws.row_dimensions[row].height = 14
+                ws[f"{cl}{row+1}"] = value
+                ws[f"{cl}{row+1}"].font = Font(bold=True, size=12, color="0F172A")
+                ws[f"{cl}{row+1}"].fill = PatternFill("solid", fgColor=color)
+                ws[f"{cl}{row+1}"].alignment = center
+                ws.row_dimensions[row+1].height = 22
+
+            row += 3   # skip label + value + blank
+
+            # ── Section builder helper ──────────────────────────────────────────
+            def write_section(title, trades, header_fill_pair, cols, row_color):
+                nonlocal row
+                ws.merge_cells(f"A{row}:H{row}")
+                ws[f"A{row}"] = title
+                ws[f"A{row}"].font = header_fill_pair[0]
+                ws[f"A{row}"].fill = header_fill_pair[1]
+                ws[f"A{row}"].alignment = center
+                ws.row_dimensions[row].height = 20
+                row += 1
+
+                # column headers
+                for ci, (col_key, col_label) in enumerate(cols, 1):
+                    cl = get_column_letter(ci)
+                    ws[f"{cl}{row}"] = col_label
+                    ws[f"{cl}{row}"].font = col_font
+                    ws[f"{cl}{row}"].fill = col_fill
+                    ws[f"{cl}{row}"].alignment = center
+                    ws.row_dimensions[row].height = 14
+                row += 1
+
+                if not trades:
+                    ws.merge_cells(f"A{row}:H{row}")
+                    ws[f"A{row}"] = "No trades in this category."
+                    ws[f"A{row}"].font = Font(italic=True, color="94A3B8", size=9)
+                    row += 2
+                    return
+
+                for t in trades:
+                    for ci, (col_key, _) in enumerate(cols, 1):
+                        cl = get_column_letter(ci)
+                        val = t.get(col_key, "")
+                        ws[f"{cl}{row}"] = val
+                        cell = ws[f"{cl}{row}"]
+                        cell.fill = PatternFill("solid", fgColor=row_color)
+                        if col_key in ("hold_note", "expert_note", "why_bought"):
+                            cell.alignment = wrap
+                            cell.font = Font(size=8)
+                        else:
+                            cell.alignment = center
+                            cell.font = Font(size=9)
+                        cell.border = thin_border
+                    ws.row_dimensions[row].height = max(80, min(200,
+                        len(str(t.get("hold_note") or t.get("expert_note", "")).split('\n')) * 14))
+                    row += 1
+                row += 1   # blank gap between sections
+
+            # ── HOLDING section ───────────────────────────────────────────────────
+            hold_cols = [
+                ("symbol",       "Symbol"),
+                ("direction",    "Dir"),
+                ("entry",        "Entry ₹"),
+                ("current_price","Current ₹"),
+                ("pnl",          "Live P&L ₹"),
+                ("pnl_pct",      "P&L %"),
+                ("days_held",    "Days"),
+                ("hold_note",    "⏳ Why Still Holding — Expert Analysis"),
+            ]
+            write_section(
+                f"⏳  CURRENTLY HOLDING  ({len(open_trades)} positions)",
+                sorted(open_trades, key=lambda t: (t.get("pnl") or 0), reverse=True),
+                (sec_font, sec_fill_hold),
+                hold_cols, "F0FDF4",
+            )
+
+            # ── PROFIT section ───────────────────────────────────────────────────
+            prof_cols = [
+                ("symbol",       "Symbol"),
+                ("direction",    "Dir"),
+                ("entry",        "Entry ₹"),
+                ("exit_price",   "Exit ₹"),
+                ("pnl",          "P&L ₹"),
+                ("pnl_pct",      "P&L %"),
+                ("duration",     "Held"),
+                ("expert_note",  "✅ Why It Made Profit — Expert Analysis"),
+            ]
+            write_section(
+                f"✅  CLOSED WITH PROFIT  ({len(profits)} trades  |  Total: ₹{sum(t.get('pnl',0) for t in profits):+,.0f})",
+                sorted(profits, key=lambda t: (t.get("pnl") or 0), reverse=True),
+                (sec_font2, sec_fill_prof),
+                prof_cols, "DCFCE7",
+            )
+
+            # ── LOSS section ─────────────────────────────────────────────────────
+            loss_cols = [
+                ("symbol",       "Symbol"),
+                ("direction",    "Dir"),
+                ("entry",        "Entry ₹"),
+                ("exit_price",   "Exit ₹"),
+                ("pnl",          "P&L ₹"),
+                ("pnl_pct",      "P&L %"),
+                ("duration",     "Held"),
+                ("expert_note",  "❌ Why It Took a Loss — Expert Analysis"),
+            ]
+            write_section(
+                f"❌  CLOSED WITH LOSS  ({len(losses)} trades  |  Total: ₹{sum(t.get('pnl',0) for t in losses):+,.0f})",
+                sorted(losses, key=lambda t: (t.get("pnl") or 0)),
+                (sec_font3, sec_fill_loss),
+                loss_cols, "FEF2F2",
+            )
+
+            # Column widths for summary sheet
+            for ci, w in enumerate([14, 7, 12, 12, 14, 10, 8, 70], 1):
+                ws.column_dimensions[get_column_letter(ci)].width = w
+
+            wb.save(self.path)
+
 
 # ── Google Sheets sink ────────────────────────────────────────────────────────
 class GoogleSheetsSink:
     def __init__(self):
         self._ws = self._sh = None
         self._formatted = False
+        self._row_count: int | None = None   # cached after existing_ids()
+        self._pending_rows: list[list] = []  # batched appends — flushed once in flush()
+        self._pending_updates: list[dict] = []  # batched cell updates for batch_update()
 
     def _get_credentials(self):
         import pickle
@@ -760,7 +1097,12 @@ class GoogleSheetsSink:
         try:
             ws = sh.worksheet(title)
             existing = ws.row_values(1) if ws.row_count > 0 else []
-            if existing and existing != HEADERS:
+            if not existing:
+                # Empty sheet — write header
+                ws.update([HEADERS], "A1")
+                self._formatted = False
+            elif existing != HEADERS:
+                # Schema changed — clear and re-write header
                 ws.clear()
                 ws.update([HEADERS], "A1")
                 self._formatted = False
@@ -785,37 +1127,82 @@ class GoogleSheetsSink:
         ws, sh = self._worksheet()
         self._ensure_formatted(ws, sh)
         records = ws.get_all_values()
+        self._row_count = len(records)   # cache so append() doesn't re-fetch
         ci_st = _CI["status"]
         out = {}
         for i, row in enumerate(records[1:], start=2):
             if not row or not row[0]:
                 continue
+            raw = row[0]
+            # Accept both int IDs (paper trades) and string IDs (agent trades)
             try:
-                tid = int(row[0])
+                tid = int(raw)
             except (ValueError, TypeError):
-                continue
+                tid = str(raw)   # agent trade UUID
             status = row[ci_st] if len(row) > ci_st else ""
             out[tid] = (i, status or "")
         return out
 
     def append(self, row: dict):
-        ws, _ = self._worksheet()
-        # Know the next row number BEFORE appending for formula substitution
-        nrows = len(ws.get_all_values())
-        r = nrows + 1
+        """Stage a row for batched writing. Call flush() after all appends."""
+        if self._row_count is None:
+            ws, _ = self._worksheet()
+            self._row_count = len(ws.get_all_values())
+        # Pre-allocate the row number so formulas are correct
+        self._row_count += 1
+        r = self._row_count
         values = []
         for k in KEYS:
             v = row.get(k, "")
             if isinstance(v, str) and "{ROW}" in v:
                 v = v.replace("{ROW}", str(r))
             values.append(v)
-        ws.append_row(values, value_input_option="USER_ENTERED")
+        self._pending_rows.append(values)
+
+    def flush(self):
+        """Write all staged rows + cell updates in as few API calls as possible."""
+        if self._pending_rows:
+            ws, _ = self._worksheet()
+            try:
+                ws.append_rows(self._pending_rows, value_input_option="USER_ENTERED")
+            except Exception as exc:
+                logger.warning(f"[sheet_logger] batch append failed: {exc}")
+            self._pending_rows.clear()
+
+        if self._pending_updates:
+            ws, sh = self._worksheet()
+            try:
+                sh.batch_update({"requests": self._pending_updates})
+            except Exception as exc:
+                # Fallback: update cells one by one
+                for req in self._pending_updates:
+                    try:
+                        ws.batch_update(req)
+                    except Exception:
+                        pass
+                logger.warning(f"[sheet_logger] batch cell update failed: {exc}")
+            self._pending_updates.clear()
 
     def update(self, row_number: int, partial: dict):
+        """Stage cell updates for batched writing. Flushed by flush()."""
         ws, _ = self._worksheet()
         for k, v in partial.items():
-            if k in KEYS:
-                ws.update_cell(row_number, _CI[k]+1, v)
+            if k not in _CI:
+                continue
+            col = _CI[k] + 1  # 1-based
+            self._pending_updates.append({
+                "updateCells": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": row_number - 1,
+                        "endRowIndex":   row_number,
+                        "startColumnIndex": col - 1,
+                        "endColumnIndex":   col,
+                    },
+                    "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}}]}],
+                    "fields": "userEnteredValue",
+                }
+            })
 
 
 # ── Factory + sync engine ─────────────────────────────────────────────────────
@@ -835,22 +1222,86 @@ def _sync_blocking(open_rows, close_updates):
         return 0, 0
     appended = updated = 0
     for row in open_rows:
-        try:
-            sink.append(row)
-            appended += 1
-        except Exception as exc:
-            logger.warning(f"[sheet_logger] append {row.get('trade_id')}: {exc}")
+        sink.append(row)   # staged, not written yet
+        appended += 1
     for row_number, partial in close_updates:
+        sink.update(row_number, partial)   # staged
+        updated += 1
+    # Write all staged rows + updates in batch (1-2 API calls regardless of row count)
+    if hasattr(sink, "flush"):
         try:
-            sink.update(row_number, partial)
-            updated += 1
+            sink.flush()
         except Exception as exc:
-            logger.warning(f"[sheet_logger] update row {row_number}: {exc}")
+            logger.warning(f"[sheet_logger] batch flush failed: {exc}")
     return appended, updated
 
 
+def _rebuild_summary(agent_rows, pos_map, hub_map):
+    """Build the Portfolio Summary sheet from agent trade data.
+
+    Runs in a thread — called via asyncio.to_thread from sync_journal.
+    """
+    sink = _make_sink()
+    if not isinstance(sink, LocalExcelSink):
+        return
+
+    now = datetime.now(tz=timezone.utc)
+    open_trades, closed_trades = [], []
+
+    for t in agent_rows:
+        if t.exit_price is None:
+            pos = pos_map.get(t.symbol) or pos_map.get(t.symbol.replace(".NS", ""))
+            current = (pos.current_price if pos else None) or t.entry_price
+            raw_pnl = pos.unrealized_pnl if pos else 0.0
+            pnl_pct = (raw_pnl / (t.entry_price * t.qty) * 100) if (t.entry_price and t.qty) else 0.0
+            days    = max(0, (now - t.entry_ts.replace(tzinfo=timezone.utc if t.entry_ts.tzinfo is None else t.entry_ts.tzinfo)).days)
+            hub     = hub_map.get(f"{t.symbol.split('.')[0]}.NS")
+            hub_scores_raw = _hub_scores(hub) if hub else {}
+            hub_note = {k.replace("hub_", ""): v for k, v in hub_scores_raw.items()} or None
+            entry  = t.entry_price
+            t1     = t.target_price
+            t2     = round(entry + 2 * (t1 - entry), 2) if t.side == "BUY" else round(entry - 2 * (entry - t1), 2)
+            hold_note = build_hold_analysis(
+                symbol=t.symbol, side=t.side, entry=entry, current=current,
+                stop=t.stop_price, target_1=t1, target_2=t2,
+                pnl=raw_pnl, pnl_pct=pnl_pct, days_held=days,
+                hub=hub_note, strategy=t.strategy or "HUB_SIGNAL",
+            )
+            open_trades.append({
+                "symbol":        t.symbol.replace(".NS", ""),
+                "direction":     t.side,
+                "entry":         round(entry, 2),
+                "current_price": round(current, 2),
+                "pnl":           round(raw_pnl, 0),
+                "pnl_pct":       f"{pnl_pct:+.2f}%",
+                "days_held":     days,
+                "hold_note":     hold_note,
+            })
+        else:
+            dur = _fmt_duration(t.entry_ts, t.exit_ts) if t.exit_ts else ""
+            pnl = t.pnl or 0.0
+            pct = t.pnl_pct or 0.0
+            status, hit = _agent_exit_status(t.exit_reason)
+            expert = build_postmortem_note(
+                t.symbol, t.side, t.entry_price, t.exit_price,
+                pnl, pct, status, hit, dur,
+            )
+            closed_trades.append({
+                "symbol":       t.symbol.replace(".NS", ""),
+                "direction":    t.side,
+                "entry":        round(t.entry_price, 2),
+                "exit_price":   round(t.exit_price, 2),
+                "pnl":          round(pnl, 0),
+                "pnl_pct":      f"{pct:+.2f}%",
+                "duration":     dur,
+                "expert_note":  expert,
+            })
+
+    sink.write_summary_sheet(open_trades, closed_trades)
+
+
 async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
-    """Idempotently reconcile the spreadsheet with the trades table."""
+    """Idempotently reconcile the spreadsheet with both PaperTrade and AgentTrade tables."""
     if not getattr(settings, "SHEET_LOG_ENABLED", False):
         return {"enabled": False}
     try:
@@ -860,41 +1311,129 @@ async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
 
         existing = await asyncio.to_thread(sink.existing_ids)
 
-        rows = (await session.execute(
+        # ── Paper trades ──────────────────────────────────────────────────────
+        paper_rows = (await session.execute(
             select(PaperTrade).order_by(PaperTrade.opened_at.desc()).limit(limit)
         )).scalars().all()
 
-        need_hub = [t.symbol for t in rows if t.id not in existing]
+        # ── Agent trades ──────────────────────────────────────────────────────
+        agent_rows = (await session.execute(
+            select(AgentTrade)
+            .where(or_(AgentTrade.exit_reason.is_(None),
+                       AgentTrade.exit_reason != "DUPLICATE_CLEANUP"))
+            .order_by(AgentTrade.entry_ts.desc())
+            .limit(limit)
+        )).scalars().all()
+
+        # Batch-fetch Hub scores for all symbols that need a new row
+        need_hub_syms: set[str] = set()
+        for t in paper_rows:
+            if t.id not in existing:
+                need_hub_syms.add(f"{t.symbol.split('.')[0]}.NS")
+        for t in agent_rows:
+            if t.id not in existing:
+                need_hub_syms.add(f"{t.symbol.split('.')[0]}.NS")
+
         hub_map: dict = {}
-        if need_hub:
-            ns = {f"{s.split('.')[0]}.NS" for s in need_hub}
+        if need_hub_syms:
             for m in (await session.execute(
                 select(MasterIntelligenceScore)
-                .where(MasterIntelligenceScore.symbol.in_(ns))
+                .where(MasterIntelligenceScore.symbol.in_(need_hub_syms))
+                .order_by(MasterIntelligenceScore.scored_at.desc())
+            )).scalars().all():
+                hub_map.setdefault(m.symbol, m)
+
+        # Batch-fetch AgentDecisions for agent trades that need a new row
+        new_agent_ids = [t.decision_id for t in agent_rows
+                         if t.id not in existing and t.decision_id]
+        decision_map: dict[str, AgentDecision] = {}
+        if new_agent_ids:
+            for d in (await session.execute(
+                select(AgentDecision).where(AgentDecision.id.in_(new_agent_ids))
+            )).scalars().all():
+                decision_map[d.id] = d
+
+        # ── Open agent positions — for live P&L and hold analysis ─────────────
+        open_positions_result = await session.execute(
+            select(AgentPosition).where(AgentPosition.is_paper == True)
+        )
+        open_positions = open_positions_result.scalars().all()
+        pos_map = {p.symbol: p for p in open_positions}       # symbol → AgentPosition
+
+        # Hub scores for hold-analysis refresh (open agent trades in existing sheet)
+        all_open_syms = {f"{t.symbol.split('.')[0]}.NS"
+                         for t in agent_rows if t.id in existing and t.exit_price is None}
+        all_open_syms.update(need_hub_syms)
+        if all_open_syms:
+            for m in (await session.execute(
+                select(MasterIntelligenceScore)
+                .where(MasterIntelligenceScore.symbol.in_(all_open_syms))
                 .order_by(MasterIntelligenceScore.scored_at.desc())
             )).scalars().all():
                 hub_map.setdefault(m.symbol, m)
 
         open_rows, close_updates = [], []
-        for t in rows:
+
+        # Paper trades
+        for t in paper_rows:
             if t.id not in existing:
                 hub = hub_map.get(f"{t.symbol.split('.')[0]}.NS")
-                open_rows.append(_open_row(t, hub))  # row_num set by sink.append
+                open_rows.append(_open_row(t, hub))
             else:
                 row_number, sheet_status = existing[t.id]
                 if "OPEN" in str(sheet_status) and t.status != TradeStatus.OPEN:
                     close_updates.append((row_number, _close_partial(t)))
 
+        # Agent trades
+        now = datetime.now(tz=timezone.utc)
+        for t in agent_rows:
+            if t.id not in existing:
+                hub      = hub_map.get(f"{t.symbol.split('.')[0]}.NS")
+                decision = decision_map.get(t.decision_id) if t.decision_id else None
+                open_rows.append(_agent_open_row(t, decision, hub))
+            else:
+                row_number, sheet_status = existing[t.id]
+                if "OPEN" in str(sheet_status):
+                    if t.exit_price is not None:
+                        close_updates.append((row_number, _agent_close_row(t)))
+                    else:
+                        # Refresh hold analysis for still-open positions
+                        pos = pos_map.get(t.symbol) or pos_map.get(t.symbol.replace(".NS", ""))
+                        current_price = (pos.current_price if pos else None) or t.entry_price
+                        raw_pnl  = pos.unrealized_pnl if pos else 0.0
+                        pnl_pct  = (raw_pnl / (t.entry_price * t.qty) * 100) if (t.entry_price and t.qty) else 0.0
+                        days     = max(0, (now - t.entry_ts.replace(tzinfo=timezone.utc if t.entry_ts.tzinfo is None else t.entry_ts.tzinfo)).days)
+                        hub      = hub_map.get(f"{t.symbol.split('.')[0]}.NS")
+                        close_updates.append((row_number, _agent_hold_update(
+                            t, current_price, raw_pnl, pnl_pct, days, hub
+                        )))
+
         if not open_rows and not close_updates:
+            # Still write the summary sheet even if no new/close changes
+            if getattr(settings, "SHEET_LOG_BACKEND", "local") == "local":
+                try:
+                    await asyncio.to_thread(_rebuild_summary, agent_rows, pos_map, hub_map)
+                except Exception as exc:
+                    logger.warning(f"[sheet_logger] summary sheet failed: {exc}")
             return {"enabled": True, "appended": 0, "updated": 0,
                     "in_sheet": len(existing)}
 
         appended, updated = await asyncio.to_thread(_sync_blocking, open_rows, close_updates)
         logger.info(
-            f"[sheet_logger] sync: +{appended} new, ~{updated} closed "
-            f"(backend={settings.SHEET_LOG_BACKEND})"
+            f"[sheet_logger] sync: +{appended} new "
+            f"({len(paper_rows)} paper + {len(agent_rows)} agent), "
+            f"~{updated} closed (backend={settings.SHEET_LOG_BACKEND})"
         )
-        return {"enabled": True, "appended": appended, "updated": updated}
+
+        # Rebuild the portfolio summary sheet (local backend only)
+        if getattr(settings, "SHEET_LOG_BACKEND", "local") == "local":
+            try:
+                await asyncio.to_thread(_rebuild_summary, agent_rows, pos_map, hub_map)
+            except Exception as exc:
+                logger.warning(f"[sheet_logger] summary sheet failed (non-fatal): {exc}")
+
+        return {"enabled": True, "appended": appended, "updated": updated,
+                "agent_trades": len(agent_rows), "paper_trades": len(paper_rows)}
     except Exception as exc:
         logger.warning(f"[sheet_logger] sync_journal failed (non-fatal): {exc}")
         return {"enabled": True, "error": str(exc)}

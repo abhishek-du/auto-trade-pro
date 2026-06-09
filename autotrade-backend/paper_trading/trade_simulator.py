@@ -131,7 +131,7 @@ async def open_paper_trade(
     -----
     1. Simulate adverse slippage on entry price.
     2. Persist PaperTrade + OpenPosition records.
-    3. Deduct 10 % margin from VirtualWallet.
+    3. Deduct full trade value from VirtualWallet (full-equity, no leverage).
     4. Write TRADE_OPENED entry to SimulationLog.
     5. Log to loguru.
 
@@ -228,8 +228,8 @@ async def open_paper_trade(
     session.add(position)
     await session.flush()
 
-    # ── Step 3: Deduct 10 % margin ────────────────────────────────────────────
-    margin = usd_value * 0.1
+    # ── Step 3: Deduct full trade value (full-equity model, no leverage) ─────
+    margin = usd_value
     ok, msg = await VirtualWallet.deduct_margin(session, margin, signal.symbol)
     if not ok:
         logger.warning(f"open_paper_trade: margin deduction failed for {signal.symbol}: {msg}")
@@ -287,7 +287,7 @@ async def close_paper_trade(
     1. Calculate realised PnL.
     2. Update PaperTrade status / exit fields.
     3. Delete the OpenPosition snapshot.
-    4. Return margin + PnL to VirtualWallet.
+    4. Return full trade value + PnL to VirtualWallet.
     5. Write TRADE_CLOSED entry to SimulationLog.
     6. loguru.success on profit, loguru.warning on loss.
 
@@ -327,7 +327,7 @@ async def close_paper_trade(
     await session.flush()
 
     # ── Step 4: Return margin + PnL to wallet ─────────────────────────────────
-    margin      = trade.size_usd * 0.1
+    margin      = trade.size_usd          # return full equity (no leverage)
     new_balance = await VirtualWallet.return_margin(session, margin, pnl, trade.symbol)
 
     # ── Step 5: Simulation log ────────────────────────────────────────────────

@@ -28,7 +28,7 @@ export function useAgent() {
 
   const fetchTrades = useCallback(async () => {
     try {
-      const r = await fetch(`${BASE}/trades?limit=20`)
+      const r = await fetch(`${BASE}/trades?limit=100`)
       if (r.ok) setTrades(await r.json())
     } catch {}
   }, [])

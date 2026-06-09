@@ -217,9 +217,15 @@ async def _india_trade_loop():
     from paper_trading.virtual_wallet import VirtualWallet
     from tasks._db import celery_session
 
+    from utils.config import settings as _cfg
+    # Kill-switch: when scanner_enabled=false in runtime_settings, the agent
+    # runs solo and the SCAN paper trader stays silent.
+    if not getattr(_cfg, "SCANNER_ENABLED", True):
+        logger.info("[india_trade_loop] scanner disabled (SCANNER_ENABLED=false) — agent runs solo")
+        return
+
     now_ist   = datetime.datetime.now(_IST)
     is_window = _is_india_trading_window()
-    from utils.config import settings as _cfg
     is_paper  = getattr(_cfg, "PAPER_MODE", True)
     logger.info(
         f"[india_trade_loop] NSE market status: {'OPEN' if is_window else 'CLOSED'} "
@@ -391,10 +397,30 @@ async def _india_trade_loop():
                 signal.atr = lv["atr"]
                 risk = abs(signal.entry_price - lv["stop_loss"])
                 signal.risk_reward_ratio = round(abs(lv["target_2"] - signal.entry_price) / risk, 2) if risk > 0 else 0.0
-                signal.reasoning_points.append(
-                    f"Trade levels [{lv['source']}]: SL ₹{lv['stop_loss']} · T1 ₹{lv['target_1']} · T2 ₹{lv['target_2']}"
-                    + (f" · ATR ₹{lv['atr']}" if lv['atr'] else "")
-                )
+                # Build rich expert note — replaces the simple one-liner
+                try:
+                    from integrations.trade_explainer import build_expert_note
+                    hub_dict = getattr(signal, "hub_scores", None) or {}
+                    raw_reason = " · ".join(signal.reasoning_points)
+                    expert = build_expert_note(
+                        symbol=signal.symbol,
+                        direction=signal.action,
+                        entry=signal.entry_price,
+                        stop=lv["stop_loss"],
+                        target_1=lv["target_1"],
+                        target_2=lv["target_2"],
+                        confidence=signal.confidence,
+                        hub=hub_dict or None,
+                        reasoning=raw_reason,
+                        strategy=getattr(signal, "strategy", "HUB_SIGNAL"),
+                        regime=getattr(signal, "regime", "UNKNOWN"),
+                    )
+                    signal.reasoning_points = [expert]
+                except Exception:
+                    signal.reasoning_points.append(
+                        f"Trade levels [{lv['source']}]: SL ₹{lv['stop_loss']} · T1 ₹{lv['target_1']} · T2 ₹{lv['target_2']}"
+                        + (f" · ATR ₹{lv['atr']}" if lv['atr'] else "")
+                    )
             except Exception as exc:
                 logger.debug(f"[india_trade_loop] {signal.symbol} level calc failed: {exc}")
 

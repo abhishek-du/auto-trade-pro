@@ -136,3 +136,60 @@ async def reset_portfolio(
     result = await VirtualWallet.reset(db)
     await db.commit()
     return result
+
+
+@router.post(
+    "/reconcile",
+    summary="Close stale agent trades and re-sync wallet to ₹5L unified capital pool",
+)
+async def reconcile_capital(
+    confirm: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """One-time maintenance: close all over-deployed stale agent trades, reset wallet
+    to the unified ₹5L capital pool.  Safe to run multiple times (idempotent).
+    """
+    if not confirm:
+        raise HTTPException(400, "Pass ?confirm=true to proceed")
+
+    from datetime import datetime as _dt
+    from db.models import AgentTrade as AT
+    from sqlalchemy import select, update
+
+    now = _dt.utcnow()
+
+    # 1. Close all open agent trades (stale over-deployment artefacts)
+    stale = (await db.execute(
+        select(AT).where(AT.exit_ts == None, AT.is_paper == True)
+    )).scalars().all()
+
+    agent_closed = 0
+    for t in stale:
+        t.exit_price  = t.entry_price      # 0 PnL — we can't recover real prices
+        t.exit_ts     = now
+        t.exit_reason = "RECONCILE_CLEANUP"
+        t.pnl         = 0.0
+        t.pnl_pct     = 0.0
+        agent_closed += 1
+
+    # 2. Also reset the in-memory agent portfolio so it doesn't re-open them
+    try:
+        from engine.agent.agent_loop import _get_portfolio
+        port = _get_portfolio()
+        port.open_positions.clear()
+        port.cash = port.equity
+    except Exception:
+        pass
+
+    # 3. Reset the VirtualWallet (closes open paper positions, restores ₹5L)
+    await VirtualWallet.reset(db)
+
+    await db.commit()
+    logger.info(
+        f"[reconcile] closed {agent_closed} stale agent trades, "
+        f"reset wallet to ₹5L unified pool"
+    )
+    return {
+        "agent_trades_closed": agent_closed,
+        "wallet": await VirtualWallet.get_summary(db),
+    }

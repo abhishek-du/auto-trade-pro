@@ -1152,6 +1152,144 @@ async def refresh_fundamentals(db: AsyncSession = Depends(get_db)):
     return {"status": "ok", "message": "Fundamental update complete"}
 
 
+@router.get(
+    "/company-profile/{symbol}",
+    summary="Rich company profile: description, employees, website, industry",
+)
+async def get_company_profile(symbol: str):
+    """Returns yfinance longBusinessSummary, website, employees, industry etc.
+    Used by the StockDetail Company tab."""
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    ns_sym = sym + ".NS"
+    try:
+        import asyncio
+        import yfinance as yf
+        info = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: yf.Ticker(ns_sym).info
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"yfinance failed for {sym}: {exc}")
+
+    if not info:
+        raise HTTPException(status_code=404, detail=f"No info for {sym}")
+
+    return {
+        "symbol":       sym,
+        "company_name": info.get("longName") or info.get("shortName", sym),
+        "description":  info.get("longBusinessSummary", ""),
+        "industry":     info.get("industry", ""),
+        "sector":       info.get("sector", ""),
+        "website":      info.get("website", ""),
+        "employees":    info.get("fullTimeEmployees"),
+        "country":      info.get("country", "India"),
+        "city":         info.get("city", ""),
+        "exchange":     info.get("exchange", "NSE"),
+        "market_cap":   info.get("marketCap"),
+        "isin":         info.get("isin", ""),
+    }
+
+
+@router.get(
+    "/financials/{symbol}",
+    summary="Annual income statement and balance sheet from yfinance",
+)
+async def get_financials(symbol: str):
+    """Returns last 4 years of P&L and balance sheet in ₹ Crores.
+    Used by the StockDetail Financials tab."""
+    import asyncio
+    import math
+
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    ns_sym = sym + ".NS"
+
+    def _fetch():
+        import yfinance as yf
+        t = yf.Ticker(ns_sym)
+        return t.income_stmt, t.balance_sheet, t.cashflow
+
+    try:
+        income_df, balance_df, cashflow_df = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"yfinance financials failed for {sym}: {exc}")
+
+    def _df_to_rows(df, max_years=4) -> dict:
+        if df is None or df.empty:
+            return {}
+        out = {}
+        for col in list(df.columns)[:max_years]:
+            year = str(col)[:10]
+            out[year] = {}
+            for idx in df.index:
+                val = df.loc[idx, col]
+                if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                    # Convert from absolute INR to Crores (÷ 1e7)
+                    try:
+                        out[year][str(idx)] = round(float(val) / 1e7, 2)
+                    except Exception:
+                        pass
+        return out
+
+    return {
+        "symbol":       sym,
+        "currency":     "INR",
+        "unit":         "₹ Crores",
+        "income_stmt":  _df_to_rows(income_df),
+        "balance_sheet": _df_to_rows(balance_df),
+        "cashflow":     _df_to_rows(cashflow_df),
+    }
+
+
+@router.get(
+    "/peers/{symbol}",
+    summary="Sector peers from market shortlist for a given symbol",
+)
+async def get_peers(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Returns up to 10 sector peers with scores from the market shortlist.
+
+    Sector lookup priority:
+      1. symbol's own row in market_shortlist (covers any scanned stock)
+      2. static SECTOR_MAP (covers large/mid caps in the hand-coded map)
+      3. fallback: return top-ranked stocks regardless of sector
+    """
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    bare_ns = sym + ".NS"
+
+    # 1. Look up sector from the shortlist itself (most reliable for live data)
+    own_row = (await db.execute(
+        select(MarketShortlist).where(
+            MarketShortlist.symbol.in_([sym, bare_ns])
+        ).order_by(MarketShortlist.created_at.desc()).limit(1)
+    )).scalar_one_or_none()
+
+    sector = (own_row.sector if own_row and own_row.sector else None) or SECTOR_MAP.get(sym)
+
+    # 2. Fetch peers — filter by sector when known, else return top-ranked
+    q = (
+        select(MarketShortlist)
+        .where(MarketShortlist.symbol.notin_([sym, bare_ns]))
+        .order_by(MarketShortlist.master_score.desc())
+    )
+    if sector:
+        q = q.where(MarketShortlist.sector == sector)
+    q = q.limit(15)
+
+    rows = (await db.execute(q)).scalars().all()
+
+    peers = [
+        {
+            "symbol":             r.symbol.replace(".NS", ""),
+            "signal":             r.signal,
+            "score":              round(r.master_score or 0, 1),
+            "rank":               r.rank,
+            "sector":             r.sector or "",
+            "upper_circuit_days": r.upper_circuit_days or 0,
+        }
+        for r in rows
+    ]
+
+    return {"symbol": sym, "sector": sector or "GENERAL", "peers": peers}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 7. SECTOR PERFORMANCE
 # ═════════════════════════════════════════════════════════════════════════════

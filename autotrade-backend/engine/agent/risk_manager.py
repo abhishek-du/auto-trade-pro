@@ -33,11 +33,15 @@ class RiskManagerAgent:
         if ctx.get("monthly_pnl_pct", 0) <= -settings.AGENT_MONTHLY_DD_STOP:
             return False, "MONTHLY_DD_STOP"
 
-        # ── Behavioral locks (Varsity M12) ────────────────────────────────────
-        if ctx.get("consec_losses_today", 0) >= settings.AGENT_CONSEC_LOSS_LOCKOUT:
-            return False, "CONSECUTIVE_LOSS_LOCKOUT"
-        if ctx.get("new_entries_today", 0) >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
-            return False, "MAX_DAILY_ENTRIES"
+        # ── Behavioral locks (Varsity M12) — skipped in paper mode ──────────────
+        # Paper trading is for learning/simulation — behavioral limits would just
+        # prevent the agent from demonstrating its full scan output.
+        is_paper = getattr(settings, "PAPER_MODE", True)
+        if not is_paper:
+            if ctx.get("consec_losses_today", 0) >= settings.AGENT_CONSEC_LOSS_LOCKOUT:
+                return False, "CONSECUTIVE_LOSS_LOCKOUT"
+            if ctx.get("new_entries_today", 0) >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
+                return False, "MAX_DAILY_ENTRIES"
 
         # ── Position sizing ───────────────────────────────────────────────────
         risk_per_share = abs(candidate.entry - candidate.stop)
@@ -52,15 +56,15 @@ class RiskManagerAgent:
         if trade_risk_pct > settings.AGENT_MAX_RISK_PER_TRADE:
             return False, "OVERSIZE_TRADE"
 
-        # ── Portfolio risk cap + cash buffer (live only) ──────────────────────
-        # Paper trading uses virtual capital — these gates only apply to real money.
-        if not settings.PAPER_MODE:
-            if ctx.get("open_risk_pct", 0) + trade_risk_pct > settings.AGENT_MAX_OPEN_RISK:
-                return False, "PORTFOLIO_RISK_CAP"
-            trade_value = qty * candidate.entry
-            cash        = ctx.get("cash", equity)
-            if cash - trade_value < settings.AGENT_CASH_BUFFER_MIN * equity:
-                return False, "CASH_BUFFER"
+        # ── Portfolio risk cap + cash buffer (paper AND live) ────────────────
+        # These enforce the ₹5L virtual budget in paper mode and protect real
+        # capital in live mode. Bypassing these caused 40× over-deployment.
+        if ctx.get("open_risk_pct", 0) + trade_risk_pct > settings.AGENT_MAX_OPEN_RISK:
+            return False, "PORTFOLIO_RISK_CAP"
+        trade_value = qty * candidate.entry
+        cash        = ctx.get("cash", equity)
+        if cash - trade_value < settings.AGENT_CASH_BUFFER_MIN * equity:
+            return False, "CASH_BUFFER"
 
         # ── Diversification ───────────────────────────────────────────────────
         if candidate.symbol in ctx.get("open_symbols", []):
