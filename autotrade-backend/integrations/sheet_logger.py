@@ -574,6 +574,19 @@ def _setup_trades_sheet(sh, ws):
     reqs.append(_cond_number(ws_id, ci_days, ci_days+1, "NUMBER_GREATER", 15,
                              _rgb(254, 243, 199)))   # amber warning
 
+    # Auto-filter (filter dropdowns on every header column — lets user filter
+    # by Status=OPEN/CLOSED, Direction=BUY/SELL, Symbol, etc.)
+    reqs.append({"setBasicFilter": {
+        "filter": {
+            "range": {
+                "sheetId": ws_id,
+                "startRowIndex": 0,
+                "startColumnIndex": 0,
+                "endColumnIndex": n_cols,
+            }
+        }
+    }})
+
     sh.batch_update({"requests": reqs})
 
 
@@ -635,7 +648,7 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
          f"=IFERROR(MIN('{T}'!{pnl_c}2:{pnl_c}),\"—\")",
          "", ""],
         ["Win Rate",
-         f"=IFERROR(TEXT(E7/(E7+E8),\"0.0%\"),\"—\")",
+         f"=IFERROR(TEXT(B7/(B7+B8),\"0.0%\"),\"—\")",
          "",
          "",
          "Avg P&L per trade ₹",
