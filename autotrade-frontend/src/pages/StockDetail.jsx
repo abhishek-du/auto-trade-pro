@@ -1,6 +1,6 @@
 /**
  * StockDetail — /s/:symbol
- * Decision-first unified stock page (Phase 2).
+ * Decision-first unified stock page.
  *
  * Section order:
  *   1  Decision Center   (verdict · trade plan · ₹10k card · confidence breakdown · scenarios)
@@ -253,17 +253,20 @@ export default function StockDetail() {
     ? symbol : symbol + '.NS';
   const display  = symbol?.replace('.NS', '').replace('.BO', '').toUpperCase();
 
-  const [price,   setPrice]   = useState(null);
-  const [deep,    setDeep]    = useState(null);
-  const [intel,   setIntel]   = useState(null);
-  const [fund,    setFund]    = useState(null);
-  const [fundLoading, setFundLoading] = useState(true);
-  const [deepSettled, setDeepSettled] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState(null);
-  const [autoFloor, setAutoFloor] = useState(30);   // live agent auto-trade threshold
-  const [inWatchlist, setInWatchlist] = useState(false);
-  const [wlLoading,   setWlLoading]   = useState(false);
+  const [price,         setPrice]         = useState(null);
+  const [deep,          setDeep]          = useState(null);
+  const [intel,         setIntel]         = useState(null);
+  const [fund,          setFund]          = useState(null);
+  const [companyProfile,setCompanyProfile]= useState(null);
+  const [financials,    setFinancials]    = useState(null);
+  const [peers,         setPeers]         = useState(null);
+  const [fundLoading,   setFundLoading]   = useState(true);
+  const [deepSettled,   setDeepSettled]   = useState(false);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState(null);
+  const [autoFloor,     setAutoFloor]     = useState(30);
+  const [inWatchlist,   setInWatchlist]   = useState(false);
+  const [wlLoading,     setWlLoading]     = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -286,12 +289,19 @@ export default function StockDetail() {
         .catch(() => {})
         .finally(() => setDeepSettled(true));
 
-      // Fundamentals — may fetch on-demand (yfinance + Screener, ~5s first
-      // hit), so it MUST stay off the critical path. Populates the deep tabs.
+      // Fundamentals — may fetch on-demand (yfinance + Screener, ~5s first hit)
       apiFetch(`/api/v1/india/fundamentals/${encodeURIComponent(nsSymbol)}`)
         .then(d => setFund(d))
         .catch(() => {})
         .finally(() => setFundLoading(false));
+
+      // Rich company profile, financials, peers — all non-blocking deep-tab data
+      apiFetch(`/api/v1/india/company-profile/${encodeURIComponent(display)}`)
+        .then(d => setCompanyProfile(d)).catch(() => {});
+      apiFetch(`/api/v1/india/financials/${encodeURIComponent(display)}`)
+        .then(d => setFinancials(d)).catch(() => {});
+      apiFetch(`/api/v1/india/peers/${encodeURIComponent(display)}`)
+        .then(d => setPeers(d)).catch(() => {});
 
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
@@ -350,8 +360,62 @@ export default function StockDetail() {
   const aw         = reasoning.active_weights ?? {};
   const ts         = deep?.trade_setup ?? {};
   const indicators = deep?.indicators ?? {};
-  const news       = deep?.news ?? [];
   const ltp        = deep?.ltp ?? price?.price ?? null;
+
+  // Build "What changed today" events from real data + synthetic indicator events.
+  // This ensures the section is never blank even when there's no news for this stock.
+  const todayEvents = (() => {
+    const evts = [];
+    const now = new Date().toISOString();
+    // 1. Price movement (always present once deep loads)
+    if (deep?.change_pct != null) {
+      const up = deep.change_pct >= 0;
+      evts.push({
+        headline: `Price ${up ? 'up' : 'down'} ${Math.abs(deep.change_pct).toFixed(2)}% today — LTP ₹${deep.ltp?.toFixed(2) ?? '—'}`,
+        source: 'Market Data',
+        published_at: now,
+        sentiment: up ? 'positive' : 'negative',
+        score: deep.change_pct,
+        impact: up ? 'Bullish momentum — price above yesterday close' : 'Selling pressure — price below yesterday close',
+      });
+    }
+    // 2. AI signal
+    if (signal && score != null) {
+      const isBuyEv = String(signal).includes('BUY');
+      const isSellEv = String(signal).includes('SELL');
+      evts.push({
+        headline: `AI Signal: ${signal.replace('_', ' ')} · ${Math.min(100, Math.round(Math.abs(score)))}% confidence`,
+        source: 'AutoTrade AI',
+        published_at: deep?.as_of ?? now,
+        sentiment: isBuyEv ? 'positive' : isSellEv ? 'negative' : 'neutral',
+        score: isBuyEv ? score : -Math.abs(score),
+        impact: `Hub score ${score?.toFixed(1)} · Regime: ${reasoning.regime || 'unknown'}`,
+      });
+    }
+    // 3. RSI state (only if notable)
+    const rsi = indicators.rsi;
+    if (rsi != null) {
+      if (indicators.rsi_signal === 'OVERBOUGHT')
+        evts.push({ headline: `RSI ${rsi.toFixed(1)} — Overbought (>70): momentum extreme, watch for reversal`, source: 'Technical', published_at: now, sentiment: 'negative', score: -5 });
+      else if (indicators.rsi_signal === 'OVERSOLD')
+        evts.push({ headline: `RSI ${rsi.toFixed(1)} — Oversold (<30): potential bounce setup`, source: 'Technical', published_at: now, sentiment: 'positive', score: 5 });
+    }
+    // 4. MACD cross
+    if (indicators.macd_cross) {
+      const bull = indicators.macd_cross === 'BULLISH_CROSS';
+      evts.push({ headline: `MACD ${bull ? 'bullish' : 'bearish'} crossover detected`, source: 'Technical', published_at: now, sentiment: bull ? 'positive' : 'negative', score: bull ? 8 : -8 });
+    }
+    // 5. Supertrend direction change
+    if (indicators.supertrend_dir) {
+      const bull = indicators.supertrend_dir === 'UP';
+      evts.push({ headline: `Supertrend direction: ${bull ? '▲ Bullish' : '▼ Bearish'} — price ${bull ? 'above' : 'below'} Supertrend line`, source: 'Technical', published_at: now, sentiment: bull ? 'positive' : 'negative', score: bull ? 6 : -6 });
+    }
+    // 6. Real news articles (from deep analysis Finnhub/RSS)
+    for (const n of (deep?.news ?? [])) {
+      evts.push(n);
+    }
+    return evts;
+  })();
 
   const isBuy  = String(signal || '').includes('BUY');
   const isSell = String(signal || '').includes('SELL');
@@ -801,26 +865,20 @@ export default function StockDetail() {
       <section className="px-5 pb-6 border-t border-border" style={{ background: '#0A1120' }}>
         <div className="pt-4">
           <SectionLabel color="text-cyan">
-            Section 2 · What changed today
+            Today's activity
             <span className="ml-auto text-[10px] text-muted font-normal normal-case tracking-normal">
-              {deepSettled ? `${news.length} events` : '…'}
+              {deepSettled ? `${todayEvents.length} events` : '…'}
             </span>
           </SectionLabel>
 
           {!deepSettled ? (
             <div className="space-y-2">{Array.from({length:3}).map((_,i)=><Skel key={i} w="w-full" h="h-16"/>)}</div>
-          ) : news.length > 0 ? (
-            <div className="bg-card rounded-xl border border-border overflow-hidden">
-              {news.slice(0, 5).map((n, i) => <NewsRow key={i} n={n} divider={i > 0} />)}
-              {news.length > 5 && (
-                <button className="w-full px-4 py-2.5 border-t border-border text-muted text-xs hover:bg-white/[0.03] text-center">
-                  Show {news.length - 5} more events
-                </button>
-              )}
-            </div>
           ) : (
-            <div className="bg-card border border-border rounded-xl px-4 py-6 text-center text-muted text-sm">
-              No recent events for this symbol.
+            <div className="bg-card rounded-xl border border-border overflow-hidden">
+              {todayEvents.slice(0, 6).map((n, i) => <NewsRow key={i} n={n} divider={i > 0} />)}
+              {todayEvents.length === 0 && (
+                <div className="px-4 py-6 text-center text-muted text-sm">Loading activity…</div>
+              )}
             </div>
           )}
         </div>
@@ -1036,87 +1094,270 @@ export default function StockDetail() {
       ═══════════════════════════════════════════════════════════════ */}
       <section className="px-5 pb-8 space-y-2" style={{ background: '#080D1A' }}>
         {/* Company */}
-        <DeepTab label="Company" subtitle="History · management · business model" icon={BookOpen}>
-          {fund ? (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-              {fund.company_name && <div><span className="text-muted text-xs">Name</span><div className="text-slate-200">{fund.company_name}</div></div>}
-              {fund.sector        && <div><span className="text-muted text-xs">Sector</span><div className="text-slate-200">{fund.sector}</div></div>}
-              {fund.market_cap_cr && <div><span className="text-muted text-xs">Mkt cap</span><div className="text-slate-200">₹{fmt(fund.market_cap_cr, 0)} Cr</div></div>}
-              {fund.dividend_yield!= null && <div><span className="text-muted text-xs">Div yield</span><div className="text-slate-200">{fmt(fund.dividend_yield)}%</div></div>}
+        <DeepTab label="Company" subtitle="About · employees · website · sector" icon={BookOpen}>
+          {(companyProfile || fund) ? (
+            <div className="space-y-4">
+              {/* Business description */}
+              {companyProfile?.description && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-1.5">About</div>
+                  <p className="text-slate-300 text-sm leading-relaxed">{companyProfile.description}</p>
+                </div>
+              )}
+              {/* Key facts grid */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                {[
+                  ['Company', companyProfile?.company_name || fund?.company_name],
+                  ['Industry', companyProfile?.industry],
+                  ['Sector', companyProfile?.sector || fund?.sector],
+                  ['Exchange', companyProfile?.exchange || 'NSE'],
+                  ['Market Cap', fund?.market_cap_cr ? `₹${fmt(fund.market_cap_cr, 0)} Cr` : companyProfile?.market_cap ? `₹${fmt(companyProfile.market_cap / 1e7, 0)} Cr` : null],
+                  ['Employees', companyProfile?.employees ? Number(companyProfile.employees).toLocaleString('en-IN') : null],
+                  ['Div yield', fund?.dividend_yield != null ? fmt(fund.dividend_yield) + '%' : null],
+                  ['Country', companyProfile?.city ? `${companyProfile.city}, ${companyProfile.country}` : companyProfile?.country],
+                ].filter(([,v]) => v).map(([k, v]) => (
+                  <div key={k}>
+                    <span className="text-muted text-xs block">{k}</span>
+                    <div className="text-slate-200 text-sm font-medium">{v}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Website */}
+              {companyProfile?.website && (
+                <a href={companyProfile.website} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-cyan text-xs hover:underline">
+                  {companyProfile.website}
+                </a>
+              )}
             </div>
-          ) : <div className="text-muted text-sm">{fundLoading ? 'Loading company data…' : 'Company details not available for this symbol.'}</div>}
+          ) : (
+            <div className="text-muted text-sm">{fundLoading ? 'Loading company data…' : 'Company details not available.'}</div>
+          )}
         </DeepTab>
 
         {/* Financials */}
-        <DeepTab label="Financials" subtitle="PE · PB · ROE · ROCE · debt ratios" icon={BarChart2}>
-          {fund ? (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                ['PE ratio',   fund.pe_ratio   != null ? fmt(fund.pe_ratio) : null],
-                ['PB ratio',   fund.pb_ratio   != null ? fmt(fund.pb_ratio) : null],
-                ['ROE',        fund.roe        != null ? fmt(fund.roe) + '%' : null],
-                ['ROCE',       fund.roce       != null ? fmt(fund.roce) + '%' : null],
-                ['Debt/Equity',fund.debt_to_equity != null ? fmt(fund.debt_to_equity, 2) : null],
-                ['Rev growth 3y', fund.revenue_growth_3yr != null ? pct(fund.revenue_growth_3yr) : null],
-                ['Profit growth 3y', fund.profit_growth_3yr != null ? pct(fund.profit_growth_3yr) : null],
-                ['Div yield',  fund.dividend_yield != null ? fmt(fund.dividend_yield) + '%' : null],
-              ].filter(([,v]) => v != null).map(([k, v]) => (
-                <div key={k} className="bg-surface rounded-lg border border-border p-3">
-                  <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
-                  <div className="font-mono text-slate-100 text-base font-bold mt-1">{v}</div>
+        <DeepTab label="Financials" subtitle="PE · PB · ROE · ROCE · P&L · Balance Sheet" icon={BarChart2}>
+          <div className="space-y-5">
+            {/* Key ratios */}
+            {fund && (
+              <div>
+                <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Key Ratios</div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {[
+                    ['PE', fund.pe_ratio != null ? fmt(fund.pe_ratio) : null, fund.pe_ratio > 40 ? 'text-amber-400' : 'text-slate-100'],
+                    ['PB', fund.pb_ratio != null ? fmt(fund.pb_ratio) : null, 'text-slate-100'],
+                    ['ROE', fund.roe != null ? fmt(fund.roe) + '%' : null, fund.roe > 15 ? 'text-profit' : 'text-amber-400'],
+                    ['ROCE', fund.roce != null ? fmt(fund.roce) + '%' : null, fund.roce > 15 ? 'text-profit' : 'text-amber-400'],
+                    ['D/E', fund.debt_to_equity != null ? fmt(fund.debt_to_equity, 2) : null, fund.debt_to_equity > 1 ? 'text-loss' : 'text-profit'],
+                    ['Curr. Ratio', fund.current_ratio != null ? fmt(fund.current_ratio, 2) : null, 'text-slate-100'],
+                    ['Rev CAGR 3y', fund.revenue_growth_3yr != null ? pct(fund.revenue_growth_3yr) : null, fund.revenue_growth_3yr > 0 ? 'text-profit' : 'text-loss'],
+                    ['Profit CAGR 3y', fund.profit_growth_3yr != null ? pct(fund.profit_growth_3yr) : null, fund.profit_growth_3yr > 0 ? 'text-profit' : 'text-loss'],
+                  ].filter(([,v]) => v != null).map(([k, v, c]) => (
+                    <div key={k} className="bg-surface rounded-lg border border-border p-3">
+                      <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
+                      <div className={`font-mono text-base font-bold mt-1 ${c}`}>{v}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : <div className="text-muted text-sm">{fundLoading ? 'Loading financials…' : 'Financials not available for this symbol.'}</div>}
+              </div>
+            )}
+
+            {/* Annual income statement */}
+            {financials?.income_stmt && Object.keys(financials.income_stmt).length > 0 && (() => {
+              const years = Object.keys(financials.income_stmt).sort().reverse();
+              const keyRows = ['Total Revenue', 'Gross Profit', 'Operating Income', 'Net Income', 'EBITDA'];
+              return (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Income Statement (₹ Cr)</div>
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-border bg-surface">
+                          <th className="text-left px-3 py-2 text-muted font-medium">Metric</th>
+                          {years.slice(0,4).map(y => <th key={y} className="text-right px-3 py-2 text-muted font-medium">{y.slice(0,4)}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {keyRows.map(row => {
+                          const vals = years.slice(0,4).map(y => financials.income_stmt[y]?.[row]);
+                          if (vals.every(v => v == null)) return null;
+                          return (
+                            <tr key={row} className="border-b border-border/50 hover:bg-white/[0.02]">
+                              <td className="px-3 py-2 text-slate-300">{row}</td>
+                              {vals.map((v, i) => (
+                                <td key={i} className={`px-3 py-2 text-right font-mono ${v != null && v < 0 ? 'text-loss' : 'text-slate-200'}`}>
+                                  {v != null ? fmt(v, 0) : '—'}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        }).filter(Boolean)}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Balance sheet */}
+            {financials?.balance_sheet && Object.keys(financials.balance_sheet).length > 0 && (() => {
+              const years = Object.keys(financials.balance_sheet).sort().reverse();
+              const keyRows = ['Total Assets', 'Total Liabilities Net Minority Interest', 'Stockholders Equity', 'Cash And Cash Equivalents', 'Total Debt'];
+              return (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Balance Sheet (₹ Cr)</div>
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-border bg-surface">
+                          <th className="text-left px-3 py-2 text-muted font-medium">Item</th>
+                          {years.slice(0,4).map(y => <th key={y} className="text-right px-3 py-2 text-muted font-medium">{y.slice(0,4)}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {keyRows.map(row => {
+                          const vals = years.slice(0,4).map(y => financials.balance_sheet[y]?.[row]);
+                          if (vals.every(v => v == null)) return null;
+                          return (
+                            <tr key={row} className="border-b border-border/50 hover:bg-white/[0.02]">
+                              <td className="px-3 py-2 text-slate-300">{row.replace('Net Minority Interest','').replace('And Cash Equivalents','')}</td>
+                              {vals.map((v, i) => (
+                                <td key={i} className="px-3 py-2 text-right font-mono text-slate-200">
+                                  {v != null ? fmt(v, 0) : '—'}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        }).filter(Boolean)}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {!fund && !financials && (
+              <div className="text-muted text-sm">{fundLoading ? 'Loading financials…' : 'Financials not available for this symbol.'}</div>
+            )}
+          </div>
         </DeepTab>
 
         {/* Ownership */}
         <DeepTab label="Ownership & Smart money" subtitle="Promoter · FII · DII · pledge" icon={Users}>
           {fund ? (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {[
-                ['Promoter', fund.promoter_holding != null ? fmt(fund.promoter_holding) + '%' : null, fund.promoter_holding > 50 ? 'text-profit' : 'text-muted'],
-                ['FII',      fund.fii_holding      != null ? fmt(fund.fii_holding) + '%' : null, 'text-slate-200'],
-                ['Pledged',  fund.pledged_pct      != null ? fmt(fund.pledged_pct) + '%' : null, fund.pledged_pct > 10 ? 'text-loss' : 'text-profit'],
-                ['Fundamental score', fund.fundamental_score != null ? fmt(fund.fundamental_score, 0) + '/100' : null, 'text-cyan'],
-              ].filter(([,v]) => v != null).map(([k, v, c]) => (
-                <div key={k} className="bg-surface rounded-lg border border-border p-3">
-                  <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
-                  <div className={`font-mono text-base font-bold mt-1 ${c}`}>{v}</div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {[
+                  { k: 'Promoter', v: fund.promoter_holding, suffix: '%', color: fund.promoter_holding > 50 ? 'text-profit' : fund.promoter_holding > 30 ? 'text-slate-200' : 'text-amber-400', note: fund.promoter_holding > 50 ? 'Strong control' : 'Moderate' },
+                  { k: 'FII / Foreign', v: fund.fii_holding, suffix: '%', color: 'text-cyan', note: fund.fii_holding > 20 ? 'High FII interest' : '' },
+                  { k: 'Pledged', v: fund.pledged_pct, suffix: '%', color: fund.pledged_pct > 10 ? 'text-loss' : fund.pledged_pct > 0 ? 'text-amber-400' : 'text-profit', note: fund.pledged_pct > 10 ? '⚠ High pledge risk' : fund.pledged_pct > 0 ? 'Moderate pledge' : 'No pledge' },
+                  { k: 'Fund Score', v: fund.fundamental_score, suffix: '/100', color: fund.fundamental_score > 60 ? 'text-profit' : fund.fundamental_score > 40 ? 'text-amber-400' : 'text-loss', note: fund.fundamental_score > 60 ? 'Strong' : fund.fundamental_score > 40 ? 'Average' : 'Weak' },
+                ].filter(x => x.v != null).map(({ k, v, suffix, color, note }) => (
+                  <div key={k} className="bg-surface rounded-lg border border-border p-3">
+                    <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
+                    <div className={`font-mono text-base font-bold mt-1 ${color}`}>{fmt(v)}{suffix}</div>
+                    {note && <div className="text-[10px] text-muted mt-1">{note}</div>}
+                  </div>
+                ))}
+              </div>
+              {/* Visual holding bar */}
+              {(fund.promoter_holding != null || fund.fii_holding != null) && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Shareholding Pattern</div>
+                  <div className="h-4 rounded-full overflow-hidden flex bg-white/5">
+                    {fund.promoter_holding > 0 && <div style={{ width: `${fund.promoter_holding}%` }} className="bg-cyan/70 transition-all" title={`Promoter ${fmt(fund.promoter_holding)}%`} />}
+                    {fund.fii_holding > 0 && <div style={{ width: `${fund.fii_holding}%` }} className="bg-violet-400/70 transition-all" title={`FII ${fmt(fund.fii_holding)}%`} />}
+                    <div className="flex-1 bg-slate-600/30" title="Retail / DII / Others" />
+                  </div>
+                  <div className="flex items-center gap-4 mt-1.5 text-[10px] text-muted">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-cyan/70 inline-block" />Promoter {fmt(fund.promoter_holding)}%</span>
+                    {fund.fii_holding > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-violet-400/70 inline-block" />FII {fmt(fund.fii_holding)}%</span>}
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-slate-500/70 inline-block" />Others {fmt(Math.max(0, 100 - (fund.promoter_holding||0) - (fund.fii_holding||0)))}%</span>
+                  </div>
                 </div>
-              ))}
+              )}
             </div>
           ) : <div className="text-muted text-sm">{fundLoading ? 'Loading ownership data…' : 'Ownership data not available for this symbol.'}</div>}
         </DeepTab>
 
         {/* Peers */}
-        <DeepTab label="Peers" subtitle="Side-by-side comparison with sector peers" icon={Users} badge="Phase 2">
-          <div className="text-muted text-sm">Peer comparison — Phase 2. In the meantime, use the <Link to="/" className="text-cyan hover:underline">Compare flow</Link> from the global search.</div>
+        <DeepTab label="Sector Peers" subtitle="Top-ranked stocks in same sector" icon={Users}>
+          {peers?.peers?.length > 0 ? (
+            <div className="space-y-3">
+              <div className="text-muted text-xs mb-2">Sector: <span className="text-slate-300">{peers.sector}</span> · top ranked from market scanner</div>
+              <div className="divide-y divide-border rounded-lg border border-border overflow-hidden">
+                {peers.peers.map((p, i) => {
+                  const pb = String(p.signal||'').includes('BUY');
+                  const ps = String(p.signal||'').includes('SELL');
+                  return (
+                    <Link key={p.symbol} to={`/s/${p.symbol}`}
+                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.03] transition-colors">
+                      <span className="text-xs text-muted w-5 text-right">{i+1}</span>
+                      <span className="font-mono text-sm text-slate-200 flex-1">{p.symbol}</span>
+                      <span className={`text-xs font-bold px-1.5 py-0.5 rounded border ${pb ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : ps ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-amber-400 bg-amber-500/10 border-amber-500/20'}`}>
+                        {p.signal?.replace('_',' ') || 'HOLD'}
+                      </span>
+                      <span className="text-xs font-mono text-muted w-12 text-right">{p.score}</span>
+                      {p.upper_circuit_days > 0 && <span className="text-amber-400 text-[10px]">UC{p.upper_circuit_days}D</span>}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="text-muted text-sm">{peers === null ? 'Loading peers…' : 'No sector peers found in current market scan.'}</div>
+          )}
         </DeepTab>
 
         {/* Technicals advanced */}
-        <DeepTab label="Technicals (Advanced)" subtitle="Full indicator dashboard · pivots · Fibonacci" icon={Activity}>
+        <DeepTab label="Technicals (Advanced)" subtitle="Full indicator dashboard · EMA · MACD · ADX · BB" icon={Activity}>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs mb-3">
-            {Object.entries(indicators).filter(([k]) => typeof indicators[k] === 'number').slice(0, 8).map(([k, v]) => (
+            {[
+              ['RSI', indicators.rsi, indicators.rsi_signal === 'OVERBOUGHT' ? 'text-loss' : indicators.rsi_signal === 'OVERSOLD' ? 'text-profit' : 'text-slate-200'],
+              ['MACD', indicators.macd, (indicators.macd||0) > 0 ? 'text-profit' : 'text-loss'],
+              ['MACD Signal', indicators.macd_signal, 'text-slate-200'],
+              ['EMA 20', indicators.ema_20, 'text-slate-200'],
+              ['EMA 50', indicators.ema_50, 'text-slate-200'],
+              ['EMA 200', indicators.ema_200, 'text-slate-200'],
+              ['ADX', indicators.adx, (indicators.adx||0) > 25 ? 'text-profit' : 'text-muted'],
+              ['VWAP', indicators.vwap, 'text-slate-200'],
+              ['BB Upper', indicators.bb_upper, 'text-slate-200'],
+              ['BB Lower', indicators.bb_lower, 'text-slate-200'],
+              ['Stoch K', indicators.stoch_k, 'text-slate-200'],
+              ['Stoch D', indicators.stoch_d, 'text-slate-200'],
+            ].filter(([,v]) => v != null).map(([k, v, c]) => (
               <div key={k} className="bg-surface rounded-lg border border-border p-3">
-                <div className="text-muted text-[10px] uppercase tracking-wider">{k.replace(/_/g,' ')}</div>
-                <div className="font-mono text-slate-200 text-sm font-semibold mt-1">{fmt(v)}</div>
+                <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
+                <div className={`font-mono text-sm font-semibold mt-1 ${c}`}>{fmt(v)}</div>
               </div>
             ))}
           </div>
-          <p className="text-muted text-xs">
+          <div className="flex flex-wrap gap-3 text-[11px] text-muted">
+            {indicators.ema_trend && <span>EMA trend: <span className="text-slate-300">{indicators.ema_trend}</span></span>}
+            {indicators.macd_cross && <span>MACD: <span className={indicators.macd_cross === 'BULLISH_CROSS' ? 'text-profit' : 'text-loss'}>{indicators.macd_cross.replace('_',' ')}</span></span>}
+            {indicators.supertrend_dir && <span>Supertrend: <span className={indicators.supertrend_dir === 'UP' ? 'text-profit' : 'text-loss'}>{indicators.supertrend_dir}</span></span>}
+            {indicators.adx_strength && <span>ADX: <span className="text-slate-300">{indicators.adx_strength}</span></span>}
+          </div>
+          <p className="text-muted text-xs mt-3">
             Open the <Link to={`/chart?symbol=${nsSymbol}&name=${display}`} className="text-cyan hover:underline">full chart page</Link> for drawing tools, Fibonacci levels, and pattern detection.
           </p>
         </DeepTab>
 
         {/* Options */}
         <DeepTab label="Options" subtitle="Chain · OI · IV · max pain · PCR" icon={PieChart}>
-          <div className="text-muted text-sm">Options chain available at <code className="text-cyan text-xs">/api/v1/india/options-chain/{display}</code>. Full UI — Phase 2.</div>
+          <div className="space-y-2">
+            <p className="text-slate-300 text-sm">Options chain data is fetched from NSE for F&O-eligible stocks.</p>
+            <p className="text-muted text-xs">F&O eligibility: stocks with market cap &gt; ₹5,000 Cr and sufficient liquidity are F&O tradeable on NSE. VIJAYA and most small/mid caps are not F&O eligible.</p>
+            <p className="text-muted text-xs">API endpoint: <code className="text-cyan bg-surface px-1 rounded">/api/v1/india/options-chain/{display}</code></p>
+          </div>
         </DeepTab>
 
         {/* Compare */}
-        <DeepTab label="Compare" subtitle="RELIANCE vs ONGC vs BHARTIARTL" icon={BarChart2} badge="New" badgeColor="text-cyan">
-          <div className="text-muted text-sm">Use ⌘K search → type a symbol → Quick action "Compare with peers".</div>
+        <DeepTab label="Compare with peers" subtitle="Side-by-side ratio and signal comparison" icon={BarChart2}>
+          <div className="space-y-2">
+            <p className="text-slate-300 text-sm">Use the search bar (⌘K) → type any NSE symbol → select "Compare" to compare two stocks side by side.</p>
+            <p className="text-muted text-xs">Alternatively, open the Sector Peers tab above to see all stocks in the same sector ranked by signal strength.</p>
+          </div>
         </DeepTab>
       </section>
       </>}

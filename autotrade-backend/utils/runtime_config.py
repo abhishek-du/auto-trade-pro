@@ -58,6 +58,17 @@ _KNOWN_KEYS: dict[str, type] = {
     "paper_mode":              bool,
     "paper_confidence_threshold": float,
     "live_confidence_threshold":  float,
+    "agent_confidence_threshold": int,   # min confidence % to open a trade (30–100)
+    # NSE/BSE product type for new positional trades:
+    #   CNC = Cash & Carry (delivery, long-only, T+1 settlement, no expiry)
+    #   MIS = Margin Intraday Square-off (short selling allowed, must close by 3:20 PM IST)
+    # MEAN_REVERSION_SHORT strategy always uses MIS regardless of this setting.
+    "agent_default_product":   str,
+    # Allow SELL signals from Hub 7-factor negative scores (equity intraday / MIS only).
+    # False by default — only BUY signals are acted on.
+    "equity_short_enabled":    bool,
+    # Scanner kill-switch: False = agent runs solo, SCAN paper trader is silent.
+    "scanner_enabled":         bool,
 }
 
 
@@ -196,6 +207,23 @@ class RuntimeConfig:
     def live_confidence_threshold(self) -> float:
         return float(self._get("live_confidence_threshold", getattr(settings, "LIVE_CONFIDENCE_THRESHOLD", 70.0)))
 
+    @property
+    def agent_confidence_threshold(self) -> int:
+        return int(self._get("agent_confidence_threshold", getattr(settings, "AGENT_CONFIDENCE_THRESHOLD", 30)))
+
+    @property
+    def agent_default_product(self) -> str:
+        val = self._get("agent_default_product", getattr(settings, "AGENT_DEFAULT_PRODUCT", "CNC"))
+        return val if val in ("CNC", "MIS") else "CNC"
+
+    @property
+    def equity_short_enabled(self) -> bool:
+        return bool(self._get("equity_short_enabled", getattr(settings, "EQUITY_SHORT_ENABLED", False)))
+
+    @property
+    def scanner_enabled(self) -> bool:
+        return bool(self._get("scanner_enabled", getattr(settings, "SCANNER_ENABLED", False)))
+
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""
         return {
@@ -219,4 +247,8 @@ class RuntimeConfig:
             "paper_mode":              self.paper_mode,
             "paper_confidence_threshold": self.paper_confidence_threshold,
             "live_confidence_threshold":  self.live_confidence_threshold,
+            "agent_default_product":       self.agent_default_product,
+            "agent_confidence_threshold":  self.agent_confidence_threshold,
+            "equity_short_enabled":        self.equity_short_enabled,
+            "scanner_enabled":             self.scanner_enabled,
         }

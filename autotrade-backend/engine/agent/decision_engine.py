@@ -5,10 +5,16 @@ Reference: trading_agent/decision.py (extended with bear-case check, M12).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from utils.config import settings
 from utils.logger import logger
+
+
+# Strategies that require MIS (intraday) product per NSE/SEBI rules:
+# - Short-selling is only allowed intraday; delivery short is illegal on NSE/BSE
+# - MIS positions must be squared off before 3:20 PM IST (Zerodha auto-squareoff)
+_MIS_STRATEGIES = {"MEAN_REVERSION_SHORT"}
 
 
 @dataclass
@@ -24,6 +30,7 @@ class AgentDecisionOutput:
     qty:          int
     risk_pct:     float
     risk_reward:  float
+    product:      str   = "CNC"   # CNC=delivery positional | MIS=intraday (short allowed)
     reasons:      list  = field(default_factory=list)
     macro_bias:   int   = 0
     fund_score:   int   = 0
@@ -96,6 +103,15 @@ class DecisionEngine:
             logger.debug(f"[agent/decision] {symbol} filtered: confidence {candidate.confidence} < {settings.AGENT_CONFIDENCE_THRESHOLD}")
             return None
 
+        # NSE rule: short selling only allowed intraday (MIS). CNC delivery
+        # shorts are rejected by Zerodha / SEBI. Any strategy that opens a
+        # SELL without an existing long position must use MIS.
+        product = (
+            "MIS"
+            if candidate.strategy in _MIS_STRATEGIES or candidate.side == "SELL"
+            else getattr(settings, "AGENT_DEFAULT_PRODUCT", "CNC")
+        )
+
         return AgentDecisionOutput(
             symbol=symbol,
             action=candidate.side,
@@ -108,6 +124,7 @@ class DecisionEngine:
             qty=qty,
             risk_pct=round(risk_pct, 4),
             risk_reward=candidate.risk_reward,
+            product=product,
             reasons=candidate.reasons,
             macro_bias=macro_bias,
             fund_score=fund_score,
@@ -125,3 +142,107 @@ class DecisionEngine:
             if regime == "BULL_TRENDING":   return "STRONG:shorting_bull_trend"
             if macro_bias >= 2:             return "STRONG:macro_tailwind"
         return ""
+
+
+# ── Hub 7-Factor Override ─────────────────────────────────────────────────────
+
+async def fetch_hub_candidate(
+    symbol: str,
+    features,
+    session,
+) -> "TradeCandidate | None":
+    """Query master_intelligence_scores for a fresh 7-factor score.
+
+    Returns a TradeCandidate built from the Hub master_score if:
+      - A row exists scored within the last 2 hours
+      - abs(master_score) >= AGENT_CONFIDENCE_THRESHOLD
+      - Symbol is not blocked (is_blocked=False)
+      - For SELL signals: EQUITY_SHORT_ENABLED must be True
+
+    ATR-based stops (2×ATR) and 2:1 R:R targets are derived from features,
+    same as HubSignalStrategy. The rest of the agent pipeline (risk manager,
+    position sizing, exits) is unchanged.
+    """
+    from db.models import MasterIntelligenceScore
+    from sqlalchemy import select as _sel
+    from engine.agent.strategies.base import TradeCandidate
+
+    threshold = settings.AGENT_CONFIDENCE_THRESHOLD
+    cutoff    = datetime.utcnow() - timedelta(hours=2)
+
+    bare = symbol.replace(".NS", "")
+    try:
+        row = (await session.execute(
+            _sel(MasterIntelligenceScore)
+            .where(
+                MasterIntelligenceScore.symbol.in_([bare, symbol]),
+                MasterIntelligenceScore.scored_at >= cutoff,
+                MasterIntelligenceScore.is_blocked == False,
+            )
+            .order_by(MasterIntelligenceScore.scored_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+    except Exception as exc:
+        logger.debug(f"[hub_override] DB query failed for {symbol}: {exc}")
+        return None
+
+    if row is None:
+        return None
+
+    master_score = row.master_score
+    if abs(master_score) < threshold:
+        logger.debug(
+            f"[hub_override] {symbol} score={master_score:.1f} below threshold {threshold}"
+        )
+        return None
+
+    side = "BUY" if master_score > 0 else "SELL"
+
+    # Respect EQUITY_SHORT_ENABLED flag for SELL signals
+    if side == "SELL" and not getattr(settings, "EQUITY_SHORT_ENABLED", False):
+        logger.debug(f"[hub_override] {symbol} SELL skipped — EQUITY_SHORT_ENABLED=False")
+        return None
+
+    entry = features.close
+    atr   = features.atr14
+    if entry <= 0 or atr <= 0:
+        return None
+
+    if side == "BUY":
+        stop   = round(entry - 2.0 * atr, 2)
+        target = round(entry + 4.0 * atr, 2)
+    else:
+        stop   = round(entry + 2.0 * atr, 2)
+        target = round(entry - 4.0 * atr, 2)
+
+    confidence = min(int(abs(master_score)), 90)
+
+    # Build sub-score breakdown for reasons
+    reasons = [
+        f"hub_7factor:score={master_score:.1f}",
+        f"technical={row.technical_score:.1f}",
+        f"news={row.news_score:.1f}",
+        f"sector={row.sector_score:.1f}",
+        f"macro={row.macro_score:.1f}",
+        f"earnings={row.earnings_score:.1f}",
+        f"fundamental={row.fundamental_score:.1f}",
+        f"options={row.options_score:.1f}",
+        f"hub_signal:{row.signal}",
+        f"regime:{row.regime or features.regime}",
+    ]
+
+    logger.info(
+        f"[hub_override] {symbol} → {side} | score={master_score:.1f} "
+        f"conf={confidence}% | signal={row.signal} | scored_at={row.scored_at.isoformat()}"
+    )
+
+    return TradeCandidate(
+        symbol=symbol,
+        side=side,
+        entry=round(entry, 2),
+        stop=stop,
+        target=target,
+        confidence=confidence,
+        reasons=reasons,
+        strategy="HUB_7FACTOR",
+    )

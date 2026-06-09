@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Bot, Power, RefreshCw, AlertTriangle, Activity, Briefcase, Zap, X } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Bot, Power, AlertTriangle, Activity, Zap, X, TrendingUp, TrendingDown, Clock } from 'lucide-react'
 import { useAgent }       from '../hooks/useAgent'
 import DecisionCard       from '../components/agent/DecisionCard'
 import BacktestPanel      from '../components/agent/BacktestPanel'
@@ -75,9 +76,10 @@ function RulebookPreview() {
 
   async function load() {
     if (rules.length > 0) { setOpen(!open); return }
-    const r = await apiFetch('/api/v1/agent/rulebook')
-    const d = r.ok ? await r.json() : { modules: [] }
-    setRules(d.modules || [])
+    try {
+      const d = await apiFetch('/api/v1/agent/rulebook')
+      setRules(d.modules || [])
+    } catch {}
     setOpen(true)
   }
 
@@ -105,9 +107,119 @@ function RulebookPreview() {
   )
 }
 
+function TradesHistory({ trades }) {
+  const [tab, setTab] = useState('open')
+  const open   = (trades || []).filter(t => !t.exit_ts)
+  const closed = (trades || []).filter(t =>  t.exit_ts)
+  const rows   = tab === 'open' ? open : closed
+
+  const fmt = (n) => n == null ? '—' : Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+  return (
+    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="px-5 py-3 border-b border-border flex items-center justify-between flex-wrap gap-2">
+        <h3 className="text-slate-200 font-semibold text-sm flex items-center gap-2">
+          <Clock size={14} className="text-cyan" /> Trade Book
+        </h3>
+        <div className="flex gap-1">
+          {[['open', `Open (${open.length})`], ['closed', `Closed (${closed.length})`]].map(([key, label]) => (
+            <button key={key} onClick={() => setTab(key)}
+              className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                tab === key
+                  ? 'bg-cyan/15 text-cyan border border-cyan/30'
+                  : 'text-muted hover:text-slate-300 border border-transparent'
+              }`}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="px-5 py-8 text-center text-muted text-sm">
+          {tab === 'open' ? 'No open trades. Trigger a cycle to start.' : 'No closed trades yet.'}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border/60 bg-surface/30">
+                {tab === 'open'
+                  ? ['Symbol','Side','Qty','Entry ₹','Stop ₹','Target ₹','Strategy','Product','Since',''].map(h => (
+                      <th key={h} className="text-left px-3 py-2 text-muted font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
+                    ))
+                  : ['Symbol','Side','Qty','Entry ₹','Exit ₹','P&L ₹','Exit Reason','Strategy','Date',''].map(h => (
+                      <th key={h} className="text-left px-3 py-2 text-muted font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
+                    ))
+                }
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/30">
+              {rows.map(t => {
+                const isBuy = t.side === 'BUY'
+                const pnlPos = (t.pnl || 0) >= 0
+                return (
+                  <tr key={t.id} className="hover:bg-white/[0.02]">
+                    <td className="px-3 py-2">
+                      <Link to={`/s/${t.symbol}`} className="font-bold text-slate-100 hover:text-cyan transition-colors">
+                        {t.symbol.replace('.NS','')}
+                      </Link>
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
+                        {isBuy ? <span className="flex items-center gap-0.5"><TrendingUp size={9}/>{t.side}</span> : <span className="flex items-center gap-0.5"><TrendingDown size={9}/>{t.side}</span>}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 tabular-nums text-slate-300">{t.qty}</td>
+                    <td className="px-3 py-2 tabular-nums text-slate-300">₹{fmt(t.entry_price)}</td>
+                    {tab === 'open' ? (
+                      <>
+                        <td className="px-3 py-2 tabular-nums text-red-400">₹{fmt(t.stop_price)}</td>
+                        <td className="px-3 py-2 tabular-nums text-cyan">₹{fmt(t.target_price)}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="px-3 py-2 tabular-nums text-slate-300">₹{fmt(t.exit_price)}</td>
+                        <td className={`px-3 py-2 tabular-nums font-bold ${pnlPos ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {pnlPos ? '+' : ''}₹{fmt(t.pnl)}
+                        </td>
+                      </>
+                    )}
+                    <td className="px-3 py-2 text-muted text-[10px] font-mono">{t.strategy?.replace('_',' ')}</td>
+                    {tab === 'open' ? (
+                      <td className="px-3 py-2 text-muted text-[10px]">{t.product || 'CNC'}</td>
+                    ) : (
+                      <td className="px-3 py-2">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                          t.exit_reason === 'T2_TARGET' ? 'bg-emerald-500/15 text-emerald-400'
+                          : t.exit_reason === 'T1_PARTIAL' ? 'bg-cyan/15 text-cyan'
+                          : t.exit_reason === 'SL_HIT' ? 'bg-red-500/15 text-red-400'
+                          : 'bg-amber-500/15 text-amber-400'
+                        }`}>{t.exit_reason?.replace('_',' ') || '—'}</span>
+                      </td>
+                    )}
+                    <td className="px-3 py-2 text-muted text-[10px] whitespace-nowrap">
+                      {tab === 'open'
+                        ? t.entry_ts?.slice(0,10)
+                        : t.exit_ts?.slice(0,10)}
+                    </td>
+                    <td className="px-3 py-2">
+                      {tab === 'open' && (
+                        <Link to={`/s/${t.symbol}`} className="text-[10px] text-cyan hover:underline">View</Link>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function TradingAgent() {
   const {
-    status, decisions, positions, performance,
+    status, decisions, trades, positions, performance,
     cycling, error,
     triggerCycle, closePosition, runBacktest, updateConfig,
   } = useAgent()
@@ -193,14 +305,22 @@ export default function TradingAgent() {
 
       {/* Status cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatusCard label="Equity"          value={formatINR(portfolio.equity || 0)} sub={`Cash: ${formatINR(portfolio.cash || 0)}`} />
-        <StatusCard label="Daily P&L"       value={`${dailyPnl >= 0 ? '+' : ''}${dailyPnl}%`} sub={`Open risk: ${portfolio.open_risk_pct || 0}%`} color={dailyColor} />
-        <StatusCard label="Open Positions"  value={portfolio.open_positions_count || 0} sub={`Threshold: ${status?.confidence_threshold || 70}%`} />
+        <StatusCard label="Equity"
+          value={formatINR(portfolio.equity || 0)}
+          sub={`Free cash: ${formatINR(portfolio.cash || 0)}`} />
+        <StatusCard label="Unrealised P&L"
+          value={`${(portfolio.unrealised_pnl ?? 0) >= 0 ? '+' : ''}${formatINR(portfolio.unrealised_pnl ?? 0)}`}
+          sub={`Realised: ${formatINR(portfolio.realised_pnl ?? 0)}`}
+          color={(portfolio.unrealised_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+        <StatusCard label="Open Positions"  value={portfolio.open_positions_count || 0} sub={`Open risk: ${portfolio.open_risk_pct || 0}%`} />
         <StatusCard label="Decisions Today" value={status?.decisions_today || 0} sub={status?.session_active ? 'Session active' : 'After hours'} />
       </div>
 
       {/* Positions */}
       <PositionsTable positions={positions} closePosition={closePosition} />
+
+      {/* Trade Book — open + closed trades */}
+      <TradesHistory trades={trades} />
 
       {/* Decision feed + Backtest */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

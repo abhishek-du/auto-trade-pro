@@ -11,7 +11,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
-from db.models import AgentDecision, AgentTrade, AgentPerformance
+from db.models import AgentDecision, AgentTrade, AgentPerformance, Candle
 from utils.config import settings
 
 router = APIRouter(tags=["Trading Agent"])
@@ -38,6 +38,7 @@ class ConfigUpdate(BaseModel):
 @router.get("/status")
 async def agent_status(db: AsyncSession = Depends(get_db)):
     from engine.agent.agent_loop import _get_portfolio, _is_market_hours, _is_trading_day
+    from sqlalchemy import func as sqlfunc
 
     portfolio = _get_portfolio()
     now       = datetime.utcnow()
@@ -52,20 +53,69 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
         )
     )).scalars().all()
 
+    # ── DB-authoritative equity/cash (in-memory portfolio has stale accounting) ──
+    START_CAPITAL = settings.AGENT_EQUITY  # ₹25L
+
+    # Realised P&L from all closed agent trades
+    realised_row = (await db.execute(
+        select(sqlfunc.coalesce(sqlfunc.sum(AgentTrade.pnl), 0.0))
+        .where(AgentTrade.exit_price != None, AgentTrade.pnl != None)
+    )).scalar()
+    realised_pnl = float(realised_row or 0.0)
+
+    # Open trades — notional deployed + unrealised P&L from latest candles
+    open_trades = (await db.execute(
+        select(AgentTrade).where(AgentTrade.exit_price == None)
+    )).scalars().all()
+    # Deduplicate to latest per symbol
+    latest: dict[str, AgentTrade] = {}
+    for t in open_trades:
+        latest[t.symbol] = t
+
+    capital_deployed = sum(float(t.qty) * float(t.entry_price) for t in latest.values())
+
+    # Candle prices for unrealised P&L
+    open_syms = list(latest.keys())
+    unrealised_pnl = 0.0
+    if open_syms:
+        lq = (
+            select(Candle.symbol, sqlfunc.max(Candle.timestamp).label("max_ts"))
+            .where(Candle.symbol.in_(open_syms)).group_by(Candle.symbol).subquery()
+        )
+        for sym, close in (await db.execute(
+            select(Candle.symbol, Candle.close).join(
+                lq, (Candle.symbol == lq.c.symbol) & (Candle.timestamp == lq.c.max_ts)
+            )
+        )).fetchall():
+            t = latest[sym]
+            if t.side == "BUY":
+                unrealised_pnl += (float(close) - float(t.entry_price)) * float(t.qty)
+            else:
+                unrealised_pnl += (float(t.entry_price) - float(close)) * float(t.qty)
+
+    db_equity = START_CAPITAL + realised_pnl + unrealised_pnl
+    db_cash   = max(0.0, START_CAPITAL + realised_pnl - capital_deployed)
+    daily_pnl_pct = round(portfolio.daily_pnl_pct * 100, 2)
+
+    # Open risk % from in-memory portfolio (has SL data)
+    open_risk_pct = round(portfolio.open_risk_pct * 100, 2)
+
     return {
-        "enabled":            settings.AGENT_ENABLED,
-        "paper_mode":         settings.AGENT_PAPER_MODE,
-        "session_active":     _is_market_hours() and _is_trading_day(),
+        "enabled":              settings.AGENT_ENABLED,
+        "paper_mode":           settings.AGENT_PAPER_MODE,
+        "session_active":       _is_market_hours() and _is_trading_day(),
         "confidence_threshold": settings.AGENT_CONFIDENCE_THRESHOLD,
-        "max_risk_per_trade": settings.AGENT_MAX_RISK_PER_TRADE,
+        "max_risk_per_trade":   settings.AGENT_MAX_RISK_PER_TRADE,
         "portfolio": {
-            "equity":               portfolio.equity,
-            "cash":                 round(portfolio.cash, 2),
-            "open_positions_count": len(portfolio.open_positions),
+            "equity":               round(db_equity, 2),
+            "cash":                 round(db_cash, 2),
+            "unrealised_pnl":       round(unrealised_pnl, 2),
+            "realised_pnl":         round(realised_pnl, 2),
+            "open_positions_count": len(latest),
             "open_positions":       portfolio.open_positions,
-            "daily_pnl_pct":        round(portfolio.daily_pnl_pct * 100, 2),
+            "daily_pnl_pct":        daily_pnl_pct,
             "weekly_pnl_pct":       round(portfolio.weekly_pnl_pct * 100, 2),
-            "open_risk_pct":        round(portfolio.open_risk_pct * 100, 2),
+            "open_risk_pct":        open_risk_pct,
         },
         "decisions_today": len(decisions_today),
     }
@@ -172,7 +222,7 @@ async def get_decisions(
 
 @router.get("/trades")
 async def get_trades(
-    limit:     int  = 20,
+    limit:     int  = 500,
     open_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
@@ -181,26 +231,59 @@ async def get_trades(
         q = q.where(AgentTrade.exit_ts == None)
     rows = (await db.execute(q)).scalars().all()
 
-    return [
-        {
-            "id":           r.id,
-            "symbol":       r.symbol,
-            "side":         r.side,
-            "qty":          r.qty,
-            "entry_price":  r.entry_price,
-            "exit_price":   r.exit_price,
-            "stop_price":   r.stop_price,
-            "target_price": r.target_price,
-            "entry_ts":     r.entry_ts.isoformat(),
-            "exit_ts":      r.exit_ts.isoformat() if r.exit_ts else None,
-            "exit_reason":  r.exit_reason,
-            "pnl":          r.pnl,
-            "strategy":     r.strategy,
-            "regime":       r.regime,
-            "is_paper":     r.is_paper,
-        }
-        for r in rows
-    ]
+    # Batch-fetch latest candle close for all open trades so the UI can
+    # display live P&L without waiting for the agent in-memory portfolio to hydrate.
+    open_syms = list({r.symbol for r in rows if r.exit_price is None})
+    price_map: dict[str, float] = {}
+    if open_syms:
+        from sqlalchemy import func as sqlfunc
+        latest_q = (
+            select(Candle.symbol, sqlfunc.max(Candle.timestamp).label("max_ts"))
+            .where(Candle.symbol.in_(open_syms))
+            .group_by(Candle.symbol)
+            .subquery()
+        )
+        candle_q = select(Candle.symbol, Candle.close).join(
+            latest_q,
+            (Candle.symbol == latest_q.c.symbol) & (Candle.timestamp == latest_q.c.max_ts),
+        )
+        for sym, close in (await db.execute(candle_q)).fetchall():
+            price_map[sym] = close
+
+    out = []
+    for r in rows:
+        cur_price: float | None = None
+        unrealised_pnl: float | None = None
+        unrealised_pct: float | None = None
+        if r.exit_price is None and r.symbol in price_map:
+            cur_price = price_map[r.symbol]
+            notional  = float(r.qty) * float(r.entry_price)
+            if r.side == "BUY":
+                unrealised_pnl = (cur_price - float(r.entry_price)) * float(r.qty)
+            else:
+                unrealised_pnl = (float(r.entry_price) - cur_price) * float(r.qty)
+            unrealised_pct = (unrealised_pnl / notional * 100) if notional else 0.0
+        out.append({
+            "id":            r.id,
+            "symbol":        r.symbol,
+            "side":          r.side,
+            "qty":           r.qty,
+            "entry_price":   r.entry_price,
+            "exit_price":    r.exit_price,
+            "stop_price":    r.stop_price,
+            "target_price":  r.target_price,
+            "entry_ts":      r.entry_ts.isoformat(),
+            "exit_ts":       r.exit_ts.isoformat() if r.exit_ts else None,
+            "exit_reason":   r.exit_reason,
+            "pnl":           r.pnl,
+            "strategy":      r.strategy,
+            "regime":        r.regime,
+            "is_paper":      r.is_paper,
+            "current_price": cur_price,
+            "unrealised_pnl": unrealised_pnl,
+            "unrealised_pct": unrealised_pct,
+        })
+    return out
 
 
 # ── GET /performance ──────────────────────────────────────────────────────────
@@ -250,32 +333,65 @@ async def get_performance(db: AsyncSession = Depends(get_db)):
 # ── GET /positions ────────────────────────────────────────────────────────────
 
 @router.get("/positions")
-async def get_positions():
-    from engine.agent.agent_loop import _get_portfolio
-    from crawler.live_prices import PRICE_CACHE
+async def get_positions(db: AsyncSession = Depends(get_db)):
+    """All open agent positions with live candle prices — DB-authoritative."""
+    from sqlalchemy import func as sqlfunc
 
-    portfolio = _get_portfolio()
-    result    = []
+    # Read open trades directly from DB (source of truth — survives restarts)
+    open_trades = (await db.execute(
+        select(AgentTrade).where(AgentTrade.exit_price == None)
+        .order_by(AgentTrade.entry_ts.asc())
+    )).scalars().all()
 
-    for symbol, pos in portfolio.open_positions.items():
-        price = float(PRICE_CACHE.get(symbol, {}).get("price", 0) or 0)
-        pnl   = 0.0
-        if price > 0:
-            if pos["side"] == "BUY":
-                pnl = (price - pos["entry"]) * pos["qty"]
-            else:
-                pnl = (pos["entry"] - price) * pos["qty"]
+    # Deduplicate to latest per symbol (same as hydration logic)
+    latest: dict[str, AgentTrade] = {}
+    for t in open_trades:
+        latest[t.symbol] = t
+
+    if not latest:
+        return []
+
+    # Batch-fetch latest candle close (same approach as /trades endpoint)
+    syms = list(latest.keys())
+    latest_q = (
+        select(Candle.symbol, sqlfunc.max(Candle.timestamp).label("max_ts"))
+        .where(Candle.symbol.in_(syms))
+        .group_by(Candle.symbol)
+        .subquery()
+    )
+    candle_q = select(Candle.symbol, Candle.close).join(
+        latest_q,
+        (Candle.symbol == latest_q.c.symbol) & (Candle.timestamp == latest_q.c.max_ts),
+    )
+    price_map: dict[str, float] = {}
+    for sym, close in (await db.execute(candle_q)).fetchall():
+        price_map[sym] = close
+
+    result = []
+    for symbol, t in latest.items():
+        cur = price_map.get(symbol, 0.0)
+        pnl = 0.0
+        if cur > 0:
+            pnl = (cur - t.entry_price) * t.qty if t.side == "BUY" else (t.entry_price - cur) * t.qty
+
+        # Also pull in-memory trading metadata (trailing stop etc.) if available
+        from engine.agent.agent_loop import _get_portfolio
+        mem_pos = _get_portfolio().open_positions.get(symbol, {})
 
         result.append({
-            "symbol":        symbol,
-            "side":          pos["side"],
-            "qty":           pos["qty"],
-            "entry":         pos["entry"],
-            "stop":          pos["stop"],
-            "target":        pos["target"],
-            "current_price": price,
+            "symbol":         symbol,
+            "side":           t.side,
+            "qty":            t.qty,
+            "entry":          t.entry_price,
+            "stop":           t.stop_price,
+            "target":         t.target_price,
+            "current_price":  cur,
             "unrealized_pnl": round(pnl, 2),
-            "strategy":      pos.get("strategy", ""),
+            "strategy":       t.strategy or "",
+            "product":        t.product if hasattr(t, "product") else mem_pos.get("product", "CNC"),
+            "trailing_sl":    mem_pos.get("trailing_sl"),
+            "partial_done":   mem_pos.get("partial_done", False),
+            "entry_ts":       t.entry_ts.isoformat() if t.entry_ts else None,
         })
 
     return result

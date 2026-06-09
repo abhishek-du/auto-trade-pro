@@ -941,13 +941,16 @@ class AgentTrade(Base):
     symbol:        Mapped[str]          = mapped_column(String(30),  nullable=False)
     side:          Mapped[str]          = mapped_column(String(10),  nullable=False)
     qty:           Mapped[int]          = mapped_column(Integer,     nullable=False)
+    # CNC = delivery (long only, T+1 settlement); MIS = intraday (short selling allowed,
+    # must square off by 3:20 PM IST); NRML = overnight F&O
+    product:       Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     entry_price:   Mapped[float]        = mapped_column(Float,       nullable=False)
     exit_price:    Mapped[float | None] = mapped_column(Float,       nullable=True)
     stop_price:    Mapped[float]        = mapped_column(Float,       nullable=False)
     target_price:  Mapped[float]        = mapped_column(Float,       nullable=False)
     entry_ts:      Mapped[datetime]     = mapped_column(DateTime,    nullable=False)
     exit_ts:       Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    exit_reason:   Mapped[str | None]   = mapped_column(String(30),  nullable=True)
+    exit_reason:   Mapped[str | None]   = mapped_column(String(50),  nullable=True)
     pnl:           Mapped[float | None] = mapped_column(Float,       nullable=True)
     pnl_pct:       Mapped[float | None] = mapped_column(Float,       nullable=True)
     strategy:      Mapped[str]          = mapped_column(String(50),  nullable=False, default="")

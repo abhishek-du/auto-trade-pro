@@ -224,22 +224,18 @@ class VirtualWallet:
     ) -> None:
         """Refresh unrealised PnL and recompute equity.
 
-        Equity = cash balance + reserved margin (still owned, just allocated to
-        open positions) + unrealised PnL. The reserved margin MUST be added back:
-        opening a position deducts 10% margin from `balance`, but that capital is
-        collateral, not a loss — omitting it understated equity by the deployed
-        margin (e.g. showing −27% ROI when the account is actually ~flat).
+        Full-equity model: each trade commits its full purchase value (qty × price).
+        Equity = cash remaining + capital locked in positions + unrealised PnL.
+        Capital locked = starting_balance − balance (what was actually deducted).
         """
-        from sqlalchemy import select as _select, func as _func
-        from db.models import OpenPosition
-
         wallet = await VirtualWallet.get_or_create(session)
-        reserved_margin = float((await session.execute(
-            _select(_func.coalesce(_func.sum(OpenPosition.size_usd * 0.1), 0.0))
-        )).scalar_one())
+        # Full-equity model: reserved capital = full trade value, not a margin fraction.
+        # starting_balance - balance = total capital committed to open positions.
+        start  = await VirtualWallet._start_balance(session)
+        capital_in_positions = max(0.0, start - wallet.balance)
 
         wallet.unrealised_pnl = total_unrealised
-        wallet.equity = wallet.balance + reserved_margin + total_unrealised
+        wallet.equity = wallet.balance + capital_in_positions + total_unrealised
         await session.flush()
 
     # ─────────────────────────────────────────────────────────────────────────

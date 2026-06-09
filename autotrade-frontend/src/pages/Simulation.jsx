@@ -59,8 +59,9 @@ function gradientOffset(snapshots) {
   const vals = snapshots.map((s) => s.balance ?? s.equity ?? 0);
   const max  = Math.max(...vals);
   const min  = Math.min(...vals);
-  if (max === min) return max >= 1000 ? 1 : 0;
-  return Math.min(1, Math.max(0, (max - 1000) / (max - min)));
+  const start = 500000;
+  if (max === min) return max >= start ? 1 : 0;
+  return Math.min(1, Math.max(0, (max - start) / (max - min)));
 }
 
 function EquityTooltip({ active, payload, label }) {
@@ -227,7 +228,7 @@ export default function Simulation() {
           <MetricCard
             title="Total ROI"
             value={fmtPct(perf?.roi_percent)}
-            subtitle="Return on $1,000 starting balance"
+            subtitle="Return on ₹5,00,000 starting balance"
             trend={perf?.roi_percent ?? 0}
             icon={TrendingUp}
           />
@@ -335,8 +336,8 @@ export default function Simulation() {
                 <YAxis tick={{ fill: '#64748B', fontSize: 11 }} tickLine={false} axisLine={false}
                   tickFormatter={(v) => `₹${v.toLocaleString('en-IN')}`} width={72} />
                 <Tooltip content={<EquityTooltip />} />
-                <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="6 3"
-                  label={{ value: 'Start $1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
+                <ReferenceLine y={500000} stroke="#6B7280" strokeDasharray="6 3"
+                  label={{ value: 'Start ₹5L', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
                 <Area type="monotone" dataKey="balance" stroke="url(#eqStroke)" strokeWidth={2}
                   fill="url(#eqGrad)" dot={false} activeDot={{ r: 4, fill: '#F1F5F9' }} />
               </AreaChart>

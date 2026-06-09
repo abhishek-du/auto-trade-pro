@@ -101,20 +101,37 @@ class Settings(BaseSettings):
     AGENT_DRY_RUN:              bool  = False  # if true, agent logs but never executes
 
     # ── AI Trading Agent (Varsity-grounded) ──────────────────────────────────
-    AGENT_ENABLED:              bool  = False
+    AGENT_ENABLED:              bool  = True
     AGENT_PAPER_MODE:           bool  = True
-    AGENT_EQUITY:               float = 500_000.0
+    AGENT_EQUITY:               float = 2_500_000.0
+
+    # Allow SELL (short) signals from the Hub 7-factor score.
+    # NSE rule: equity short-selling is intraday-only (MIS product).
+    # Set True only when you want the agent to act on negative Hub scores.
+    # F&O shorts come later; this flag is equity cash only.
+    EQUITY_SHORT_ENABLED:       bool  = False
 
     # Risk limits — Varsity Module 9
     AGENT_MAX_RISK_PER_TRADE:   float = 0.01
     AGENT_MAX_OPEN_RISK:        float = 0.06
+    AGENT_MAX_POSITIONS:        int   = 15   # hard cap on concurrent open positions
     AGENT_DAILY_DD_STOP:        float = 0.03
     AGENT_WEEKLY_DD_STOP:       float = 0.05
     AGENT_MONTHLY_DD_STOP:      float = 0.10
     AGENT_CASH_BUFFER_MIN:      float = 0.20
-    AGENT_MAX_NEW_ENTRIES_DAY:  int   = 5
+    AGENT_MAX_NEW_ENTRIES_DAY:  int   = 20   # per-day new-trade ceiling (paper: bypassed)
     AGENT_CONSEC_LOSS_LOCKOUT:  int   = 2
-    AGENT_CONFIDENCE_THRESHOLD: int   = 70
+    AGENT_CONFIDENCE_THRESHOLD: int   = 30
+
+    # Hub-score-driven exits — close held positions when intelligence changes.
+    # When Hub 7-factor score for a held BUY drops to or below this value, the
+    # position is exited even if price hasn't hit the ATR stop yet.
+    # REVERSAL  = score crossed to negative side (company/market turned bearish)
+    # FLOOR     = score still positive but too weak to justify holding (profit risk)
+    # Set REVERSAL_THRESHOLD = -10 and FLOOR = 5 as safe defaults.
+    AGENT_HUB_EXIT_ENABLED:             bool = True
+    AGENT_HUB_EXIT_REVERSAL_THRESHOLD:  int  = -10   # BUY exits if score drops below this
+    AGENT_HUB_EXIT_SCORE_FLOOR:         int  = 5     # BUY exits if score falls below this floor
 
     # Master Intelligence Hub universe. Empty → use the hub_universe DB table
     # (top-N by turnover, rebuilt daily). Set a comma-separated list to override.
@@ -128,17 +145,25 @@ class Settings(BaseSettings):
     # without locking out mid-caps that have less history persisted.
     AGENT_TIMEFRAME:            str   = "1h"
     AGENT_WARMUP_BARS:          int   = 60
-    AGENT_SESSION_START:        str   = "09:20"
-    AGENT_SESSION_END:          str   = "15:20"
+    # NSE regular session: 9:15 AM – 3:30 PM IST
+    # MIS (intraday) auto-squareoff: 3:20 PM IST (Zerodha)
+    # Agent starts scanning at 9:15; initiates MIS close sweep at 3:15 (5 min buffer)
+    AGENT_SESSION_START:        str   = "09:15"
+    AGENT_SESSION_END:          str   = "15:30"
+    AGENT_MIS_SQUAREOFF_TIME:   str   = "15:15"   # close MIS positions by this time
+    # CNC = delivery (long only, no expiry); MIS = intraday (short selling allowed)
+    # Strategies: MEAN_REVERSION_SHORT → always MIS; everything else → DEFAULT_PRODUCT
+    AGENT_DEFAULT_PRODUCT:      str   = "CNC"
 
     # ── Paper trading parameters ──────────────────────────────────────────────
-    # Default ₹5,00,000 — matches AGENT_EQUITY so the simulator wallet and the
+    # Default ₹25,00,000 — matches AGENT_EQUITY so the simulator wallet and the
     # AI Trading Agent equity start from the same base.
-    PAPER_TRADING_BALANCE: float = 500000.0
+    PAPER_TRADING_BALANCE: float = 2_500_000.0
     MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
     MAX_OPEN_POSITIONS: int = 20           # SAFETY CEILING (bug guard) — not the primary limiter
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance
     PAPER_MODE: bool = True
+    SCANNER_ENABLED: bool = False  # False = agent runs solo; True = SCAN paper trader also runs
 
     # ── Capital-utilization model (replaces the rigid "max 5 positions") ──────
     # The agent deploys capital by ANALYSIS, not a fixed count: it keeps opening
