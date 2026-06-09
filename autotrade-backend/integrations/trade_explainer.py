@@ -14,29 +14,53 @@ from utils.logger import logger
 _GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
+# llama-3.3-70b-versatile free-tier limits: 30 RPM / 1K RPD / 12K TPM
+# We self-throttle to 25 RPM (2.4 s gap) and honour the retry-after header.
+_GROQ_MIN_INTERVAL = 2.5   # seconds between calls
+_groq_last_call_ts: float = 0.0
+
 
 def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
-               timeout: float = 15.0) -> str:
+               timeout: float = 20.0) -> str:
     if not getattr(settings, "GROQ_API_KEY", ""):
         return ""
-    try:
-        import httpx
-        resp = httpx.post(
-            _GROQ_URL,
-            headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={"model": _GROQ_MODEL,
-                  "messages": [{"role": "system", "content": system},
-                               {"role": "user", "content": prompt}],
-                  "max_tokens": max_tokens, "temperature": 0.25},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
-    except Exception as exc:
-        logger.warning(f"[trade_explainer] Groq call failed: {exc}")
-        return ""
+    import time
+    import httpx
+    global _groq_last_call_ts
+
+    # Pace calls to ≤25 RPM
+    gap = _groq_last_call_ts + _GROQ_MIN_INTERVAL - time.monotonic()
+    if gap > 0:
+        time.sleep(gap)
+
+    for attempt in range(3):
+        try:
+            _groq_last_call_ts = time.monotonic()
+            resp = httpx.post(
+                _GROQ_URL,
+                headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": _GROQ_MODEL,
+                      "messages": [{"role": "system", "content": system},
+                                   {"role": "user", "content": prompt}],
+                      "max_tokens": max_tokens, "temperature": 0.25},
+                timeout=timeout,
+            )
+            if resp.status_code == 429:
+                wait = float(resp.headers.get("retry-after", 60))
+                logger.warning(f"[trade_explainer] Groq 429 — retry-after {wait:.0f}s (attempt {attempt+1}/3)")
+                time.sleep(wait + 1)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
+        except httpx.HTTPStatusError:
+            raise
+        except Exception as exc:
+            logger.warning(f"[trade_explainer] Groq call failed: {exc}")
+            return ""
+    logger.warning("[trade_explainer] Groq: 3 retries exhausted — using template fallback")
+    return ""
 
 
 # ── ETA to first target ────────────────────────────────────────────────────────
@@ -274,16 +298,18 @@ def build_hold_analysis(symbol: str, side: str, entry: float, current: float,
                         stop: float, target_1: float, target_2: float,
                         pnl: float, pnl_pct: float, days_held: int,
                         hub: dict | None, strategy: str,
-                        reasoning: str = "") -> str:
+                        reasoning: str = "", use_llm: bool = False) -> str:
     """Open position monitoring note: 'Why Still Holding + What to Watch'.
 
-    Called for each OPEN trade during every journal sync so the hold analysis
-    stays current with latest prices and hub scores.
+    Always uses the deterministic template — called on every 5-min sync tick for
+    every open position, so LLM mode is off by default to protect RPD quota.
+    Pass use_llm=True only when generating a one-off note outside of sync.
     """
     template = _hold_template(symbol, side, entry, current, stop, target_1, target_2,
                               pnl, pnl_pct, days_held, hub, strategy)
 
-    if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
+    if not use_llm or not getattr(settings, "SHEET_LOG_USE_LLM", False) \
+            or not getattr(settings, "GROQ_API_KEY", ""):
         return template
 
     hub_txt  = ", ".join(f"{k}={v:+.0f}" for k, v in (hub or {}).items())
