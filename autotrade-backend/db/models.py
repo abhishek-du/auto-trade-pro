@@ -919,10 +919,13 @@ class AgentDecision(Base):
     reasons:     Mapped[list]         = mapped_column(JSON,  nullable=False, default=list)
     macro_bias:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
     fund_score:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
-    skip_reason: Mapped[str | None]   = mapped_column(String(100), nullable=True)
-    is_paper:    Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
-    order_id:    Mapped[str | None]   = mapped_column(String(60),  nullable=True)
-    created_at:  Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    skip_reason:        Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    is_paper:           Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
+    order_id:           Mapped[str | None]   = mapped_column(String(60),  nullable=True)
+    # Audit columns added for multiplicative-confidence pipeline (hub 7-factor)
+    master_score:       Mapped[float | None] = mapped_column(Float,  nullable=True)
+    confidence_factors: Mapped[dict | None]  = mapped_column(JSON,   nullable=True)
+    created_at:         Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     def __repr__(self) -> str:
         return f"<AgentDecision {self.action} {self.symbol} conf={self.confidence} {self.strategy}>"

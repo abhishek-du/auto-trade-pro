@@ -56,6 +56,8 @@ class AgentExecutionManager:
             reasons=decision.reasons,
             macro_bias=decision.macro_bias,
             fund_score=decision.fund_score,
+            master_score=getattr(decision, "master_score", None),
+            confidence_factors=getattr(decision, "confidence_factors", None),
             is_paper=True,
             order_id=order_id,
         )

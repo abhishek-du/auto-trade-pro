@@ -920,12 +920,14 @@ def run_master_intelligence_cycle():
                             )
                             if candidate is None:
                                 continue
-                            decision = de.fuse(
+                            decision, _reject = de.fuse(
                                 symbol=stock.symbol, candidate=candidate, regime=stock.regime,
                                 macro_bias=ctx.macro.total_macro_bias, fund_score=0,
                                 fund_grade=stock.fund_grade, equity=portfolio.equity,
                             )
                             if decision is None:
+                                if _reject:
+                                    logger.debug(f"[hub] {stock.symbol} fuse-filtered: {_reject}")
                                 continue
                             ok, why = rm.can_take_trade(candidate, portfolio.equity)
                             if not ok:

@@ -310,8 +310,8 @@ async def _process_symbol(
     if not hub_override:
         candidate = _selector.propose(symbol, df, features, macro_bias, fund_grade)
 
-    # 5. Decision fusion (risk + position sizing + bear-case check)
-    decision = _decision.fuse(
+    # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
+    decision, reject_reason = _decision.fuse(
         symbol=symbol,
         candidate=candidate,
         regime=features.regime,
@@ -322,14 +322,21 @@ async def _process_symbol(
     )
 
     if decision is None:
-        skip_reason = (
-            f"no_qualifying_setup" if candidate is None
-            else f"decision_filtered:conf={candidate.confidence}"
-        )
         logger.debug(
-            f"[agent] SKIP {symbol} | {skip_reason} | regime={features.regime}"
+            f"[agent] SKIP {symbol} | {reject_reason} | regime={features.regime}"
             + (" | hub_override" if hub_override else "")
         )
+        if candidate is not None:
+            # Log every fuse()-level rejection to agent_decisions for audit
+            await _log_skipped_decision(
+                symbol=symbol,
+                candidate=candidate,
+                regime=features.regime,
+                macro_bias=macro_bias,
+                fund_score=fund_score,
+                drop_reason=reject_reason or "decision_filtered",
+                session=session,
+            )
         return None
 
     # 6. Risk Manager veto
@@ -340,7 +347,16 @@ async def _process_symbol(
 
     if not risk_ok:
         logger.info(f"[agent] BLOCKED {symbol} | {risk_reason} | {decision.strategy}")
-        await _log_skipped_decision(symbol, decision, risk_reason, session)
+        await _log_skipped_decision(
+            symbol=symbol,
+            candidate=candidate,
+            regime=features.regime,
+            macro_bias=macro_bias,
+            fund_score=fund_score,
+            drop_reason=risk_reason,
+            session=session,
+            decision=decision,
+        )
         return None
 
     # 7. Execute
@@ -452,27 +468,38 @@ async def _fetch_hub_scores(universe: list[str], session: AsyncSession) -> dict[
 
 async def _log_skipped_decision(
     symbol: str,
-    decision,
-    risk_reason: str,
+    drop_reason: str,
     session: AsyncSession,
+    candidate=None,
+    regime: str = "",
+    macro_bias: int = 0,
+    fund_score: int = 0,
+    decision=None,  # AgentDecisionOutput, populated when risk-manager blocked
 ) -> None:
+    """Log every rejected trade to agent_decisions before dropping."""
     try:
         from db.models import AgentDecision
+
+        # Use decision fields when available (risk-manager block), else candidate fields
+        src = decision if decision is not None else candidate
+
         db_dec = AgentDecision(
             symbol=symbol,
-            action=decision.action,
-            confidence=decision.confidence,
-            regime=decision.regime,
-            strategy=decision.strategy,
-            entry=decision.entry,
-            stop=decision.stop,
-            target=decision.target,
+            action=getattr(src, "action", None) or getattr(src, "side", "SKIP"),
+            confidence=getattr(src, "confidence", 0),
+            regime=getattr(decision, "regime", regime),
+            strategy=getattr(src, "strategy", ""),
+            entry=getattr(src, "entry", None),
+            stop=getattr(src, "stop", None),
+            target=getattr(src, "target", None),
             qty=0,
-            risk_pct=decision.risk_pct,
-            reasons=decision.reasons,
-            macro_bias=decision.macro_bias,
-            fund_score=decision.fund_score,
-            skip_reason=risk_reason,
+            risk_pct=getattr(src, "risk_pct", 0.0),
+            reasons=getattr(src, "reasons", []),
+            macro_bias=getattr(decision, "macro_bias", macro_bias),
+            fund_score=getattr(decision, "fund_score", fund_score),
+            skip_reason=drop_reason,
+            master_score=getattr(src, "master_score", None),
+            confidence_factors=getattr(decision, "confidence_factors", None),
             is_paper=settings.AGENT_PAPER_MODE,
             order_id=None,
         )

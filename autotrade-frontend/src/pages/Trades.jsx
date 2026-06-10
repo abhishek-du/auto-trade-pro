@@ -304,18 +304,15 @@ function InvestmentSummary({ wallet, agentStatus, trades }) {
   const roiPct         = ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100;
   const isGain         = totalPnl >= 0;
 
-  // Open counts by source for sub-label context
-  const openTrades   = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
-  const openPaper    = openTrades.filter(t => t.source !== 'agent').length;
-  const openAgent    = openTrades.filter(t => t.source === 'agent').length;
+  const openTrades = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
 
   const cards = [
     {
       label: 'Agent Equity',
       value: fmt(portfolioValue),
       sub:   agentCash !== null
-        ? `Free cash: ${fmt(agentCash)} · ${openPositions} open`
-        : `${openPaper} scan + ${openAgent} AI open`,
+        ? `Free cash: ${fmt(agentCash)} · ${openTrades.length} open`
+        : `${openTrades.length} AI positions open`,
       icon:  Wallet,
       color: 'text-cyan',
       bg:    'bg-cyan/10',
@@ -700,17 +697,11 @@ export default function Trades() {
                         </div>
                       </td>
 
-                      {/* Source badge */}
+                      {/* Source badge — agent is the sole trader */}
                       <td className="px-4 py-3">
-                        {t.source === 'agent' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
-                            <Bot size={9} /> AI
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded bg-cyan/10 text-cyan/70 border border-cyan/20">
-                            SCAN
-                          </span>
-                        )}
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                          <Bot size={9} /> AI
+                        </span>
                       </td>
 
                       {/* Direction */}

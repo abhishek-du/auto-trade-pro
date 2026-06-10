@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     ZERODHA_REDIRECT_URL:  str  = "http://localhost:8000/api/v1/zerodha/callback"
     ZERODHA_ENABLED:       bool = False
     ZERODHA_PAPER_MODE:    bool = True
+    ZERODHA_USER_ID:       str  = ""
+    ZERODHA_PASSWORD:      str  = ""
+    ZERODHA_TOTP_SECRET:   str  = ""
 
     # ── Unified decision router ──────────────────────────────────────────────
     # Single confidence gate used by paper, live, and agent execution paths

@@ -15,9 +15,12 @@ _GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # llama-3.3-70b-versatile free-tier limits: 30 RPM / 1K RPD / 12K TPM
-# We self-throttle to 25 RPM (2.4 s gap) and honour the retry-after header.
+# 2.5 s gap → 24 RPM, safely under 30 RPM.  400 tokens × 24 = 9.6K TPM < 12K TPM.
 _GROQ_MIN_INTERVAL = 2.5   # seconds between calls
 _groq_last_call_ts: float = 0.0
+# Circuit breaker: when daily quota (RPD) is exhausted, skip all remaining calls
+# this session rather than sleeping 200+ s per trade.  Resets each process start.
+_groq_quota_exhausted: bool = False
 
 
 def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
@@ -26,9 +29,13 @@ def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
         return ""
     import time
     import httpx
-    global _groq_last_call_ts
+    global _groq_last_call_ts, _groq_quota_exhausted
 
-    # Pace calls to ≤25 RPM
+    # Skip immediately if we already know the daily quota is gone
+    if _groq_quota_exhausted:
+        return ""
+
+    # Pace calls to ≤24 RPM
     gap = _groq_last_call_ts + _GROQ_MIN_INTERVAL - time.monotonic()
     if gap > 0:
         time.sleep(gap)
@@ -48,7 +55,19 @@ def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
             )
             if resp.status_code == 429:
                 wait = float(resp.headers.get("retry-after", 60))
-                logger.warning(f"[trade_explainer] Groq 429 — retry-after {wait:.0f}s (attempt {attempt+1}/3)")
+                if wait > 60:
+                    # retry-after > 60 s = daily RPD quota exhausted, not a burst spike.
+                    # Trip the circuit breaker so we stop trying for the rest of this run.
+                    _groq_quota_exhausted = True
+                    logger.warning(
+                        f"[trade_explainer] Groq RPD quota exhausted (retry-after {wait:.0f}s) "
+                        f"— switching to template notes for this session"
+                    )
+                    return ""
+                logger.warning(
+                    f"[trade_explainer] Groq 429 burst — retry-after {wait:.0f}s "
+                    f"(attempt {attempt+1}/3)"
+                )
                 time.sleep(wait + 1)
                 continue
             resp.raise_for_status()
@@ -264,7 +283,8 @@ def build_expert_note(symbol: str, direction: str, entry: float, stop: float,
     template = _entry_template(symbol, direction, entry, stop, target_1, target_2,
                                confidence, hub, reasoning, strategy, regime)
 
-    if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    if not _llm_ok:
         return template
 
     hub_txt = ", ".join(f"{k}={v:+.0f}" for k, v in (hub or {}).items())
@@ -308,8 +328,8 @@ def build_hold_analysis(symbol: str, side: str, entry: float, current: float,
     template = _hold_template(symbol, side, entry, current, stop, target_1, target_2,
                               pnl, pnl_pct, days_held, hub, strategy)
 
-    if not use_llm or not getattr(settings, "SHEET_LOG_USE_LLM", False) \
-            or not getattr(settings, "GROQ_API_KEY", ""):
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    if not use_llm or not _llm_ok:
         return template
 
     hub_txt  = ", ".join(f"{k}={v:+.0f}" for k, v in (hub or {}).items())
@@ -345,10 +365,10 @@ def build_postmortem_note(symbol: str, direction: str, entry: float, exit_price:
     template = _postmortem_template(symbol, direction, entry, exit_price, pnl,
                                     pnl_pct, reason, target_achieved, duration)
 
-    if not getattr(settings, "SHEET_LOG_USE_LLM", False) or not getattr(settings, "GROQ_API_KEY", ""):
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    if not _llm_ok:
         return template
 
-    outcome = "profit" if pnl >= 0 else "loss"
     prompt = f"""You are a senior Indian equity trader writing a post-mortem for a closed trade.
 Write 4-5 sentences of professional analysis. Be honest — if it was a loss, explain what failed.
 If it was a profit, explain what worked. One concrete lesson at the end.

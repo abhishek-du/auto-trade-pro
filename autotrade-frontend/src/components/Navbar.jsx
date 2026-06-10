@@ -111,7 +111,7 @@ function LiveClock() {
 
 function BalanceTicker({ portfolio }) {
   if (!portfolio) return <span className="text-muted text-sm">Loading…</span>;
-  const balance  = portfolio.balance ?? 0;
+  const balance  = portfolio.equity ?? portfolio.balance ?? 0;
   const pnl      = (portfolio.realised_pnl ?? 0) + (portfolio.unrealised_pnl ?? 0);
   const pct      = portfolio.roi_percent ?? 0;
   const positive = pnl >= 0;
@@ -162,16 +162,31 @@ function ZerodhaTokenBanner() {
     return () => clearInterval(id);
   }, []);
 
-  // Only show warning if token valid but expires within 60 min
-  if (!token?.valid || token.hours_remaining > 1) return null;
+  if (!token) return null;
 
-  const mins = Math.round(token.hours_remaining * 60);
+  const expired = !token.valid;
+  const nearExpiry = token.valid && token.hours_remaining <= 1;
+  if (!expired && !nearExpiry) return null;
+
+  const mins = token.valid ? Math.round(token.hours_remaining * 60) : 0;
 
   async function handleClick() {
     try {
       const { url } = await getZerodhaLoginUrl();
       window.open(url, '_blank', 'noopener');
     } catch { /* ignore */ }
+  }
+
+  if (expired) {
+    return (
+      <button
+        onClick={handleClick}
+        className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-red-500/50 bg-red-500/10 text-red-400 text-xs font-semibold hover:bg-red-500/20 transition-all animate-pulse"
+      >
+        <Zap size={12} />
+        Zerodha token expired — click to refresh
+      </button>
+    );
   }
 
   return (
@@ -292,8 +307,8 @@ export default function Navbar({ onSearchOpen }) {
               <Search size={18} />
             </button>
           )}
-          {/* Token warning — only when relevant; hide on the smallest screens */}
-          <div className="hidden sm:block"><ZerodhaTokenBanner /></div>
+          {/* Token warning — always visible when expired, hidden on xs when near-expiry only */}
+          <ZerodhaTokenBanner />
           {/* Expiry countdown — desktop only */}
           <div className="hidden xl:block"><ExpiryCountdown /></div>
           {/* Market status dots — large screens */}

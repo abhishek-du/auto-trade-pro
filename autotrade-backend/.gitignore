@@ -50,6 +50,13 @@ Thumbs.db
 # ── Alembic generated ─────────────────────────────────────────────────────────
 db/migrations/versions/
 celerybeat-schedule
+celerybeat-schedule.db
+
+# ── Local DB dumps (large binary/SQL — restore via scripts/migrate_to_local_db.sh) ──
+db/init/*.sql
+
+# ── Env backups (contain credentials) ─────────────────────────────────────────
+.env*.bak
 
 # ── Trade journal / Google auth ───────────────────────────────────────────────
 logs/trade_journal.xlsx
