@@ -13,10 +13,12 @@ class TradeCandidate:
     entry:      float
     stop:       float
     target:     float
-    confidence: int        # 0-100
-    reasons:    list = field(default_factory=list)
-    strategy:   str  = "base"
-    timeframe:  str  = "15m"
+    confidence:   int        # 0-100
+    reasons:      list  = field(default_factory=list)
+    strategy:     str   = "base"
+    timeframe:    str   = "15m"
+    size_factor:  float = 1.0   # 0.5 for RANGE regimes, 1.0 otherwise
+    master_score: float | None = None  # raw hub score (−100 to +100)
 
     @property
     def risk_reward(self) -> float:

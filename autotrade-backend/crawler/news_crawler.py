@@ -69,6 +69,35 @@ _UNCERTAINTY_PHRASES  = [
     "wait-and-see", "cautious ahead", "on hold",
 ]
 
+# Indian broker recommendation patterns — FinBERT cannot parse these correctly.
+# Headlines follow: "{Action} {Stock}; target of Rs {N}: {Broker}"
+# We detect the leading action word and score directly, bypassing FinBERT.
+_INDIA_BUY_WORDS  = frozenset({
+    "buy", "strong buy", "add", "accumulate", "outperform", "overweight",
+    "reiterate buy", "maintain buy", "upgrade", "top pick",
+})
+_INDIA_SELL_WORDS = frozenset({
+    "sell", "reduce", "underperform", "underweight", "avoid",
+    "downgrade", "exit", "book profit",
+})
+
+
+def _india_broker_score(headline: str) -> "dict | None":
+    """Detect Indian broker recommendation headlines and score them directly.
+
+    Returns a scored dict when the headline starts with a known action word,
+    or None to fall through to FinBERT.  Score magnitude is 0.75 (strong signal
+    but below 1.0 to leave room for earnings/macro context).
+    """
+    lower = headline.lower().lstrip()
+    for word in _INDIA_BUY_WORDS:
+        if lower.startswith(word + " ") or lower.startswith(word + ":"):
+            return {"sentiment": "positive", "score": 0.75, "confidence": 0.75}
+    for word in _INDIA_SELL_WORDS:
+        if lower.startswith(word + " ") or lower.startswith(word + ":"):
+            return {"sentiment": "negative", "score": -0.75, "confidence": 0.75}
+    return None
+
 
 def _is_uncertain(headline: str) -> bool:
     """Return True for wait-and-see headlines FinBERT mis-scores as directional."""
@@ -630,6 +659,11 @@ class SentimentAnalyser:
         if not self._available:
             return _keyword_score(headline)
 
+        # Guard 0: Indian broker recommendation format — FinBERT mis-scores these
+        broker_result = _india_broker_score(headline)
+        if broker_result is not None:
+            return broker_result
+
         # Guard 1: uncertainty/consolidation headlines → neutral
         if _is_uncertain(headline):
             return {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}
@@ -689,6 +723,8 @@ class SentimentAnalyser:
                     slot_results.append(
                         {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
                     )
+                elif _india_broker_score(h) is not None:
+                    slot_results.append(_india_broker_score(h))
                 elif _is_uncertain(h):
                     slot_results.append(
                         {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}

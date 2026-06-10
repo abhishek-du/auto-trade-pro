@@ -426,9 +426,7 @@ def _agent_hold_update(trade: AgentTrade, current_price: float,
         strategy=trade.strategy or "HUB_SIGNAL",
     )
     return {
-        "expert_note":  analysis,
-        "live_pnl_rs":  round(pnl, 0),
-        "live_pnl_pct": round(pnl_pct, 2),
+        "expert_note": analysis,
     }
 
 
@@ -633,41 +631,44 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
          "Total Unrealized P&L ₹",
          f"=IFERROR(SUMIF('{T}'!{st_c}2:{st_c},\"OPEN\",'{T}'!{lpnl_c}2:{lpnl_c}),0)",
          "", ""],
+        ["Total Closed",
+         f"=COUNTIFS('{T}'!{st_c}2:{st_c},\"<>OPEN\",'{T}'!{st_c}2:{st_c},\"<>\")",
+         "",
+         "",
+         "Best Trade ₹",
+         f'=IFERROR(IF(COUNTIFS(\'{T}\'!{st_c}2:{st_c},"<>OPEN",\'{T}\'!{st_c}2:{st_c},"<>")=0,"—",MAX(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
+         "", ""],
         ["Closed (Profit)",
          f"=COUNTIFS('{T}'!{st_c}2:{st_c},\"<>OPEN\",'{T}'!{pnl_c}2:{pnl_c},\">0\")",
          "",
          "",
-         "Best Trade ₹",
-         f'=IFERROR(IF(COUNTIF(\'{T}\'!{st_c}2:{st_c},"<>OPEN")=0,"—",MAX(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
+         "Worst Trade ₹",
+         f'=IFERROR(IF(COUNTIFS(\'{T}\'!{st_c}2:{st_c},"<>OPEN",\'{T}\'!{st_c}2:{st_c},"<>")=0,"—",MIN(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
          "", ""],
         ["Closed (Loss)",
          f"=COUNTIFS('{T}'!{st_c}2:{st_c},\"<>OPEN\",'{T}'!{pnl_c}2:{pnl_c},\"<0\")",
          "",
          "",
-         "Worst Trade ₹",
-         f'=IFERROR(IF(COUNTIF(\'{T}\'!{st_c}2:{st_c},"<>OPEN")=0,"—",MIN(\'{T}\'!{pnl_c}2:{pnl_c})),"—")',
-         "", ""],
-        ["Win Rate",
-         f"=IFERROR(TEXT(B7/(B7+B8),\"0.0%\"),\"—\")",
-         "",
-         "",
          "Avg P&L per trade ₹",
          f"=IFERROR(AVERAGEIF('{T}'!{st_c}2:{st_c},\"<>OPEN\",'{T}'!{pnl_c}2:{pnl_c}),\"—\")",
          "", ""],
-        ["BUY trades",
-         f"=COUNTIF('{T}'!{dir_c}2:{dir_c},\"BUY\")",
+        ["Win Rate",
+         f"=IFERROR(TEXT(B8/(B8+B9),\"0.0%\"),\"—\")",
          "",
          "",
          "Avg Hold Duration (days)",
          f"=IFERROR(ROUND(AVERAGEIF('{T}'!{days_c}2:{days_c},\"<>—\",'{T}'!{days_c}2:{days_c}),1),\"—\")",
          "", ""],
-        ["SELL trades",
-         f"=COUNTIF('{T}'!{dir_c}2:{dir_c},\"SELL\")",
+        ["BUY trades",
+         f"=COUNTIF('{T}'!{dir_c}2:{dir_c},\"BUY\")",
          "",
          "",
          "Avg Confidence %",
          f"=IFERROR(ROUND(AVERAGE('{T}'!{conf_c}2:{conf_c}),1),\"—\")",
          "", ""],
+        ["SELL trades",
+         f"=COUNTIF('{T}'!{dir_c}2:{dir_c},\"SELL\")",
+         "", "", "", "", "", ""],
         ["", "", "", "", "", "", "", ""],
 
         # Row 13: Live open positions
@@ -722,47 +723,47 @@ def _add_summary_sheet(sh, trades_ws_title="Trades"):
         _repeat(ws_id, 3, 4, 0, n,
             _cell_fmt(bg=_rgb(30,41,59), fg=C_HEADER_FG, bold=True),
             "backgroundColor,textFormat"),
-        _repeat(ws_id, 12, 13, 0, n,
+        _repeat(ws_id, 13, 14, 0, n,
             _cell_fmt(bg=_rgb(6,78,59), fg=_rgb(209,250,229), bold=True),
             "backgroundColor,textFormat"),
-        _repeat(ws_id, 24, 25, 0, n,
+        _repeat(ws_id, 25, 26, 0, n,
             _cell_fmt(bg=_rgb(30,41,59), fg=C_HEADER_FG, bold=True),
             "backgroundColor,textFormat"),
-        # Column header row (row 14) for open positions
-        _repeat(ws_id, 13, 14, 0, n,
+        # Column header row for open positions
+        _repeat(ws_id, 14, 15, 0, n,
             _cell_fmt(bg=_rgb(51,65,85), fg=C_HEADER_FG, bold=True, halign="CENTER"),
             "backgroundColor,textFormat,horizontalAlignment"),
         # Open positions rows alternate shading
-        _repeat(ws_id, 14, 22, 0, n,
+        _repeat(ws_id, 15, 23, 0, n,
             _cell_fmt(halign="CENTER"), "horizontalAlignment"),
-        # Number formats — KPI value column (F, col 5): ₹ currency with commas
+        # Number formats — KPI value column (F, col 5): ₹ currency with commas (rows 5-12)
         {"repeatCell": {
-            "range": {"sheetId": ws_id, "startRowIndex": 4, "endRowIndex": 11,
+            "range": {"sheetId": ws_id, "startRowIndex": 4, "endRowIndex": 12,
                       "startColumnIndex": 5, "endColumnIndex": 6},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
             "fields": "userEnteredFormat.numberFormat"}},
         # Open positions: Live P&L ₹ (col E = idx 4) → comma-separated integer
         {"repeatCell": {
-            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+            "range": {"sheetId": ws_id, "startRowIndex": 15, "endRowIndex": 23,
                       "startColumnIndex": 4, "endColumnIndex": 5},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}},
             "fields": "userEnteredFormat.numberFormat"}},
         # Open positions: Live P&L % (col F = idx 5) → 0.46 shown as "0.46%" (literal %)
         {"repeatCell": {
-            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+            "range": {"sheetId": ws_id, "startRowIndex": 15, "endRowIndex": 23,
                       "startColumnIndex": 5, "endColumnIndex": 6},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": '0.00"%"'}}},
             "fields": "userEnteredFormat.numberFormat"}},
         # Open positions: Entry ₹ and Live ₹ (cols C,D = idx 2,3) → 2 decimal places
         {"repeatCell": {
-            "range": {"sheetId": ws_id, "startRowIndex": 14, "endRowIndex": 22,
+            "range": {"sheetId": ws_id, "startRowIndex": 15, "endRowIndex": 23,
                       "startColumnIndex": 2, "endColumnIndex": 4},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}}},
             "fields": "userEnteredFormat.numberFormat"}},
         # Sparkline row height
         {"updateDimensionProperties": {
             "range": {"sheetId": ws_id, "dimension": "ROWS",
-                      "startIndex": 25, "endIndex": 26},
+                      "startIndex": 26, "endIndex": 27},
             "properties": {"pixelSize": 140}, "fields": "pixelSize"}},
         # Column widths for summary
         {"updateDimensionProperties": {
@@ -1225,6 +1226,9 @@ class GoogleSheetsSink:
         ws, _ = self._worksheet()
         for k, v in partial.items():
             if k not in _CI:
+                continue
+            # Do not overwrite live formulas in Google Sheets.
+            if k in {"live_price", "live_pnl_rs", "live_pnl_pct", "days_held"}:
                 continue
             col = _CI[k] + 1  # 1-based
             # Numeric fields must use numberValue so SUMIF/COUNTIFS treat them as

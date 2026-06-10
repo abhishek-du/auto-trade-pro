@@ -60,18 +60,74 @@ def _get_sector_for_symbol(symbol: str) -> str:
         if symbol in stocks or clean in stocks or f"{clean}.NS" in stocks:
             return sector_key
     FALLBACK = {
+        # Banking & Finance
         "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking",
         "AXISBANK": "Banking", "KOTAKBANK": "Banking", "INDUSINDBK": "Banking",
-        "BAJFINANCE": "Banking",
+        "BAJFINANCE": "Banking", "BAJAJFINSV": "Banking", "HDFCLIFE": "Banking",
+        "SBILIFE": "Banking", "ICICIPRULI": "Banking", "CHOLAFIN": "Banking",
+        "MUTHOOTFIN": "Banking", "MANAPPURAM": "Banking", "LICHSGFIN": "Banking",
+        "PNBHOUSING": "Banking", "IIFL": "Banking", "M&MFIN": "Banking",
+        "FEDERALBNK": "Banking", "IDFCFIRSTB": "Banking", "BANDHANBNK": "Banking",
+        "AUBANK": "Banking", "KARURVYSYA": "Banking", "CANBK": "Banking",
+        "BANKBARODA": "Banking", "PNB": "Banking", "UNIONBANK": "Banking",
+        "CENTRALBANK": "Banking", "IOB": "Banking", "MAHABANK": "Banking",
+        # IT
         "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
+        "LTIM": "IT", "MPHASIS": "IT", "COFORGE": "IT", "PERSISTENT": "IT",
+        "OFSS": "IT", "HEXAWARE": "IT", "KPITTECH": "IT", "MASTEK": "IT",
+        "TATAELXSI": "IT", "ZENSAR": "IT", "NIIT": "IT", "RATEGAIN": "IT",
+        # Energy & Oil Gas
         "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy", "NTPC": "Energy",
-        "POWERGRID": "Energy",
-        "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma", "DIVISLAB": "Pharma",
+        "POWERGRID": "Energy", "ADANIGREEN": "Energy", "ADANIPOWER": "Energy",
+        "TATAPOWER": "Energy", "TORNTPOWER": "Energy", "CESC": "Energy",
+        "COAL INDIA": "Energy", "COALINDIA": "Energy", "IOC": "Energy",
+        "HINDPETRO": "Energy", "GAIL": "Energy", "PETRONET": "Energy",
+        "MRPL": "Energy", "OIL": "Energy", "ADANITRANS": "Energy",
+        # Pharma & Healthcare
+        "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma",
+        "DIVISLAB": "Pharma", "BIOCON": "Pharma", "TORNTPHARM": "Pharma",
+        "ALKEM": "Pharma", "AUROPHARMA": "Pharma", "GLENMARK": "Pharma",
+        "LUPIN": "Pharma", "IPCA": "Pharma", "ABBOTINDIA": "Pharma",
+        "PFIZER": "Pharma", "SANOFI": "Pharma", "APOLLOHOSP": "Pharma",
+        "MAXHEALTH": "Pharma", "FORTIS": "Pharma", "NARAYANA": "Pharma",
+        "LALPATHLAB": "Pharma", "METROPOLIS": "Pharma", "DRLABERATIO": "Pharma",
+        "DRREDDYS": "Pharma",
+        # FMCG
         "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "DABUR": "FMCG",
-        "MARUTI": "Auto", "TATAMOTORS": "Auto", "BAJAJ-AUTO": "Auto", "EICHERMOT": "Auto",
+        "MARICO": "FMCG", "COLPAL": "FMCG", "BRITANNIA": "FMCG", "GODREJCP": "FMCG",
+        "EMAMILTD": "FMCG", "TATACONSUM": "FMCG", "VBL": "FMCG", "RADICO": "FMCG",
+        "UNITDSPR": "FMCG", "MCDOWELL-N": "FMCG",
+        # Auto
+        "MARUTI": "Auto", "TATAMOTORS": "Auto", "BAJAJ-AUTO": "Auto",
+        "EICHERMOT": "Auto", "HEROMOTOCO": "Auto", "TVSMOTORS": "Auto",
+        "MOTHERSON": "Auto", "BOSCHLTD": "Auto", "BALKRISIND": "Auto",
+        "EXIDEIND": "Auto", "AMARAJABAT": "Auto", "MRF": "Auto",
+        "APOLLOTYRE": "Auto", "CEATLTD": "Auto", "TIINDIA": "Auto",
+        "SCHAEFFLER": "Auto", "ENDURANCE": "Auto", "EIHOTEL": "Auto",
+        "MAHINDRA": "Auto", "M&M": "Auto", "ASHOKLEY": "Auto", "SML ISUZU": "Auto",
+        # Metals & Mining
         "TATASTEEL": "Metals", "HINDALCO": "Metals", "JSWSTEEL": "Metals",
-        "LT": "Infra", "ULTRACEMCO": "Infra",
-        "BHARTIARTL": "Telecom",
+        "SAIL": "Metals", "NMDC": "Metals", "VEDL": "Metals", "NATIONALUM": "Metals",
+        "APLAPOLLO": "Metals", "RATNAMANI": "Metals", "JINDALSAW": "Metals",
+        "WELCORP": "Metals", "HIKAL": "Metals",
+        # Infra & Construction & Real Estate
+        "LT": "Infra", "ULTRACEMCO": "Infra", "AMBUJACEMENT": "Infra",
+        "SHREECEM": "Infra", "ACC": "Infra", "DALMIA": "Infra",
+        "NAUKRI": "Infra", "DLF": "Infra", "GODREJPROP": "Infra",
+        "PHOENIXLTD": "Infra", "PRESTIGE": "Infra", "BRIGADE": "Infra",
+        "OBEROIRLTY": "Infra", "SOBHA": "Infra", "MFSL": "Infra",
+        "IRB": "Infra", "KPRMILL": "Infra", "GMRINFRA": "Infra",
+        "ADANIPORTS": "Infra", "CONCOR": "Infra",
+        # Consumer & Discretionary
+        "TITAN": "Consumer", "PAGEIND": "Consumer", "TRENT": "Consumer",
+        "DMART": "Consumer", "SHOPERSTOP": "Consumer", "BATA": "Consumer",
+        "RELAXO": "Consumer", "VMART": "Consumer", "ZOMATO": "Consumer",
+        "SWIGGY": "Consumer", "NYKAA": "Consumer", "INDIAMART": "Consumer",
+        "JUSTDIAL": "Consumer", "EASEMYTRIP": "Consumer", "IXIGO": "Consumer",
+        "PVRINOX": "Consumer", "INOXWIND": "Consumer",
+        # Telecom
+        "BHARTIARTL": "Telecom", "INDUSTOWER": "Telecom", "IDEA": "Telecom",
+        "TATACOMM": "Telecom", "HFCL": "Telecom",
     }
     return FALLBACK.get(clean, "GENERAL")
 

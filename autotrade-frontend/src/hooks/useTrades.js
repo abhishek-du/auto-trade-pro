@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getTrades, apiFetch } from '../api/client';
+import { apiFetch } from '../api/client';
 
 function normalizeAgentTrade(t) {
   const notional = (t.qty ?? 0) * (t.entry_price ?? 0);
@@ -39,28 +39,10 @@ export function useTrades(pollInterval = 15000) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [paperRaw, agentRaw] = await Promise.allSettled([
-        getTrades(),
-        apiFetch('/api/v1/agent/trades?limit=500'),
-      ]);
-
-      const paper = paperRaw.status === 'fulfilled'
-        ? (Array.isArray(paperRaw.value) ? paperRaw.value : paperRaw.value?.trades ?? []).map(t => ({ ...t, source: 'scanner' }))
-        : [];
-
-      const agent = agentRaw.status === 'fulfilled'
-        ? (Array.isArray(agentRaw.value) ? agentRaw.value : []).map(normalizeAgentTrade)
-        : [];
-
-      // Merge: agent trades first (most recent), then scanner trades
-      // Sort by opened_at descending
-      const merged = [...agent, ...paper].sort((a, b) => {
-        const ta = new Date(a.opened_at ?? 0).getTime();
-        const tb = new Date(b.opened_at ?? 0).getTime();
-        return tb - ta;
-      });
-
-      setTrades(merged);
+      const raw = await apiFetch('/api/v1/agent/trades?limit=500');
+      const agent = (Array.isArray(raw) ? raw : []).map(normalizeAgentTrade);
+      agent.sort((a, b) => new Date(b.opened_at ?? 0) - new Date(a.opened_at ?? 0));
+      setTrades(agent);
       setError(null);
     } catch (err) {
       setError(err);
