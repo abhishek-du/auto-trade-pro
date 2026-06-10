@@ -153,42 +153,96 @@ function InvestCard({ tradeSetup, ltp, signal }) {
 
 // ── Intelligence chip card ─────────────────────────────────────────────────────
 
-function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded }) {
+function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded, explanation }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetail = !!explanation;
+
   if (noData || excluded) {
     return (
-      <div className="bg-card border border-border rounded-xl p-4 opacity-50">
+      <div
+        className={`bg-card border border-border rounded-xl p-4 transition-all ${hasDetail ? 'cursor-pointer hover:border-slate-600/80' : 'opacity-50'}`}
+        onClick={() => hasDetail && setExpanded(e => !e)}
+      >
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-1.5">
             {Icon && <Icon size={12} className="text-muted" />}
             <span className="text-[10px] text-muted uppercase tracking-wider">{label}</span>
           </div>
-          <span className="w-2 h-2 rounded-full shrink-0 bg-slate-600" />
+          {hasDetail
+            ? <ChevronDown size={11} className={`text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
+            : <span className="w-2 h-2 rounded-full shrink-0 bg-slate-600" />
+          }
         </div>
-        <div className="text-base font-bold leading-tight text-slate-500">No data</div>
-        <div className="text-[10px] text-muted mt-2 leading-snug">
-          {excluded ? 'No data · excluded from score' : 'Not in tracked universe'}
+        <div className="text-sm font-bold leading-tight text-slate-400">
+          {explanation?.verdict || 'No data'}
         </div>
+        {explanation && (
+          <div className="text-[10px] text-muted mt-1 leading-snug">
+            {explanation.weight_pct}% weight · {explanation.contribution > 0 ? '+' : ''}{explanation.contribution} pts
+          </div>
+        )}
+        {!hasDetail && (
+          <div className="text-[10px] text-muted mt-2 leading-snug">
+            {excluded ? 'Excluded from score' : 'Not in tracked universe'}
+          </div>
+        )}
+        {expanded && explanation && (
+          <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+            <div className="text-[11px] text-slate-300 leading-relaxed">{explanation.detail}</div>
+            {(explanation.headlines || []).slice(0, 2).map((h, i) => (
+              <div key={i} className="flex gap-1.5 text-[10px] text-muted">
+                <span className="text-cyan shrink-0 mt-0.5">›</span><span>{h}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
-  const norm = Math.max(0, Math.min(100, 50 + (rawScore ?? 0)));
-  const isPos  = (rawScore ?? 0) >= 10;
-  const isNeg  = (rawScore ?? 0) <= -10;
-  const color  = isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-amber-400';
-  const border = isPos ? 'hover:border-emerald-500/40' : isNeg ? 'hover:border-red-500/40' : 'hover:border-amber-500/40';
+
+  const norm    = Math.max(0, Math.min(100, 50 + (rawScore ?? 0)));
+  const isPos   = (rawScore ?? 0) >= 10;
+  const isNeg   = (rawScore ?? 0) <= -10;
+  const color   = isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-amber-400';
+  const border  = isPos ? 'hover:border-emerald-500/40' : isNeg ? 'hover:border-red-500/40' : 'hover:border-amber-500/40';
   const verdict = isPos ? 'Bullish' : isNeg ? 'Bearish' : 'Neutral';
+
   return (
-    <div className={`bg-card border border-border ${border} rounded-xl p-4 transition-colors cursor-pointer`}>
+    <div
+      className={`bg-card border border-border ${border} rounded-xl p-4 transition-colors ${hasDetail ? 'cursor-pointer' : ''}`}
+      onClick={() => hasDetail && setExpanded(e => !e)}
+    >
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-1.5">
           {Icon && <Icon size={12} className="text-muted" />}
           <span className="text-[10px] text-muted uppercase tracking-wider">{label}</span>
         </div>
-        <span className={`w-2 h-2 rounded-full shrink-0 ${isPos ? 'bg-emerald-400' : isNeg ? 'bg-red-400' : 'bg-amber-400'}`} />
+        {hasDetail
+          ? <ChevronDown size={11} className={`text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          : <span className={`w-2 h-2 rounded-full shrink-0 ${isPos ? 'bg-emerald-400' : isNeg ? 'bg-red-400' : 'bg-amber-400'}`} />
+        }
       </div>
       <div className={`text-base font-bold leading-tight ${color}`}>{verdict}</div>
       <DotMeter value={norm} colorClass={color} />
-      {note && <div className="text-[10px] text-muted mt-2 leading-snug line-clamp-2">{note}</div>}
+      {note && !expanded && <div className="text-[10px] text-muted mt-2 leading-snug line-clamp-2">{note}</div>}
+      {expanded && explanation && (
+        <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+          <div className="flex items-center gap-3 text-[10px] flex-wrap">
+            <span className="text-muted">Score:</span>
+            <span className={`font-mono font-bold ${color}`}>{explanation.score > 0 ? '+' : ''}{explanation.score}</span>
+            <span className="text-muted">Weight:</span>
+            <span className="text-slate-300">{explanation.weight_pct}%</span>
+            <span className="text-muted">Impact:</span>
+            <span className={`font-mono font-bold ${color}`}>{explanation.contribution > 0 ? '+' : ''}{explanation.contribution} pts</span>
+          </div>
+          <div className="text-[11px] text-slate-300 leading-relaxed">{explanation.detail}</div>
+          {(explanation.headlines || []).slice(0, 2).map((h, i) => (
+            <div key={i} className="flex gap-1.5 text-[10px] text-muted">
+              <span className="text-cyan shrink-0 mt-0.5">›</span><span>{h}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -890,6 +944,11 @@ export default function StockDetail() {
       <section className="px-5 pb-6" style={{ background: '#080D1A' }}>
         <SectionLabel>
           Section 3 · Intelligence snapshot
+          {!verdictPending && isTracked && (
+            <span className="ml-auto text-[10px] text-muted font-normal normal-case tracking-normal">
+              Click any factor for detailed explanation
+            </span>
+          )}
           {!verdictPending && !isTracked && (
             <span className="ml-auto text-[10px] text-amber-400/90 font-normal normal-case tracking-normal">
               Technical-only — symbol not in hub universe
@@ -902,14 +961,52 @@ export default function StockDetail() {
           </div>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            {/* Technical works for every symbol — from hub score, else derived from deep composite. */}
-            <IntelChip label="Technical"    rawScore={isTracked ? comp.technical : (deep?.composite_score ?? 0)} icon={Activity} note={indicators.rsi ? `RSI ${fmt(indicators.rsi,1)} · ${indicators.ema_trend||''}` : null} />
-            <IntelChip label="Fundamentals" rawScore={comp.fundamental}  icon={BookOpen}  noData={!isTracked && !fund} excluded={isTracked && aw.fundamental === 0} note={fund ? `ROE ${fmt(fund.roe)}% · ROCE ${fmt(fund.roce)}%` : null} />
-            <IntelChip label="Sentiment"    rawScore={comp.news}         icon={Zap}       noData={!isTracked} excluded={isTracked && aw.news === 0} note={reasoning.news_tone ? `${reasoning.news_tone}` : null} />
-            <IntelChip label="Sector"       rawScore={comp.sector}       icon={PieChart}  noData={!isTracked} excluded={isTracked && aw.sector === 0} note={reasoning.sector_name ? `${reasoning.sector_name} · ${reasoning.sector_mood||''}` : null} />
-            <IntelChip label="Macro"        rawScore={comp.macro}        icon={BarChart2} noData={!isTracked} note={reasoning.regime ? `Regime: ${reasoning.regime}` : null} />
-            <IntelChip label="Earnings"     rawScore={comp.earnings}     icon={BookOpen}  noData={!isTracked} excluded={isTracked && aw.earnings === 0} note={reasoning.fund_grade ? `Grade: ${reasoning.fund_grade}` : null} />
-            <div className="bg-gradient-to-br from-card to-blue-900/20 border border-cyan/30 rounded-xl p-4 cursor-pointer">
+            <IntelChip label="Technical"
+              rawScore={isTracked ? comp.technical : (deep?.composite_score ?? 0)}
+              icon={Activity}
+              note={indicators.rsi ? `RSI ${fmt(indicators.rsi,1)} · ${indicators.ema_trend||''}` : null}
+              explanation={intel?.factor_explanations?.technical}
+            />
+            <IntelChip label="Fundamentals"
+              rawScore={comp.fundamental}
+              icon={BookOpen}
+              noData={!isTracked && !fund}
+              excluded={isTracked && aw.fundamental === 0}
+              note={fund ? `ROE ${fmt(fund.roe)}% · ROCE ${fmt(fund.roce)}%` : null}
+              explanation={intel?.factor_explanations?.fundamental}
+            />
+            <IntelChip label="Sentiment"
+              rawScore={comp.news}
+              icon={Zap}
+              noData={!isTracked}
+              excluded={isTracked && aw.news === 0}
+              note={reasoning.news_tone ? `${reasoning.news_tone}` : null}
+              explanation={intel?.factor_explanations?.news}
+            />
+            <IntelChip label="Sector"
+              rawScore={comp.sector}
+              icon={PieChart}
+              noData={!isTracked}
+              excluded={isTracked && aw.sector === 0}
+              note={reasoning.sector_name ? `${reasoning.sector_name} · ${reasoning.sector_mood||''}` : null}
+              explanation={intel?.factor_explanations?.sector}
+            />
+            <IntelChip label="Macro"
+              rawScore={comp.macro}
+              icon={BarChart2}
+              noData={!isTracked}
+              note={reasoning.regime ? `Regime: ${reasoning.regime}` : null}
+              explanation={intel?.factor_explanations?.macro}
+            />
+            <IntelChip label="Earnings"
+              rawScore={comp.earnings}
+              icon={BookOpen}
+              noData={!isTracked}
+              excluded={isTracked && aw.earnings === 0}
+              note={reasoning.fund_grade ? `Grade: ${reasoning.fund_grade}` : null}
+              explanation={intel?.factor_explanations?.earnings}
+            />
+            <div className="bg-gradient-to-br from-card to-blue-900/20 border border-cyan/30 rounded-xl p-4">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] text-cyan uppercase tracking-wider font-semibold">Overall</span>
                 <span className={`w-2 h-2 rounded-full shrink-0 ${isBuy ? 'bg-profit' : isSell ? 'bg-loss' : 'bg-amber-400'}`} />
@@ -919,6 +1016,11 @@ export default function StockDetail() {
               </div>
               <DotMeter value={conf ?? 0} colorClass={signalColor} />
               <div className="text-muted text-[10px] mt-2">Conviction {convictionLabel} · score {score != null ? fmt(score,1) : '—'}</div>
+              {isTracked && score != null && (
+                <div className="text-muted text-[10px] mt-1">
+                  7-factor weighted model
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -948,9 +1050,102 @@ export default function StockDetail() {
                 RSI {fmt(indicators.rsi, 1)} ({indicators.rsi_signal || 'neutral'})
               </span>
               {indicators.macd != null && <span>MACD {fmt(indicators.macd, 2)}</span>}
-              {indicators.ema_trend && <span>EMA trend: <span className={indicators.ema_trend === 'BULLISH' ? 'text-profit' : 'text-loss'}>{indicators.ema_trend}</span></span>}
-              {indicators.supertrend && <span>Supertrend: <span className={indicators.supertrend === 'BUY' ? 'text-profit' : 'text-loss'}>{indicators.supertrend}</span></span>}
-              {indicators.bb_position && <span>BB: {indicators.bb_position}</span>}
+              {indicators.ema_trend && <span>EMA: <span className={indicators.ema_trend === 'BULLISH' ? 'text-profit' : 'text-loss'}>{indicators.ema_trend}</span></span>}
+              {indicators.supertrend_dir && <span>Supertrend: <span className={indicators.supertrend_dir === 'BEARISH' ? 'text-loss' : 'text-profit'}>{indicators.supertrend_dir}</span></span>}
+              {indicators.bb_position && <span>BB: {indicators.bb_position.replace('_', ' ')}</span>}
+              {indicators.ichimoku_signal && <span>Ichimoku: <span className={indicators.ichimoku_signal?.includes('BUY') ? 'text-profit' : indicators.ichimoku_signal?.includes('SELL') ? 'text-loss' : 'text-muted'}>{indicators.ichimoku_signal.replace('_', ' ')}</span></span>}
+            </div>
+          )}
+
+          {/* AI Chart Reading */}
+          {deepSettled && (deep?.reasoning || deep?.indicators) && (
+            <div className="mt-4 rounded-xl border border-violet-500/20 p-4" style={{ background: 'rgba(139,92,246,0.04)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Activity size={13} className="text-violet-400" />
+                <span className="text-violet-400 text-[11px] font-bold uppercase tracking-wider">AI Chart Reading</span>
+                <span className="ml-auto text-muted text-[10px] font-mono">{deep.data_source || 'yfinance'} · {deep.as_of?.slice(0,10) || 'today'}</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-[10px] text-muted uppercase tracking-wider mb-2">What the chart is showing</div>
+                  <div className="space-y-1.5">
+                    {[
+                      ...(deep.reasoning?.bullish || []).slice(0, 3).map(b => ({ text: b, type: 'bull' })),
+                      ...(deep.reasoning?.bearish || []).slice(0, 2).map(b => ({ text: b, type: 'bear' })),
+                      ...(deep.reasoning?.neutral || []).slice(0, 1).map(b => ({ text: b, type: 'neut' })),
+                    ].map((item, i) => (
+                      <div key={i} className="flex gap-2 text-[11px]">
+                        <span className={`shrink-0 font-bold ${item.type === 'bull' ? 'text-profit' : item.type === 'bear' ? 'text-loss' : 'text-muted'}`}>
+                          {item.type === 'bull' ? '▲' : item.type === 'bear' ? '▼' : '◦'}
+                        </span>
+                        <span className="text-slate-300 leading-snug">{item.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted uppercase tracking-wider mb-2">Key price levels</div>
+                  <div className="space-y-1.5 text-[11px]">
+                    {ts.target_2 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">Target 2</span>
+                        <span className="text-profit font-mono font-bold">₹{fmt(ts.target_2)}</span>
+                      </div>
+                    )}
+                    {ts.target_1 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">Target 1</span>
+                        <span className="text-profit font-mono font-bold">₹{fmt(ts.target_1)}</span>
+                      </div>
+                    )}
+                    {indicators.supertrend && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">Supertrend</span>
+                        <span className={`font-mono font-bold ${indicators.supertrend_dir === 'BEARISH' ? 'text-loss' : 'text-profit'}`}>
+                          ₹{fmt(indicators.supertrend)} ({indicators.supertrend_dir})
+                        </span>
+                      </div>
+                    )}
+                    {ltp && (
+                      <div className="flex justify-between items-center border-t border-border/40 pt-1.5 mt-1">
+                        <span className="text-muted font-semibold">CMP</span>
+                        <span className="text-slate-100 font-mono font-bold">₹{fmt(ltp)}</span>
+                      </div>
+                    )}
+                    {indicators.ema_50 && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">EMA 50</span>
+                        <span className={`font-mono ${ltp && ltp > indicators.ema_50 ? 'text-profit' : 'text-loss'}`}>₹{fmt(indicators.ema_50)}</span>
+                      </div>
+                    )}
+                    {ts.stop_loss && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">Stop Loss</span>
+                        <span className="text-loss font-mono font-bold">₹{fmt(ts.stop_loss)}</span>
+                      </div>
+                    )}
+                    {indicators.bb_lower && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted">BB Lower</span>
+                        <span className="text-slate-400 font-mono">₹{fmt(indicators.bb_lower)}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-border/30 text-[10px] text-muted leading-relaxed">
+                    <span className="text-cyan font-semibold">Next trigger: </span>
+                    {indicators.rsi_signal === 'OVERSOLD'
+                      ? `RSI oversold at ${fmt(indicators.rsi, 1)} — watch for reversal candle (hammer/engulfing) for bounce entry`
+                      : indicators.bb_position === 'BELOW_LOWER'
+                      ? `Price below lower Bollinger Band ₹${fmt(indicators.bb_lower)} — statistically extreme, mean reversion probable`
+                      : indicators.ichimoku_signal === 'STRONG_BUY'
+                      ? 'Ichimoku fully bullish — all 5 components aligned. Breakout above Supertrend would confirm trend change'
+                      : indicators.macd_cross === 'BULLISH_CROSS'
+                      ? 'MACD bullish crossover confirmed — momentum turning positive'
+                      : `Watch ₹${fmt(ts.resistance || ts.target_1)} resistance for breakout confirmation`
+                    }
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -962,23 +1157,71 @@ export default function StockDetail() {
       <section className="px-5 pb-6" style={{ background: '#080D1A' }}>
         <SectionLabel>Section 5 · AI equity research</SectionLabel>
 
-        {/* Executive summary */}
+        {/* Executive summary — expert Groq analysis */}
         <div className="rounded-2xl border border-blue-500/20 p-5 mb-4 relative overflow-hidden"
           style={{ background: 'linear-gradient(145deg,#131E30,#0F1829)', boxShadow: '0 0 40px -15px rgba(139,92,246,0.3)' }}>
           <div className="flex items-start justify-between mb-3">
-            <div className="text-violet-400 text-[10px] uppercase tracking-[0.2em] font-bold">Executive Summary</div>
-            {conf != null && <div className="text-right"><div className="text-[10px] text-muted">Conviction</div><div className="font-mono text-violet-400 text-xl font-bold">{isBuy ? 'High' : 'Low'} · {conf}%</div></div>}
+            <div>
+              <div className="text-violet-400 text-[10px] uppercase tracking-[0.2em] font-bold">Expert Research Analysis</div>
+              <div className="text-muted text-[10px] mt-0.5">AI-generated · powered by Groq LLM · not financial advice</div>
+            </div>
+            {conf != null && (
+              <div className="text-right shrink-0 ml-4">
+                <div className="text-[10px] text-muted">Signal</div>
+                <div className={`font-mono text-lg font-bold ${signalColor}`}>{isBuy ? 'BUY' : isSell ? 'SELL' : 'HOLD'} · {conf}%</div>
+              </div>
+            )}
           </div>
-          {verdictPending ? <Skel w="w-full" h="h-16" /> : (
-            <p className="text-slate-200 text-sm leading-relaxed">
-              {deep?.ai_summary || (
-                isBuy
-                  ? `${fund?.company_name || display} is showing a ${String(signal||'').toLowerCase().replace('_',' ')} signal with ${conf}% confidence. Technical indicators are ${(comp.technical||0) > 0 ? 'bullish' : 'bearish'} and the sector outlook is ${reasoning.sector_mood?.toLowerCase() || 'neutral'}.`
-                  : `${fund?.company_name || display} is under selling pressure. Technical structure is ${(comp.technical||0) > 0 ? 'recovering' : 'bearish'}. Capital preservation takes priority — wait for reversal signals.`
-              )}
+          {verdictPending ? (
+            <div className="space-y-2"><Skel w="w-full" h="h-4" /><Skel w="w-full" h="h-4" /><Skel w="w-5/6" h="h-4" /></div>
+          ) : deep?.ai_summary ? (
+            <div className="text-slate-200 text-sm leading-relaxed whitespace-pre-line">{deep.ai_summary}</div>
+          ) : !deepSettled ? (
+            <div className="flex items-center gap-2 text-muted text-sm">
+              <div className="w-3 h-3 rounded-full bg-violet-500/30 animate-pulse" />
+              Generating expert analysis…
+            </div>
+          ) : (
+            <p className="text-slate-300 text-sm leading-relaxed">
+              {isBuy
+                ? `${fund?.company_name || display} is showing a ${String(signal||'').toLowerCase().replace('_',' ')} signal with ${conf}% confidence. Technical momentum is ${(comp.technical||0) > 0 ? 'strongly bullish' : 'bearish'}. Sector: ${reasoning.sector_name || 'General'} (${reasoning.sector_mood?.toLowerCase() || 'neutral'}). Market regime: ${reasoning.regime || 'unknown'}.`
+                : `${fund?.company_name || display} is under pressure. Technical structure is ${(comp.technical||0) > 0 ? 'recovering' : 'bearish'}. Capital preservation recommended — wait for reversal confirmation before entering.`
+              }
             </p>
           )}
         </div>
+
+        {/* News Impact Analysis */}
+        {(deep?.news || []).length > 0 && (
+          <div className="rounded-xl border border-border p-4 mb-4">
+            <div className="text-slate-200 text-sm font-semibold mb-3 flex items-center gap-2">
+              <BookOpen size={13} className="text-cyan" /> News & Market Context
+              <span className="ml-auto text-muted text-[10px] font-normal">{deep.news.length} recent articles</span>
+            </div>
+            <div className="space-y-3">
+              {(deep.news || []).slice(0, 5).map((n, i) => {
+                const hasSummary = n.summary && n.summary.trim().length > 20;
+                return (
+                  <div key={i} className="flex gap-3">
+                    <div className="w-0.5 bg-border rounded-full shrink-0 mt-1" style={{ minHeight: '2rem' }} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-slate-200 text-xs font-medium leading-snug">{n.headline}</div>
+                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                        {n.source && <span className="text-muted text-[10px]">{n.source}</span>}
+                        {n.published_at && <span className="text-muted text-[10px] font-mono">{n.published_at.slice(0, 10)}</span>}
+                      </div>
+                      {hasSummary && (
+                        <div className="text-muted text-[11px] mt-1 leading-relaxed">
+                          {n.summary.slice(0, 200)}{n.summary.length > 200 ? '…' : ''}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Bull / Bear / Risks */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -1344,11 +1587,77 @@ export default function StockDetail() {
         </DeepTab>
 
         {/* Options */}
-        <DeepTab label="Options" subtitle="Chain · OI · IV · max pain · PCR" icon={PieChart}>
-          <div className="space-y-2">
-            <p className="text-slate-300 text-sm">Options chain data is fetched from NSE for F&O-eligible stocks.</p>
-            <p className="text-muted text-xs">F&O eligibility: stocks with market cap &gt; ₹5,000 Cr and sufficient liquidity are F&O tradeable on NSE. VIJAYA and most small/mid caps are not F&O eligible.</p>
-            <p className="text-muted text-xs">API endpoint: <code className="text-cyan bg-surface px-1 rounded">/api/v1/india/options-chain/{display}</code></p>
+        <DeepTab label="Options & F&O" subtitle="PCR · Max Pain · F&O eligibility · Hub options score" icon={PieChart}>
+          <div className="space-y-4">
+            {/* F&O Eligibility Status */}
+            {(() => {
+              const mcap = fund?.market_cap_cr ?? companyProfile?.market_cap ? companyProfile.market_cap / 1e7 : null;
+              const eligible = mcap != null ? mcap > 5000 : null;
+              return (
+                <div className={`flex items-start gap-3 p-3 rounded-lg border ${eligible === true ? 'bg-profit/5 border-profit/20' : eligible === false ? 'bg-amber-500/5 border-amber-500/20' : 'bg-white/[0.02] border-border'}`}>
+                  <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${eligible === true ? 'bg-profit' : eligible === false ? 'bg-amber-400' : 'bg-slate-500'}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm font-semibold ${eligible === true ? 'text-profit' : eligible === false ? 'text-amber-400' : 'text-slate-300'}`}>
+                      {eligible === true ? `${display} is F&O Eligible` : eligible === false ? `${display} may not be F&O Eligible` : `${display} F&O Status`}
+                    </div>
+                    <div className="text-muted text-xs mt-1 leading-relaxed">
+                      {eligible === true
+                        ? `Market cap ₹${fmt(mcap, 0)} Cr — above the ₹5,000 Cr NSE threshold. ${display} equity derivatives (Futures + Options) are actively traded on NSE. View live chain on NSE India or Sensibull.`
+                        : eligible === false
+                        ? `Market cap ₹${fmt(mcap, 0)} Cr — below the ₹5,000 Cr threshold. NSE F&O eligibility also requires minimum liquidity. Verify on NSE India.`
+                        : 'NSE F&O eligibility requires market cap > ₹5,000 Cr and sufficient liquidity. Load company data to check eligibility.'}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Hub Options Score explanation */}
+            <div>
+              <div className="text-muted text-[10px] uppercase tracking-wider mb-2">How the Hub Uses Options Data</div>
+              <p className="text-slate-300 text-xs leading-relaxed mb-3">
+                The Hub's options factor (5% weight) uses the <strong className="text-slate-200">NIFTY Put-Call Ratio (PCR)</strong> as a market-wide fear/greed indicator.
+                It does not use individual stock options chains — that data is not yet integrated.
+                PCR &gt; 1.3 = heavy hedging = contrarian bullish. PCR &lt; 0.7 = complacency = caution.
+              </p>
+              {comp.options != null && (
+                <div className="flex items-center gap-4">
+                  <div className="bg-surface rounded-lg border border-border p-3 text-center">
+                    <div className="text-muted text-[10px] uppercase tracking-wider">Options Score</div>
+                    <div className={`font-mono text-lg font-bold mt-1 ${comp.options >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {comp.options > 0 ? '+' : ''}{Math.round(comp.options)}
+                    </div>
+                    <div className="text-muted text-[10px] mt-0.5">out of ±15</div>
+                  </div>
+                  <div className="text-muted text-xs flex-1 leading-relaxed">
+                    Score {comp.options >= 0 ? '≥ 0' : '< 0'} = Nifty PCR is {comp.options > 10 ? 'elevated (>1.3) — contrarian bullish signal' : comp.options < -10 ? 'low (<0.7) — complacency warning' : 'neutral (0.7–1.3) — no strong signal'}.
+                    This is an index-level indicator — it applies equally to all F&O and non-F&O stocks.
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* External Links */}
+            <div className="bg-card border border-border rounded-lg p-3">
+              <div className="text-slate-200 text-sm font-semibold mb-2">View Live {display} Options Chain</div>
+              <div className="flex gap-2 flex-wrap">
+                <a href={`https://www.nseindia.com/get-quotes/equity?symbol=${display}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="text-[11px] text-cyan bg-cyan/5 border border-cyan/20 px-3 py-1.5 rounded-lg hover:bg-cyan/10 transition-colors">
+                  NSE India →
+                </a>
+                <a href={`https://sensibull.com/nse/${display}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="text-[11px] text-violet-400 bg-violet-500/5 border border-violet-500/20 px-3 py-1.5 rounded-lg hover:bg-violet-500/10 transition-colors">
+                  Sensibull →
+                </a>
+                <a href={`https://www.screener.in/company/${display}/`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="text-[11px] text-slate-300 bg-white/5 border border-border px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">
+                  Screener.in →
+                </a>
+              </div>
+            </div>
           </div>
         </DeepTab>
 

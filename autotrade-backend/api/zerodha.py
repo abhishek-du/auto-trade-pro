@@ -820,10 +820,9 @@ async def _run_deep_analysis_core(sym: str) -> dict:
     reasoning = generate_reasoning(sig, ltp)
     setup     = build_trade_setup(sig, ltp, signal_label)
 
-    news, ai_text = await asyncio.gather(
-        fetch_stock_news(sym),
-        groq_commentary(sym, ltp, chg_pct, sig, reasoning, setup),
-    )
+    # Fetch news first so Groq can interpret headlines in context
+    news    = await fetch_stock_news(sym)
+    ai_text = await groq_commentary(sym, ltp, chg_pct, sig, reasoning, setup, news=news)
 
     return {
         "symbol":          sym,
