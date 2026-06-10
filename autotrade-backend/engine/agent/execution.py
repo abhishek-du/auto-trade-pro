@@ -382,10 +382,10 @@ class AgentExecutionManager:
             await VirtualWallet.return_margin(session, trade_value, pnl, symbol)
             await session.commit()
 
-            # Telegram exit alert (fire-and-forget)
+            # Telegram exit alert
             if settings.telegram_available:
-                from integrations.telegram_service import fire, fmt_exit
-                fire(fmt_exit(
+                from integrations.telegram_service import send, fmt_exit
+                await send(fmt_exit(
                     symbol=symbol,
                     side=trade.side,
                     entry=float(trade.entry_price),

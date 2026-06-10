@@ -34,6 +34,7 @@ async def _post(text: str) -> None:
     token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
     chat_id = getattr(settings, "TELEGRAM_CHAT_ID",   "")
     if not token or not chat_id:
+        logger.warning("[telegram] missing token or chat_id")
         return
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -46,10 +47,17 @@ async def _post(text: str) -> None:
                     "disable_web_page_preview": True,
                 },
             )
-            if r.status_code != 200:
-                logger.debug(f"[telegram] {r.status_code}: {r.text[:120]}")
+            if r.status_code == 200:
+                logger.info(f"[telegram] ✓ sent to {chat_id}")
+            else:
+                logger.warning(f"[telegram] {r.status_code}: {r.text[:200]}")
     except Exception as exc:
-        logger.debug(f"[telegram] send failed: {exc}")
+        logger.warning(f"[telegram] send failed: {exc}")
+
+
+async def send(text: str) -> None:
+    """Awaitable send — use this inside async contexts for guaranteed delivery."""
+    await _post(text)
 
 
 def fire(text: str) -> None:
@@ -58,7 +66,7 @@ def fire(text: str) -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(_post(text))
     except RuntimeError:
-        pass   # no loop (sync context / tests) — skip silently
+        logger.warning("[telegram] fire() called outside async loop")
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
