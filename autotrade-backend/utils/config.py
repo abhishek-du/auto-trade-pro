@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     IPOALERTS_BASE_URL:    str  = "https://api.ipoalerts.in"
     IPOALERTS_INCLUDE_GMP: bool = False
 
+    # ── Telegram notifications ────────────────────────────────────────────────
+    TELEGRAM_BOT_TOKEN: str = ""   # from @BotFather
+    TELEGRAM_CHAT_ID:   str = ""   # user/channel ID (e.g. 693584236)
+
     # ── LLM ───────────────────────────────────────────────────────────────────
     # Groq: fast inference — signal commentary, quick market analysis
     GROQ_API_KEY: str = ""
@@ -201,6 +205,10 @@ class Settings(BaseSettings):
     GOOGLE_OAUTH_TOKEN_PATH:         str = "logs/google_token.pickle"  # saved after first auth
     # Legacy service-account path (kept for compatibility — OAuth is preferred)
     GOOGLE_SERVICE_ACCOUNT_JSON: str = ""
+
+    @property
+    def telegram_available(self) -> bool:
+        return bool(self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_CHAT_ID)
 
     @property
     def google_sheets_available(self) -> bool:

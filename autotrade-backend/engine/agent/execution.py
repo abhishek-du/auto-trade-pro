@@ -381,3 +381,16 @@ class AgentExecutionManager:
             trade_value = round(trade.qty * trade.entry_price, 2)
             await VirtualWallet.return_margin(session, trade_value, pnl, symbol)
             await session.commit()
+
+            # Telegram exit alert (fire-and-forget)
+            if settings.telegram_available:
+                from integrations.telegram_service import fire, fmt_exit
+                fire(fmt_exit(
+                    symbol=symbol,
+                    side=trade.side,
+                    entry=float(trade.entry_price),
+                    exit_price=exit_price,
+                    qty=int(trade.qty),
+                    pnl=pnl,
+                    reason=reason,
+                ))

@@ -374,6 +374,11 @@ async def _process_symbol(
         # Track product so MIS square-off sweep can identify intraday positions
         portfolio.open_positions[_sym]["product"]      = getattr(decision, "product", "CNC")
 
+        # Telegram entry alert (fire-and-forget — never blocks the pipeline)
+        if settings.telegram_available:
+            from integrations.telegram_service import fire, fmt_entry
+            fire(fmt_entry(decision))
+
     return decision.to_dict()
 
 
