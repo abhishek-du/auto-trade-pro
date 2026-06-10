@@ -128,6 +128,13 @@ def _get_sector_for_symbol(symbol: str) -> str:
         # Telecom
         "BHARTIARTL": "Telecom", "INDUSTOWER": "Telecom", "IDEA": "Telecom",
         "TATACOMM": "Telecom", "HFCL": "Telecom",
+        # Capital Goods / Defense / PSU Engineering → mapped to Infra (closest tracked sector)
+        "BHEL": "Infra", "HAL": "Infra", "BEL": "Infra", "BEML": "Infra",
+        "MIDHANI": "Infra", "COCHINSHIP": "Infra", "MAZAGONDOCK": "Infra",
+        "GRSE": "Infra", "RVNL": "Infra", "IRCON": "Infra", "NBCC": "Infra",
+        "IRCTC": "Infra", "IRFC": "Infra", "RAILTEL": "Infra",
+        "ABB": "Infra", "SIEMENS": "Infra", "CUMMINSIND": "Infra",
+        "THERMAX": "Infra", "BHARAT": "Infra", "PCBL": "Infra",
     }
     return FALLBACK.get(clean, "GENERAL")
 
