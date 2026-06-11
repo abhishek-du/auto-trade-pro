@@ -290,18 +290,17 @@ function TradeDetailPanel({ trade }) {
 function InvestmentSummary({ wallet, agentStatus, trades }) {
   // Agent is sole trader — use agent stats as primary source for KPI cards.
   // VirtualWallet (wallet) tracks the SCAN legacy positions (now closed).
-  const START_CAPITAL = 2_500_000;  // ₹25L fixed
-
   const agentPortfolio = agentStatus?.portfolio ?? null;
   const realisedPnl    = agentPortfolio?.realised_pnl    ?? wallet?.realised_pnl   ?? 0;
   const unrealisedPnl  = agentPortfolio?.unrealised_pnl  ?? wallet?.unrealised_pnl ?? 0;
   const totalPnl       = realisedPnl + unrealisedPnl;
-  const portfolioValue = agentPortfolio
-    ? START_CAPITAL + realisedPnl + unrealisedPnl
-    : (wallet?.equity ?? START_CAPITAL);
+  // Use actual equity from the API; fall back to wallet equity so the number is
+  // always live and never depends on a hardcoded starting constant.
+  const portfolioValue = agentPortfolio?.equity ?? wallet?.equity ?? 100_000;
+  const START_CAPITAL  = wallet?.peak_balance   ?? 100_000;
   const openPositions  = agentPortfolio?.open_positions_count ?? 0;
   const agentCash      = agentPortfolio?.cash ?? null;
-  const roiPct         = ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100;
+  const roiPct         = START_CAPITAL > 0 ? ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100 : 0;
   const isGain         = totalPnl >= 0;
 
   const openTrades = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
@@ -320,7 +319,7 @@ function InvestmentSummary({ wallet, agentStatus, trades }) {
     {
       label: 'Portfolio Value',
       value: fmt(portfolioValue),
-      sub:   `₹${(START_CAPITAL / 100000).toFixed(0)}L starting · ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)} unrealised`,
+      sub:   `${fmt(START_CAPITAL)} starting · ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)} unrealised`,
       icon:  BarChart2,
       color: 'text-blue-400',
       bg:    'bg-blue-500/10',
@@ -336,7 +335,7 @@ function InvestmentSummary({ wallet, agentStatus, trades }) {
     {
       label: 'Return on Investment',
       value: `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
-      sub:   `Net P&L ${isGain ? '+' : ''}${fmt(totalPnl)} on ₹${(START_CAPITAL / 100000).toFixed(0)}L capital`,
+      sub:   `Net P&L ${isGain ? '+' : ''}${fmt(totalPnl)} on ${fmt(START_CAPITAL)} capital`,
       icon:  roiPct >= 0 ? TrendingUp : TrendingDown,
       color: roiPct >= 0 ? 'text-profit' : 'text-loss',
       bg:    roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',

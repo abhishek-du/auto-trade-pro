@@ -928,7 +928,7 @@ class LocalExcelSink:
             losses  = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
             total_pnl = sum((t.get("pnl") or 0) for t in closed_trades)
             unrealised = sum((t.get("pnl") or 0) for t in open_trades)
-            start_capital = 2_500_000
+            start_capital = settings.AGENT_EQUITY
             equity  = start_capital + total_pnl + unrealised
             roi_pct = (equity - start_capital) / start_capital * 100
             win_rate = len(profits) / max(1, len(closed_trades)) * 100
@@ -945,7 +945,7 @@ class LocalExcelSink:
 
             from datetime import datetime
             ws.merge_cells(f"A{row}:H{row}")
-            ws[f"A{row}"] = f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}   |   Agent Solo Mode   |   ₹25L Capital"
+            ws[f"A{row}"] = f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}   |   Agent Solo Mode   |   ₹{start_capital/100000:.0f}L Capital"
             ws[f"A{row}"].font = Font(color="64748B", italic=True, size=9)
             ws[f"A{row}"].alignment = center
             row += 2
