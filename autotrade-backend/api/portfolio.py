@@ -82,6 +82,46 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
 
 
 @router.get(
+    "/trades",
+    summary="All paper trades (open + closed history)",
+)
+async def get_paper_trades(
+    limit: int = 500,
+    db: AsyncSession = Depends(get_db),
+):
+    from db.models import PaperTrade
+    rows = (await db.execute(
+        select(PaperTrade).order_by(desc(PaperTrade.opened_at)).limit(limit)
+    )).scalars().all()
+
+    out = []
+    for r in rows:
+        notional = float(r.entry_price or 0) * float(r.size_units or 0)
+        out.append({
+            "id":               f"paper_{r.id}",
+            "symbol":           r.symbol.replace(".NS", "") if r.symbol else r.symbol,
+            "direction":        r.direction.value if hasattr(r.direction, "value") else str(r.direction),
+            "status":           r.status.value   if hasattr(r.status,    "value") else str(r.status),
+            "entry_price":      r.entry_price,
+            "exit_price":       r.exit_price,
+            "stop_loss":        r.stop_loss,
+            "take_profit":      r.take_profit,
+            "size_units":       r.size_units,
+            "size_usd":         r.size_usd,
+            "pnl":              r.pnl,
+            "pnl_percent":      r.pnl_percent,
+            "signal_confidence":r.signal_confidence,
+            "pattern_name":     r.pattern_name,
+            "ai_reason":        r.ai_reason,
+            "opened_at":        r.opened_at.isoformat() if r.opened_at else None,
+            "closed_at":        r.closed_at.isoformat() if r.closed_at else None,
+            "exit_reason":      None,
+            "source":           "paper",
+        })
+    return out
+
+
+@router.get(
     "/snapshots",
     response_model=list[PerformanceSnapshotOut],
     summary="Last 30 daily equity snapshots (equity curve data)",
