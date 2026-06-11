@@ -452,10 +452,14 @@ async def _india_trade_loop():
                     break
                 continue
 
-            pos_size       = calculate_position_size(signal, balance)
-            trade          = await open_paper_trade(signal, pos_size, session)
-            balance       -= pos_size["usd_value"] * 0.1
-            opened        += 1
+            pos_size = calculate_position_size(signal, balance)
+            try:
+                trade = await open_paper_trade(signal, pos_size, session)
+            except ValueError as exc:
+                logger.warning(f"[india_trade_loop] {exc}")
+                continue
+            balance -= pos_size["usd_value"]
+            opened  += 1
             pos_result     = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 

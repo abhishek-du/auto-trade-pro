@@ -232,7 +232,12 @@ async def open_paper_trade(
     margin = usd_value
     ok, msg = await VirtualWallet.deduct_margin(session, margin, signal.symbol)
     if not ok:
-        logger.warning(f"open_paper_trade: margin deduction failed for {signal.symbol}: {msg}")
+        # Roll back the persisted records so a failed balance check leaves no orphaned rows.
+        await session.execute(delete(OpenPosition).where(OpenPosition.id == position.id))
+        await session.execute(delete(PaperTrade).where(PaperTrade.id == trade.id))
+        await session.flush()
+        logger.warning(f"open_paper_trade: BLOCKED {signal.symbol} — {msg}")
+        raise ValueError(f"Insufficient virtual funds to open {signal.symbol}: {msg}")
 
     # ── Step 4: Simulation log ────────────────────────────────────────────────
     rr = (
