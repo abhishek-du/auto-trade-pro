@@ -150,27 +150,25 @@ async def validate_signal(
     max_port_risk   = cfg.max_portfolio_risk
     min_cash_buffer = cfg.min_cash_buffer
 
-    # Reconstruct current capital state from open positions.
-    deployed_margin   = sum(p.size_usd * 0.1 for p in open_positions)
+    # Reconstruct current capital state from open positions (full-equity model).
+    deployed_capital  = sum(p.size_usd for p in open_positions)
     unrealised        = sum(getattr(p, "unrealised_pnl", 0.0) or 0.0 for p in open_positions)
-    equity            = wallet_balance + deployed_margin + unrealised
+    equity            = wallet_balance + deployed_capital + unrealised
     current_open_risk = sum(
         abs(p.entry_price - p.stop_loss) * p.size_units for p in open_positions
     )
 
-    # ── Check 1a: Absolute safety ceiling (bug guard, not the primary limiter) ─
+    # ── Check 1a: Absolute safety ceiling ────────────────────────────────────
     if len(open_positions) >= max_pos:
         reason = f"Safety ceiling reached ({len(open_positions)}/{max_pos} positions)"
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 1b: Portfolio risk budget (live trading only) ───────────────────
-    # Paper trading has unlimited virtual capital — skip the cap so every
-    # signal the agent wants to take can actually be taken.
     this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
     this_risk = this_pos["risk_amount"]
-    is_paper  = cfg.paper_mode
-    if not is_paper and equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
+
+    # ── Check 1b: Portfolio risk budget ──────────────────────────────────────
+    if equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
         reason = (
             f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
             f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
@@ -178,12 +176,14 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 1c: Cash buffer (live trading only) ─────────────────────────────
-    this_margin = this_pos["usd_value"] * 0.1
-    if not is_paper and equity > 0 and (deployed_margin + this_margin) > (1 - min_cash_buffer) * equity:
+    # ── Check 1c: Cash buffer — applies in both paper and live ───────────────
+    # Keeps MIN_CASH_BUFFER fraction of equity as dry powder at all times.
+    this_notional = this_pos["usd_value"]
+    if equity > 0 and (deployed_capital + this_notional) > (1 - min_cash_buffer) * equity:
         reason = (
-            f"Cash buffer guard: deploying ₹{this_margin:.0f} margin would breach "
-            f"the {min_cash_buffer*100:.0f}% cash reserve"
+            f"Cash buffer: deploying ₹{this_notional:.0f} would breach "
+            f"the {min_cash_buffer*100:.0f}% cash reserve "
+            f"(deployed ₹{deployed_capital:.0f} / equity ₹{equity:.0f})"
         )
         _log_rejection(signal.symbol, reason)
         return False, reason
@@ -313,6 +313,13 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
 
     units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
     usd_value = units * signal.entry_price
+
+    # Cap notional at 20% of balance — prevents a tight stop from sizing a single
+    # position into the majority of the portfolio (e.g. 2% risk / 2% stop = 100%).
+    max_notional = balance * 0.20
+    if usd_value > max_notional:
+        usd_value = max_notional
+        units     = usd_value / signal.entry_price if signal.entry_price > 0 else 0.0
 
     result = {
         "units":        round(units, 6),
