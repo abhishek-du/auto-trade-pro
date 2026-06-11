@@ -39,10 +39,15 @@ export function useTrades(pollInterval = 15000) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const raw = await apiFetch('/api/v1/agent/trades?limit=500');
-      const agent = (Array.isArray(raw) ? raw : []).map(normalizeAgentTrade);
-      agent.sort((a, b) => new Date(b.opened_at ?? 0) - new Date(a.opened_at ?? 0));
-      setTrades(agent);
+      const [agentRaw, paperRaw] = await Promise.all([
+        apiFetch('/api/v1/agent/trades?limit=500').catch(() => []),
+        apiFetch('/api/v1/portfolio/trades?limit=500').catch(() => []),
+      ]);
+      const agent = (Array.isArray(agentRaw) ? agentRaw : []).map(normalizeAgentTrade);
+      const paper = (Array.isArray(paperRaw) ? paperRaw : []);
+      const all   = [...agent, ...paper];
+      all.sort((a, b) => new Date(b.opened_at ?? 0) - new Date(a.opened_at ?? 0));
+      setTrades(all);
       setError(null);
     } catch (err) {
       setError(err);
