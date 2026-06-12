@@ -208,10 +208,9 @@ _MAX_SHORTLIST_PER_CYCLE = 5
 
 
 async def _send_loop_shortlist_alert(signal) -> None:
-    """Send a shortlist Telegram alert for a hub BUY candidate.
+    """Send a full shortlist Telegram alert with 7-factor breakdown + web research.
 
-    Fires regardless of whether a trade was actually opened — the channel
-    receives intelligence on every high-conviction setup the agent sees.
+    Fires regardless of whether a trade was actually opened.
     Respects a 4-hour per-symbol cooldown. Non-blocking; swallows all errors.
     """
     from utils.config import settings as _s
@@ -223,41 +222,43 @@ async def _send_loop_shortlist_alert(signal) -> None:
     if last and (now - last).total_seconds() < _SHORTLIST_COOLDOWN_H * 3600:
         return
 
-    entry  = signal.entry_price
-    stop   = signal.stop_loss
-    t1     = signal.take_profit
-    t2     = getattr(signal, "target_2", round(entry + 2 * abs(entry - stop), 2))
-    risk   = abs(entry - stop)
-    rr     = round(abs(t2 - entry) / risk, 1) if risk > 0 else 0
-    score  = round(signal.final_score, 1)
-    conf   = round(signal.confidence, 0)
-    reason = (signal.reasoning_points[0] if signal.reasoning_points else "")[:400]
+    score = round(signal.final_score, 1)
 
-    # Tavily research note (2 credits, non-blocking)
-    ai_note = ""
+    # ── Tavily search + crawl (advanced depth = full article text) ────────────
+    crawl_data: dict = {}
+    ai_note: str = ""
     try:
-        from engine.tavily_enricher import research_stock_for_alert
+        from engine.tavily_enricher import search_and_crawl, research_stock_for_alert
         if _s.tavily_available:
+            crawl_data = await search_and_crawl(
+                signal.symbol,
+                query_suffix="NSE India stock news analysis 2026",
+                crawl_top=2,
+                extract_depth="basic",
+            )
+            # Also get the structured AI note from advanced search
             ai_note = await research_stock_for_alert(
                 symbol=signal.symbol, score=float(score),
-                tech_score=0, news_score=0, regime=getattr(signal, "regime", ""),
-                entry=entry, stop=stop, t1=t1, t2=t2,
+                tech_score=float(signal.hub_subscores.get("technical", 0)),
+                news_score=float(signal.hub_subscores.get("news", 0)),
+                regime=getattr(signal, "regime", ""),
+                entry=signal.entry_price,
+                stop=signal.stop_loss or 0.0,
+                t1=signal.take_profit or 0.0,
+                t2=getattr(signal, "target_2", 0.0) or 0.0,
             ) or ""
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[trade_loop/shortlist] research failed {bare}: {exc}")
 
-    ai_block = f"\n\n🤖 <i>{ai_note[:500]}</i>" if ai_note else ""
-
-    msg = (
-        f"📡 <b>SHORTLIST ALERT — {bare}</b>\n"
-        f"Hub Score: <b>{score:+.0f}</b>  |  Conf: <b>{conf:.0f}%</b>  |  {signal.action}\n\n"
-        f"💰 Entry <b>₹{entry:.0f}</b>  ·  SL ₹{stop:.0f}  ·  T1 ₹{t1:.0f}  ·  T2 ₹{t2:.0f}\n"
-        f"R:R = {rr}x  |  Regime: {getattr(signal, 'regime', 'UNKNOWN')}\n"
-        f"\n📋 <i>{reason}</i>"
-        f"{ai_block}"
-    )
     try:
-        from integrations.telegram_service import send
+        from integrations.telegram_service import send, fmt_shortlist_alert
+        msg = fmt_shortlist_alert(
+            signal,
+            df=None,
+            ai_note=ai_note,
+            executed=False,
+            crawl_data=crawl_data or None,
+        )
         await send(msg)
         _shortlist_alerted_loop[bare] = now
         logger.info(f"[trade_loop/shortlist] ✓ alert sent for {bare} score={score:+.0f}")
@@ -357,6 +358,16 @@ async def _india_trade_loop():
                 MasterIntelligenceScore.symbol,
                 MasterIntelligenceScore.master_score,
                 MasterIntelligenceScore.signal,
+                MasterIntelligenceScore.regime,
+                MasterIntelligenceScore.technical_score,
+                MasterIntelligenceScore.news_score,
+                MasterIntelligenceScore.sector_score,
+                MasterIntelligenceScore.macro_score,
+                MasterIntelligenceScore.earnings_score,
+                MasterIntelligenceScore.fundamental_score,
+                MasterIntelligenceScore.options_score,
+                MasterIntelligenceScore.reasoning,
+                MasterIntelligenceScore.scored_at,
             )
             .join(
                 _latest_subq,
@@ -375,6 +386,19 @@ async def _india_trade_loop():
                 "symbol": r.symbol, "score": float(r.master_score), "signal": r.signal,
                 "source": "hub", "sector": SECTOR_MAP.get(r.symbol.replace(".NS", ""), ""),
                 "rsi": None,
+                "hub_subscores": {
+                    "technical":   float(r.technical_score),
+                    "news":        float(r.news_score),
+                    "sector":      float(r.sector_score),
+                    "macro":       float(r.macro_score),
+                    "earnings":    float(r.earnings_score),
+                    "fundamental": float(r.fundamental_score),
+                    "options":     float(r.options_score),
+                    "signal":      r.signal,
+                    "regime":      r.regime,
+                    "reasoning":   r.reasoning or {},
+                    "scored_at":   r.scored_at.isoformat() if r.scored_at else "",
+                },
             }
             for r in hub_rows
         ]
@@ -469,8 +493,9 @@ async def _india_trade_loop():
                 risk_reward_ratio=2.0,
                 patterns_detected=[],
                 reasoning_points=[why],
-                regime="UNKNOWN",
+                regime=c["hub_subscores"].get("regime", "UNKNOWN") if c.get("hub_subscores") else "UNKNOWN",
                 timeframe="1d",
+                hub_subscores=c.get("hub_subscores", {}),
             ))
 
         actionable = [s for s in signals if s.action in ("BUY", "SELL")]
@@ -517,7 +542,7 @@ async def _india_trade_loop():
                 # Build rich expert note — replaces the simple one-liner
                 try:
                     from integrations.trade_explainer import build_expert_note
-                    hub_dict = getattr(signal, "hub_scores", None) or {}
+                    hub_dict = getattr(signal, "hub_subscores", None) or {}
                     raw_reason = " · ".join(signal.reasoning_points)
                     expert = build_expert_note(
                         symbol=signal.symbol,
