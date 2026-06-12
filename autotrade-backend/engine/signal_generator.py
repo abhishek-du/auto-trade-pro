@@ -70,6 +70,7 @@ class TradingSignal:
     atr:                float            = 0.0   # ATR at entry → 1× trailing stop distance
     risk_reward_ratio:  float            = 0.0
     regime:             str              = ""
+    hub_subscores:      dict             = field(default_factory=dict)  # 7-factor breakdown + indicator detail
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

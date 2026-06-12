@@ -611,6 +611,37 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     if symbol in dc.get("tax_harvest_symbols", []) and signal in ("SELL", "STRONG_SELL"):
         master_score -= 15
 
+    # ── Technical indicator snapshot for Telegram proofs ──────────────────────
+    import math as _math
+    def _nf(v):  # nan → None, else round to 2
+        return None if (v is None or (isinstance(v, float) and _math.isnan(v))) else round(float(v), 2)
+
+    tech_detail = {
+        "rsi":              _nf(getattr(signals, "rsi", None)),
+        "rsi_signal":       getattr(signals, "rsi_signal", ""),
+        "macd":             _nf(getattr(signals, "macd", None)),
+        "macd_signal":      _nf(getattr(signals, "macd_signal", None)),
+        "macd_hist":        _nf(getattr(signals, "macd_histogram", None)),
+        "macd_cross":       getattr(signals, "macd_cross", ""),
+        "bb_position":      getattr(signals, "bb_position", ""),
+        "ema_trend":        getattr(signals, "ema_trend", ""),
+        "ema_20":           _nf(getattr(signals, "ema_20", None)),
+        "ema_50":           _nf(getattr(signals, "ema_50", None)),
+        "ema_200":          _nf(getattr(signals, "ema_200", None)),
+        "adx":              _nf(getattr(signals, "adx", None)),
+        "adx_direction":    getattr(signals, "adx_direction", ""),
+        "adx_strength":     getattr(signals, "adx_trend_strength", ""),
+        "stoch_k":          _nf(getattr(signals, "stoch_k", None)),
+        "stoch_d":          _nf(getattr(signals, "stoch_d", None)),
+        "stoch_signal":     getattr(signals, "stoch_signal", ""),
+        "supertrend_dir":   getattr(signals, "supertrend_direction", ""),
+        "ichimoku_signal":  getattr(signals, "ichimoku_signal", ""),
+        "ichimoku_tenkan":  _nf(getattr(signals, "ichimoku_tenkan", None)),
+        "ichimoku_kijun":   _nf(getattr(signals, "ichimoku_kijun", None)),
+        "volume_surge":     _nf(getattr(signals, "volume_surge", None)),
+        "composite_score":  _nf(signals.composite_score),
+    }
+
     reasoning = {
         "technical": round(technical_score, 1), "news": round(news_score, 1),
         "sector": round(sector_score, 1), "macro": round(macro_score, 1),
@@ -621,6 +652,33 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
         "headlines": ctx.news.headlines_by_symbol.get(symbol, []),
         "active_weights": {k: round(v, 3) for k, v in _w.items()},
+        "tech_detail": tech_detail,
+        "macro_detail": {
+            "fii_net_3d":  round(ctx.macro.fii_net_3d, 1),
+            "dii_net_3d":  round(ctx.macro.dii_net_3d, 1),
+            "india_vix":   round(ctx.macro.india_vix, 2),
+            "vix_label":   ctx.macro.vix_label,
+            "fii_bias":    ctx.macro.fii_bias,
+            "dii_bias":    ctx.macro.dii_bias,
+            "breadth_bias": ctx.macro.breadth_bias,
+        },
+        "sector_detail": {
+            "sector_name":  sector,
+            "sector_bias":  round(sector_bias, 2),
+            "sector_mood":  sector_mood,
+        },
+        "earnings_detail": {
+            "tone":         tone,
+            "has_data":     symbol in ctx.earnings.tones_by_symbol,
+        },
+        "fundamental_detail": {
+            "fund_score":   round(fund_score, 1),
+            "fund_grade":   fund_grade,
+            "has_data":     bare in ctx.fundamentals_by_symbol,
+        },
+        "options_detail": {
+            "nifty_bias":   ctx.options.nifty_bias,
+        },
     }
 
     return ScoredStock(
