@@ -54,89 +54,18 @@ _MOOD_BIAS = {
 
 def _get_sector_for_symbol(symbol: str) -> str:
     from crawler.sector_data import SECTOR_DEFINITIONS
+    from utils.sector_cache import get_sector as _cache_get_sector
+
     clean = symbol.replace(".NS", "").replace(".BO", "")
+
+    # 1. SECTOR_DEFINITIONS (sector_data.py explicit lists)
     for sector_key, definition in SECTOR_DEFINITIONS.items():
         stocks = definition.get("stocks", [])
         if symbol in stocks or clean in stocks or f"{clean}.NS" in stocks:
             return sector_key
-    FALLBACK = {
-        # Banking & Finance
-        "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking",
-        "AXISBANK": "Banking", "KOTAKBANK": "Banking", "INDUSINDBK": "Banking",
-        "BAJFINANCE": "Banking", "BAJAJFINSV": "Banking", "HDFCLIFE": "Banking",
-        "SBILIFE": "Banking", "ICICIPRULI": "Banking", "CHOLAFIN": "Banking",
-        "MUTHOOTFIN": "Banking", "MANAPPURAM": "Banking", "LICHSGFIN": "Banking",
-        "PNBHOUSING": "Banking", "IIFL": "Banking", "M&MFIN": "Banking",
-        "FEDERALBNK": "Banking", "IDFCFIRSTB": "Banking", "BANDHANBNK": "Banking",
-        "AUBANK": "Banking", "KARURVYSYA": "Banking", "CANBK": "Banking",
-        "BANKBARODA": "Banking", "PNB": "Banking", "UNIONBANK": "Banking",
-        "CENTRALBANK": "Banking", "IOB": "Banking", "MAHABANK": "Banking",
-        # IT
-        "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
-        "LTIM": "IT", "MPHASIS": "IT", "COFORGE": "IT", "PERSISTENT": "IT",
-        "OFSS": "IT", "HEXAWARE": "IT", "KPITTECH": "IT", "MASTEK": "IT",
-        "TATAELXSI": "IT", "ZENSAR": "IT", "NIIT": "IT", "RATEGAIN": "IT",
-        # Energy & Oil Gas
-        "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy", "NTPC": "Energy",
-        "POWERGRID": "Energy", "ADANIGREEN": "Energy", "ADANIPOWER": "Energy",
-        "TATAPOWER": "Energy", "TORNTPOWER": "Energy", "CESC": "Energy",
-        "COAL INDIA": "Energy", "COALINDIA": "Energy", "IOC": "Energy",
-        "HINDPETRO": "Energy", "GAIL": "Energy", "PETRONET": "Energy",
-        "MRPL": "Energy", "OIL": "Energy", "ADANITRANS": "Energy",
-        # Pharma & Healthcare
-        "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma",
-        "DIVISLAB": "Pharma", "BIOCON": "Pharma", "TORNTPHARM": "Pharma",
-        "ALKEM": "Pharma", "AUROPHARMA": "Pharma", "GLENMARK": "Pharma",
-        "LUPIN": "Pharma", "IPCA": "Pharma", "ABBOTINDIA": "Pharma",
-        "PFIZER": "Pharma", "SANOFI": "Pharma", "APOLLOHOSP": "Pharma",
-        "MAXHEALTH": "Pharma", "FORTIS": "Pharma", "NARAYANA": "Pharma",
-        "LALPATHLAB": "Pharma", "METROPOLIS": "Pharma", "DRLABERATIO": "Pharma",
-        "DRREDDYS": "Pharma",
-        # FMCG
-        "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "DABUR": "FMCG",
-        "MARICO": "FMCG", "COLPAL": "FMCG", "BRITANNIA": "FMCG", "GODREJCP": "FMCG",
-        "EMAMILTD": "FMCG", "TATACONSUM": "FMCG", "VBL": "FMCG", "RADICO": "FMCG",
-        "UNITDSPR": "FMCG", "MCDOWELL-N": "FMCG",
-        # Auto
-        "MARUTI": "Auto", "TATAMOTORS": "Auto", "BAJAJ-AUTO": "Auto",
-        "EICHERMOT": "Auto", "HEROMOTOCO": "Auto", "TVSMOTORS": "Auto",
-        "MOTHERSON": "Auto", "BOSCHLTD": "Auto", "BALKRISIND": "Auto",
-        "EXIDEIND": "Auto", "AMARAJABAT": "Auto", "MRF": "Auto",
-        "APOLLOTYRE": "Auto", "CEATLTD": "Auto", "TIINDIA": "Auto",
-        "SCHAEFFLER": "Auto", "ENDURANCE": "Auto", "EIHOTEL": "Auto",
-        "MAHINDRA": "Auto", "M&M": "Auto", "ASHOKLEY": "Auto", "SML ISUZU": "Auto",
-        # Metals & Mining
-        "TATASTEEL": "Metals", "HINDALCO": "Metals", "JSWSTEEL": "Metals",
-        "SAIL": "Metals", "NMDC": "Metals", "VEDL": "Metals", "NATIONALUM": "Metals",
-        "APLAPOLLO": "Metals", "RATNAMANI": "Metals", "JINDALSAW": "Metals",
-        "WELCORP": "Metals", "HIKAL": "Metals",
-        # Infra & Construction & Real Estate
-        "LT": "Infra", "ULTRACEMCO": "Infra", "AMBUJACEMENT": "Infra",
-        "SHREECEM": "Infra", "ACC": "Infra", "DALMIA": "Infra",
-        "NAUKRI": "Infra", "DLF": "Infra", "GODREJPROP": "Infra",
-        "PHOENIXLTD": "Infra", "PRESTIGE": "Infra", "BRIGADE": "Infra",
-        "OBEROIRLTY": "Infra", "SOBHA": "Infra", "MFSL": "Infra",
-        "IRB": "Infra", "KPRMILL": "Infra", "GMRINFRA": "Infra",
-        "ADANIPORTS": "Infra", "CONCOR": "Infra",
-        # Consumer & Discretionary
-        "TITAN": "Consumer", "PAGEIND": "Consumer", "TRENT": "Consumer",
-        "DMART": "Consumer", "SHOPERSTOP": "Consumer", "BATA": "Consumer",
-        "RELAXO": "Consumer", "VMART": "Consumer", "ZOMATO": "Consumer",
-        "SWIGGY": "Consumer", "NYKAA": "Consumer", "INDIAMART": "Consumer",
-        "JUSTDIAL": "Consumer", "EASEMYTRIP": "Consumer", "IXIGO": "Consumer",
-        "PVRINOX": "Consumer", "INOXWIND": "Consumer",
-        # Telecom
-        "BHARTIARTL": "Telecom", "INDUSTOWER": "Telecom", "IDEA": "Telecom",
-        "TATACOMM": "Telecom", "HFCL": "Telecom",
-        # Capital Goods / Defense / PSU Engineering → mapped to Infra (closest tracked sector)
-        "BHEL": "Infra", "HAL": "Infra", "BEL": "Infra", "BEML": "Infra",
-        "MIDHANI": "Infra", "COCHINSHIP": "Infra", "MAZAGONDOCK": "Infra",
-        "GRSE": "Infra", "RVNL": "Infra", "IRCON": "Infra", "NBCC": "Infra",
-        "IRCTC": "Infra", "IRFC": "Infra", "RAILTEL": "Infra",
-        "ABB": "Infra", "SIEMENS": "Infra", "CUMMINSIND": "Infra",
-        "THERMAX": "Infra", "BHARAT": "Infra", "PCBL": "Infra",
-    }
-    return FALLBACK.get(clean, "GENERAL")
+
+    # 2. Persistent JSON cache + live yfinance fallback (covers all 9,600+ NSE symbols)
+    return _cache_get_sector(clean)
 
 
 # ── Context dataclasses ───────────────────────────────────────────────────────
@@ -358,6 +287,51 @@ async def build_news_context(session: AsyncSession) -> NewsContext:
     )
 
 
+async def enrich_news_context_with_tavily(
+    ctx_news: "NewsContext",
+    hub_universe: list[str],
+) -> "NewsContext":
+    """Inject Tavily news scores for hub symbols that have no RSS/DB coverage.
+
+    Called once per hub cycle AFTER build_news_context() completes.
+    Mutates and returns a new NewsContext with the enriched data.
+    Budget-safe: capped at 10 Tavily calls per invocation (10 credits).
+    """
+    try:
+        from engine.tavily_enricher import enrich_missing_news
+        from utils.config import settings
+
+        if not getattr(settings, "tavily_available", False):
+            return ctx_news
+
+        enriched = await enrich_missing_news(
+            symbol_list=hub_universe,
+            existing_scores=ctx_news.scores_by_symbol,
+            max_symbols=20,
+        )
+        if not enriched:
+            return ctx_news
+
+        new_scores = dict(ctx_news.scores_by_symbol)
+        new_headlines = dict(ctx_news.headlines_by_symbol)
+        for sym, (score, hl) in enriched.items():
+            new_scores[sym] = round(score, 4)
+            new_headlines[sym] = hl[:3]
+
+        logger.info(
+            f"[hub/tavily] news enriched {len(enriched)} symbols "
+            f"previously at news_score=0"
+        )
+        return NewsContext(
+            scores_by_symbol=new_scores,
+            headlines_by_symbol=new_headlines,
+            market_wide_score=ctx_news.market_wide_score,
+        )
+    except Exception as exc:
+        logger.warning(f"[hub/tavily] news enrichment failed: {exc}")
+        return ctx_news
+
+
 async def build_earnings_context(session: AsyncSession) -> EarningsContext:
     from db.models import EarningsCallSummary
 
@@ -461,7 +435,11 @@ async def build_portfolio_context(agent_portfolio, session: AsyncSession) -> Por
     )
 
 
-async def build_master_context(agent_portfolio, session: AsyncSession) -> MasterContext:
+async def build_master_context(
+    agent_portfolio,
+    session: AsyncSession,
+    hub_universe: list[str] | None = None,
+) -> MasterContext:
     # NOTE: a single AsyncSession cannot serve concurrent queries, so these
     # DB-backed builders run sequentially (each is a fast indexed lookup).
     macro     = await build_macro_context(session)
@@ -470,6 +448,11 @@ async def build_master_context(agent_portfolio, session: AsyncSession) -> Master
     options   = await build_options_context(session)
     portfolio = await build_portfolio_context(agent_portfolio, session)
     sectors   = build_sector_context()  # sync, cache-only
+
+    # Tavily: inject real-time news for small-cap hub symbols with no RSS/DB
+    # coverage. Capped at 10 calls (10 credits) so the monthly budget is safe.
+    if hub_universe:
+        news = await enrich_news_context_with_tavily(news, hub_universe)
 
     # Pre-load cached fundamental scores once (DB only — no live yfinance calls).
     # FundamentalData is keyed on the bare ticker (e.g. "RELIANCE").
@@ -518,13 +501,35 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     except Exception:
         features, regime = None, "UNKNOWN"
 
-    # 2. News (15%)
+    # 2. News (15%) — RSS/DB score; falls back to yfinance headlines scored by
+    # FinBERT (keyword fallback if torch absent) for small caps with no RSS coverage.
+    _has_news = symbol in ctx.news.scores_by_symbol
     raw_news = ctx.news.scores_by_symbol.get(symbol, 0.0)
+    if not _has_news:
+        try:
+            import yfinance as yf
+            ticker_news = yf.Ticker(symbol).news or []
+            if ticker_news:
+                from engine.tavily_enricher import _score_headlines_finbert
+                headlines_yf = [
+                    (n.get("title") or n.get("content", ""))
+                    for n in ticker_news[:5]
+                ]
+                raw_news = _score_headlines_finbert(headlines_yf)
+                if raw_news != 0.0:
+                    _has_news = True
+                    logger.debug(f"[hub/yf_news] {symbol}: yfinance score={raw_news:+.2f}")
+        except Exception:
+            pass
     news_score = max(-100, min(100, raw_news * 100))
 
-    # 3. Sector (15%)
+    # 3. Sector (15%) — GENERAL/unmapped falls back to market breadth bias so
+    # every hub symbol always carries a sector signal rather than being zeroed.
     sector = _get_sector_for_symbol(symbol)
-    sector_bias = ctx.sectors.sector_biases.get(sector, 0)
+    if sector in ctx.sectors.sector_biases:
+        sector_bias = ctx.sectors.sector_biases[sector]
+    else:
+        sector_bias = ctx.macro.breadth_bias  # market-wide proxy for unclassified stocks
     sector_score = max(-50, min(50, sector_bias * 25))
 
     # 4. Macro (10%)
@@ -547,12 +552,14 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     # 7. Options (5%) — index-wide bias applied lightly to every name
     options_score = ctx.options.nifty_bias * 15
 
-    # Renormalize: factors with no real data (default/missing) get 0 weight
-    # so blank factors don't dilute symbols that only have technical data.
+    # Renormalize: factors with no real data get 0 weight so missing factors
+    # don't dilute the ones that have a genuine signal.
+    # Exceptions: sector always has a signal (known sector or market breadth proxy);
+    # news is considered covered if Tavily, RSS, or yfinance contributed a score.
     _w = {
         "technical":   0.35,
-        "news":        0.15 if symbol in ctx.news.scores_by_symbol else 0.0,
-        "sector":      0.15 if sector in ctx.sectors.sector_biases else 0.0,
+        "news":        0.15 if _has_news else 0.0,
+        "sector":      0.15,  # always: known sector or market breadth fallback
         "macro":       0.10,
         "earnings":    0.10 if symbol in ctx.earnings.tones_by_symbol else 0.0,
         "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
@@ -631,10 +638,16 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     from crawler.price_feed import get_latest_candles
 
     # Phase 1: fetch candles sequentially (DB-bound, shared session)
+    # Fallback chain: requested timeframe → 1h → skip.
+    # This lets the Hub score symbols that only have intraday bars (e.g. freshly
+    # added stocks before the weekly 1d backfill has run).
+    _fallback = "1h" if timeframe != "1h" else None
     dfs: dict = {}
     for symbol in symbols:
         try:
             candles = await get_latest_candles(symbol, timeframe, 300, session)
+            if (not candles or len(candles) < 50) and _fallback:
+                candles = await get_latest_candles(symbol, _fallback, 300, session)
             if not candles or len(candles) < 50:
                 continue
             cs = sorted(candles, key=lambda c: c.timestamp)
