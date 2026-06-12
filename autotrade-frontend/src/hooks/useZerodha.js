@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const API = 'http://localhost:8000/api/v1/zerodha';
+const API = '/api/v1/zerodha';
 
 async function asJson(res) {
   if (!res.ok) {

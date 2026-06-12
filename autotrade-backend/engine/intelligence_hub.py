@@ -54,26 +54,18 @@ _MOOD_BIAS = {
 
 def _get_sector_for_symbol(symbol: str) -> str:
     from crawler.sector_data import SECTOR_DEFINITIONS
+    from utils.sector_cache import get_sector as _cache_get_sector
+
     clean = symbol.replace(".NS", "").replace(".BO", "")
+
+    # 1. SECTOR_DEFINITIONS (sector_data.py explicit lists)
     for sector_key, definition in SECTOR_DEFINITIONS.items():
         stocks = definition.get("stocks", [])
         if symbol in stocks or clean in stocks or f"{clean}.NS" in stocks:
             return sector_key
-    FALLBACK = {
-        "HDFCBANK": "Banking", "ICICIBANK": "Banking", "SBIN": "Banking",
-        "AXISBANK": "Banking", "KOTAKBANK": "Banking", "INDUSINDBK": "Banking",
-        "BAJFINANCE": "Banking",
-        "TCS": "IT", "INFY": "IT", "WIPRO": "IT", "HCLTECH": "IT", "TECHM": "IT",
-        "RELIANCE": "Energy", "ONGC": "Energy", "BPCL": "Energy", "NTPC": "Energy",
-        "POWERGRID": "Energy",
-        "SUNPHARMA": "Pharma", "DRREDDY": "Pharma", "CIPLA": "Pharma", "DIVISLAB": "Pharma",
-        "HINDUNILVR": "FMCG", "ITC": "FMCG", "NESTLEIND": "FMCG", "DABUR": "FMCG",
-        "MARUTI": "Auto", "TATAMOTORS": "Auto", "BAJAJ-AUTO": "Auto", "EICHERMOT": "Auto",
-        "TATASTEEL": "Metals", "HINDALCO": "Metals", "JSWSTEEL": "Metals",
-        "LT": "Infra", "ULTRACEMCO": "Infra",
-        "BHARTIARTL": "Telecom",
-    }
-    return FALLBACK.get(clean, "GENERAL")
+
+    # 2. Persistent JSON cache + live yfinance fallback (covers all 9,600+ NSE symbols)
+    return _cache_get_sector(clean)
 
 
 # ── Context dataclasses ───────────────────────────────────────────────────────
@@ -150,6 +142,12 @@ class MasterContext:
     earnings:  EarningsContext
     options:   OptionsContext
     portfolio: PortfolioContext
+    # symbol → fundamental_score (0–100), pre-loaded once from FundamentalData
+    # so scoring 500 symbols needs ZERO live fundamental API calls.
+    fundamentals_by_symbol: dict = field(default_factory=dict)
+    # symbol → (profit_growth_3yr, revenue_growth_3yr) — used as earnings proxy
+    # for symbols with no transcript in EarningsCallSummary.
+    growth_by_symbol: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -246,10 +244,12 @@ def build_sector_context() -> SectorContext:
 async def build_news_context(session: AsyncSession) -> NewsContext:
     from db.models import NewsItem
 
-    cutoff = datetime.utcnow() - timedelta(hours=24)
+    # 7-day window: yfinance NSE articles are typically 2-5 days old;
+    # same-day RSS items are always within range and still dominate the average.
+    cutoff = datetime.utcnow() - timedelta(days=7)
     items = (await session.execute(
         select(NewsItem).where(NewsItem.published_at >= cutoff)
-        .order_by(desc(NewsItem.published_at)).limit(500)
+        .order_by(desc(NewsItem.published_at)).limit(2000)
     )).scalars().all()
 
     # tickers_affected stores full NSE symbols today (e.g. "INFY.NS") because
@@ -288,6 +288,51 @@ async def build_news_context(session: AsyncSession) -> NewsContext:
         headlines_by_symbol={k: v[:3] for k, v in headlines.items()},
         market_wide_score=round(market_wide, 4),
     )
+
+
+async def enrich_news_context_with_tavily(
+    ctx_news: "NewsContext",
+    hub_universe: list[str],
+) -> "NewsContext":
+    """Inject Tavily news scores for hub symbols that have no RSS/DB coverage.
+
+    Called once per hub cycle AFTER build_news_context() completes.
+    Mutates and returns a new NewsContext with the enriched data.
+    Budget-safe: capped at 10 Tavily calls per invocation (10 credits).
+    """
+    try:
+        from engine.tavily_enricher import enrich_missing_news
+        from utils.config import settings
+
+        if not getattr(settings, "tavily_available", False):
+            return ctx_news
+
+        enriched = await enrich_missing_news(
+            symbol_list=hub_universe,
+            existing_scores=ctx_news.scores_by_symbol,
+            max_symbols=20,
+        )
+        if not enriched:
+            return ctx_news
+
+        new_scores = dict(ctx_news.scores_by_symbol)
+        new_headlines = dict(ctx_news.headlines_by_symbol)
+        for sym, (score, hl) in enriched.items():
+            new_scores[sym] = round(score, 4)
+            new_headlines[sym] = hl[:3]
+
+        logger.info(
+            f"[hub/tavily] news enriched {len(enriched)} symbols "
+            f"previously at news_score=0"
+        )
+        return NewsContext(
+            scores_by_symbol=new_scores,
+            headlines_by_symbol=new_headlines,
+            market_wide_score=ctx_news.market_wide_score,
+        )
+    except Exception as exc:
+        logger.warning(f"[hub/tavily] news enrichment failed: {exc}")
+        return ctx_news
 
 
 async def build_earnings_context(session: AsyncSession) -> EarningsContext:
@@ -393,7 +438,11 @@ async def build_portfolio_context(agent_portfolio, session: AsyncSession) -> Por
     )
 
 
-async def build_master_context(agent_portfolio, session: AsyncSession) -> MasterContext:
+async def build_master_context(
+    agent_portfolio,
+    session: AsyncSession,
+    hub_universe: list[str] | None = None,
+) -> MasterContext:
     # NOTE: a single AsyncSession cannot serve concurrent queries, so these
     # DB-backed builders run sequentially (each is a fast indexed lookup).
     macro     = await build_macro_context(session)
@@ -403,10 +452,41 @@ async def build_master_context(agent_portfolio, session: AsyncSession) -> Master
     portfolio = await build_portfolio_context(agent_portfolio, session)
     sectors   = build_sector_context()  # sync, cache-only
 
+    # Tavily: inject real-time news for small-cap hub symbols with no RSS/DB
+    # coverage. Capped at 10 calls (10 credits) so the monthly budget is safe.
+    if hub_universe:
+        news = await enrich_news_context_with_tavily(news, hub_universe)
+
+    # Pre-load cached fundamental scores once (DB only — no live yfinance calls).
+    # FundamentalData is keyed on the bare ticker (e.g. "RELIANCE").
+    from db.models import FundamentalData
+    fund_rows = (await session.execute(
+        select(
+            FundamentalData.symbol,
+            FundamentalData.fundamental_score,
+            FundamentalData.profit_growth_3yr,
+            FundamentalData.revenue_growth_3yr,
+        )
+    )).all()
+    fundamentals_by_symbol = {
+        r.symbol.replace(".NS", ""): float(r.fundamental_score)
+        for r in fund_rows if r.fundamental_score is not None
+    }
+    growth_by_symbol = {
+        r.symbol.replace(".NS", ""): (
+            float(r.profit_growth_3yr)  if r.profit_growth_3yr  is not None else None,
+            float(r.revenue_growth_3yr) if r.revenue_growth_3yr is not None else None,
+        )
+        for r in fund_rows
+        if r.profit_growth_3yr is not None or r.revenue_growth_3yr is not None
+    }
+
     now = datetime.utcnow().isoformat()
     ctx = MasterContext(
         built_at=now, bar_time=now, macro=macro, sectors=sectors,
         news=news, earnings=earnings, options=options, portfolio=portfolio,
+        fundamentals_by_symbol=fundamentals_by_symbol,
+        growth_by_symbol=growth_by_symbol,
     )
 
     # Publish to module caches for macro agent / decision engine / chat
@@ -426,7 +506,6 @@ _EARNINGS_SCORE = {"OPTIMISTIC": 30, "NEUTRAL": 0, "CAUTIOUS": -20, "NEGATIVE": 
 async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, session: AsyncSession) -> ScoredStock:
     from engine.indicators import compute_indicators
     from engine.agent.analyzer import MarketAnalyzerAgent
-    from engine.agent.fundamentals import FundamentalsAgent
 
     analyzer = MarketAnalyzerAgent()
 
@@ -439,40 +518,148 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     except Exception:
         features, regime = None, "UNKNOWN"
 
-    # 2. News (15%)
+    bare = symbol.replace(".NS", "")
+
+    # 2. News/Sentiment (15%) — RSS/DB score; falls back to yfinance headlines scored by
+    # FinBERT (keyword fallback if torch absent) for small caps with no RSS coverage.
+    # Final fallback: use 3-year profit growth as a sentiment proxy for stocks with
+    # zero media presence (common for PSUs, micro-caps, and defense/infra names).
+    _has_news = symbol in ctx.news.scores_by_symbol
     raw_news = ctx.news.scores_by_symbol.get(symbol, 0.0)
+    _news_source = "rss"
+    if not _has_news:
+        try:
+            import yfinance as yf
+            ticker_news = yf.Ticker(symbol).news or []
+            if ticker_news:
+                from engine.tavily_enricher import _score_headlines_finbert
+                headlines_yf = [
+                    (n.get("title") or n.get("content", ""))
+                    for n in ticker_news[:5]
+                ]
+                raw_news = _score_headlines_finbert(headlines_yf)
+                if raw_news != 0.0:
+                    _has_news = True
+                    _news_source = "yfinance"
+                    logger.debug(f"[hub/yf_news] {symbol}: yfinance score={raw_news:+.2f}")
+        except Exception:
+            pass
+    # Growth-based sentiment proxy — applied only when no news source has any data.
+    # Rationale: consistently growing companies tend to attract positive media when
+    # coverage finally appears; this prevents a perpetual 0% weight for small-caps.
+    if not _has_news:
+        _growth = ctx.growth_by_symbol.get(bare)
+        pg = rg = None
+        if _growth:
+            pg, rg = _growth  # profit_growth_3yr, revenue_growth_3yr
+        if pg is not None:
+            if pg > 20 and (rg is None or rg > 10):
+                raw_news, _news_source = 0.20, "growth_proxy"
+            elif pg > 10:
+                raw_news, _news_source = 0.10, "growth_proxy"
+            elif pg < -10 or (rg is not None and rg < -5):
+                raw_news, _news_source = -0.15, "growth_proxy"
+            else:
+                raw_news, _news_source = 0.05, "growth_proxy"
+            _has_news = True
+            logger.debug(f"[hub/growth_proxy] {symbol}: pg={pg:.1f}% rg={rg} → news_proxy={raw_news:+.2f}")
+        elif bare in ctx.fundamentals_by_symbol:
+            # Last resort: use fundamental quality score as a very weak sentiment proxy.
+            # fund_score > 65 = quality company → slight positive; < 40 = weak → slight negative.
+            fs = ctx.fundamentals_by_symbol[bare]
+            if fs >= 65:
+                raw_news, _news_source = 0.10, "fundamental_proxy"
+            elif fs >= 50:
+                raw_news, _news_source = 0.04, "fundamental_proxy"
+            elif fs < 40:
+                raw_news, _news_source = -0.08, "fundamental_proxy"
+            else:
+                raw_news, _news_source = 0.02, "fundamental_proxy"
+            _has_news = True
+            logger.debug(f"[hub/fund_proxy] {symbol}: fund_score={fs:.1f} → news_proxy={raw_news:+.2f}")
     news_score = max(-100, min(100, raw_news * 100))
 
-    # 3. Sector (15%)
+    # 3. Sector (15%) — GENERAL/unmapped falls back to market breadth bias so
+    # every hub symbol always carries a sector signal rather than being zeroed.
     sector = _get_sector_for_symbol(symbol)
-    sector_bias = ctx.sectors.sector_biases.get(sector, 0)
+    if sector in ctx.sectors.sector_biases:
+        sector_bias = ctx.sectors.sector_biases[sector]
+    else:
+        sector_bias = ctx.macro.breadth_bias  # market-wide proxy for unclassified stocks
     sector_score = max(-50, min(50, sector_bias * 25))
 
     # 4. Macro (10%)
     macro_score = max(-50, min(50, ctx.macro.total_macro_bias * 12))
 
-    # 5. Earnings (10%)
-    tone = ctx.earnings.tones_by_symbol.get(symbol, "NEUTRAL")
+    # 5. Earnings (10%) — primary: EarningsCallSummary transcript NLP tone.
+    # Fallback: derive tone from FundamentalData 3-year profit/revenue growth so
+    # small-caps and PSUs without indexed transcripts still carry an earnings signal.
+    _earnings_source = "transcript"
+    tone = ctx.earnings.tones_by_symbol.get(symbol)
+    if tone is None:
+        _growth = ctx.growth_by_symbol.get(bare)
+        pg = _growth[0] if _growth else None
+        if pg is not None:
+            if pg > 20:
+                tone, _earnings_source = "OPTIMISTIC", "growth_proxy"
+            elif pg > 0:
+                tone, _earnings_source = "NEUTRAL",    "growth_proxy"
+            else:
+                tone, _earnings_source = "CAUTIOUS",   "growth_proxy"
+            logger.debug(f"[hub/earn_proxy] {symbol}: pg={pg:.1f}% → {tone}")
+        elif bare in ctx.fundamentals_by_symbol:
+            # Fundamental quality score as earnings proxy when no growth data
+            fs = ctx.fundamentals_by_symbol[bare]
+            if fs >= 65:
+                tone, _earnings_source = "OPTIMISTIC", "fundamental_proxy"
+            elif fs >= 50:
+                tone, _earnings_source = "NEUTRAL",    "fundamental_proxy"
+            else:
+                tone, _earnings_source = "CAUTIOUS",   "fundamental_proxy"
+            logger.debug(f"[hub/earn_fund_proxy] {symbol}: fund_score={fs:.1f} → {tone}")
+    if tone is None:
+        tone = "NEUTRAL"
+        _earnings_source = "default"
     earnings_score = _EARNINGS_SCORE.get(tone, 0)
 
-    # 6. Fundamental (10%)
-    try:
-        fund_score, fund_grade = await FundamentalsAgent().get_cached_grade(symbol)
-    except Exception:
-        fund_score, fund_grade = 50, "WATCHLIST"
+    # 6. Fundamental (10%) — DB-cached score only (no live API call per symbol).
+    # Neutral 50 when the symbol isn't in FundamentalData yet (weekly task fills it).
+    fund_score = ctx.fundamentals_by_symbol.get(bare, 50.0)
+    fund_grade = (
+        "STRONG" if fund_score >= 70 else "GOOD" if fund_score >= 55
+        else "WATCHLIST" if fund_score >= 40 else "WEAK"
+    )
     fundamental_score = (fund_score - 50) * 1.0
 
     # 7. Options (5%) — index-wide bias applied lightly to every name
     options_score = ctx.options.nifty_bias * 15
 
+    # Renormalize: factors with no real data get 0 weight so missing factors
+    # don't dilute the ones that have a genuine signal.
+    # Exceptions: sector always has a signal (known sector or market breadth proxy);
+    # news is considered covered if Tavily, RSS, or yfinance contributed a score.
+    _has_earnings = (tone != "NEUTRAL" or _earnings_source != "default")
+    _w = {
+        "technical":   0.35,
+        "news":        0.15 if _has_news else 0.0,
+        "sector":      0.15,  # always: known sector or market breadth fallback
+        "macro":       0.10,
+        "earnings":    0.10 if _has_earnings else 0.0,
+        "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
+        "options":     0.05,
+    }
+    _total_w = sum(_w.values())
+    if _total_w > 0:
+        _w = {k: v / _total_w for k, v in _w.items()}
+
     master_score = (
-        technical_score   * 0.35 +
-        news_score        * 0.15 +
-        sector_score      * 0.15 +
-        macro_score       * 0.10 +
-        earnings_score    * 0.10 +
-        fundamental_score * 0.10 +
-        options_score     * 0.05
+        technical_score   * _w["technical"] +
+        news_score        * _w["news"] +
+        sector_score      * _w["sector"] +
+        macro_score       * _w["macro"] +
+        earnings_score    * _w["earnings"] +
+        fundamental_score * _w["fundamental"] +
+        options_score     * _w["options"]
     )
 
     # Blocking + penalties
@@ -507,6 +694,38 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     if symbol in dc.get("tax_harvest_symbols", []) and signal in ("SELL", "STRONG_SELL"):
         master_score -= 15
 
+    # ── Technical indicator snapshot for Telegram proofs ──────────────────────
+    import math as _math
+    def _nf(v):  # nan → None, else round to 2
+        return None if (v is None or (isinstance(v, float) and _math.isnan(v))) else round(float(v), 2)
+
+    tech_detail = {
+        "rsi":              _nf(getattr(signals, "rsi", None)),
+        "rsi_signal":       getattr(signals, "rsi_signal", ""),
+        "macd":             _nf(getattr(signals, "macd", None)),
+        "macd_signal":      _nf(getattr(signals, "macd_signal", None)),
+        "macd_hist":        _nf(getattr(signals, "macd_histogram", None)),
+        "macd_cross":       getattr(signals, "macd_cross", ""),
+        "bb_position":      getattr(signals, "bb_position", ""),
+        "ema_trend":        getattr(signals, "ema_trend", ""),
+        "ema_20":           _nf(getattr(signals, "ema_20", None)),
+        "ema_50":           _nf(getattr(signals, "ema_50", None)),
+        "ema_200":          _nf(getattr(signals, "ema_200", None)),
+        "adx":              _nf(getattr(signals, "adx", None)),
+        "adx_direction":    getattr(signals, "adx_direction", ""),
+        "adx_strength":     getattr(signals, "adx_trend_strength", ""),
+        "stoch_k":          _nf(getattr(signals, "stoch_k", None)),
+        "stoch_d":          _nf(getattr(signals, "stoch_d", None)),
+        "stoch_signal":     getattr(signals, "stoch_signal", ""),
+        "supertrend_dir":   getattr(signals, "supertrend_direction", ""),
+        "ichimoku_signal":  getattr(signals, "ichimoku_signal", ""),
+        "ichimoku_tenkan":  _nf(getattr(signals, "ichimoku_tenkan", None)),
+        "ichimoku_kijun":   _nf(getattr(signals, "ichimoku_kijun", None)),
+        "volume_surge":     _nf(getattr(signals, "volume_surge", None)),
+        "composite_score":  _nf(signals.composite_score),
+    }
+
+    _growth_vals = ctx.growth_by_symbol.get(bare, (None, None))
     reasoning = {
         "technical": round(technical_score, 1), "news": round(news_score, 1),
         "sector": round(sector_score, 1), "macro": round(macro_score, 1),
@@ -516,6 +735,38 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "sector_mood": sector_mood, "fund_grade": fund_grade,
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
         "headlines": ctx.news.headlines_by_symbol.get(symbol, []),
+        "active_weights": {k: round(v, 3) for k, v in _w.items()},
+        "news_source":     _news_source,
+        "earnings_source": _earnings_source,
+        "profit_growth_3yr":  _growth_vals[0],
+        "revenue_growth_3yr": _growth_vals[1],
+        "tech_detail": tech_detail,
+        "macro_detail": {
+            "fii_net_3d":  round(ctx.macro.fii_net_3d, 1),
+            "dii_net_3d":  round(ctx.macro.dii_net_3d, 1),
+            "india_vix":   round(ctx.macro.india_vix, 2),
+            "vix_label":   ctx.macro.vix_label,
+            "fii_bias":    ctx.macro.fii_bias,
+            "dii_bias":    ctx.macro.dii_bias,
+            "breadth_bias": ctx.macro.breadth_bias,
+        },
+        "sector_detail": {
+            "sector_name":  sector,
+            "sector_bias":  round(sector_bias, 2),
+            "sector_mood":  sector_mood,
+        },
+        "earnings_detail": {
+            "tone":         tone,
+            "has_data":     symbol in ctx.earnings.tones_by_symbol,
+        },
+        "fundamental_detail": {
+            "fund_score":   round(fund_score, 1),
+            "fund_grade":   fund_grade,
+            "has_data":     bare in ctx.fundamentals_by_symbol,
+        },
+        "options_detail": {
+            "nifty_bias":   ctx.options.nifty_bias,
+        },
     }
 
     return ScoredStock(
@@ -533,10 +784,18 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     from crawler.price_feed import get_latest_candles
 
     # Phase 1: fetch candles sequentially (DB-bound, shared session)
+    # Fallback chain: requested timeframe → 1h → 1d → skip.
+    _FALLBACKS = {"5m": ["1h", "1d"], "1h": ["1d"], "15m": ["1h", "1d"], "1d": []}
+    _fallbacks = _FALLBACKS.get(timeframe, ["1h", "1d"])
     dfs: dict = {}
     for symbol in symbols:
         try:
             candles = await get_latest_candles(symbol, timeframe, 300, session)
+            for fb in _fallbacks:
+                if not candles or len(candles) < 50:
+                    candles = await get_latest_candles(symbol, fb, 300, session)
+                else:
+                    break
             if not candles or len(candles) < 50:
                 continue
             cs = sorted(candles, key=lambda c: c.timestamp)

@@ -39,6 +39,8 @@ _KNOWN_KEYS: dict[str, type] = {
     # Risk / sizing
     "atr_multiplier":         float,
     "min_risk_reward":        float,
+    "max_portfolio_risk":     float,   # total stop-loss risk across all open positions
+    "min_cash_buffer":        float,   # minimum dry cash as fraction of equity
     # Indian market
     "indian_market_max_risk": float,
     "indian_intraday_sl_pct": float,
@@ -56,6 +58,17 @@ _KNOWN_KEYS: dict[str, type] = {
     "paper_mode":              bool,
     "paper_confidence_threshold": float,
     "live_confidence_threshold":  float,
+    "agent_confidence_threshold": int,   # min confidence % to open a trade (30–100)
+    # NSE/BSE product type for new positional trades:
+    #   CNC = Cash & Carry (delivery, long-only, T+1 settlement, no expiry)
+    #   MIS = Margin Intraday Square-off (short selling allowed, must close by 3:20 PM IST)
+    # MEAN_REVERSION_SHORT strategy always uses MIS regardless of this setting.
+    "agent_default_product":   str,
+    # Allow SELL signals from Hub 7-factor negative scores (equity intraday / MIS only).
+    # False by default — only BUY signals are acted on.
+    "equity_short_enabled":    bool,
+    # Scanner kill-switch: False = agent runs solo, SCAN paper trader is silent.
+    "scanner_enabled":         bool,
 }
 
 
@@ -139,6 +152,14 @@ class RuntimeConfig:
         return float(self._get("min_risk_reward", settings.MIN_RISK_REWARD))
 
     @property
+    def max_portfolio_risk(self) -> float:
+        return float(self._get("max_portfolio_risk", getattr(settings, "MAX_PORTFOLIO_RISK", 0.15)))
+
+    @property
+    def min_cash_buffer(self) -> float:
+        return float(self._get("min_cash_buffer", getattr(settings, "MIN_CASH_BUFFER", 0.10)))
+
+    @property
     def indian_market_max_risk(self) -> float:
         return float(self._get("indian_market_max_risk", settings.INDIAN_MARKET_MAX_RISK))
 
@@ -186,6 +207,23 @@ class RuntimeConfig:
     def live_confidence_threshold(self) -> float:
         return float(self._get("live_confidence_threshold", getattr(settings, "LIVE_CONFIDENCE_THRESHOLD", 70.0)))
 
+    @property
+    def agent_confidence_threshold(self) -> int:
+        return int(self._get("agent_confidence_threshold", getattr(settings, "AGENT_CONFIDENCE_THRESHOLD", 30)))
+
+    @property
+    def agent_default_product(self) -> str:
+        val = self._get("agent_default_product", getattr(settings, "AGENT_DEFAULT_PRODUCT", "CNC"))
+        return val if val in ("CNC", "MIS") else "CNC"
+
+    @property
+    def equity_short_enabled(self) -> bool:
+        return bool(self._get("equity_short_enabled", getattr(settings, "EQUITY_SHORT_ENABLED", False)))
+
+    @property
+    def scanner_enabled(self) -> bool:
+        return bool(self._get("scanner_enabled", getattr(settings, "SCANNER_ENABLED", False)))
+
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""
         return {
@@ -197,6 +235,8 @@ class RuntimeConfig:
             "min_risk_reward":         self.min_risk_reward,
             "indian_market_max_risk":  self.indian_market_max_risk,
             "indian_intraday_sl_pct":  self.indian_intraday_sl_pct,
+            "max_portfolio_risk":      self.max_portfolio_risk,
+            "min_cash_buffer":         self.min_cash_buffer,
             "enable_fii_dii_analysis": self.enable_fii_dii_analysis,
             "enable_options_chain":    self.enable_options_chain,
             "enable_india_vix":        self.enable_india_vix,
@@ -207,4 +247,8 @@ class RuntimeConfig:
             "paper_mode":              self.paper_mode,
             "paper_confidence_threshold": self.paper_confidence_threshold,
             "live_confidence_threshold":  self.live_confidence_threshold,
+            "agent_default_product":       self.agent_default_product,
+            "agent_confidence_threshold":  self.agent_confidence_threshold,
+            "equity_short_enabled":        self.equity_short_enabled,
+            "scanner_enabled":             self.scanner_enabled,
         }

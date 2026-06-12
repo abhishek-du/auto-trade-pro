@@ -31,13 +31,13 @@ function ChartTooltip({ active, payload, label, prefix = '' }) {
   );
 }
 
-/* gradient offset for equity curve split at $1000 */
 function equityOffset(data) {
   if (!data?.length) return 0.5;
-  const vals = data.map((d) => d.balance ?? d.equity ?? 0);
-  const max = Math.max(...vals), min = Math.min(...vals);
-  if (max === min) return max >= 1000 ? 1 : 0;
-  return Math.min(1, Math.max(0, (max - 1000) / (max - min)));
+  const vals  = data.map((d) => d.balance ?? d.equity ?? 0);
+  const max   = Math.max(...vals), min = Math.min(...vals);
+  const start = 500000;
+  if (max === min) return max >= start ? 1 : 0;
+  return Math.min(1, Math.max(0, (max - start) / (max - min)));
 }
 
 const WIN_LOSS_COLORS = ['#10B981', '#EF4444', '#F59E0B'];
@@ -111,8 +111,8 @@ export default function Analytics() {
               <XAxis dataKey="date"  tick={CHART_THEME.tick} tickLine={false} axisLine={CHART_THEME.axis} interval="preserveStartEnd" />
               <YAxis tick={CHART_THEME.tick} tickLine={false} axisLine={false} tickFormatter={fmtINR} width={68} />
               <Tooltip content={<ChartTooltip prefix="₹" />} />
-              <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="5 3"
-                label={{ value: '₹1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
+              <ReferenceLine y={500000} stroke="#6B7280" strokeDasharray="5 3"
+                label={{ value: '₹5L start', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
               {/* backend equity_curve uses 'equity' key; daily_pnl_chart uses 'balance' */}
               <Area type="monotone" dataKey="equity" name="Balance"
                 stroke="url(#sGrad)" strokeWidth={2} fill="url(#aGrad)" dot={false}

@@ -38,6 +38,12 @@ class OpenPositionOut(BaseModel):
     trade_id:       int
     opened_at:      datetime
     last_updated:   datetime
+    # Trade-management state (from PaperTrade.indicator_snapshot.trade_mgmt)
+    target_1:       float | None = None   # first checkpoint / trailing trigger
+    target_2:       float | None = None   # final target (= take_profit)
+    atr:            float | None = None
+    trailing:       bool         = False  # True once T1 hit → stop trails by 1×ATR
+    level_source:   str | None   = None   # 'dynamic' | 'atr' | 'static'
 
 
 class PerformanceSnapshotOut(BaseModel):

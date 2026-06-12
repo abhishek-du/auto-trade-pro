@@ -7,8 +7,8 @@ function MarketTicker({ symbol, label }) {
 
   useEffect(() => {
     const load = () =>
-      apiFetch(`/api/v1/india/price/${encodeURIComponent(symbol)}`)
-        .then(r => r.json())
+      apiFetch(`/api/v1/india/live-prices/${encodeURIComponent(symbol)}`)
+        .then(r => r)
         .then(d => setData(d))
         .catch(() => {})
     load()

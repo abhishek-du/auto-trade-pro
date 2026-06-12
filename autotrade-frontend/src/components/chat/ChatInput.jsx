@@ -29,8 +29,7 @@ export default function ChatInput({ value, onChange, onSend, onSuggestionClick, 
     debounceRef.current = setTimeout(async () => {
       setAutoLoading(true)
       try {
-        const res  = await apiFetch(`/api/v1/chat/suggest/${encodeURIComponent(last)}`)
-        const data = await res.json()
+        const data  = await apiFetch(`/api/v1/chat/suggest/${encodeURIComponent(last)}`)
         if (Array.isArray(data) && data.length) {
           setAutocomplete(data)
           setShowAuto(true)

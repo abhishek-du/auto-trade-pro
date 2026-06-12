@@ -126,19 +126,19 @@ app = FastAPI(
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 # CORS spec rejects `allow_origins=["*"]` together with `allow_credentials=True`
-# (the browser silently drops the response). Pin the origin list explicitly,
-# extendable at deploy time via the CORS_ORIGINS env var (comma-separated).
-import os as _os
-_default_origins = [
-    "http://localhost:5173",   # Vite dev server
+# (the browser silently drops the response). Set CORS_ORIGINS in .env as a
+# comma-separated list. Falls back to localhost dev URLs when not set.
+from utils.config import settings as _settings
+_cors_env = [o.strip() for o in (_settings.CORS_ORIGINS or "").split(",") if o.strip()]
+_cors_origins = _cors_env or [
+    "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:8000",   # FastAPI itself (Swagger/redoc)
+    "http://localhost:8000",
     "http://127.0.0.1:8000",
 ]
-_extra = [o.strip() for o in (_os.getenv("CORS_ORIGINS") or "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_default_origins + _extra,
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

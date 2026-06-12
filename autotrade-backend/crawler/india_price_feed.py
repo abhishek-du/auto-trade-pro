@@ -548,23 +548,52 @@ async def run_india_price_crawl(
             "errors":             [],
         }
 
-    # Build full symbol list — large-cap + mid-cap + indices + INR forex + commodities
-    all_symbols: list[str] = (
-        settings.nse_symbols
-        + settings.nse_mid_symbols
-        + settings.WATCHLIST_NIFTY_INDICES
-        + settings.WATCHLIST_INDIAN_FOREX
-        + settings.WATCHLIST_COMMODITIES
+    # Build symbol list dynamically from market_shortlist (full-market scanner output).
+    # Fallback: top 50 NSE EQ symbols from kite_instruments (bootstrap / cold start).
+    # Always include the mandatory indices and VIX symbols regardless of shortlist.
+    from sqlalchemy import select as _sel, text as _text
+    from db.models import MarketShortlist, KiteInstrument
+
+    # 1. Mandatory: indices + VIX (needed for macro/VIX scoring in hub)
+    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES)
+
+    # 2. Dynamic equity universe from market_shortlist
+    sl_result = await session.execute(
+        _sel(MarketShortlist.symbol).order_by(MarketShortlist.rank).limit(100)
     )
+    shortlist_syms = [r.symbol for r in sl_result.all()]
+
+    if shortlist_syms:
+        equity_syms = shortlist_syms
+        source = f"market_shortlist ({len(equity_syms)} symbols)"
+    else:
+        # Cold start: top 50 NSE EQ from kite_instruments alphabetically
+        ki_result = await session.execute(
+            _sel(KiteInstrument.tradingsymbol)
+            .where(
+                KiteInstrument.instrument_type == "EQ",
+                KiteInstrument.segment == "NSE",
+                KiteInstrument.name != "",
+            )
+            .order_by(KiteInstrument.tradingsymbol)
+            .limit(50)
+        )
+        equity_syms = [f"{r.tradingsymbol}.NS" for r in ki_result.all()]
+        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols)"
+
+    # 3. User watchlist additions
+    from db.models import UserWatchlist
+    wl_result = await session.execute(
+        _sel(UserWatchlist.symbol).where(UserWatchlist.is_active == True)
+    )
+    user_syms = [s for s in wl_result.scalars().all() if s not in equity_syms]
+
+    all_symbols: list[str] = mandatory + equity_syms + user_syms
 
     logger.info(
         f"━━ India price crawl START ━━  {len(all_symbols)} symbols  "
         f"market_open={market_open}  ignore_market_hours={ignore_market_hours}  "
-        f"({len(settings.nse_symbols)} large-cap  "
-        f"{len(settings.nse_mid_symbols)} mid-cap  "
-        f"{len(settings.WATCHLIST_NIFTY_INDICES)} indices  "
-        f"{len(settings.WATCHLIST_INDIAN_FOREX)} INR forex  "
-        f"{len(settings.WATCHLIST_COMMODITIES)} commodities)"
+        f"source={source}  user_extra={len(user_syms)}"
     )
 
     all_candles:    list[dict] = []
@@ -575,29 +604,62 @@ async def run_india_price_crawl(
     # Per-symbol 20s timeout: yfinance has no native timeout and can hang for
     # minutes when Yahoo's gateway is degraded. Without this guard a single
     # bad symbol burned the whole task budget (Celery hard-limit 600s).
+    #
+    # We fetch two timeframes per symbol:
+    #   5m  (period=5d)  — for the agent's real-time decision-making
+    #   1h  (period=60d) — for Hub scoring and longer-window indicators
+    counted: set[str] = set()
     for symbol in all_symbols:
         logger.info(f"  →  Fetching candles for {symbol} ...")
+        symbol_ok = False
+
+        # 5-minute candles (only available for last 60 days; fetch 5d to keep DB fresh)
         try:
-            candles = await asyncio.wait_for(
+            candles_5m = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda s=symbol: fetch_nse_candles(s, interval="5m", period="5d"),
+                ),
+                timeout=20.0,
+            )
+            if candles_5m:
+                all_candles.extend(candles_5m)
+                symbol_ok = True
+                logger.info(f"  ✓  {symbol}: {len(candles_5m)} × 5m candles")
+            else:
+                logger.debug(f"  -  {symbol}: no 5m data (index/forex skip is normal)")
+        except asyncio.TimeoutError:
+            logger.warning(f"  ✗  {symbol}: 5m yfinance timeout (>20s)")
+            errors.append(f"{symbol}/5m: timeout")
+        except Exception as exc:
+            logger.debug(f"  -  {symbol}: 5m fetch skipped: {exc}")
+
+        # 1-hour candles (primary source for Hub scoring + EMA/RSI on longer window)
+        try:
+            candles_1h = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda s=symbol: fetch_nse_candles(s, interval="1h"),
                 ),
                 timeout=20.0,
             )
-            if candles:
-                total_symbols += 1
-                all_candles.extend(candles)
-                logger.info(f"  ✓  {symbol}: {len(candles)} candles")
+            if candles_1h:
+                all_candles.extend(candles_1h)
+                symbol_ok = True
+                logger.info(f"  ✓  {symbol}: {len(candles_1h)} × 1h candles")
             else:
-                logger.warning(f"  ✗  {symbol}: no candle data returned")
-                errors.append(f"{symbol}: empty response")
+                logger.warning(f"  ✗  {symbol}: no 1h candle data returned")
+                errors.append(f"{symbol}/1h: empty response")
         except asyncio.TimeoutError:
-            logger.warning(f"  ✗  {symbol}: yfinance timeout (>20s)")
-            errors.append(f"{symbol}: timeout")
+            logger.warning(f"  ✗  {symbol}: 1h yfinance timeout (>20s)")
+            errors.append(f"{symbol}/1h: timeout")
         except Exception as exc:
-            logger.warning(f"  ✗  Failed to fetch {symbol}: {exc}")
-            errors.append(f"{symbol}: {exc}")
+            logger.warning(f"  ✗  Failed to fetch {symbol} 1h: {exc}")
+            errors.append(f"{symbol}/1h: {exc}")
+
+        if symbol_ok and symbol not in counted:
+            counted.add(symbol)
+            total_symbols += 1
 
     # Step 2 — fetch index snapshots (non-DB, informational / dashboard use)
     indices = fetch_nifty_indices()

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import {
-  Activity, Globe, Zap, BarChart2, TrendingUp,
+  Activity, Globe, Zap, BarChart2, TrendingUp, ArrowRight,
 } from 'lucide-react';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
@@ -11,8 +12,19 @@ import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
 import {
   getIndiaMarketStatus, getIndiaVix, getIndiaFiiDii,
-  getIndiaSignals, getIndiaSectorPerf, getIndiaOptionsChain,
+  getIndiaSignals, getIndiaSectorPerf, getIndiaOptionsChain, apiFetch,
 } from '../api/client';
+
+// Unified signal pill — same thresholds as the scanner / stock detail / agent.
+function UnifiedSignalPill({ signal }) {
+  const s = (signal || 'HOLD').toUpperCase();
+  const isBuy = s.includes('BUY'); const isSell = s.includes('SELL');
+  const cls = isBuy ? 'bg-profit/12 text-profit border-profit/25'
+            : isSell ? 'bg-loss/12 text-loss border-loss/25'
+            : 'bg-white/5 text-muted border-border';
+  const label = s === 'STRONG_BUY' ? 'S.BUY' : s === 'STRONG_SELL' ? 'S.SELL' : s;
+  return <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${cls} shrink-0`}>{label}</span>;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -91,8 +103,23 @@ export default function IndiaMarket() {
 
   const loadSignals = useCallback(async (cat) => {
     try {
-      const data = await getIndiaSignals(cat);
-      setSignals(Array.isArray(data) ? data : data?.signals ?? []);
+      if (cat === 'stocks') {
+        // Stocks tab → unified market_shortlist (compute_indicators), so it
+        // matches the Scanner, /s/:symbol page, and the agent exactly.
+        const d = await apiFetch('/api/v1/india/market-scanner/shortlist?limit=30');
+        const rows = (d?.shortlist ?? [])
+          .filter(r => /BUY|SELL/.test((r.signal || '').toUpperCase()))
+          .map(r => ({
+            symbol: r.symbol, ticker: r.ticker, signal: r.signal,
+            confidence: Math.min(100, Math.abs(r.master_score ?? 0)),
+            sector: r.sector, rsi: r.rsi, unified: true,
+          }))
+          .sort((a, b) => b.confidence - a.confidence);
+        setSignals(rows);
+      } else {
+        const data = await getIndiaSignals(cat);
+        setSignals(Array.isArray(data) ? data : data?.signals ?? []);
+      }
     } catch {}
   }, []);
 
@@ -262,25 +289,37 @@ export default function IndiaMarket() {
 
           <div className="flex-1 overflow-y-auto px-4 py-1 divide-y divide-border">
             {signals.length === 0 ? (
-              <div className="flex items-center justify-center h-32">
-                <p className="text-muted text-sm">No signals</p>
+              <div className="flex flex-col items-center justify-center h-32 gap-1">
+                <p className="text-muted text-sm">No actionable signals</p>
+                {sigTab === 'stocks' && (
+                  <p className="text-muted/60 text-xs">Run the market scanner to populate</p>
+                )}
               </div>
             ) : (
-              signals.slice(0, 14).map((s, i) => (
-                <div key={i} className="flex items-center justify-between py-2.5">
-                  <div>
-                    <p className="text-slate-200 text-sm font-semibold">
-                      {s.symbol?.replace('.NS', '')}
-                    </p>
-                    {s.confidence != null && (
-                      <p className="text-muted text-[10px] mt-0.5">
-                        {s.pattern_name ?? s.timeframe} · {(+s.confidence).toFixed(1)}%
+              signals.slice(0, 14).map((s, i) => {
+                const ticker = s.ticker ?? s.symbol?.replace('.NS', '');
+                const row = (
+                  <>
+                    <div className="min-w-0">
+                      <p className="text-slate-200 text-sm font-semibold truncate">{ticker}</p>
+                      <p className="text-muted text-[10px] mt-0.5 truncate">
+                        {s.unified
+                          ? `${Math.round(s.confidence)}% conviction${s.sector ? ` · ${s.sector}` : ''}${s.rsi != null ? ` · RSI ${Math.round(s.rsi)}` : ''}`
+                          : `${s.pattern_name ?? s.timeframe ?? ''}${s.confidence != null ? ` · ${(+s.confidence).toFixed(1)}%` : ''}`}
                       </p>
-                    )}
-                  </div>
-                  <SignalBadge signal={s} />
-                </div>
-              ))
+                    </div>
+                    {s.unified ? <UnifiedSignalPill signal={s.signal} /> : <SignalBadge signal={s} />}
+                  </>
+                );
+                return s.unified ? (
+                  <Link key={i} to={`/s/${ticker}`}
+                    className="flex items-center justify-between gap-2 py-2.5 hover:bg-white/[0.02] -mx-2 px-2 rounded-lg transition-colors">
+                    {row}
+                  </Link>
+                ) : (
+                  <div key={i} className="flex items-center justify-between gap-2 py-2.5">{row}</div>
+                );
+              })
             )}
           </div>
         </div>

@@ -13,7 +13,7 @@ import asyncio
 import re
 import html
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 
 import httpx
@@ -30,17 +30,10 @@ _SENTIMENT_WINDOW: int = 10
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_NEWSAPI_BASE  = "https://newsapi.org/v2/everything"
-_FINNHUB_BASE  = "https://finnhub.io/api/v1"
-# India-first RSS feeds (no key, no rate limit). Empty/blocked feeds are
-# skipped gracefully by fetch_free_rss_news(). Moneycontrol, Business Standard
-# and Mint reliably return market headlines; ET is best-effort.
-_RSS_FEEDS     = [
-    "https://www.moneycontrol.com/rss/latestnews.xml",
-    "https://www.business-standard.com/rss/markets-106.rss",
-    "https://www.livemint.com/rss/markets",
-    "https://economictimes.indiatimes.com/markets/rss.cms",
-]
+_NEWSAPI_BASE  = settings.NEWSAPI_BASE_URL
+_FINNHUB_BASE  = settings.FINNHUB_BASE_URL
+# India-first RSS feeds — configured via RSS_FEED_URLS in .env (comma-separated)
+_RSS_FEEDS     = [u.strip() for u in settings.RSS_FEED_URLS.split(",") if u.strip()]
 _FOREX_CODES   = {"EUR", "USD", "GBP", "JPY", "AUD", "CHF", "CAD"}
 _FINBERT_MODEL = "ProsusAI/finbert"
 
@@ -49,7 +42,7 @@ _FINBERT_MODEL = "ProsusAI/finbert"
 # operator can notice a quiet outage instead of discovering it via empty news
 # feeds in the UI. Keyed by the same source-name strings the source_counts
 # dict uses.
-_SOURCE_ZERO_STREAK: dict[str, int] = {"rss": 0, "newsdata": 0, "finnhub": 0, "newsapi": 0}
+_SOURCE_ZERO_STREAK: dict[str, int] = {"rss": 0, "newsdata": 0, "finnhub": 0, "newsapi": 0, "yfinance": 0}
 _SOURCE_FAIL_THRESHOLD: int = 3
 
 _POSITIVE_WORDS = [
@@ -68,6 +61,35 @@ _UNCERTAINTY_PHRASES  = [
     "holds steady", "flat ahead", "rangebound", "consolidates",
     "wait-and-see", "cautious ahead", "on hold",
 ]
+
+# Indian broker recommendation patterns — FinBERT cannot parse these correctly.
+# Headlines follow: "{Action} {Stock}; target of Rs {N}: {Broker}"
+# We detect the leading action word and score directly, bypassing FinBERT.
+_INDIA_BUY_WORDS  = frozenset({
+    "buy", "strong buy", "add", "accumulate", "outperform", "overweight",
+    "reiterate buy", "maintain buy", "upgrade", "top pick",
+})
+_INDIA_SELL_WORDS = frozenset({
+    "sell", "reduce", "underperform", "underweight", "avoid",
+    "downgrade", "exit", "book profit",
+})
+
+
+def _india_broker_score(headline: str) -> "dict | None":
+    """Detect Indian broker recommendation headlines and score them directly.
+
+    Returns a scored dict when the headline starts with a known action word,
+    or None to fall through to FinBERT.  Score magnitude is 0.75 (strong signal
+    but below 1.0 to leave room for earnings/macro context).
+    """
+    lower = headline.lower().lstrip()
+    for word in _INDIA_BUY_WORDS:
+        if lower.startswith(word + " ") or lower.startswith(word + ":"):
+            return {"sentiment": "positive", "score": 0.75, "confidence": 0.75}
+    for word in _INDIA_SELL_WORDS:
+        if lower.startswith(word + " ") or lower.startswith(word + ":"):
+            return {"sentiment": "negative", "score": -0.75, "confidence": 0.75}
+    return None
 
 
 def _is_uncertain(headline: str) -> bool:
@@ -630,6 +652,11 @@ class SentimentAnalyser:
         if not self._available:
             return _keyword_score(headline)
 
+        # Guard 0: Indian broker recommendation format — FinBERT mis-scores these
+        broker_result = _india_broker_score(headline)
+        if broker_result is not None:
+            return broker_result
+
         # Guard 1: uncertainty/consolidation headlines → neutral
         if _is_uncertain(headline):
             return {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}
@@ -689,6 +716,8 @@ class SentimentAnalyser:
                     slot_results.append(
                         {"sentiment": "neutral", "score": 0.0, "confidence": 0.0}
                     )
+                elif _india_broker_score(h) is not None:
+                    slot_results.append(_india_broker_score(h))
                 elif _is_uncertain(h):
                     slot_results.append(
                         {"sentiment": "neutral", "score": 0.0, "confidence": 0.5}
@@ -733,7 +762,151 @@ class SentimentAnalyser:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PART 3 — Main crawl function
+# PART 3 — yfinance news (symbol-tagged, no key required)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_YF_MAX_SYMBOLS:    int = 60    # symbols to query per crawl cycle
+_YF_MAX_PER_SYMBOL: int = 8     # articles to take per symbol
+_YF_MAX_AGE_HOURS:  int = 168   # 7 days — Yahoo Finance NSE news is often 3-5 days old
+
+
+async def _yf_news_symbols(session: AsyncSession, limit: int = _YF_MAX_SYMBOLS) -> list[str]:
+    """Return the most Hub-relevant symbols for yfinance news fetching.
+
+    Always includes WATCHLIST_NSE_LARGE_CAP (most Yahoo Finance coverage) plus
+    the top-N market_shortlist symbols (Hub's active universe). Deduped, capped
+    at `limit`.
+    """
+    from db.models import MarketShortlist
+    from sqlalchemy import desc as _desc
+
+    # Always include config large-caps and mid-caps (best Yahoo Finance coverage)
+    seed = (
+        [f"{s}.NS" for s in settings.WATCHLIST_NSE_LARGE_CAP] +
+        [f"{s}.NS" for s in settings.WATCHLIST_NSE_MID_CAP]
+    )
+
+    # Supplement with live shortlist (hub-relevant universe)
+    try:
+        rows = (await session.execute(
+            select(MarketShortlist.symbol)
+            .order_by(_desc(MarketShortlist.master_score))
+            .limit(limit)
+        )).scalars().all()
+        seed.extend(rows)
+    except Exception as exc:
+        logger.debug(f"[yfinance_news] market_shortlist query failed: {exc}")
+
+    # Dedup preserving order, cap at limit
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in seed:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _parse_yf_news_item(raw: dict, queried_sym: str, cutoff: datetime) -> dict | None:
+    """Parse one yfinance news dict — handles both the old flat format (≤0.2.x)
+    and the new nested-content format (≥1.3.0).
+
+    Returns a crawl-row dict or None if the item should be skipped.
+    """
+    # yfinance ≥1.3 wraps everything under a "content" key.
+    content = raw.get("content") or raw
+
+    title = (content.get("title") or "").strip()
+    if not title:
+        return None
+
+    # Publisher ---------------------------------------------------------------
+    provider = content.get("provider") or {}
+    publisher = (
+        provider.get("displayName")
+        or raw.get("publisher")
+        or "Yahoo Finance"
+    )
+
+    # URL ---------------------------------------------------------------------
+    canonical = content.get("canonicalUrl") or content.get("clickThroughUrl") or {}
+    url = canonical.get("url") or raw.get("link")
+
+    # Published-at ------------------------------------------------------------
+    pub_dt: datetime | None = None
+    pub_str = content.get("pubDate") or content.get("displayTime")
+    if pub_str:
+        try:
+            pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+    if pub_dt is None:
+        # Old format: Unix timestamp
+        ts = raw.get("providerPublishTime")
+        if ts:
+            try:
+                pub_dt = datetime.utcfromtimestamp(ts)
+            except Exception:
+                pass
+
+    if pub_dt and pub_dt < cutoff:
+        return None  # too old
+
+    # Related tickers (old format only — new format dropped this field) -------
+    related = [
+        r if ("." in r or r.startswith("^") or "=" in r) else f"{r}.NS"
+        for r in (raw.get("relatedTickers") or [])
+    ]
+    tickers_affected = list(dict.fromkeys([queried_sym, *related]))
+
+    return {
+        "headline":         title,
+        "source":           f"yf:{publisher[:30]}",
+        "url":              url,
+        "published_at":     pub_dt,
+        "tickers_affected": tickers_affected,
+    }
+
+
+async def fetch_yfinance_news(symbols: list[str]) -> list[dict]:
+    """Fetch recent news headlines from Yahoo Finance for a batch of NSE symbols.
+
+    Unlike RSS/Finnhub/NewsAPI, every article is **pre-tagged** to the
+    symbol it was fetched for — no ticker extraction needed.
+
+    Runs yfinance synchronously in a thread-pool executor so the event loop
+    stays unblocked. A per-symbol exception never kills the batch.
+    """
+    if not symbols:
+        return []
+
+    cutoff = datetime.utcnow() - timedelta(hours=_YF_MAX_AGE_HOURS)
+
+    def _fetch_all(syms: list[str]) -> list[dict]:
+        import yfinance as yf
+        rows: list[dict] = []
+        for sym in syms:
+            try:
+                news_list = yf.Ticker(sym).news or []
+                for raw in news_list[:_YF_MAX_PER_SYMBOL]:
+                    parsed = _parse_yf_news_item(raw, sym, cutoff)
+                    if parsed:
+                        rows.append(parsed)
+            except Exception as exc:
+                logger.debug(f"[yfinance_news] {sym}: {exc}")
+        return rows
+
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, _fetch_all, symbols)
+    if rows:
+        logger.info(f"yfinance ✓  {len(rows)} headlines  symbols_queried={len(symbols)}")
+    return rows
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PART 4 — Main crawl function
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def run_news_crawl(session: AsyncSession) -> dict:
@@ -755,12 +928,16 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # ~59 names in NSE_STOCK_LOOKUP.
     await _build_india_name_map(session)
 
-    # ── Fetch from all sources ────────────────────────────────────────────────
-    newsapi_rows, finnhub_rows, newsdata_rows, rss_rows = await asyncio.gather(
+    # ── Identify symbols for yfinance (DB shortlist — async, must run first) ────
+    yf_symbols = await _yf_news_symbols(session)
+
+    # ── Fetch from all sources in parallel ───────────────────────────────────
+    newsapi_rows, finnhub_rows, newsdata_rows, rss_rows, yf_rows = await asyncio.gather(
         fetch_newsapi_headlines(),
         fetch_finnhub_news(),
         fetch_newsdata_india(),
         fetch_free_rss_news(),
+        fetch_yfinance_news(yf_symbols),
         return_exceptions=True,
     )
 
@@ -771,16 +948,18 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             return []
         return result  # type: ignore[return-value]
 
-    newsapi_rows  = _unwrap("newsapi",  newsapi_rows)
-    finnhub_rows  = _unwrap("finnhub",  finnhub_rows)
-    newsdata_rows = _unwrap("newsdata", newsdata_rows)
-    rss_rows      = _unwrap("rss",      rss_rows)
+    newsapi_rows  = _unwrap("newsapi",   newsapi_rows)
+    finnhub_rows  = _unwrap("finnhub",   finnhub_rows)
+    newsdata_rows = _unwrap("newsdata",  newsdata_rows)
+    rss_rows      = _unwrap("rss",       rss_rows)
+    yf_rows       = _unwrap("yfinance",  yf_rows)
 
     source_counts = {
-        "newsapi":  len(newsapi_rows),
-        "finnhub":  len(finnhub_rows),
-        "newsdata": len(newsdata_rows),
-        "rss":      len(rss_rows),
+        "newsapi":   len(newsapi_rows),
+        "finnhub":   len(finnhub_rows),
+        "newsdata":  len(newsdata_rows),
+        "rss":       len(rss_rows),
+        "yfinance":  len(yf_rows),
     }
 
     # ── Per-source health check ───────────────────────────────────────────────
@@ -789,6 +968,7 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # expected, not an outage.
     _expects_data = {
         "rss":      True,
+        "yfinance": True,          # no key required — always expected
         "finnhub":  bool(getattr(settings, "FINNHUB_KEY", "")),
         "newsdata": bool(getattr(settings, "NEWSDATA_KEY", "")),
         "newsapi":  bool(getattr(settings, "NEWSAPI_KEY", "")),
@@ -807,8 +987,8 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         else:
             _SOURCE_ZERO_STREAK[src] = 0
 
-    # RSS first — India-first priority; then NewsData, NewsAPI, Finnhub
-    all_raw: list[dict] = rss_rows + newsdata_rows + newsapi_rows + finnhub_rows
+    # RSS + yfinance first (India-first, symbol-tagged); then NewsData, NewsAPI, Finnhub
+    all_raw: list[dict] = rss_rows + yf_rows + newsdata_rows + newsapi_rows + finnhub_rows
     total_fetched = len(all_raw)
 
     # Normalize headlines: RSS feeds often double-escape (`&amp;amp;`), Finnhub
@@ -867,7 +1047,13 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     total_saved = 0
     broadcast_payloads: list[dict] = []
     for item, sent in zip(new_items, sentiments):
-        tickers = extract_tickers_from_headline(item["headline"])
+        # yfinance items carry pre-tagged tickers — no extraction needed.
+        # RSS/NewsAPI/Finnhub items get tickers extracted from the headline text.
+        tickers = (
+            item["tickers_affected"]
+            if item.get("tickers_affected")
+            else extract_tickers_from_headline(item["headline"])
+        )
         row = NewsItem(
             headline=item["headline"],
             source=item["source"],

@@ -163,6 +163,7 @@ export function usePortfolioTracker() {
     summary:   liveSummary,
     loading,   detailLoading,
     reload:    () => loadDetail(activeId),
+    refreshPortfolios: loadPortfolios,
     createPortfolio, deletePortfolio,
     addHolding, sellHolding, deleteHolding,
     searchStocks, getTransactions,

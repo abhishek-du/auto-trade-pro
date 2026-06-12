@@ -618,6 +618,9 @@ class IndicatorSignals:
 
     composite_score: float            # -100 … +100
 
+    upper_circuit_days: int   = 0    # consecutive candles close ≈ day high
+    volume_surge:       float = 1.0  # latest vol / 20-candle avg
+
     def to_dict(self) -> dict:
         """JSON-safe representation — replaces math.nan with None."""
         def _clean(v):
@@ -628,6 +631,72 @@ class IndicatorSignals:
             return v
 
         return {k: _clean(v) for k, v in self.__dict__.items()}
+
+
+# ── Composite-score → signal label (single source of truth) ────────────────────
+# Used by the deep-analysis endpoint, the market scanner, and the trade loop so
+# every surface (stock detail page, scanner UI, agent) derives the SAME signal
+# from the SAME composite_score. Thresholds: ±25 actionable, ±60 strong.
+
+def score_to_signal(score: float) -> str:
+    if score is None or (isinstance(score, float) and math.isnan(score)):
+        return "NEUTRAL"
+    if score >= 60:  return "STRONG_BUY"
+    if score >= 25:  return "BUY"
+    if score >= -25: return "NEUTRAL"
+    if score >= -60: return "SELL"
+    return "STRONG_SELL"
+
+
+# ── Momentum-breakout / upper-circuit detector ────────────────────────────────
+
+def _momentum_breakout_score(df: pd.DataFrame) -> tuple[int, float, float]:
+    """Detect upper-circuit / all-buy-pressure momentum streaks.
+
+    Returns (uc_days, vol_surge, bonus_score).
+
+    uc_days     — consecutive candles where close ≈ day high AND gain ≥ 0.5%
+                  (proxy for NSE upper circuit or strong buy-locked trading)
+    vol_surge   — latest volume / 20-candle rolling average
+    bonus_score — added to composite score to neutralize the overbought
+                  penalties that RSI/BB/Stoch apply to breakout stocks (+0…+75)
+
+    Without this, RSI=90 (−20) + BB_ABOVE_UPPER (−15) + Stoch=95 (−15) = −50
+    penalty wipes out EMA/MACD bullish signals on the strongest momentum stocks.
+    """
+    if len(df) < 3:
+        return 0, 1.0, 0.0
+
+    dfc = df.copy()
+    dfc.columns = [c.lower() for c in dfc.columns]
+    close  = dfc["close"].astype(float).values
+    high   = dfc["high"].astype(float).values
+    volume = dfc["volume"].astype(float).values
+
+    uc_days = 0
+    n = len(close)
+    for i in range(n - 1, max(-1, n - 15), -1):
+        prev = close[i - 1] if i > 0 else close[i] * 0.995
+        if (
+            high[i] > 0
+            and close[i] >= high[i] * 0.995        # close pinned at top of candle
+            and close[i] >= prev * 1.005            # at least 0.5% gain from prev
+        ):
+            uc_days += 1
+        else:
+            break
+
+    avg_vol   = float(np.mean(volume[-20:])) if len(volume) >= 20 else float(np.mean(volume))
+    vol_surge = float(volume[-1]) / avg_vol if avg_vol > 0 else 1.0
+
+    if uc_days == 0:
+        return 0, round(vol_surge, 2), 0.0
+
+    # Each UC day adds 15 pts (1→+15, 3→+45, 5→+60) to clear the −50 overbought
+    # penalty and give a net-positive momentum signal.  Volume confirms conviction.
+    base      = min(60.0, uc_days * 15.0)
+    vol_bonus = min(15.0, (vol_surge - 1.0) * 6.0) if vol_surge >= 1.5 else 0.0
+    return uc_days, round(vol_surge, 2), round(base + vol_bonus, 1)
 
 
 # ── Edge-case bundle ──────────────────────────────────────────────────────────
@@ -782,6 +851,7 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
     ribbon = calculate_ema_ribbon(df)
 
     # ── Composite score ────────────────────────────────────────────────────────
+    uc_days, vol_surge, momentum_bonus = _momentum_breakout_score(df)
     score = max(
         -100.0,
         min(100.0,
@@ -790,7 +860,8 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
             + vwap["vwap_score"]
             + ichimoku["ichimoku_score"]
             + adx["adx_score"]
-            + ribbon["ribbon_score"]),
+            + ribbon["ribbon_score"]
+            + momentum_bonus),
     )
 
     return IndicatorSignals(
@@ -828,6 +899,8 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
         ema_ribbon=ribbon["ema_ribbon"],
         ema_ribbon_state=ribbon["ema_ribbon_state"],
         composite_score=score,
+        upper_circuit_days=uc_days,
+        volume_surge=vol_surge,
     )
 
 

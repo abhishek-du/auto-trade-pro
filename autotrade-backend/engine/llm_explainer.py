@@ -15,7 +15,7 @@ format_paper_trade_notification(trade: PaperTrade, explanation: str) -> str
 from db.models import PaperTrade
 from utils.config import settings
 from utils.logger import logger
-from utils.llm import call_groq_chat
+from utils.llm import call_llm_chat as call_groq_chat
 
 # ── System prompt (same wording as the Claude spec — works with any LLM) ─────
 _SYSTEM_PROMPT = (

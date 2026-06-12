@@ -4,7 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_SITE="$SCRIPT_DIR/.venv/lib/python3.10/site-packages"
+VENV_SITE="$SCRIPT_DIR/.venv/lib/python3.11/site-packages"
 
 if [ ! -d "$VENV_SITE" ]; then
     echo "ERROR: Virtual environment not found at $VENV_SITE"

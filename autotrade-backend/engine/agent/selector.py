@@ -9,17 +9,23 @@ from engine.agent.strategies.trend_breakout import TrendBreakoutLong
 from engine.agent.strategies.pullback_trend  import PullbackTrendLong
 from engine.agent.strategies.mean_reversion  import MeanReversionShort
 from engine.agent.strategies.range_reversal  import RangeReversalLong
+from engine.agent.strategies.hub_signal      import HubSignalStrategy
 from utils.logger import logger
 
 
 class StrategySelectorAgent:
 
     def __init__(self):
+        # Varsity strategies run first — specific setups with full price-action
+        # confirmation.  HubSignalStrategy is the catch-all fallback: if a stock
+        # ranked in the market shortlist but no specific Varsity setup fired, it
+        # still gets traded based on the 7-factor hub score.
         self.strategies = [
             TrendBreakoutLong(),
             PullbackTrendLong(),
             MeanReversionShort(),
             RangeReversalLong(),
+            HubSignalStrategy(),   # widest net — always last
         ]
 
     def propose(self, symbol, df, features, macro_bias: int, fund_grade: str):

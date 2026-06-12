@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from crawler.fii_dii_crawler import BROWSER_HEADERS
+from utils.config import settings
 from utils.logger import logger
 
 # ── BSE scrip code map ────────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ _BSE_HEADERS = {
 _SCRIP_CODE_CACHE: dict[str, int] = {}
 
 _BSE_SEARCH_URL = (
-    "https://api.bseindia.com/BseIndiaAPI/api/listofscripdata/w"
+    settings.BSE_API_BASE_URL + "/BseIndiaAPI/api/listofscripdata/w"
     "?Group=&Exchange=C&ScrCd=&segment=Equity&SectorIndex=0"
     "&Category=A&PageNo=1&PageSize=25&strSearch={ticker}"
 )

@@ -224,12 +224,18 @@ class VirtualWallet:
     ) -> None:
         """Refresh unrealised PnL and recompute equity.
 
-        Called on every price tick; deliberately lightweight — only two column
-        writes, no SimulationLog entry (too noisy for a heartbeat operation).
+        Full-equity model: each trade commits its full purchase value (qty × price).
+        Equity = cash remaining + capital locked in positions + unrealised PnL.
+        Capital locked = starting_balance − balance (what was actually deducted).
         """
         wallet = await VirtualWallet.get_or_create(session)
+        # Full-equity model: reserved capital = full trade value, not a margin fraction.
+        # starting_balance - balance = total capital committed to open positions.
+        start  = await VirtualWallet._start_balance(session)
+        capital_in_positions = max(0.0, start - wallet.balance)
+
         wallet.unrealised_pnl = total_unrealised
-        wallet.equity = wallet.balance + total_unrealised
+        wallet.equity = wallet.balance + capital_in_positions + total_unrealised
         await session.flush()
 
     # ─────────────────────────────────────────────────────────────────────────

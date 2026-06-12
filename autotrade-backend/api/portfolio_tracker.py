@@ -19,7 +19,7 @@ from engine.portfolio_service import (
     add_or_update_holding,
     calculate_portfolio_summary,
     calculate_tax_liability,
-    search_stocks,
+    search_stocks_async,
     search_stocks_live,
     sell_holding,
 )
@@ -267,9 +267,13 @@ async def sync_zerodha_holdings(db: AsyncSession = Depends(get_db)):
 # ── Stock search ──────────────────────────────────────────────────────────────
 
 @router.get("/search/stocks")
-async def search_stocks_api(q: str = Query(..., min_length=1)):
+async def search_stocks_api(
+    q: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full NSE EQ universe search (kite_instruments) + yfinance fallback for misses."""
     import asyncio
-    results = search_stocks(q)
+    results = await search_stocks_async(q, db)
     if not results and len(q.strip()) >= 2:
         loop = asyncio.get_event_loop()
         live = await loop.run_in_executor(None, search_stocks_live, q)

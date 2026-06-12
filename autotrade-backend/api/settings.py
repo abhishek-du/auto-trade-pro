@@ -40,6 +40,11 @@ class RuntimeSettingsOut(BaseModel):
     paper_mode:              bool
     paper_confidence_threshold: float
     live_confidence_threshold:  float
+    max_portfolio_risk:      float
+    min_cash_buffer:         float
+    agent_default_product:      str   # "CNC" | "MIS"
+    agent_confidence_threshold: int   # 0–100
+    equity_short_enabled:       bool  # allow SELL signals (MIS intraday only)
 
 
 class SettingsPatch(BaseModel):
@@ -62,6 +67,11 @@ class SettingsPatch(BaseModel):
     paper_mode:              bool  | None = None
     paper_confidence_threshold: float | None = None
     live_confidence_threshold:  float | None = None
+    max_portfolio_risk:      float | None = None
+    min_cash_buffer:         float | None = None
+    agent_default_product:      str  | None = None   # "CNC" | "MIS"
+    agent_confidence_threshold: int  | None = None   # 0–100
+    equity_short_enabled:       bool | None = None   # allow SELL signals
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

@@ -162,3 +162,92 @@ async def sync_all_nse_candles(
     }
     logger.info(f"[zerodha_historical] sync_all_nse_candles → {summary}")
     return summary
+
+
+# ── DB sync — FULL NSE universe from kite_instruments ────────────────────────
+
+async def sync_full_nse_universe(
+    session: AsyncSession,
+    *,
+    days_back: int = 7,
+    delay_sec: float = 0.5,
+) -> dict:
+    """Incrementally refresh daily candles for EVERY NSE EQ instrument.
+
+    Reads instrument tokens straight from `kite_instruments` (not the curated
+    watchlist) so the agent's full-market universe stays current. Designed for
+    the weekly beat task: ``days_back=7`` keeps the latest week of bars fresh.
+
+    Idempotent (ON CONFLICT DO NOTHING). Skips symbols whose token is missing.
+    """
+    import datetime as _d
+    from sqlalchemy import text as _text
+
+    rows = (await session.execute(_text("""
+        SELECT tradingsymbol, instrument_token
+        FROM kite_instruments
+        WHERE segment='NSE' AND instrument_type='EQ'
+          AND name != '' AND instrument_token > 0
+        ORDER BY tradingsymbol
+    """))).all()
+
+    kite = None
+    try:
+        from crawler.zerodha_kite_lib import get_kite
+        kite = get_kite()
+        kite.profile()  # verify token before the long loop
+    except Exception as exc:
+        logger.warning(f"[sync_full_nse_universe] Zerodha not authenticated: {exc}")
+        return {"symbols": 0, "saved": 0, "error": "not_authenticated"}
+
+    to_date   = _d.date.today()
+    from_date = to_date - _d.timedelta(days=int(days_back * 1.6) + 3)
+
+    total_saved = ok = empty = 0
+    pending: list[dict] = []
+
+    for sym, token in rows:
+        try:
+            raw = await asyncio.to_thread(
+                kite.historical_data,
+                instrument_token=token, from_date=from_date,
+                to_date=to_date, interval="day",
+            )
+        except Exception:
+            raw = []
+        if raw:
+            ok += 1
+            for c in raw:
+                ts = c.get("date")
+                if ts is None:
+                    continue
+                if isinstance(ts, _d.datetime) and ts.tzinfo is not None:
+                    ts = ts.astimezone(_d.timezone.utc).replace(tzinfo=None)
+                pending.append({
+                    "symbol": f"{sym}.NS", "timeframe": "1d",
+                    "open": float(c.get("open", 0.0)), "high": float(c.get("high", 0.0)),
+                    "low": float(c.get("low", 0.0)), "close": float(c.get("close", 0.0)),
+                    "volume": float(c.get("volume", 0) or 0), "timestamp": ts,
+                })
+        else:
+            empty += 1
+
+        if len(pending) >= 5000:
+            try:
+                total_saved += await save_candles_to_db(pending, session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+            pending = []
+        await asyncio.sleep(delay_sec)
+
+    if pending:
+        try:
+            total_saved += await save_candles_to_db(pending, session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+    summary = {"symbols": len(rows), "fetched_ok": ok, "empty": empty, "saved": total_saved}
+    logger.info(f"[sync_full_nse_universe] → {summary}")
+    return summary
