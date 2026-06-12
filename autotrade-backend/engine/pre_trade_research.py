@@ -194,6 +194,7 @@ async def _llm_verdict(
                  {"role": "user",   "content": prompt}],
                 max_tokens=80,
                 temperature=0.1,
+                groq_fallback=False,  # background — protect Groq quota
             ),
             timeout=6.0,
         )
