@@ -520,6 +520,7 @@ async def research_options_chain(symbol: str) -> dict:
                     [{"role": "user", "content": prompt_text}],
                     max_tokens=150,
                     temperature=0.2,
+                    groq_fallback=False,  # background — protect Groq quota
                 ),
                 timeout=8.0,
             ) or ""

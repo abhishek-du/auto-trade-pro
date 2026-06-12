@@ -42,6 +42,19 @@ async def call_ollama_chat(
     import httpx
 
     _model   = model   or settings.OLLAMA_MODEL
+
+    # Fast-fail if the target model isn't loaded (avoids 404 → Groq fallback cycle)
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as _chk:
+            _tags = await _chk.get(f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/tags")
+            if _tags.status_code == 200:
+                _loaded = [m.get("name", "") for m in (_tags.json().get("models") or [])]
+                _base_model = _model.split(":")[0]
+                if _loaded and not any(_base_model in m for m in _loaded):
+                    logger.debug(f"[llm.ollama] model {_model!r} not loaded — skipping")
+                    return None
+    except Exception:
+        pass  # if tags check fails, proceed and let the actual call fail naturally
     _timeout = timeout if timeout is not None else settings.OLLAMA_TIMEOUT
     url      = OLLAMA_CHAT_URL.format(base=settings.OLLAMA_BASE_URL.rstrip("/"))
 
@@ -106,6 +119,13 @@ async def call_ollama_chat(
 
 # ── Groq (fallback) ───────────────────────────────────────────────────────────
 
+# Circuit-breaker: when Groq returns 429 with a long retry-after we record
+# the time until which Groq calls should be suppressed.  This prevents
+# background tasks from hammering the API after the daily quota is exhausted.
+import time as _time
+_groq_blocked_until: float = 0.0
+
+
 async def call_groq_chat(
     messages: list[dict],
     *,
@@ -118,10 +138,20 @@ async def call_groq_chat(
     """Cloud Groq inference — fallback when Ollama is unavailable or times out.
 
     Retries up to _retries times on 429, honouring the Retry-After header.
-    If Retry-After > 30s (daily quota exhausted) it fails fast.
+    If Retry-After > 30s (daily quota exhausted) it fails fast and sets a
+    module-level circuit-breaker so subsequent calls skip Groq until the
+    window expires.
     """
+    global _groq_blocked_until
     if not getattr(settings, "groq_available", False) or not getattr(settings, "GROQ_API_KEY", ""):
         return None
+
+    # Circuit-breaker: if we know Groq is rate-limited, fail fast
+    if _time.monotonic() < _groq_blocked_until:
+        remaining = int(_groq_blocked_until - _time.monotonic())
+        logger.debug(f"[llm.groq] circuit-breaker open — {remaining}s remaining, skipping call")
+        return None
+
     import httpx
     headers = {
         "Authorization": f"Bearer {settings.GROQ_API_KEY}",
@@ -146,10 +176,14 @@ async def call_groq_chat(
                             f"[llm.groq] 429 rate limit — retry-after={retry_after}s, "
                             "giving up (quota likely exhausted)"
                         )
+                        # Open circuit-breaker for the duration Groq asked us to wait
+                        _groq_blocked_until = _time.monotonic() + retry_after
                         return None
                     logger.info(f"[llm.groq] 429 — waiting {retry_after}s (attempt {attempt+1}/{_retries})")
                     await asyncio.sleep(retry_after)
                     continue
+                # Successful response — reset circuit-breaker
+                _groq_blocked_until = 0.0
                 resp.raise_for_status()
                 data = resp.json()
             choice  = (data.get("choices") or [{}])[0]
@@ -173,10 +207,12 @@ async def call_llm_chat(
     temperature: float = 0.3,
     timeout: float | None = None,
     model: str | None = None,
+    groq_fallback: bool = True,
 ) -> str | None:
     """Try Ollama first (local, no quota); fall back to Groq on failure.
 
-    All engine modules should call this instead of call_groq_chat directly.
+    Pass groq_fallback=False for background/batch tasks to protect the
+    Groq daily quota for user-facing requests.
     """
     result = await call_ollama_chat(
         messages,
@@ -187,6 +223,10 @@ async def call_llm_chat(
     )
     if result:
         return result
+
+    if not groq_fallback:
+        logger.debug("[llm] Ollama unavailable — groq_fallback=False, skipping Groq")
+        return None
 
     logger.info("[llm] Ollama unavailable/timeout — falling back to Groq")
     return await call_groq_chat(

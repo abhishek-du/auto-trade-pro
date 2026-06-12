@@ -31,6 +31,13 @@ _macro      = MacroSectorAgent()
 _decision   = DecisionEngine()
 _executor   = AgentExecutionManager()
 
+# Tracks symbols that already received a shortlist alert this session.
+# Key = symbol (bare), value = datetime sent. Prevents repeat spam every 60s.
+_shortlist_alerted: dict[str, datetime] = {}
+_SHORTLIST_ALERT_COOLDOWN_HOURS = 4   # re-alert after this many hours
+_MAX_SHORTLIST_ALERTS_PER_CYCLE = 5   # cap: top-5 per cycle to avoid LLM queue pile-up
+_shortlist_alerts_this_cycle: int = 0  # reset at the start of each run_agent_cycle
+
 # Shared in-memory portfolio (paper mode uses this; live mode syncs from Kite)
 _portfolio: AgentPortfolioContext | None = None
 _portfolio_hydrated: bool = False
@@ -169,6 +176,9 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     if not force and not _is_market_hours():
         return {"status": "outside_market_hours"}
 
+    global _shortlist_alerts_this_cycle
+    _shortlist_alerts_this_cycle = 0  # reset per-cycle cap
+
     portfolio = _get_portfolio()
 
     # Reload open positions from DB on first cycle after a restart.
@@ -258,6 +268,7 @@ async def _process_symbol(
     session: AsyncSession,
     hub_info: dict | None = None,
 ) -> dict | None:
+    global _shortlist_alerts_this_cycle
 
     # 1. Get candle data from DB
     from crawler.price_feed import get_latest_candles
@@ -309,6 +320,33 @@ async def _process_symbol(
     # 4b. Fallback — technical-only strategy selector when no fresh Hub score.
     if not hub_override:
         candidate = _selector.propose(symbol, df, features, macro_bias, fund_grade)
+
+    # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
+    #     candidate regardless of whether execution ultimately proceeds.
+    #     Threshold: any Hub BUY signal with |master_score| >= 40 OR signal is
+    #     STRONG_BUY. The alert fires here (before risk/fund gates) so the
+    #     channel receives intelligence on ALL good setups, not just traded ones.
+    _shortlist_score_threshold = 40
+    if (
+        hub_override
+        and candidate is not None
+        and candidate.side == "BUY"
+        and _shortlist_alerts_this_cycle < _MAX_SHORTLIST_ALERTS_PER_CYCLE
+        and (
+            (candidate.master_score or 0) >= _shortlist_score_threshold
+            or (getattr(candidate, "hub_subscores", {}) or {}).get("signal") == "STRONG_BUY"
+        )
+        and symbol not in portfolio.open_positions  # skip symbols already held
+    ):
+        # Check cooldown before incrementing counter (avoids wasting a slot on duplicates)
+        bare = symbol.replace(".NS", "")
+        _last = _shortlist_alerted.get(bare)
+        _now  = datetime.utcnow()
+        if not _last or (_now - _last).total_seconds() >= _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
+            _shortlist_alerts_this_cycle += 1
+            asyncio.create_task(
+                _send_shortlist_alert(candidate, df=df, executed=False)
+            )
 
     # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
     decision, reject_reason = _decision.fuse(
@@ -374,12 +412,117 @@ async def _process_symbol(
         # Track product so MIS square-off sweep can identify intraday positions
         portfolio.open_positions[_sym]["product"]      = getattr(decision, "product", "CNC")
 
-        # Telegram entry alert
+        # Telegram entry alert.
+        # Hub-override trades already got the full shortlist alert → send a brief
+        # "TRADE PLACED" follow-up. Technical-only trades get the full fmt_entry.
         if settings.telegram_available:
             from integrations.telegram_service import send, fmt_entry
-            await send(fmt_entry(decision))
+            if hub_override:
+                _sym_bare = _sym.replace(".NS", "")
+                _t2 = portfolio.open_positions[_sym].get("target2", decision.target)
+                placed_msg = (
+                    f"✅ <b>TRADE PLACED</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 <b>{_sym_bare}</b>  "
+                    f"· BUY {decision.qty} shares @ ₹{decision.entry:,.2f}\n"
+                    f"🛑 Stop ₹{decision.stop:,.2f}  "
+                    f"·  🎯 T2 ₹{_t2:,.2f}\n"
+                    f"<i>Position opened — see analysis above</i>"
+                )
+                await send(placed_msg)
+            else:
+                await send(fmt_entry(decision))
 
     return decision.to_dict()
+
+
+async def _send_shortlist_alert(
+    candidate,
+    df: "pd.DataFrame | None",
+    executed: bool,
+) -> None:
+    """Build and send the STRONG_BUY shortlist alert to Telegram.
+
+    Called for every high-score Hub candidate, regardless of whether the
+    trade was actually executed (fund/risk constraints may have blocked it).
+    Respects a 4-hour per-symbol cooldown so the channel isn't spammed.
+    """
+    if not settings.telegram_available:
+        return
+
+    bare = candidate.symbol.replace(".NS", "")
+    now  = datetime.utcnow()
+
+    # Cooldown: skip if we already alerted for this symbol recently AND the
+    # trade wasn't just executed (executed = always send)
+    if not executed:
+        last_sent = _shortlist_alerted.get(bare)
+        if last_sent and (now - last_sent).total_seconds() < _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
+            return
+
+    # Build AI explanation — try Tavily research first (real web data), then LLM.
+    ai_note = ""
+    subs   = getattr(candidate, "hub_subscores", {}) or {}
+    regime = subs.get("regime", "")
+    tech   = float(subs.get("technical",   0))
+    news_s = float(subs.get("news",        0))
+    earn   = float(subs.get("earnings",    0))
+    fund   = float(subs.get("fundamental", 0))
+    score  = candidate.master_score or 0.0
+    entry  = candidate.entry
+    stop   = candidate.stop
+    risk   = abs(entry - stop)
+    t1     = round(entry + risk, 2)
+    t2     = round(entry + 2 * risk, 2)
+
+    # 1. Try Tavily web research (factual, real-time, costs 2 credits)
+    try:
+        from engine.tavily_enricher import research_stock_for_alert
+        from utils.config import settings as _cfg
+        if getattr(_cfg, "tavily_available", False):
+            ai_note = await research_stock_for_alert(
+                symbol=candidate.symbol,
+                score=score, tech_score=tech, news_score=news_s,
+                regime=regime, entry=entry, stop=stop, t1=t1, t2=t2,
+            ) or ""
+    except Exception as exc:
+        logger.debug(f"[agent/shortlist] Tavily research failed for {bare}: {exc}")
+
+    # 2. Fallback to local LLM if Tavily returned nothing
+    if not ai_note:
+        try:
+            llm_prompt = (
+                f"Indian stock: {bare}\n"
+                f"Hub 7-factor score: {score:+.1f} "
+                f"(Technical={tech:+.0f}, News={news_s:+.0f}, "
+                f"Earnings={earn:+.0f}, Fundamental={fund:+.0f})\n"
+                f"Regime: {regime}\n"
+                f"Entry ₹{entry:.0f}, Stop ₹{stop:.0f}, T1 ₹{t1:.0f}, T2 ₹{t2:.0f}\n\n"
+                f"In 3 short sentences: WHY strong buy? Key risk? When to EXIT?"
+            )
+            from utils.llm import call_llm_chat
+            ai_note = await call_llm_chat(
+                [
+                    {"role": "system", "content": "Concise Indian equity analyst. Max 3 sentences."},
+                    {"role": "user",   "content": llm_prompt},
+                ],
+                max_tokens=200,
+                temperature=0.3,
+                timeout=50.0,
+                groq_fallback=False,  # background task — protect Groq quota for user-facing requests
+            ) or ""
+        except Exception as exc:
+            logger.debug(f"[agent/shortlist] LLM fallback failed for {bare}: {exc}")
+
+    # Send
+    try:
+        from integrations.telegram_service import send, fmt_shortlist_alert
+        msg = fmt_shortlist_alert(candidate, df=df, ai_note=ai_note, executed=executed)
+        await send(msg)
+        _shortlist_alerted[bare] = now
+        logger.info(f"[agent/shortlist] ✓ Telegram alert sent for {bare} (executed={executed})")
+    except Exception as exc:
+        logger.warning(f"[agent/shortlist] Telegram send failed for {bare}: {exc}")
 
 
 async def _build_scan_universe(session: AsyncSession) -> list[str]:
