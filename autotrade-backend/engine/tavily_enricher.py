@@ -401,3 +401,207 @@ async def search_and_crawl(
         "sentiment":     sentiment,
         "urls":          urls,
     }
+
+
+# ── Agent-driven options research ─────────────────────────────────────────────
+
+async def research_options_chain(symbol: str) -> dict:
+    """Let the agent discover options/F&O data for a symbol via Tavily.
+
+    Instead of hardcoding a specific options platform, Tavily searches the
+    open web and returns the best available sources — NSE, brokers, fin-media,
+    options analytics sites — whatever currently has the most relevant data.
+
+    Returns:
+      {
+        "summary":        str   — agent's synthesized F&O insight
+        "pcr":            float | None  — Put-Call Ratio if found in text
+        "max_pain":       float | None  — max pain price if found
+        "iv":             float | None  — implied volatility % if found
+        "key_strikes":    list[dict]    — [{strike, type, oi, note}]
+        "sources":        list[str]     — URLs the agent used
+        "headlines":      list[str]     — raw headlines found
+        "crawled_text":   str           — raw full-text from top source
+        "agent_note":     str           — LLM synthesis (if available)
+      }
+    Never raises. Returns empty dict keys on failure.
+    """
+    bare   = symbol.replace(".NS", "").replace(".BO", "")
+    empty  = {
+        "summary": "", "pcr": None, "max_pain": None, "iv": None,
+        "key_strikes": [], "sources": [], "headlines": [], "crawled_text": "",
+        "agent_note": "",
+    }
+
+    client = _client()
+    if client is None:
+        return empty
+
+    loop = asyncio.get_running_loop()
+    company_name = await loop.run_in_executor(None, lambda: _get_company_name(symbol))
+    search_term = company_name if company_name and len(company_name) > len(bare) else bare
+
+    # Two focused queries — let Tavily choose the best sources on the open web
+    query_chain  = f"{bare} NSE options chain OI PCR max pain implied volatility 2026"
+    query_fo     = f'"{search_term}" F&O futures options analysis India buy call put strike'
+
+    try:
+        resp1, resp2 = await asyncio.gather(
+            loop.run_in_executor(None, lambda: client.search(
+                query_chain,
+                search_depth="advanced",
+                topic="finance",
+                max_results=5,
+                include_answer=True,
+                time_range="week",
+                country="india",
+                chunks_per_source=2,
+            )),
+            loop.run_in_executor(None, lambda: client.search(
+                query_fo,
+                search_depth="basic",
+                topic="finance",
+                max_results=4,
+                include_answer=False,
+                time_range="week",
+                country="india",
+            )),
+            return_exceptions=True,
+        )
+    except Exception as exc:
+        logger.debug(f"[tavily/options] search failed for {bare}: {exc}")
+        return empty
+
+    # Merge results from both queries
+    answer   = ""
+    all_results: list[dict] = []
+    for resp in (resp1, resp2):
+        if isinstance(resp, dict):
+            if not answer:
+                answer = (resp.get("answer") or "").strip()
+            all_results.extend(resp.get("results") or [])
+
+    urls      = list({r.get("url", "") for r in all_results if r.get("url")})
+    headlines = [r.get("title", "") for r in all_results if r.get("title")]
+    snippets  = [r.get("content", "") for r in all_results if r.get("content")]
+    all_text  = " ".join([answer] + snippets)
+
+    # Extract structured numbers from the combined text
+    pcr       = _extract_pcr(all_text)
+    max_pain  = _extract_max_pain(all_text, bare)
+    iv_val    = _extract_iv(all_text)
+    key_strikes = _extract_key_strikes(all_text)
+
+    # Crawl the top URL for full article text
+    crawled_text = ""
+    if urls:
+        crawled = await crawl_urls(urls[:1], extract_depth="basic")
+        if crawled:
+            crawled_text = crawled[0].get("content", "")
+
+    # Build a clean summary
+    summary = answer or (snippets[0][:400] if snippets else "")
+
+    # Optional LLM synthesis
+    agent_note = ""
+    try:
+        from utils.config import settings as _s
+        if _s.ollama_available or _s.groq_available:
+            from utils.llm import call_llm_chat
+            prompt_text = (
+                f"Stock: {bare} (NSE India)\n"
+                f"Options research from the web:\n{all_text[:1500]}\n\n"
+                f"In 2-3 sentences, summarise the current F&O sentiment, "
+                f"key support/resistance strikes, and whether options flow is "
+                f"bullish or bearish. Be specific with numbers if available."
+            )
+            agent_note = await asyncio.wait_for(
+                call_llm_chat(
+                    [{"role": "user", "content": prompt_text}],
+                    max_tokens=150,
+                    temperature=0.2,
+                ),
+                timeout=8.0,
+            ) or ""
+    except Exception:
+        pass
+
+    return {
+        "summary":      summary[:600],
+        "pcr":          pcr,
+        "max_pain":     max_pain,
+        "iv":           iv_val,
+        "key_strikes":  key_strikes[:6],
+        "sources":      urls[:6],
+        "headlines":    headlines[:6],
+        "crawled_text": crawled_text[:1000],
+        "agent_note":   agent_note[:400],
+    }
+
+
+# ── Number extractors for options data ───────────────────────────────────────
+
+def _extract_pcr(text: str) -> float | None:
+    """Extract Put-Call Ratio from text."""
+    m = re.search(r"\bPCR\s*[=:of]?\s*(\d+\.\d+)", text, re.I)
+    if m:
+        v = float(m.group(1))
+        if 0.1 < v < 10:
+            return round(v, 2)
+    m = re.search(r"put.call\s+ratio\s*[=:of]?\s*(\d+\.\d+)", text, re.I)
+    if m:
+        v = float(m.group(1))
+        if 0.1 < v < 10:
+            return round(v, 2)
+    return None
+
+
+def _extract_max_pain(text: str, bare: str) -> float | None:
+    """Extract max pain price from text."""
+    m = re.search(r"max\s*pain\s*[=:at]?\s*[₹]?\s*(\d[\d,]+)", text, re.I)
+    if m:
+        try:
+            return float(m.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_iv(text: str) -> float | None:
+    """Extract implied volatility % from text."""
+    m = re.search(r"\bIV\b\s*[=:of]?\s*(\d+\.?\d*)\s*%?", text)
+    if m:
+        v = float(m.group(1))
+        if 5 < v < 500:
+            return round(v, 1)
+    m = re.search(r"implied\s+volatility\s*[=:of]?\s*(\d+\.?\d*)\s*%?", text, re.I)
+    if m:
+        v = float(m.group(1))
+        if 5 < v < 500:
+            return round(v, 1)
+    return None
+
+
+def _extract_key_strikes(text: str) -> list[dict]:
+    """Extract notable strike prices with call/put context."""
+    strikes = []
+    pattern = re.compile(
+        r"(?:(?P<type>call|put|CE|PE)\s+(?:at\s+)?[₹]?\s*(?P<strike>\d[\d,]+)"
+        r"|[₹]?\s*(?P<strike2>\d[\d,]+)\s+(?P<type2>call|put|CE|PE))",
+        re.I,
+    )
+    seen: set[float] = set()
+    for m in pattern.finditer(text):
+        strike_str = m.group("strike") or m.group("strike2") or ""
+        type_str   = (m.group("type")  or m.group("type2")  or "").upper()
+        try:
+            strike_val = float(strike_str.replace(",", ""))
+            if 1 < strike_val < 1_000_000 and strike_val not in seen:
+                seen.add(strike_val)
+                # Get a snippet of context around this match
+                start = max(0, m.start() - 80)
+                note  = text[start:m.end() + 80].strip()
+                strikes.append({"strike": strike_val, "type": type_str, "note": note[:120]})
+        except ValueError:
+            pass
+    return strikes

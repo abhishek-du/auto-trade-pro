@@ -316,6 +316,8 @@ export default function StockDetail() {
   const [peers,         setPeers]         = useState(null);
   const [screenerData,  setScreenerData]  = useState(null);  // Screener.in + NSE deep
   const [screenerLoading,setScreenerLoading] = useState(false);
+  const [optionsResearch, setOptionsResearch] = useState(null);
+  const [optionsResearchLoading, setOptionsResearchLoading] = useState(false);
   const [fundLoading,   setFundLoading]   = useState(true);
   const [deepSettled,   setDeepSettled]   = useState(false);
   const [loading,       setLoading]       = useState(true);
@@ -365,6 +367,13 @@ export default function StockDetail() {
         .then(d => setScreenerData(d))
         .catch(() => {})
         .finally(() => setScreenerLoading(false));
+
+      // Agent-driven options research — Tavily discovers best sources dynamically
+      setOptionsResearchLoading(true);
+      apiFetch(`/api/v1/india/options-research/${encodeURIComponent(display)}`)
+        .then(d => setOptionsResearch(d))
+        .catch(() => {})
+        .finally(() => setOptionsResearchLoading(false));
 
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
@@ -1976,24 +1985,136 @@ export default function StockDetail() {
               )}
             </div>
 
-            {/* External Links */}
-            <div className="bg-card border border-border rounded-lg p-3">
-              <div className="text-slate-200 text-sm font-semibold mb-2">View Live {display} Options Chain</div>
-              <div className="flex gap-2 flex-wrap">
+            {/* Agent-driven options research */}
+            <div className="bg-card border border-border rounded-lg p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="text-slate-200 text-sm font-semibold">🤖 Agent Options Research</div>
+                {optionsResearchLoading && (
+                  <span className="text-muted text-[10px] animate-pulse">Searching web…</span>
+                )}
+              </div>
+
+              {optionsResearch && !optionsResearchLoading ? (
+                <div className="space-y-4">
+                  {/* Key metrics row */}
+                  {(optionsResearch.pcr != null || optionsResearch.max_pain != null || optionsResearch.iv != null) && (
+                    <div className="grid grid-cols-3 gap-3">
+                      {optionsResearch.pcr != null && (
+                        <div className="bg-surface rounded border border-border p-3 text-center">
+                          <div className="text-muted text-[10px] uppercase tracking-wider">PCR</div>
+                          <div className={`font-mono text-base font-bold mt-1 ${optionsResearch.pcr > 1.2 ? 'text-profit' : optionsResearch.pcr < 0.8 ? 'text-loss' : 'text-amber-400'}`}>
+                            {optionsResearch.pcr}
+                          </div>
+                          <div className="text-muted text-[9px] mt-0.5">
+                            {optionsResearch.pcr > 1.3 ? 'Bullish (heavy hedging)' : optionsResearch.pcr < 0.7 ? 'Bearish (complacency)' : 'Neutral'}
+                          </div>
+                        </div>
+                      )}
+                      {optionsResearch.max_pain != null && (
+                        <div className="bg-surface rounded border border-border p-3 text-center">
+                          <div className="text-muted text-[10px] uppercase tracking-wider">Max Pain</div>
+                          <div className="font-mono text-base font-bold mt-1 text-slate-200">₹{optionsResearch.max_pain?.toLocaleString('en-IN')}</div>
+                          <div className="text-muted text-[9px] mt-0.5">Options expiry gravity</div>
+                        </div>
+                      )}
+                      {optionsResearch.iv != null && (
+                        <div className="bg-surface rounded border border-border p-3 text-center">
+                          <div className="text-muted text-[10px] uppercase tracking-wider">Impl. Vol</div>
+                          <div className={`font-mono text-base font-bold mt-1 ${optionsResearch.iv > 40 ? 'text-loss' : 'text-amber-400'}`}>
+                            {optionsResearch.iv}%
+                          </div>
+                          <div className="text-muted text-[9px] mt-0.5">{optionsResearch.iv > 40 ? 'Elevated IV' : 'Normal range'}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Key strikes */}
+                  {optionsResearch.key_strikes?.length > 0 && (
+                    <div>
+                      <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Key Strikes Found</div>
+                      <div className="flex flex-wrap gap-2">
+                        {optionsResearch.key_strikes.map((s, i) => (
+                          <span key={i} className={`text-[11px] font-mono px-2.5 py-1 rounded border ${s.type === 'CALL' || s.type === 'CE' ? 'text-profit bg-profit/10 border-profit/20' : 'text-loss bg-loss/10 border-loss/20'}`}>
+                            {s.type} ₹{s.strike?.toLocaleString('en-IN')}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Agent synthesis */}
+                  {optionsResearch.agent_note && (
+                    <div className="bg-violet-500/5 border border-violet-500/20 rounded-lg p-3">
+                      <div className="text-violet-400 text-[10px] uppercase tracking-wider mb-1">🤖 AI Synthesis</div>
+                      <p className="text-slate-300 text-xs leading-relaxed">{optionsResearch.agent_note}</p>
+                    </div>
+                  )}
+
+                  {/* Summary from web */}
+                  {optionsResearch.summary && (
+                    <div>
+                      <div className="text-muted text-[10px] uppercase tracking-wider mb-1">Web Research Summary</div>
+                      <p className="text-slate-400 text-xs leading-relaxed">{optionsResearch.summary}</p>
+                    </div>
+                  )}
+
+                  {/* Source URLs the agent found */}
+                  {optionsResearch.sources?.length > 0 && (
+                    <div>
+                      <div className="text-muted text-[10px] uppercase tracking-wider mb-1.5">Sources discovered by agent</div>
+                      <div className="space-y-1">
+                        {optionsResearch.sources.slice(0, 5).map((url, i) => {
+                          const domain = (() => { try { return new URL(url).hostname.replace('www.',''); } catch { return url; } })();
+                          return (
+                            <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-2 text-[11px] text-cyan hover:text-cyan/80 hover:underline truncate">
+                              <span className="w-4 h-4 rounded bg-cyan/10 border border-cyan/20 flex items-center justify-center text-[9px] font-bold shrink-0">{i+1}</span>
+                              <span className="font-medium text-slate-300">{domain}</span>
+                              <span className="text-muted truncate">{url.slice(0, 60)}…</span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Headlines found */}
+                  {optionsResearch.headlines?.length > 0 && (
+                    <div>
+                      <div className="text-muted text-[10px] uppercase tracking-wider mb-1">Latest Headlines</div>
+                      <ul className="space-y-1">
+                        {optionsResearch.headlines.slice(0, 4).map((h, i) => (
+                          <li key={i} className="text-slate-400 text-[11px]">• {h}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* No structured data found but has summary */}
+                  {!optionsResearch.pcr && !optionsResearch.max_pain && !optionsResearch.iv &&
+                   !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (
+                    <div className="text-muted text-xs">
+                      No structured F&O data found. {display} may be a non-F&O stock or options data is not yet indexed.
+                    </div>
+                  )}
+                </div>
+              ) : optionsResearchLoading ? (
+                <div className="text-muted text-xs animate-pulse">
+                  Agent is searching the web for {display} F&O data…
+                </div>
+              ) : (
+                <div className="text-muted text-xs">
+                  Options research unavailable (Tavily API required).
+                </div>
+              )}
+
+              {/* NSE official link — always shown */}
+              <div className="pt-1 border-t border-border">
                 <a href={`https://www.nseindia.com/get-quotes/equity?symbol=${display}`}
                   target="_blank" rel="noopener noreferrer"
-                  className="text-[11px] text-cyan bg-cyan/5 border border-cyan/20 px-3 py-1.5 rounded-lg hover:bg-cyan/10 transition-colors">
-                  NSE India →
-                </a>
-                <a href={`https://sensibull.com/nse/${display}`}
-                  target="_blank" rel="noopener noreferrer"
-                  className="text-[11px] text-violet-400 bg-violet-500/5 border border-violet-500/20 px-3 py-1.5 rounded-lg hover:bg-violet-500/10 transition-colors">
-                  Sensibull →
-                </a>
-                <a href={`https://www.screener.in/company/${display}/`}
-                  target="_blank" rel="noopener noreferrer"
-                  className="text-[11px] text-slate-300 bg-white/5 border border-border px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">
-                  Screener.in →
+                  className="text-[11px] text-cyan bg-cyan/5 border border-cyan/20 px-3 py-1.5 rounded-lg hover:bg-cyan/10 transition-colors inline-flex items-center gap-1.5">
+                  View on NSE India (official) →
                 </a>
               </div>
             </div>
