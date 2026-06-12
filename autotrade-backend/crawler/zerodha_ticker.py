@@ -164,6 +164,14 @@ def on_close(ws, code, reason) -> None:
 
 def on_error(ws, code, reason) -> None:
     logger.error(f"[zerodha_ticker] Error code={code} reason={reason}")
+    # 403 = expired/invalid access token.  Reconnecting is pointless without a
+    # fresh token — stop the ticker to silence the retry storm and prompt re-login.
+    if "403" in str(reason) or "Forbidden" in str(reason):
+        logger.warning(
+            "[zerodha_ticker] 403 Forbidden — access token expired. "
+            "Re-login at /zerodha in the app to resume live feed."
+        )
+        stop_kite_ticker()
 
 
 def on_order_update(ws, data: dict) -> None:

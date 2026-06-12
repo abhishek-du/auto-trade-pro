@@ -122,13 +122,13 @@ def _get_groq_client():
 
 async def _call_groq_for_earnings(system: str, user: str, max_tokens: int = 2000) -> str | None:
     """Delegate to the shared async Groq client."""
-    from utils.llm import call_groq_chat
+    from utils.llm import call_llm_chat as call_groq_chat
     return await call_groq_chat(
         [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
         ],
-        max_tokens=max_tokens, temperature=0.2, timeout=60.0,
+        max_tokens=max_tokens, temperature=0.2,
     )
 
 
@@ -138,8 +138,9 @@ def _rule_based_summary(
     text: str, symbol: str, company_name: str,
     quarter: str, call_date: str, pdf_url: str, source: str,
     word_count: int, transcript_length: int,
+    groq_reason: str = "",
 ) -> EarningsSummary:
-    """Basic regex extraction when Groq is unavailable."""
+    """Basic regex extraction when Groq is unavailable or rate-limited."""
     highlights = []
 
     revenue_matches = re.findall(
@@ -158,23 +159,32 @@ def _rule_based_summary(
         g = growth_matches[0]
         highlights.append(f"Growth figure: {g[0]}% {g[1]}")
     highlights.append(f"Transcript available: {word_count:,} words from {source}")
-    highlights.append("Add GROQ_API_KEY to .env for full AI analysis")
+
+    groq_configured = getattr(settings, "groq_available", False)
+    if groq_configured:
+        ai_note = groq_reason or "Groq AI rate-limited — try refreshing in a few minutes"
+    else:
+        ai_note = "Add GROQ_API_KEY to .env for full AI analysis"
+
+    highlights.append(ai_note)
     while len(highlights) < 5:
-        highlights.append("Full analysis available with Groq AI configured")
+        highlights.append("Full AI analysis pending — refresh to retry")
+
+    pending_msg = "Refresh page to retry AI analysis" if groq_configured else "Configure GROQ_API_KEY in .env"
 
     return EarningsSummary(
         symbol=symbol, company_name=company_name,
         quarter=quarter, call_date=call_date,
         pdf_url=pdf_url, source=source,
         financial_highlights=highlights,
-        management_guidance=["Configure GROQ_API_KEY in .env for AI guidance extraction"],
-        key_risks=["Configure GROQ_API_KEY in .env for AI risk extraction"],
-        analyst_questions=["Configure GROQ_API_KEY in .env for Q&A analysis"],
-        strategic_updates=["Configure GROQ_API_KEY in .env for strategic updates"],
+        management_guidance=[pending_msg],
+        key_risks=[pending_msg],
+        analyst_questions=[pending_msg],
+        strategic_updates=[pending_msg],
         revenue_guidance=None, margin_guidance=None,
         capex_guidance=None, dividend_info=None,
         management_tone="NEUTRAL",
-        tone_reason="Rule-based extraction — tone analysis requires Groq AI",
+        tone_reason="Rule-based extraction — AI tone analysis pending",
         ai_confidence="LOW",
         transcript_length=transcript_length,
         is_ai_generated=False,
@@ -362,6 +372,8 @@ async def summarize_long_transcript(
 
     intermediates = []
     for i, chunk in enumerate(chunks):
+        if i > 0:
+            await asyncio.sleep(3)  # avoid back-to-back 429s on free tier
         reply = await _call_groq_for_earnings(
             system="You are a financial analyst summarizing an Indian earnings call transcript.",
             user=(

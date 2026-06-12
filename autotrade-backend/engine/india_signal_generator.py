@@ -420,15 +420,53 @@ async def analyze_all_india_symbols(
     The caller owns the transaction (no commit here).
     Pass ignore_market_hours=True to run outside NSE trading hours (e.g. seed/test).
     """
-    timeframe   = "1h"
-    all_symbols = settings.all_indian_symbols
+    timeframe = "1h"
+
+    # Dynamic universe: market_shortlist (full-market scanner output).
+    # Fallback 1: user_watchlist. Fallback 2: kite_instruments top-50 (bootstrap only).
+    # Static WATCHLIST_NSE_LARGE_CAP / MID_CAP are no longer used here.
+    try:
+        from sqlalchemy import select as _select
+        from db.models import MarketShortlist, UserWatchlist, KiteInstrument
+
+        sl_res = await session.execute(
+            _select(MarketShortlist.symbol).order_by(MarketShortlist.rank).limit(100)
+        )
+        shortlist_syms = [r.symbol for r in sl_res.all()]
+
+        wl_res = await session.execute(
+            _select(UserWatchlist.symbol).where(UserWatchlist.is_active == True)
+        )
+        user_syms = [s for s in wl_res.scalars().all() if s not in shortlist_syms]
+
+        if shortlist_syms:
+            all_symbols = shortlist_syms + user_syms
+            source = f"market_shortlist({len(shortlist_syms)}) + user({len(user_syms)})"
+        elif user_syms:
+            all_symbols = user_syms
+            source = f"user_watchlist({len(user_syms)})"
+        else:
+            # Cold start bootstrap — use kite_instruments top 50
+            ki_res = await session.execute(
+                _select(KiteInstrument.tradingsymbol)
+                .where(KiteInstrument.instrument_type == "EQ", KiteInstrument.segment == "NSE", KiteInstrument.name != "")
+                .order_by(KiteInstrument.tradingsymbol)
+                .limit(50)
+            )
+            all_symbols = [f"{r.tradingsymbol}.NS" for r in ki_res.all()]
+            source = f"kite_instruments bootstrap({len(all_symbols)})"
+    except Exception as exc:
+        logger.warning(f"[india_signals] symbol resolution failed: {exc} — using config fallback")
+        all_symbols = settings.all_indian_symbols
+        source = "config_fallback"
+
     all_signals: list[TradingSignal] = []
-    skipped     = 0
+    skipped = 0
 
     logger.info(
         f"[india_signals] Starting analysis — "
-        f"{len(all_symbols)} symbols  timeframe={timeframe}  "
-        f"market_open={is_nse_market_open()}  ignore_hours={ignore_market_hours}"
+        f"{len(all_symbols)} symbols  source={source}  "
+        f"timeframe={timeframe}  market_open={is_nse_market_open()}  ignore_hours={ignore_market_hours}"
     )
 
     for symbol in all_symbols:

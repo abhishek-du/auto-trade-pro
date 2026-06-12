@@ -415,7 +415,17 @@ export default function CandlestickChart({
   // is what we were seeing as "init failed: WebSocketDisconnect" in the
   // backend logs.
   const setupWS = useCallback((tf) => {
-    wsRef.current?.close()
+    // Tear down any prior socket without tripping the browser's
+    // "closed before the connection is established" warning (StrictMode remount).
+    const prev = wsRef.current
+    if (prev) {
+      if (prev.readyState === WebSocket.OPEN || prev.readyState === WebSocket.CLOSING) {
+        prev.close()
+      } else if (prev.readyState === WebSocket.CONNECTING) {
+        prev.onopen = () => prev.close()
+        prev.onerror = null
+      }
+    }
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const sym   = encodeURIComponent(symbol)
     const ws    = new WebSocket(`${proto}//${window.location.host}/ws/candles/${sym}?timeframe=${tf}`)
@@ -462,7 +472,16 @@ export default function CandlestickChart({
 
     // Return a cleanup function that stops both the WS and any fallback poller.
     return () => {
-      ws.close()
+      // Closing a socket that is still CONNECTING triggers the browser warning
+      // "WebSocket is closed before the connection is established" — common under
+      // React StrictMode's mount→unmount→mount cycle in dev. Guard against it:
+      // close immediately if open, otherwise defer the close until it opens.
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
+        ws.close()
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.onopen = () => ws.close()
+        ws.onerror = null  // suppress the benign connecting-then-closed error
+      }
       if (pollId) clearInterval(pollId)
     }
   }, [symbol])

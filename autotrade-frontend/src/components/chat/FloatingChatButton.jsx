@@ -59,7 +59,7 @@ export default function FloatingChatButton() {
   }
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+    <div className="fixed bottom-20 right-4 md:bottom-6 md:right-6 z-50 flex flex-col items-end gap-3">
       {/* Mini chat drawer */}
       {open && (
         <div className="w-80 rounded-2xl border border-border overflow-hidden shadow-2xl fade-in"

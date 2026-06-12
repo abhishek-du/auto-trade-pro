@@ -81,7 +81,7 @@ async def get_latest_diagnosis(
         .limit(1)
     )).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="No diagnosis found")
+        return None
 
     return {
         "id":             row.id,

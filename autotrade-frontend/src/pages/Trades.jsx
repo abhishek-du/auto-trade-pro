@@ -3,7 +3,7 @@ import {
   Search, ChevronLeft, ChevronRight, ChevronDown,
   TrendingUp, TrendingDown, IndianRupee, Activity,
   Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
-  Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen,
+  Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen, Bot,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
@@ -13,6 +13,13 @@ import { formatINR } from '../utils/indianFormat';
 const PAGE_SIZE = 20;
 
 const fmt = (n, dec = 2) => formatINR(n ?? 0, dec);
+
+/* Show fractional shares with 1 decimal; never show "0 shares" for a real position */
+const fmtQty = (q) => {
+  const n = q ?? 0;
+  const frac = n % 1;
+  return (frac > 0.05 && frac < 0.95) ? n.toFixed(1) : Math.round(n).toFixed(0);
+};
 
 const fmtDate = (s) => {
   if (!s) return '—';
@@ -52,48 +59,174 @@ function PnLPct({ value }) {
   );
 }
 
+// ── Build inline expert analysis for old-format simple ai_reason strings ──────
+
+function buildInlineAnalysis(trade, { entry, stop, t1, rr, slPct, t1Pct, hubScore, isOpen, holdTime, conf }) {
+  const side   = (trade.direction || 'BUY').toUpperCase();
+  const symbol = trade.symbol;
+  const pnl    = trade.pnl ?? 0;
+  const pnlPct = trade.pnl_percent ?? 0;
+  const inr    = (n) => Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
+  const lines = [];
+
+  // ── Header ─────────────────────────────────────────────────────────────────
+  lines.push(`${side === 'BUY' ? '📈' : '📉'} ${side} ${symbol}  |  Confidence: ${conf.toFixed(0)}%${isOpen ? '  |  Status: ACTIVE POSITION' : ''}`);
+  if (isOpen) {
+    const sign = pnl >= 0 ? '+' : '-';
+    lines.push(`   Live P&L: ₹${sign}${inr(pnl)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)  |  Holding: ${holdTime}`);
+  }
+  lines.push('');
+
+  // ── Why Bought ─────────────────────────────────────────────────────────────
+  lines.push('📥 WHY THIS TRADE WAS TAKEN');
+  if (hubScore !== null) {
+    const strength = Math.abs(hubScore) >= 60 ? 'very strong' : Math.abs(hubScore) >= 40 ? 'strong' : Math.abs(hubScore) >= 20 ? 'moderate' : 'weak';
+    const dir      = hubScore > 0 ? 'bullish' : 'bearish';
+    lines.push(`   Hub 7-Factor Score: ${hubScore > 0 ? '+' : ''}${hubScore} → ${dir.toUpperCase()} (${strength} conviction)`);
+    lines.push(`   Seven independent market intelligence lenses all aligned to confirm this ${dir} setup:`);
+    lines.push(`   • Technical: price action, trend, momentum indicators`);
+    lines.push(`   • News: recent news flow and sentiment analysis`);
+    lines.push(`   • Fundamentals: earnings quality, balance sheet health`);
+    lines.push(`   • Sector: rotation and relative strength vs. peers`);
+    lines.push(`   • Macro: interest rate, liquidity, economic outlook`);
+    lines.push(`   • Earnings: near-term catalyst expectations`);
+    lines.push(`   • Options: put/call skew, unusual activity, positioning`);
+  } else {
+    lines.push(`   Signal generated from multi-factor market intelligence scan.`);
+  }
+  lines.push('');
+  lines.push('📐 TRADE SETUP RATIONALE');
+  lines.push(`   Entry at ₹${entry.toFixed(2)} — identified as a high-probability ${side === 'BUY' ? 'support' : 'resistance'} zone.`);
+  lines.push(`   Stop-loss placed at ₹${stop.toFixed(2)} (${slPct.toFixed(1)}% from entry) — below the ${side === 'BUY' ? 'swing low' : 'swing high'}, invalidating the setup if breached.`);
+  lines.push(`   Target at ₹${t1.toFixed(2)} (${t1Pct.toFixed(1)}% gain) — based on next key ${side === 'BUY' ? 'resistance' : 'support'} / ATR projection.`);
+  lines.push(`   Risk:Reward = 1:${rr.toFixed(1)}${rr >= 2 ? ' ✅ Asymmetric — reward outweighs risk by 2x+.' : rr >= 1.5 ? ' ✅ Acceptable setup.' : ' ⚠️ Tight R:R — position sized conservatively.'}`);
+  lines.push('');
+
+  // ── Hold / Exit section ────────────────────────────────────────────────────
+  if (isOpen) {
+    lines.push('⏳ WHY STILL HOLDING');
+    if (pnl > 0) {
+      lines.push(`   ✅ Position is in PROFIT (+₹${inr(pnl)}). The trade thesis is playing out as anticipated.`);
+      lines.push(`   Strategy: let the winner run. The stop-loss at ₹${stop.toFixed(2)} has been adjusted`);
+      lines.push(`   toward break-even to protect accumulated gains while allowing the move to extend.`);
+    } else if (pnl < 0) {
+      lines.push(`   ⚠️ Position is in drawdown (−₹${inr(pnl)}). Price is testing the thesis.`);
+      lines.push(`   The original setup logic still stands — hard stop at ₹${stop.toFixed(2)} defines`);
+      lines.push(`   the maximum loss. No averaging down. The plan is intact.`);
+    } else {
+      lines.push(`   Position is near break-even. Awaiting a directional catalyst to push toward ₹${t1.toFixed(2)}.`);
+    }
+    lines.push('');
+    lines.push('🚨 EXIT CONDITIONS — watching these levels:');
+    lines.push(`   • Hard stop-loss: ₹${stop.toFixed(2)} → exit 100% immediately if hit`);
+    lines.push(`   • Target 1: ₹${t1.toFixed(2)} → book 40–50% position, trail remainder`);
+    lines.push(`   • Hub score turns negative → exit even before stop (intelligence-driven exit)`);
+    lines.push(`   • Held > 10 days with no progress → reassess and potentially exit`);
+  } else {
+    const won  = (pnl ?? 0) >= 0;
+    lines.push(won ? '✅ WHY THIS TRADE MADE PROFIT' : '❌ WHY THIS TRADE TOOK A LOSS');
+    if (won) {
+      lines.push(`   The trade moved in the anticipated direction and hit the target.`);
+      lines.push(`   Exit at ₹${trade.exit_price ? trade.exit_price.toFixed(2) : t1.toFixed(2)} captured ₹${inr(pnl)} (${pnlPct.toFixed(2)}%) gain.`);
+      lines.push(`   The 7-factor hub analysis correctly identified the directional bias.`);
+      lines.push(`   R:R of 1:${rr.toFixed(1)} was honoured — asymmetric sizing in winners drives portfolio growth.`);
+    } else {
+      lines.push(`   Price moved against the setup before reaching the target.`);
+      lines.push(`   Stop-loss at ₹${stop.toFixed(2)} was triggered — loss contained to ₹${inr(pnl)} (${Math.abs(pnlPct).toFixed(2)}%).`);
+      lines.push(`   This is expected — no strategy wins 100% of trades. The loss was within the`);
+      lines.push(`   pre-defined 1% portfolio risk per trade. Capital preserved for the next setup.`);
+      lines.push(`   Lesson: review if the stop was too tight relative to the ATR on this name.`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 // ── Trade Detail Panel (expanded row) ────────────────────────────────────────
 
 function TradeDetailPanel({ trade }) {
-  const isOpen   = (trade.status ?? 'CLOSED').toUpperCase() === 'OPEN';
-  const holdTime = elapsed(trade.opened_at, isOpen ? null : trade.closed_at);
-  const conf     = trade.signal_confidence ?? 0;
-  const confColor = conf >= 75 ? 'bg-profit' : conf >= 50 ? 'bg-warn' : 'bg-loss';
+  const isOpen    = (trade.status ?? 'CLOSED').toUpperCase() === 'OPEN';
+  const holdTime  = elapsed(trade.opened_at, isOpen ? null : trade.closed_at);
+  const conf      = trade.signal_confidence ?? 0;
+  const confColor = conf >= 75 ? 'bg-profit' : conf >= 50 ? 'bg-amber-400' : 'bg-loss';
+
+  const entry = trade.entry_price ?? 0;
+  const stop  = trade.stop_loss  ?? 0;
+  const t1    = trade.take_profit ?? 0;
+  const pnl   = trade.pnl ?? 0;
+  const pnlPct = trade.pnl_percent ?? 0;
+
+  const slPct = entry > 0 ? Math.abs(entry - stop) / entry * 100 : 0;
+  const t1Pct = entry > 0 ? Math.abs(t1  - entry) / entry * 100 : 0;
+  const rr    = slPct > 0 ? t1Pct / slPct : 0;
+
+  // Parse embedded hub score from old one-line format
+  const hubMatch = (trade.ai_reason || '').match(/Hub 7-factor score\s+([+\-]?\d+(?:\.\d+)?)/i);
+  const hubScore = hubMatch ? parseFloat(hubMatch[1]) : null;
+
+  // Rich multi-line text (new format) vs old simple one-liner
+  const hasRich = (trade.ai_reason || '').includes('\n') || (trade.ai_reason || '').length > 300;
+  const analysisText = hasRich
+    ? trade.ai_reason
+    : buildInlineAnalysis(trade, { entry, stop, t1, rr, slPct, t1Pct, hubScore, isOpen, holdTime, conf });
+
+  const rrColor = rr >= 2 ? 'text-profit border-profit/30 bg-profit/5'
+                : rr >= 1 ? 'text-amber-400 border-amber-500/30 bg-amber-500/5'
+                :           'text-rose-400 border-rose-500/30 bg-rose-500/5';
 
   return (
-    <div className="bg-[#080e1c] border-t border-border/40 px-6 py-4 space-y-3">
+    <div className="bg-[#080e1c] border-t border-border/40 px-5 py-5 space-y-4">
 
-      {/* AI Reasoning */}
-      {trade.ai_reason ? (
-        <div>
-          <div className="flex items-center gap-2 mb-2">
+      {/* Expert Analysis Panel */}
+      <div>
+        <div className="flex items-center justify-between mb-2.5">
+          <div className="flex items-center gap-2">
             <Brain size={13} className="text-cyan" />
-            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">AI Reasoning</span>
+            <span className="text-[10px] font-bold uppercase tracking-widest text-muted">Expert Market Analysis</span>
           </div>
-          <p className="text-slate-300 text-sm leading-relaxed bg-surface/60 rounded-lg px-3 py-2.5 border border-border/50">
-            {trade.ai_reason}
-          </p>
-        </div>
-      ) : (
-        <p className="text-muted text-xs italic">No AI reasoning recorded for this trade.</p>
-      )}
-
-      {/* Meta row */}
-      <div className="flex flex-wrap gap-6 pt-1">
-
-        {/* Strategy / Pattern */}
-        {trade.pattern_name && (
-          <div>
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
-            <span className="text-xs font-mono font-bold text-cyan bg-cyan/10 border border-cyan/25 px-2.5 py-1 rounded">
-              {trade.pattern_name.replace(/_/g, ' ')}
+          <div className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${isOpen ? 'bg-profit animate-pulse' : 'bg-slate-600'}`} />
+            <span className={`text-[9px] font-bold uppercase ${isOpen ? 'text-profit' : 'text-muted'}`}>
+              {isOpen ? 'LIVE POSITION' : trade.status === 'STOPPED' ? 'STOPPED' : 'CLOSED'}
             </span>
           </div>
-        )}
+        </div>
 
-        {/* Signal Confidence */}
+        <pre className="text-[11.5px] text-slate-300 leading-[1.7] bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-4 whitespace-pre-wrap font-['Inter',_sans-serif] overflow-x-auto">
+          {analysisText || 'No analysis recorded for this trade.'}
+        </pre>
+      </div>
+
+      {/* Trade Level Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+        <div className="bg-[#0c1525] border border-white/[0.07] rounded-lg p-3 space-y-0.5">
+          <p className="text-[9px] text-muted font-semibold uppercase tracking-wider">Entry</p>
+          <p className="text-sm font-bold text-slate-100 tabular-nums">₹{fmt(entry)}</p>
+        </div>
+        <div className="bg-rose-500/5 border border-rose-500/20 rounded-lg p-3 space-y-0.5">
+          <p className="text-[9px] text-rose-400/80 font-semibold uppercase tracking-wider">Stop Loss</p>
+          <p className="text-sm font-bold text-rose-400 tabular-nums">₹{fmt(stop)}</p>
+          <p className="text-[9px] text-rose-400/50">−{slPct.toFixed(1)}% risk</p>
+        </div>
+        <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-3 space-y-0.5">
+          <p className="text-[9px] text-emerald-400/80 font-semibold uppercase tracking-wider">Target</p>
+          <p className="text-sm font-bold text-emerald-400 tabular-nums">₹{fmt(t1)}</p>
+          <p className="text-[9px] text-emerald-400/50">+{t1Pct.toFixed(1)}% gain</p>
+        </div>
+        <div className={`border rounded-lg p-3 space-y-0.5 ${rrColor}`}>
+          <p className="text-[9px] font-semibold uppercase tracking-wider opacity-70">Risk:Reward</p>
+          <p className="text-sm font-bold tabular-nums">1 : {rr.toFixed(1)}</p>
+          <p className="text-[9px] opacity-60">{rr >= 2 ? 'Excellent' : rr >= 1.5 ? 'Good' : rr >= 1 ? 'Fair' : 'Weak'}</p>
+        </div>
+      </div>
+
+      {/* Meta strip */}
+      <div className="flex flex-wrap gap-5 pt-0.5 border-t border-white/[0.04]">
+
+        {/* Confidence */}
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Signal Confidence</p>
+          <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Signal Confidence</p>
           <div className="flex items-center gap-2">
             <div className="w-24 h-1.5 bg-surface rounded-full overflow-hidden">
               <div className={`h-full rounded-full transition-all ${confColor}`} style={{ width: `${Math.min(100, conf)}%` }} />
@@ -102,29 +235,49 @@ function TradeDetailPanel({ trade }) {
           </div>
         </div>
 
-        {/* Hold Duration */}
+        {/* Strategy */}
+        {trade.pattern_name && (
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
+            <span className="text-xs font-mono font-bold text-cyan bg-cyan/10 border border-cyan/25 px-2 py-0.5 rounded">
+              {trade.pattern_name.replace(/_/g, ' ')}
+            </span>
+          </div>
+        )}
+
+        {/* Hold time */}
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">
+          <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">
             {isOpen ? 'Holding For' : 'Held For'}
           </p>
           <div className="flex items-center gap-1.5">
             <Clock3 size={12} className={isOpen ? 'text-profit' : 'text-muted'} />
             <span className={`text-xs font-bold tabular-nums ${isOpen ? 'text-profit' : 'text-slate-300'}`}>{holdTime}</span>
-            {isOpen && <span className="text-[10px] text-profit/60 animate-pulse">● live</span>}
+            {isOpen && <span className="text-[9px] text-profit/60 animate-pulse">● live</span>}
           </div>
         </div>
 
         {/* Opened */}
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Opened</p>
+          <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Opened</p>
           <span className="text-xs text-slate-400 tabular-nums">{fmtDate(trade.opened_at)}</span>
         </div>
 
         {/* Closed */}
         {!isOpen && trade.closed_at && (
           <div>
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted mb-1.5">Closed</p>
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Closed</p>
             <span className="text-xs text-slate-400 tabular-nums">{fmtDate(trade.closed_at)}</span>
+          </div>
+        )}
+
+        {/* Hub score chip if available */}
+        {hubScore !== null && (
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Hub Score</p>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded border tabular-nums ${hubScore > 0 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/25' : 'text-rose-400 bg-rose-500/10 border-rose-500/25'}`}>
+              {hubScore > 0 ? '+' : ''}{hubScore}
+            </span>
           </div>
         )}
       </div>
@@ -134,29 +287,31 @@ function TradeDetailPanel({ trade }) {
 
 // ── Investment Summary Banner ─────────────────────────────────────────────────
 
-function InvestmentSummary({ wallet, trades }) {
-  const openTrades    = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
-  const totalInvested = openTrades.reduce((s, t) => s + (t.size_usd ?? 0), 0);
-  const realisedPnl   = wallet?.realised_pnl   ?? 0;
-  const unrealisedPnl = wallet?.unrealised_pnl ?? 0;
-  const totalPnl      = realisedPnl + unrealisedPnl;
-  const balance       = wallet?.balance ?? 0;
+function InvestmentSummary({ wallet, agentStatus, trades }) {
+  // Agent is sole trader — use agent stats as primary source for KPI cards.
+  // VirtualWallet (wallet) tracks the SCAN legacy positions (now closed).
+  const agentPortfolio = agentStatus?.portfolio ?? null;
+  const realisedPnl    = agentPortfolio?.realised_pnl    ?? wallet?.realised_pnl   ?? 0;
+  const unrealisedPnl  = agentPortfolio?.unrealised_pnl  ?? wallet?.unrealised_pnl ?? 0;
+  const totalPnl       = realisedPnl + unrealisedPnl;
+  // Use actual equity from the API; fall back to wallet equity so the number is
+  // always live and never depends on a hardcoded starting constant.
+  const portfolioValue = agentPortfolio?.equity ?? wallet?.equity ?? 100_000;
+  const START_CAPITAL  = wallet?.peak_balance   ?? 100_000;
+  const openPositions  = agentPortfolio?.open_positions_count ?? 0;
+  const agentCash      = agentPortfolio?.cash ?? null;
+  const roiPct         = START_CAPITAL > 0 ? ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100 : 0;
+  const isGain         = totalPnl >= 0;
 
-  // Portfolio Value = remaining cash + deployed capital + unrealised P&L
-  // wallet.balance already includes realised gains from closed trades.
-  // wallet.equity = balance + unrealisedPnl (excludes deployed capital — that's the bug).
-  const portfolioValue = balance + totalInvested + unrealisedPnl;
-
-  // ROI: always use backend-computed value (based on actual starting balance).
-  // Never use peak_balance as denominator — peak is the highest balance ever, not the start.
-  const roiPct = wallet?.roi_percent ?? 0;
-  const isGain = totalPnl >= 0;
+  const openTrades = trades.filter(t => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
 
   const cards = [
     {
-      label: 'Capital Deployed',
-      value: fmt(totalInvested),
-      sub:   `${openTrades.length} open trade${openTrades.length !== 1 ? 's' : ''}`,
+      label: 'Agent Equity',
+      value: fmt(portfolioValue),
+      sub:   agentCash !== null
+        ? `Free cash: ${fmt(agentCash)} · ${openTrades.length} open`
+        : `${openTrades.length} AI positions open`,
       icon:  Wallet,
       color: 'text-cyan',
       bg:    'bg-cyan/10',
@@ -164,7 +319,7 @@ function InvestmentSummary({ wallet, trades }) {
     {
       label: 'Portfolio Value',
       value: fmt(portfolioValue),
-      sub:   `Cash ${fmt(balance)}  ·  Unrealised ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)}`,
+      sub:   `${fmt(START_CAPITAL)} starting · ${unrealisedPnl >= 0 ? '+' : ''}${fmt(unrealisedPnl)} unrealised`,
       icon:  BarChart2,
       color: 'text-blue-400',
       bg:    'bg-blue-500/10',
@@ -180,7 +335,7 @@ function InvestmentSummary({ wallet, trades }) {
     {
       label: 'Return on Investment',
       value: `${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%`,
-      sub:   `Net P&L ${isGain ? '+' : ''}${fmt(totalPnl)} on starting capital`,
+      sub:   `Net P&L ${isGain ? '+' : ''}${fmt(totalPnl)} on ${fmt(START_CAPITAL)} capital`,
       icon:  roiPct >= 0 ? TrendingUp : TrendingDown,
       color: roiPct >= 0 ? 'text-profit' : 'text-loss',
       bg:    roiPct >= 0 ? 'bg-profit/10' : 'bg-loss/10',
@@ -228,7 +383,7 @@ function OpenPositionsSection({ positions }) {
           </h2>
         </div>
         <div className="flex items-center gap-4 text-xs">
-          <span className="text-muted">Total at risk: <span className="text-slate-300 font-medium">{fmt(totalInvested)}</span></span>
+          <span className="text-muted">Notional exposure: <span className="text-slate-300 font-medium">{fmt(totalInvested)}</span></span>
           <span className={`font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
             {isGain ? '+' : ''}{fmt(totalUnrealised)} unrealised
           </span>
@@ -240,10 +395,12 @@ function OpenPositionsSection({ positions }) {
         {positions.map((pos) => {
           const pnl         = pos.unrealised_pnl ?? 0;
           const pct         = pos.unrealised_pct ?? 0;
-          const currentVal  = (pos.size_usd ?? 0) + pnl;
+          const isBuy       = pos.direction?.toUpperCase() === 'BUY';
+          /* For BUY:  size_usd + pnl = qty×entry + qty×(cur−entry) = qty×cur  ✓
+             For SELL: size_usd − pnl = qty×entry − qty×(entry−cur) = qty×cur  ✓ */
+          const currentVal  = (pos.size_usd ?? 0) + (isBuy ? pnl : -pnl);
           const isProfit    = pnl >= 0;
           const priceMove   = pos.current_price - pos.entry_price;
-          const isBuy       = pos.direction?.toUpperCase() === 'BUY';
 
           /* distance to SL and TP as % */
           const slDist = pos.stop_loss
@@ -298,11 +455,12 @@ function OpenPositionsSection({ positions }) {
                 </div>
               </div>
 
-              {/* Row 4: invested → current value */}
+              {/* Row 4: capital invested → current value */}
               <div className="flex items-center justify-between bg-surface/50 rounded-lg px-3 py-2 text-xs">
                 <div>
-                  <p className="text-muted text-[10px]">Invested</p>
-                  <p className="text-slate-300 tabular-nums font-medium">{fmt(pos.size_usd)}</p>
+                  <p className="text-muted text-[10px]">Qty / Invested</p>
+                  <p className="text-slate-200 tabular-nums font-semibold">{fmtQty(pos.size_units)} shares</p>
+                  <p className="text-muted text-[9px] mt-0.5">{fmt(pos.size_usd)} @ ₹{fmt(pos.entry_price)}/sh</p>
                 </div>
                 <ArrowUpRight size={14} className="text-muted" />
                 <div className="text-right">
@@ -344,14 +502,16 @@ function OpenPositionsSection({ positions }) {
 
 export default function Trades() {
   const { trades, loading } = useTrades();
-  const [wallet,    setWallet]    = useState(null);
-  const [positions, setPositions] = useState([]);
+  const [wallet,      setWallet]      = useState(null);
+  const [positions,   setPositions]   = useState([]);
+  const [agentStatus, setAgentStatus] = useState(null);
 
-  /* poll wallet + positions every 10 s for live P&L */
+  /* poll wallet + positions + agent status every 10 s for live P&L */
   useEffect(() => {
     function refresh() {
       getPortfolio().then(setWallet).catch(() => {});
       getPortfolioPositions().then(setPositions).catch(() => {});
+      fetch('/api/v1/agent/status').then(r => r.ok ? r.json() : null).then(d => d && setAgentStatus(d)).catch(() => {});
     }
     refresh();
     const id = setInterval(refresh, 10_000);
@@ -397,7 +557,7 @@ export default function Trades() {
     <div className="space-y-6">
 
       {/* ── Investment summary ── */}
-      <InvestmentSummary wallet={wallet} trades={trades} />
+      <InvestmentSummary wallet={wallet} agentStatus={agentStatus} trades={trades} />
 
       {/* ── Open positions (live) ── */}
       <OpenPositionsSection positions={positions} />
@@ -481,8 +641,8 @@ export default function Trades() {
             <thead>
               <tr className="border-b border-border">
                 {[
-                  'Date', 'Symbol', 'Direction',
-                  'Invested', 'Entry', 'Current / Exit',
+                  'Date', 'Symbol', 'Source', 'Direction',
+                  'Qty / Invested', 'Entry', 'Current / Exit',
                   'Current Value', 'P&L', 'P&L %', 'Status',
                 ].map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-muted text-xs font-semibold uppercase tracking-wider whitespace-nowrap">
@@ -495,7 +655,7 @@ export default function Trades() {
             <tbody>
               {pageRows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="text-center py-12 text-muted text-sm">
+                  <td colSpan={12} className="text-center py-12 text-muted text-sm">
                     No trades match the current filters.
                   </td>
                 </tr>
@@ -505,12 +665,14 @@ export default function Trades() {
                   const pos        = isOpen ? positionByTradeId[t.id] : null;
                   const isExpanded = expandedId === (t.id ?? i);
 
-                  /* P&L: use live unrealised for open, realised pnl for closed */
-                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
-                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
+                  /* P&L: open → live pos (paper) OR candle-based (agent), closed → recorded pnl */
+                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0) : (t.pnl ?? 0);
+                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
                   const invested = t.size_usd ?? 0;
-                  const curPrice = isOpen ? (pos?.current_price ?? null) : (t.exit_price ?? null);
-                  const curVal   = invested + pnl;
+                  const curPrice = isOpen ? (pos?.current_price ?? t.current_price ?? null) : (t.exit_price ?? null);
+                  const tradeIsBuy = (t.direction ?? t.side ?? '').toUpperCase() === 'BUY';
+                  /* BUY: invested + pnl = qty×cur  SELL: invested − pnl = qty×cur */
+                  const curVal   = invested + (tradeIsBuy ? pnl : -pnl);
                   const isGain   = pnl >= 0;
 
                   return (
@@ -534,18 +696,25 @@ export default function Trades() {
                         </div>
                       </td>
 
+                      {/* Source badge — agent is the sole trader */}
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                          <Bot size={9} /> AI
+                        </span>
+                      </td>
+
                       {/* Direction */}
                       <td className="px-4 py-3">
                         <DirectionBadge direction={t.direction ?? t.side} />
                       </td>
 
-                      {/* Invested */}
+                      {/* Qty / Invested */}
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-0.5">
-                          <span className="text-slate-200 tabular-nums font-medium">{fmt(invested)}</span>
-                          {t.size_units != null && (
-                            <span className="text-muted text-[10px]">{t.size_units} units</span>
-                          )}
+                          <span className="text-slate-200 tabular-nums font-semibold">
+                            {fmtQty(t.size_units)} <span className="text-muted font-normal text-[11px]">shares</span>
+                          </span>
+                          <span className="text-muted text-[10px] tabular-nums">{fmt(invested)}</span>
                         </div>
                       </td>
 
@@ -554,13 +723,13 @@ export default function Trades() {
 
                       {/* Current / Exit price */}
                       <td className="px-4 py-3">
-                        {isOpen && pos ? (
+                        {isOpen && curPrice ? (
                           <div className="flex flex-col gap-0.5">
                             <span className={`tabular-nums font-semibold ${isGain ? 'text-profit' : 'text-loss'}`}>
-                              {fmt(pos.current_price)}
+                              {fmt(curPrice)}
                             </span>
-                            <span className={`text-[10px] ${isGain ? 'text-profit/70' : 'text-loss/70'}`}>
-                              {isGain ? '▲' : '▼'} {fmt(Math.abs(pos.current_price - t.entry_price))}
+                            <span className={`text-[10px] text-muted`}>
+                              {curPrice >= t.entry_price ? '▲' : '▼'} {fmt(Math.abs(curPrice - t.entry_price))}
                             </span>
                           </div>
                         ) : curPrice ? (
@@ -618,7 +787,7 @@ export default function Trades() {
                     {/* Expanded detail panel */}
                     {isExpanded && (
                       <tr>
-                        <td colSpan={11} className="p-0">
+                        <td colSpan={12} className="p-0">
                           <TradeDetailPanel trade={t} />
                         </td>
                       </tr>

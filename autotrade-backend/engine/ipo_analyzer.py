@@ -6,7 +6,7 @@ from typing import Any
 
 from utils.config import settings
 from utils.logger import logger
-from utils.llm import call_groq_chat
+from utils.llm import call_llm_chat as call_groq_chat
 
 
 async def _call_groq(prompt: str) -> str | None:

@@ -18,6 +18,9 @@ httpx
 
 # ── Market data: yfinance primary, Twelve Data secondary ─────────────────────
 yfinance
+
+# ── Web research (Tavily — news enrichment for small-caps + shortlist AI notes)
+tavily-python
 mftool    # mutual fund NAVs only -- actively maintained v3.0
 nselib    # FPI data fallback only -- v2.5.1 May 2026
 # do NOT add nsepy or jugaad-trader -- both are broken/inactive
@@ -55,9 +58,20 @@ beautifulsoup4
 lxml
 bsedata    # BSE corporate actions and announcements
 
+# ── PDF extraction (earnings transcripts) ─────────────────────────────────────
+pdfplumber
+PyPDF2
+
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi
 
 # ── Zerodha Kite portfolio tracker ───────────────────────────────────────────
 kiteconnect>=4.2.0   # Zerodha KiteConnect v3 — full trading + GTT + ticker
 scipy                # XIRR calculation via brentq root solver
+
+# ── Trade journal → spreadsheet ──────────────────────────────────────────────
+openpyxl             # local .xlsx trade journal (SHEET_LOG_BACKEND="local")
+gspread              # Google Sheets backend (SHEET_LOG_BACKEND="google")
+google-auth          # Google OAuth token refresh
+google-auth-oauthlib # OAuth 2.0 Desktop flow (your own account, no sheet sharing needed)
+pyotp                # TOTP generation for automated Zerodha daily token refresh

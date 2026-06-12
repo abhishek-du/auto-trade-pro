@@ -13,6 +13,349 @@ from db.models import MasterIntelligenceScore, MFIntelligenceScore, HubCycleLog
 router = APIRouter(tags=["Intelligence Hub"])
 
 
+# ── Factor explanation builder ────────────────────────────────────────────────
+
+def _build_factor_explanations(components: dict, reasoning: dict) -> dict:
+    """Generate human-readable WHY explanations for each of the 7 Hub factors."""
+    aw              = reasoning.get("active_weights", {})
+    headlines       = reasoning.get("headlines", [])
+    news_tone       = reasoning.get("news_tone", "NEUTRAL")
+    news_source     = reasoning.get("news_source", "rss")
+    earnings_source = reasoning.get("earnings_source", "transcript")
+    profit_growth   = reasoning.get("profit_growth_3yr")
+    revenue_growth  = reasoning.get("revenue_growth_3yr")
+    sector_name     = reasoning.get("sector_name", "GENERAL")
+    sector_mood     = reasoning.get("sector_mood", "NEUTRAL")
+    regime          = reasoning.get("regime", "UNKNOWN")
+    fund_grade      = reasoning.get("fund_grade", "WATCHLIST")
+
+    TRACKED = ["IT", "Banking", "Pharma", "Auto", "FMCG", "Metals", "Energy", "Infra", "Consumer", "Telecom"]
+
+    def _verdict(score: float) -> str:
+        if score > 50:  return "Strongly Bullish"
+        if score > 20:  return "Bullish"
+        if score > -20: return "Neutral"
+        if score > -50: return "Bearish"
+        return "Strongly Bearish"
+
+    expl: dict = {}
+
+    # 1. Technical ─────────────────────────────────────────────────────────────
+    t  = components.get("technical", 0)
+    tw = aw.get("technical", 0.35)
+    if t > 80:
+        tech_detail = (
+            f"Near-perfect indicator alignment — score {t:.1f}/100. All major indicators fire bullishly: "
+            "EMA stack bullish, RSI not overbought, MACD histogram recovering or positive, "
+            "Ichimoku in strong buy configuration (price above cloud with all 5 components aligned), "
+            "and/or price at an extreme Bollinger Band level signalling mean-reversion. "
+            "This is the strongest technical setup the Hub assigns."
+        )
+    elif t > 40:
+        tech_detail = (
+            f"Moderately bullish technicals — score {t:.1f}/100. More bullish signals firing than bearish. "
+            "Typical configuration: EMA trend bullish, RSI in healthy range, positive MACD. "
+            "Some indicators may still be neutral or slightly bearish — not every indicator is aligned."
+        )
+    elif t > 0:
+        tech_detail = (
+            f"Slight bullish edge — score {t:.1f}/100. Mixed picture: some indicators bullish, others neutral/bearish. "
+            "Watch for confirmation (breakout with volume, or RSI/MACD alignment) before committing."
+        )
+    elif t > -40:
+        tech_detail = (
+            f"Bearish technical structure — score {t:.1f}/100. More bearish signals than bullish. "
+            "Typical pattern: price below key EMAs, MACD negative, Supertrend bearish. "
+            "Capital preservation is the priority; wait for reversal signals."
+        )
+    else:
+        tech_detail = (
+            f"Strong bearish breakdown — score {t:.1f}/100. Nearly all indicators point south. "
+            "EMA stack fully bearish, RSI potentially oversold, trend is down. "
+            "Only contrarian plays (deep value, mean reversion at extremes) would consider entry here."
+        )
+    expl["technical"] = {
+        "score":        round(t, 1),
+        "weight_pct":   round(tw * 100, 1),
+        "contribution": round(t * tw, 1),
+        "verdict":      _verdict(t),
+        "detail":       tech_detail,
+    }
+
+    # 2. News / Sentiment ──────────────────────────────────────────────────────
+    n  = components.get("news", 0)
+    nw = aw.get("news", 0)
+    if nw == 0:
+        news_detail = (
+            "No news articles mentioning this stock were found in the 7-day tracking window. "
+            "Weight is set to 0% so this data gap doesn't penalise the overall score — "
+            "a silent stock is treated as neutral, not bearish. "
+            "The Hub tracks Finnhub headlines and FinBERT-scored RSS feeds; "
+            "gaps are common for PSUs, small-caps, and stocks with low media coverage."
+        )
+        news_verdict = "No Coverage"
+    elif news_source in ("growth_proxy", "fundamental_proxy"):
+        pg_str = f"{profit_growth:+.1f}%" if profit_growth is not None else "N/A"
+        rg_str = f"{revenue_growth:+.1f}%" if revenue_growth is not None else "N/A"
+        if n > 15:
+            news_verdict = "Positive (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Consistently growing companies tend to attract positive interest when coverage appears. "
+                f"Score {n:+.0f} is a conservative growth-proxy signal, not a FinBERT news score."
+            )
+        elif n < -10:
+            news_verdict = "Cautious (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Declining profits or revenues suggest caution even without explicit negative news. "
+                f"Score {n:+.0f} is a growth-proxy signal."
+            )
+        else:
+            news_verdict = "Neutral (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Modest growth suggests neutral market interest. "
+                f"Score {n:+.0f} is a conservative growth-proxy signal."
+            )
+    else:
+        hl_snippet = f" Latest: \"{headlines[0][:90]}\"" if headlines else ""
+        if n > 30:
+            news_detail = f"Positive news sentiment (FinBERT score: {n:+.1f}). {len(headlines)} headline(s) tracked.{hl_snippet}"
+            news_verdict = "Positive"
+        elif n < -30:
+            news_detail = f"Negative news flow (FinBERT score: {n:+.1f}). {len(headlines)} headline(s) tracked.{hl_snippet}"
+            news_verdict = "Negative"
+        else:
+            news_detail = (
+                f"Neutral news sentiment (FinBERT score: {n:+.1f}). {len(headlines)} headline(s) in window.{hl_snippet} "
+                f"Neutral tone: news mentions exist but don't carry a strong directional signal."
+            )
+            news_verdict = "Neutral"
+    expl["news"] = {
+        "score":        round(n, 1),
+        "weight_pct":   round(nw * 100, 1),
+        "contribution": round(n * nw, 1) if nw > 0 else 0,
+        "verdict":      news_verdict,
+        "detail":       news_detail,
+        "headlines":    headlines[:3],
+    }
+
+    # 3. Sector ────────────────────────────────────────────────────────────────
+    s  = components.get("sector", 0)
+    sw = aw.get("sector", 0)
+    if sw == 0 or sector_name == "GENERAL":
+        sector_detail = (
+            f"Sector '{sector_name}' is not in the Hub's 10 tracked sectors: {', '.join(TRACKED)}. "
+            "The Hub tracks sector momentum via NSE sector indices (CNXBANK, CNXIT, etc.). "
+            "Stocks that don't map to a tracked sector get weight 0% — "
+            "the absence of sector data doesn't penalise the score. "
+            "Capital Goods, Defense, and Railway PSUs typically fall into this category."
+        )
+        sector_verdict = "Not Tracked"
+    else:
+        sector_detail = (
+            f"Sector: {sector_name} | Current mood: {sector_mood} | Regime: {regime}. "
+            f"Score {s:+.0f} reflects sector momentum vs broader market. "
+            f"Sectors outperforming Nifty50 get a positive bias; underperformers get negative. "
+            f"Mood '{sector_mood}' comes from comparing sector index vs 20-day mean."
+        )
+        sector_verdict = _verdict(s)
+    expl["sector"] = {
+        "score":        round(s, 1),
+        "weight_pct":   round(sw * 100, 1),
+        "contribution": round(s * sw, 1) if sw > 0 else 0,
+        "verdict":      sector_verdict,
+        "detail":       sector_detail,
+    }
+
+    # 4. Macro ─────────────────────────────────────────────────────────────────
+    m  = components.get("macro", 0)
+    mw = aw.get("macro", 0.10)
+    if m >= 24:
+        macro_detail = (
+            f"Strong macro tailwind (score {m:+.0f}). FII net buying is strong (3-day net > ₹2,000 Cr), "
+            "India VIX is low (<13), and market breadth is bullish (more advances than declines). "
+            "All three macro pillars aligned — best environment for longs."
+        )
+    elif m >= 12:
+        macro_detail = (
+            f"Mild macro support (score {m:+.0f}, regime: {regime}). FII flows are positive or neutral. "
+            "VIX is moderate. Breadth is constructive. Macro isn't a headwind here."
+        )
+    elif m >= -12:
+        macro_detail = (
+            f"Neutral macro (score {m:+.0f}, regime: {regime}). FII flows mixed or slightly negative. "
+            "India VIX in moderate zone (13–20). Market breadth near-neutral (ADR ~1.0). "
+            "Macro isn't helping or hurting — stock-specific catalysts drive the trade."
+        )
+    elif m >= -24:
+        macro_detail = (
+            f"Macro headwind (score {m:+.0f}, regime: {regime}). FII net selling active. "
+            "VIX elevated or breadth negative. Consider reducing position sizes and waiting "
+            "for macro to stabilise before adding new longs."
+        )
+    else:
+        macro_detail = (
+            f"Significant macro headwind (score {m:+.0f}, regime: {regime}). Strong FII outflows. "
+            "VIX high (>20). Breadth strongly negative. Market in risk-off mode — "
+            "only very high-conviction setups are justified; cash is a valid position."
+        )
+    expl["macro"] = {
+        "score":        round(m, 1),
+        "weight_pct":   round(mw * 100, 1),
+        "contribution": round(m * mw, 1),
+        "verdict":      _verdict(m),
+        "detail":       macro_detail,
+        "regime":       regime,
+    }
+
+    # 5. Earnings ──────────────────────────────────────────────────────────────
+    e  = components.get("earnings", 0)
+    ew = aw.get("earnings", 0)
+    if ew == 0:
+        earn_detail = (
+            "No earnings call transcript found for this stock in the last 90 days. "
+            "The Hub analyses earnings call transcripts using NLP to score management tone "
+            "(OPTIMISTIC → +30, NEUTRAL → 0, CAUTIOUS → -20, NEGATIVE → -40). "
+            "Without a transcript, the weight is set to 0% — "
+            "this is not a negative signal. PSUs and some mid-caps often lack indexed transcripts."
+        )
+        earn_verdict = "No Transcript"
+    elif earnings_source in ("growth_proxy", "fundamental_proxy"):
+        pg_str = f"{profit_growth:+.1f}%" if profit_growth is not None else "N/A"
+        rg_str = f"{revenue_growth:+.1f}%" if revenue_growth is not None else "N/A"
+        if e >= 25:
+            earn_verdict = "Optimistic (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Strong and consistent growth signals management execution quality. "
+                f"Score {e:+.0f} reflects the growth trajectory, not a management tone call."
+            )
+        elif e >= 0:
+            earn_verdict = "Neutral (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Moderate growth: company is expanding but not at an exceptional pace. "
+                f"Score {e:+.0f}."
+            )
+        else:
+            earn_verdict = "Cautious (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Flat or declining profits warrant caution. "
+                f"Score {e:+.0f}."
+            )
+    elif e >= 25:
+        earn_detail = (
+            f"OPTIMISTIC earnings tone (score {e:+.0f}). Management expressed positive guidance "
+            "on revenue growth, margin expansion, or order wins in the most recent call. "
+            "Earnings momentum is a bullish tailwind."
+        )
+        earn_verdict = "Optimistic"
+    elif e >= 0:
+        earn_detail = (
+            f"NEUTRAL earnings tone (score {e:+.0f}). Management guidance was in-line — "
+            "no major positive or negative surprises. Earnings factor contributes minimally to score."
+        )
+        earn_verdict = "Neutral"
+    elif e >= -25:
+        earn_detail = (
+            f"CAUTIOUS earnings tone (score {e:+.0f}). Management flagged headwinds — "
+            "margin pressure, demand slowdown, or project delays. Watch for earnings downgrade risk."
+        )
+        earn_verdict = "Cautious"
+    else:
+        earn_detail = (
+            f"NEGATIVE earnings call (score {e:+.0f}). Management tone was distinctly bearish — "
+            "revenue miss, guidance cut, or operational crisis mentioned. High risk of further downside."
+        )
+        earn_verdict = "Negative"
+    expl["earnings"] = {
+        "score":        round(e, 1),
+        "weight_pct":   round(ew * 100, 1),
+        "contribution": round(e * ew, 1) if ew > 0 else 0,
+        "verdict":      earn_verdict,
+        "detail":       earn_detail,
+    }
+
+    # 6. Fundamental ───────────────────────────────────────────────────────────
+    f  = components.get("fundamental", 0)
+    fw = aw.get("fundamental", 0)
+    grade_desc = {
+        "STRONG":    "Top-tier fundamentals — ROE/ROCE both >20%, low debt, strong revenue growth.",
+        "GOOD":      "Above-average fundamentals — ROE/ROCE healthy (15–20%), manageable leverage.",
+        "WATCHLIST": "Average fundamentals — ROE/ROCE around 10–15%, mixed growth metrics. Monitor closely.",
+        "WEAK":      "Below-average fundamentals — thin margins, high debt, or negative growth. High risk.",
+    }
+    if fw == 0:
+        fund_detail = (
+            "Fundamental score not yet cached for this stock. "
+            "The Hub scores ~2,000 NSE stocks weekly using yfinance + Screener data "
+            "(ROE, ROCE, D/E, current ratio, revenue growth, promoter holding, earnings quality). "
+            "First-time additions and infrequently traded stocks may not yet have a cached score."
+        )
+        fund_verdict = "No Data"
+    else:
+        fund_score_100 = round(50 + f, 0)
+        fund_detail = (
+            f"Fundamental grade: {fund_grade} (score {fund_score_100:.0f}/100). "
+            f"{grade_desc.get(fund_grade, '')} "
+            f"Score 50 = average; above 60 = top-quartile quality. "
+            f"Derived from ROE, ROCE, debt/equity, revenue CAGR, profit CAGR, and promoter holding. "
+            f"Contributes {f * fw:+.1f} points to master score."
+        )
+        fund_verdict = fund_grade.title()
+    expl["fundamental"] = {
+        "score":        round(f, 1),
+        "weight_pct":   round(fw * 100, 1),
+        "contribution": round(f * fw, 1) if fw > 0 else 0,
+        "verdict":      fund_verdict,
+        "detail":       fund_detail,
+    }
+
+    # 7. Options ───────────────────────────────────────────────────────────────
+    opt = components.get("options", 0)
+    ow  = aw.get("options", 0.05)
+    if opt > 10:
+        opt_detail = (
+            f"NIFTY PCR > 1.3 — heavy put open interest signals fear and active hedging. "
+            "Contrarian interpretation: when everyone is hedging (buying puts), "
+            "the market is often near a bottom. Bullish signal for all stocks."
+        )
+        opt_verdict = "Contrarian Bullish"
+    elif opt < -10:
+        opt_detail = (
+            f"NIFTY PCR < 0.7 — low put-call ratio signals complacency (call buyers dominate). "
+            "Contrarian warning: when the market is too optimistic (heavy call OI), "
+            "a reversal is more likely. Mild caution signal."
+        )
+        opt_verdict = "Complacency Warning"
+    else:
+        opt_detail = (
+            f"NIFTY PCR in neutral zone (0.7–1.3) — balanced put/call activity. "
+            "No strong contrarian signal from the index options market. "
+            "Note: this is an INDEX-LEVEL indicator, not {symbol}-specific stock options. "
+            "It acts as a tide-level factor affecting all stocks equally."
+        )
+        opt_verdict = "Neutral"
+    expl["options"] = {
+        "score":        round(opt, 1),
+        "weight_pct":   round(ow * 100, 1),
+        "contribution": round(opt * ow, 1),
+        "verdict":      opt_verdict,
+        "detail":       opt_detail,
+    }
+
+    return expl
+
+
 # ── GET /context ──────────────────────────────────────────────────────────────
 
 @router.get("/context")
@@ -118,18 +461,20 @@ async def get_score_breakdown(symbol: str, db: AsyncSession = Depends(get_db)):
     )).scalar_one_or_none()
     if not row:
         raise HTTPException(404, f"No score for {symbol}")
+    components = {
+        "technical":   row.technical_score,
+        "news":        row.news_score,
+        "sector":      row.sector_score,
+        "macro":       row.macro_score,
+        "earnings":    row.earnings_score,
+        "fundamental": row.fundamental_score,
+        "options":     row.options_score,
+    }
     return {
         **_score_to_dict(row),
-        "components": {
-            "technical":   row.technical_score,
-            "news":        row.news_score,
-            "sector":      row.sector_score,
-            "macro":       row.macro_score,
-            "earnings":    row.earnings_score,
-            "fundamental": row.fundamental_score,
-            "options":     row.options_score,
-        },
+        "components": components,
         "full_reasoning": row.reasoning,
+        "factor_explanations": _build_factor_explanations(components, row.reasoning or {}),
     }
 
 
@@ -215,6 +560,119 @@ async def trigger_cycle():
     except Exception as exc:
         # Fallback: run inline if broker unavailable
         raise HTTPException(503, f"Could not queue cycle: {exc}")
+
+
+@router.post("/rescore/{symbol}")
+async def rescore_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Rescore a single symbol inline (skips Celery — instant result).
+
+    Use when you need the latest score for one symbol without waiting for
+    the full 2000-symbol Hub cycle. Returns the updated score breakdown.
+    """
+    from engine.intelligence_hub import (
+        score_symbol, build_macro_context, build_news_context,
+        build_earnings_context, build_options_context, build_sector_context,
+        MasterContext, PortfolioContext, enrich_news_context_with_tavily,
+    )
+    from db.models import FundamentalData
+    from sqlalchemy import select as _sel
+    from datetime import datetime as _dt
+
+    bare = symbol.replace(".NS", "").replace(".BO", "").upper()
+    sym  = bare + ".NS"
+
+    try:
+        macro    = await build_macro_context(db)
+        news     = await build_news_context(db)
+        earnings = await build_earnings_context(db)
+        options  = await build_options_context(db)
+        sectors  = build_sector_context()
+        portfolio = PortfolioContext(equity=100000, cash=100000)
+
+        # Tavily enrichment for this specific symbol
+        news = await enrich_news_context_with_tavily(news, [sym])
+
+        rows = (await db.execute(
+            _sel(FundamentalData.symbol, FundamentalData.fundamental_score,
+                 FundamentalData.profit_growth_3yr, FundamentalData.revenue_growth_3yr)
+        )).all()
+        fund_by_sym = {r.symbol.replace(".NS", ""): float(r.fundamental_score)
+                       for r in rows if r.fundamental_score is not None}
+        growth_by_sym = {
+            r.symbol.replace(".NS", ""): (
+                float(r.profit_growth_3yr)  if r.profit_growth_3yr  is not None else None,
+                float(r.revenue_growth_3yr) if r.revenue_growth_3yr is not None else None,
+            )
+            for r in rows
+            if r.profit_growth_3yr is not None or r.revenue_growth_3yr is not None
+        }
+        now = _dt.utcnow().isoformat()
+        ctx = MasterContext(
+            built_at=now, bar_time=now, macro=macro, sectors=sectors,
+            news=news, earnings=earnings, options=options, portfolio=portfolio,
+            fundamentals_by_symbol=fund_by_sym, growth_by_symbol=growth_by_sym,
+        )
+
+        # Fetch candles — try 15m, fall back to 1h
+        import pandas as pd
+        from crawler.price_feed import get_latest_candles
+        candles = await get_latest_candles(sym, "15m", 300, db)
+        if not candles or len(candles) < 50:
+            candles = await get_latest_candles(sym, "1h", 300, db)
+        if not candles or len(candles) < 50:
+            candles = await get_latest_candles(sym, "1d", 300, db)
+        if not candles or len(candles) < 20:
+            raise HTTPException(404, f"Insufficient price history for {sym}")
+        candles_sorted = sorted(candles, key=lambda c: c.timestamp)
+        df = pd.DataFrame([{
+            "open": float(c.open), "high": float(c.high),
+            "low":  float(c.low),  "close": float(c.close),
+            "volume": float(c.volume), "timestamp": c.timestamp,
+        } for c in candles_sorted]).set_index("timestamp")
+
+        result = await score_symbol(sym, df, ctx, db)
+        if result is None:
+            raise HTTPException(404, f"Could not score {sym} — no price data in DB")
+
+        # Persist the single score
+        from engine.intelligence_hub import persist_scores
+        await persist_scores([result], _dt.utcnow(), db)
+
+        # Return from the ScoredStock result directly (freshest data)
+        r = result.reasoning
+        return {
+            "symbol":    result.symbol,
+            "rescored":  True,
+            "scored_at": _dt.utcnow().isoformat(),
+            "master_score":   result.master_score,
+            "signal":         result.signal,
+            "regime":         result.regime,
+            "is_blocked":     result.is_blocked,
+            "news_score":     r.get("news"),
+            "earnings_score": r.get("earnings"),
+            "technical_score": r.get("technical"),
+            "fundamental_score": r.get("fundamental"),
+            "sector_score":   r.get("sector"),
+            "macro_score":    r.get("macro"),
+            "options_score":  r.get("options"),
+            "reasoning":      r,
+            "factor_explanations": _build_factor_explanations(
+                {
+                    "technical":   r.get("technical", 0),
+                    "news":        r.get("news", 0),
+                    "sector":      r.get("sector", 0),
+                    "macro":       r.get("macro", 0),
+                    "earnings":    r.get("earnings", 0),
+                    "fundamental": r.get("fundamental", 0),
+                    "options":     r.get("options", 0),
+                },
+                r,
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Rescore failed: {exc}")
 
 
 # ── helper ────────────────────────────────────────────────────────────────────

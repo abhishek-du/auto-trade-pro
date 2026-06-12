@@ -1,14 +1,32 @@
-# AutoTrade Pro — Docker Compose (workers only)
-# Database  → Supabase (external, set DATABASE_URL in .env)
-# Redis     → Upstash  (external, set REDIS_URL in .env)
-# API       → Vercel   (deploy with `vercel --prod`)
-#
-# This compose file runs only the Celery worker + beat scheduler locally
-# or on any Linux host (Railway, Fly.io, Render, etc.).
+# AutoTrade Pro — Docker Compose
+# Database  → local PostgreSQL (Docker)
+# Redis     → host redis-server (already running on :6379)
+# API       → FastAPI (local dev)
+# Workers   → Celery worker + beat
 
 version: "3.9"
 
 services:
+
+  # ── PostgreSQL (local — replaces Supabase) ───────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: autotrade_postgres
+    environment:
+      POSTGRES_DB:       autotrade_pro
+      POSTGRES_USER:     autotrade
+      POSTGRES_PASSWORD: autotrade
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d   # SQL dumps restored on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autotrade -d autotrade_pro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   # ── FastAPI app (local dev only) ──────────────────────────────────────────
   app:
@@ -20,6 +38,9 @@ services:
       - .:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # ── Celery worker ─────────────────────────────────────────────────────────
   celery_worker:
@@ -30,7 +51,8 @@ services:
     command: celery -A tasks.celery_app worker --loglevel=info --concurrency=2
     restart: unless-stopped
     depends_on:
-      - app
+      postgres:
+        condition: service_healthy
 
   # ── Celery beat (periodic scheduler) ────────────────────────────────────
   celery_beat:
@@ -41,6 +63,16 @@ services:
     command: celery -A tasks.celery_app beat --loglevel=info
     restart: unless-stopped
     depends_on:
-      - app
+      postgres:
+        condition: service_healthy
 
-# No local volumes needed — database and cache are fully managed externally.
+  # ── Adminer (web-based DB browser) ──────────────────────────────────────────
+  adminer:
+    image: adminer:latest
+    container_name: autotrade_adminer
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

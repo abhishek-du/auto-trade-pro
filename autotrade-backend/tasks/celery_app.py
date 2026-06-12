@@ -32,6 +32,8 @@ celery_app = Celery(
         "tasks.news_scan",
         "tasks.paper_trade_loop",
         "tasks.india_tasks",
+        "tasks.market_scanner",
+        "tasks.pre_diagnose",
     ],
 )
 
@@ -113,11 +115,48 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week=0, hour=18, minute=30),
     },
 
+    # Weekly Sunday 19:00 UTC: rebuild yfinance sector mapping for all NSE EQ symbols
+    "sector-cache-rebuild-weekly": {
+        "task":     "tasks.rebuild_sector_cache",
+        "schedule": crontab(day_of_week=0, hour=19, minute=0),
+    },
+
+    # Weekly Sunday 01:00 UTC (06:30 IST, before market open): refresh last week
+    # of daily candles for the FULL NSE universe via Zerodha Kite. Keeps every
+    # symbol's bars current so the scanner/agent cover the whole market.
+    "full-nse-candles-weekly": {
+        "task":     "tasks.refresh_full_nse_candles",
+        "schedule": crontab(day_of_week="sunday", hour=1, minute=0),
+    },
+
+    # Daily 02:50 UTC (08:20 IST, after candle/instrument refresh, before open):
+    # rebuild the Hub's ~500-name deep-score universe by 30-day avg turnover.
+    "rebuild-hub-universe-daily": {
+        "task":     "tasks.rebuild_hub_universe",
+        "schedule": crontab(hour=2, minute=50),
+    },
+
+    # Every 15 min during NSE hours: score full NSE universe → market_shortlist
+    # (runs 45 s before the hub cycle so the shortlist is always fresh)
+    "market-scanner-every-15min": {
+        "task":     "tasks.market_scanner.run_market_scanner",
+        "schedule": 900,
+        "options":  {"countdown": 30},
+    },
+
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",
         "schedule": 60,
         "options":  {"countdown": 15},
+    },
+
+    # Every 5 min: reconcile the spreadsheet trade journal (catches trades that
+    # close after the 60 s trade loop stops running post-market).
+    "trade-journal-sync-5min": {
+        "task":     "tasks.india_tasks.sync_trade_journal",
+        "schedule": 300,
+        "options":  {"countdown": 30},
     },
 
     # Weekly Saturday 20:30 UTC = Sunday 02:00 IST: LSTM + RF model training
@@ -185,6 +224,24 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 20},
     },
 
+    # Daily 10:45 UTC = 4:15 PM IST: save capital snapshot with Sharpe/Treynor/Jensen
+    "capital-snapshot-daily": {
+        "task":     "tasks.india_tasks.save_capital_snapshot",
+        "schedule": crontab(hour=10, minute=45),
+    },
+
+    # Weekly Sunday 17:00 UTC = 10:30 PM IST: rebalance check + Telegram alert
+    "weekly-portfolio-rebalance": {
+        "task":     "tasks.india_tasks.weekly_portfolio_rebalance",
+        "schedule": crontab(day_of_week="sunday", hour=17, minute=0),
+    },
+
+    # Weekly Sunday 17:30 UTC = 11:00 PM IST: AI portfolio report via Telegram
+    "weekly-ai-portfolio-report": {
+        "task":     "tasks.india_tasks.weekly_ai_portfolio_report",
+        "schedule": crontab(day_of_week="sunday", hour=17, minute=30),
+    },
+
     # ── Kite library tasks (post market-close holdings, daily candles, etc.) ──
     "kite-sync-holdings-daily": {
         "task":     "tasks.kite_sync_holdings",
@@ -201,6 +258,13 @@ celery_app.conf.beat_schedule = {
     "kite-check-token-daily": {
         "task":     "tasks.kite_check_token",
         "schedule": crontab(hour=0, minute=35),
+    },
+    # Daily 02:30 UTC = 08:00 IST: auto-refresh access token before market open.
+    # Uses ZERODHA_USER_ID + ZERODHA_PASSWORD + ZERODHA_TOTP_SECRET from .env.
+    # On success ZERODHA_ENABLED flips to True in-memory so the ticker can start.
+    "kite-token-refresh-daily": {
+        "task":     "tasks.zerodha_token_refresh",
+        "schedule": crontab(hour=2, minute=30, day_of_week="1-5"),
     },
     "kite-start-ticker-on-open": {
         "task":     "tasks.kite_start_ticker",

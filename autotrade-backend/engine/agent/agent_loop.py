@@ -31,8 +31,16 @@ _macro      = MacroSectorAgent()
 _decision   = DecisionEngine()
 _executor   = AgentExecutionManager()
 
+# Tracks symbols that already received a shortlist alert this session.
+# Key = symbol (bare), value = datetime sent. Prevents repeat spam every 60s.
+_shortlist_alerted: dict[str, datetime] = {}
+_SHORTLIST_ALERT_COOLDOWN_HOURS = 4   # re-alert after this many hours
+_MAX_SHORTLIST_ALERTS_PER_CYCLE = 5   # cap: top-5 per cycle to avoid LLM queue pile-up
+_shortlist_alerts_this_cycle: int = 0  # reset at the start of each run_agent_cycle
+
 # Shared in-memory portfolio (paper mode uses this; live mode syncs from Kite)
 _portfolio: AgentPortfolioContext | None = None
+_portfolio_hydrated: bool = False
 
 
 def _get_portfolio() -> AgentPortfolioContext:
@@ -43,6 +51,88 @@ def _get_portfolio() -> AgentPortfolioContext:
             cash=settings.AGENT_EQUITY,
         )
     return _portfolio
+
+
+async def _hydrate_portfolio_from_db(
+    portfolio: AgentPortfolioContext,
+    session: AsyncSession,
+) -> None:
+    """On first cycle after a restart, reload open positions from DB.
+
+    Without this, the in-memory portfolio is empty after every restart, so:
+    - ALREADY_IN_POSITION check never fires → same stock bought N times
+    - check_and_close_positions finds nothing → stops/targets never trigger
+    Also deduplicates: if the same symbol has multiple open DB rows (caused by
+    a previous restart bug), the most recent row is kept and older ones are
+    closed at entry price (zero P&L, exit_reason=DUPLICATE_CLEANUP).
+    """
+    global _portfolio_hydrated
+    if _portfolio_hydrated:
+        return
+
+    from db.models import AgentTrade
+    from sqlalchemy import select as _sel
+
+    try:
+        open_trades = (await session.execute(
+            _sel(AgentTrade)
+            .where(AgentTrade.exit_price == None)
+            .order_by(AgentTrade.entry_ts.asc())
+        )).scalars().all()
+
+        # Keep only the most recent open trade per symbol
+        latest: dict[str, AgentTrade] = {}
+        for trade in open_trades:
+            latest[trade.symbol] = trade  # ascending order → last write = most recent
+
+        # Close older duplicates in DB
+        for trade in open_trades:
+            if latest[trade.symbol].id != trade.id:
+                trade.exit_price  = trade.entry_price
+                trade.exit_ts     = datetime.utcnow()
+                trade.exit_reason = "DUPLICATE_CLEANUP"
+                trade.pnl         = 0.0
+                trade.pnl_pct     = 0.0
+                session.add(trade)
+
+        if open_trades:
+            await session.commit()
+
+        # Hydrate in-memory portfolio with the unique open positions
+        capital_locked = 0.0
+        for sym, trade in latest.items():
+            if sym not in portfolio.open_positions:
+                risk = abs(trade.entry_price - trade.stop_price)
+                portfolio.open_positions[sym] = {
+                    "side":          trade.side,
+                    "entry":         trade.entry_price,
+                    "stop":          trade.stop_price,
+                    "target":        trade.target_price,
+                    "qty":           trade.qty,
+                    "strategy":      trade.strategy,
+                    "target1":       round(trade.entry_price + risk, 2),
+                    "target2":       round(trade.entry_price + 2 * risk, 2),
+                    "partial_done":  False,
+                    "trailing_sl":   None,
+                    "entry_ts":      trade.entry_ts.isoformat() if trade.entry_ts else None,
+                    "product":       trade.product,
+                }
+                capital_locked += trade.qty * trade.entry_price
+
+        # Set cash to reflect what's actually been deployed from the virtual account.
+        # If positions already over-used the equity (old bug), cap cash at 0.
+        portfolio.cash = max(0.0, portfolio.equity - capital_locked)
+
+        dupes_closed = len(open_trades) - len(latest)
+        logger.info(
+            f"[agent] portfolio hydrated from DB: {len(latest)} open positions, "
+            f"capital locked ₹{capital_locked:,.0f}, cash remaining ₹{portfolio.cash:,.0f}"
+            + (f", {dupes_closed} duplicate(s) cleaned up" if dupes_closed else "")
+        )
+    except Exception as exc:
+        logger.warning(f"[agent] portfolio hydration failed: {exc}")
+
+    _portfolio_hydrated = True
 
 
 def _is_market_hours() -> bool:
@@ -56,31 +146,96 @@ def _is_trading_day() -> bool:
     return datetime.now().weekday() < 5  # Mon-Fri
 
 
-async def run_agent_cycle(session: AsyncSession) -> dict:
-    """Top-level entry point called by the Celery task."""
+def _is_mis_squareoff_window() -> bool:
+    """True from MIS_SQUAREOFF_TIME until session end (3:15–3:30 PM IST by default).
 
-    if not settings.AGENT_ENABLED:
+    NSE/BSE rule: MIS (intraday) positions MUST be closed before 3:20 PM IST.
+    Zerodha auto-squares at 3:20 PM — we initiate at 3:15 to avoid market-order
+    slippage from the broker's forced square-off.
+    """
+    now = datetime.now().time()
+    sq_h, sq_m = map(int, settings.AGENT_MIS_SQUAREOFF_TIME.split(":"))
+    end_h, end_m = map(int, settings.AGENT_SESSION_END.split(":"))
+    return dtime(sq_h, sq_m) <= now <= dtime(end_h, end_m)
+
+
+async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
+    """Top-level entry point called by the Celery task.
+
+    force=True bypasses the enabled flag and market-hours check — used by the
+    manual trigger button and always allowed in paper trading mode.
+    """
+    is_paper = getattr(settings, "PAPER_MODE", True)
+
+    if not force and not settings.AGENT_ENABLED:
         return {"status": "disabled"}
 
-    if not _is_trading_day():
+    if not force and not _is_trading_day():
         return {"status": "non_trading_day"}
 
-    if not _is_market_hours():
+    if not force and not _is_market_hours():
         return {"status": "outside_market_hours"}
 
+    global _shortlist_alerts_this_cycle
+    _shortlist_alerts_this_cycle = 0  # reset per-cycle cap
+
     portfolio = _get_portfolio()
+
+    # Reload open positions from DB on first cycle after a restart.
+    # This prevents the same stock from being bought multiple times and ensures
+    # stop/target exits fire correctly even after a backend restart.
+    await _hydrate_portfolio_from_db(portfolio, session)
 
     # Check stop/target on all open positions first
     from crawler.live_prices import PRICE_CACHE
     await _executor.check_and_close_positions(portfolio, PRICE_CACHE, session)
 
-    universe  = settings.nse_symbols
+    # NSE/BSE Rule: MIS (intraday) positions must be squared off before 3:20 PM IST.
+    # Zerodha auto-squares at 3:20 PM with market orders (bad fill). We close at
+    # AGENT_MIS_SQUAREOFF_TIME (default 3:15 PM) with limit orders for better pricing.
+    if _is_mis_squareoff_window():
+        mis_symbols = [
+            sym for sym, pos in portfolio.open_positions.items()
+            if pos.get("product", "CNC") == "MIS"
+        ]
+        if mis_symbols:
+            logger.info(
+                f"[agent] MIS square-off window — closing {len(mis_symbols)} "
+                f"intraday position(s): {mis_symbols}"
+            )
+            for sym in mis_symbols:
+                pos = portfolio.open_positions.get(sym, {})
+                price_data = PRICE_CACHE.get(sym, {})
+                price = float(price_data.get("price", 0) or pos.get("entry", 0))
+                if price > 0:
+                    pnl = portfolio.close_position(sym, price)
+                    await _executor._record_exit(sym, price, "MIS_SQUAREOFF", pnl, session)
+                    logger.info(
+                        f"[agent] MIS squared off {sym} @ ₹{price:.2f} | pnl=₹{pnl:,.2f}"
+                    )
+
+    # Build scan universe from market shortlist (BUY-signaled stocks from the
+    # full 9,600-symbol scanner) + the hardcoded large-cap fallback.
+    # The shortlist is the right source because it already did the heavy work of
+    # filtering by volume, score, and signal — so the agent scans quality stocks,
+    # not just 22 large caps that may all be in RANGE regime simultaneously.
+    universe = await _build_scan_universe(session)
     results   = []
     skipped   = 0
 
+    # Pre-fetch hub scores for the whole universe in one call (avoids N+1 queries)
+    hub_scores: dict[str, dict] = await _fetch_hub_scores(universe, session)
+
+    max_pos = getattr(settings, "AGENT_MAX_POSITIONS", 15)
     for symbol in universe:
+        if len(portfolio.open_positions) >= max_pos:
+            logger.info(f"[agent] MAX_POSITIONS cap ({max_pos}) reached — stopping new entries")
+            break
         try:
-            result = await _process_symbol(symbol, portfolio, session)
+            result = await _process_symbol(
+                symbol, portfolio, session,
+                hub_info=hub_scores.get(symbol) or hub_scores.get(symbol.replace(".NS", "")),
+            )
             if result:
                 results.append(result)
             else:
@@ -111,12 +266,23 @@ async def _process_symbol(
     symbol: str,
     portfolio: AgentPortfolioContext,
     session: AsyncSession,
+    hub_info: dict | None = None,
 ) -> dict | None:
+    global _shortlist_alerts_this_cycle
 
-    # 1. Get candle data from DB
+    # 1. Get candle data from DB — fallback chain: 5m → 1h → 1d
     from crawler.price_feed import get_latest_candles
 
+    _timeframe_used = settings.AGENT_TIMEFRAME
     candles = await get_latest_candles(symbol, settings.AGENT_TIMEFRAME, 300, session)
+    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and settings.AGENT_TIMEFRAME != "1h":
+        candles = await get_latest_candles(symbol, "1h", 300, session)
+        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
+            _timeframe_used = "1h"
+    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and _timeframe_used != "1d":
+        candles = await get_latest_candles(symbol, "1d", 300, session)
+        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
+            _timeframe_used = "1d"
     if not candles or len(candles) < settings.AGENT_WARMUP_BARS:
         return None
 
@@ -138,15 +304,64 @@ async def _process_symbol(
         logger.debug(f"[agent] features failed for {symbol}: {exc}")
         return None
 
+    # Inject hub composite score + signal so HubSignalStrategy can use them
+    if hub_info:
+        features.hub_composite_score = hub_info.get("composite_score") or hub_info.get("master_score")
+        features.hub_signal          = hub_info.get("signal", "HOLD")
+    else:
+        features.hub_composite_score = None
+        features.hub_signal          = "HOLD"
+
     # 3. Macro and fundamentals (cached)
     macro_bias          = _macro.bias(symbol)
     fund_score, fund_grade = await _fund_agent.get_cached_grade(symbol)
 
-    # 4. Strategy proposal
-    candidate = _selector.propose(symbol, df, features, macro_bias, fund_grade)
+    # 4a. Hub 7-Factor override — primary signal source.
+    #     Fetch the latest master_intelligence_score (within 2 hours).
+    #     If a fresh, above-threshold score exists, use it directly and skip
+    #     the strategy selector. This gives every trade the holistic 7-factor
+    #     view (technical + news + sector + macro + earnings + fundamentals +
+    #     options) while retaining all Varsity risk-management downstream.
+    from engine.agent.decision_engine import fetch_hub_candidate
+    candidate = await fetch_hub_candidate(symbol, features, session)
+    hub_override = candidate is not None
 
-    # 5. Decision fusion
-    decision = _decision.fuse(
+    # 4b. Fallback — technical-only strategy selector when no fresh Hub score.
+    if not hub_override:
+        candidate = _selector.propose(symbol, df, features, macro_bias, fund_grade)
+        # Stamp regime from features so Telegram alerts always have a real value
+        if candidate is not None:
+            candidate.regime = features.regime
+
+    # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
+    #     candidate regardless of whether execution ultimately proceeds.
+    #     Threshold: any Hub BUY signal with |master_score| >= 40 OR signal is
+    #     STRONG_BUY. The alert fires here (before risk/fund gates) so the
+    #     channel receives intelligence on ALL good setups, not just traded ones.
+    _shortlist_score_threshold = 40
+    if (
+        hub_override
+        and candidate is not None
+        and candidate.side == "BUY"
+        and _shortlist_alerts_this_cycle < _MAX_SHORTLIST_ALERTS_PER_CYCLE
+        and (
+            (candidate.master_score or 0) >= _shortlist_score_threshold
+            or (getattr(candidate, "hub_subscores", {}) or {}).get("signal") == "STRONG_BUY"
+        )
+        and symbol not in portfolio.open_positions  # skip symbols already held
+    ):
+        # Check cooldown before incrementing counter (avoids wasting a slot on duplicates)
+        bare = symbol.replace(".NS", "")
+        _last = _shortlist_alerted.get(bare)
+        _now  = datetime.utcnow()
+        if not _last or (_now - _last).total_seconds() >= _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
+            _shortlist_alerts_this_cycle += 1
+            asyncio.create_task(
+                _send_shortlist_alert(candidate, df=df, executed=False)
+            )
+
+    # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
+    decision, reject_reason = _decision.fuse(
         symbol=symbol,
         candidate=candidate,
         regime=features.regime,
@@ -157,11 +372,21 @@ async def _process_symbol(
     )
 
     if decision is None:
-        skip_reason = (
-            f"no_qualifying_setup" if candidate is None
-            else f"decision_filtered:conf={candidate.confidence}"
+        logger.debug(
+            f"[agent] SKIP {symbol} | {reject_reason} | regime={features.regime}"
+            + (" | hub_override" if hub_override else "")
         )
-        logger.debug(f"[agent] SKIP {symbol} | {skip_reason} | regime={features.regime}")
+        if candidate is not None:
+            # Log every fuse()-level rejection to agent_decisions for audit
+            await _log_skipped_decision(
+                symbol=symbol,
+                candidate=candidate,
+                regime=features.regime,
+                macro_bias=macro_bias,
+                fund_score=fund_score,
+                drop_reason=reject_reason or "decision_filtered",
+                session=session,
+            )
         return None
 
     # 6. Risk Manager veto
@@ -172,18 +397,63 @@ async def _process_symbol(
 
     if not risk_ok:
         logger.info(f"[agent] BLOCKED {symbol} | {risk_reason} | {decision.strategy}")
-        await _log_skipped_decision(symbol, decision, risk_reason, session)
+        await _log_skipped_decision(
+            symbol=symbol,
+            candidate=candidate,
+            regime=features.regime,
+            macro_bias=macro_bias,
+            fund_score=fund_score,
+            drop_reason=risk_reason,
+            session=session,
+            decision=decision,
+        )
         return None
 
-    # 7. Execute
+    # 7. Pre-trade research gate (BUY only) — Screener + yfinance + Tavily + LLM veto
+    #    Runs BEFORE execution so bad trades are blocked with real data, not just
+    #    technical signals. Cached 20 min so repeated scans of the same symbol are free.
+    if decision.action == "BUY":
+        try:
+            from engine.pre_trade_research import run_pre_trade_research
+            research = await asyncio.wait_for(
+                run_pre_trade_research(
+                    symbol=symbol,
+                    action=decision.action,
+                    score=decision.master_score or decision.confidence,
+                    regime=decision.regime,
+                    entry=decision.entry,
+                    stop=decision.stop,
+                    t1=decision.target,
+                    fund_grade=decision.fund_grade,
+                ),
+                timeout=12.0,
+            )
+            if research.get("veto"):
+                veto_reason = research["veto_reason"]
+                logger.warning(f"[agent] PRE-TRADE VETO {symbol}: {veto_reason}")
+                await _log_skipped_decision(
+                    symbol=symbol,
+                    candidate=candidate,
+                    regime=features.regime,
+                    macro_bias=macro_bias,
+                    fund_score=fund_score,
+                    drop_reason=f"pre_trade_veto:{veto_reason}",
+                    session=session,
+                    decision=decision,
+                )
+                return None
+            # Append research note to decision reasons for audit trail
+            note = research.get("research_note", "")
+            if note:
+                decision.reasons.append(f"[web] {note[:200]}")
+        except (asyncio.TimeoutError, Exception) as _exc:
+            logger.debug(f"[agent] pre-trade research error for {symbol}: {_exc} → ALLOW")
+
+    # 8. Execute
     order_id = await _executor.execute(decision, session)
 
     if order_id:
         portfolio.add_position(decision)
-        # Multi-target exit keys consumed by check_and_close_positions:
-        #   target1 = 1:1 R:R (partial 50% exit + SL → near-breakeven)
-        #   target2 = 2:1 R:R (full exit of remainder)
-        #   partial_done / trailing_sl / entry_ts drive stage transitions
         _sym  = decision.symbol
         _risk = abs(decision.entry - decision.stop)
         portfolio.open_positions[_sym]["target1"]      = round(decision.entry + 1.0 * _risk, 2)
@@ -191,33 +461,245 @@ async def _process_symbol(
         portfolio.open_positions[_sym]["partial_done"] = False
         portfolio.open_positions[_sym]["trailing_sl"]  = None
         portfolio.open_positions[_sym]["entry_ts"]     = datetime.utcnow().isoformat()
+        # Track product so MIS square-off sweep can identify intraday positions
+        portfolio.open_positions[_sym]["product"]      = getattr(decision, "product", "CNC")
+
+        # Telegram entry alert.
+        # Hub-override trades already got the full shortlist alert → send a brief
+        # "TRADE PLACED" follow-up. Technical-only trades get the full fmt_entry.
+        if settings.telegram_available:
+            from integrations.telegram_service import send, fmt_entry
+            if hub_override:
+                _sym_bare = _sym.replace(".NS", "")
+                _t2 = portfolio.open_positions[_sym].get("target2", decision.target)
+                placed_msg = (
+                    f"✅ <b>TRADE PLACED</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📌 <b>{_sym_bare}</b>  "
+                    f"· BUY {decision.qty} shares @ ₹{decision.entry:,.2f}\n"
+                    f"🛑 Stop ₹{decision.stop:,.2f}  "
+                    f"·  🎯 T2 ₹{_t2:,.2f}\n"
+                    f"<i>Position opened — see analysis above</i>"
+                )
+                await send(placed_msg)
+            else:
+                await send(fmt_entry(decision))
 
     return decision.to_dict()
 
 
+async def _send_shortlist_alert(
+    candidate,
+    df: "pd.DataFrame | None",
+    executed: bool,
+) -> None:
+    """Build and send the STRONG_BUY shortlist alert to Telegram.
+
+    Called for every high-score Hub candidate, regardless of whether the
+    trade was actually executed (fund/risk constraints may have blocked it).
+    Respects a 4-hour per-symbol cooldown so the channel isn't spammed.
+    """
+    if not settings.telegram_available:
+        return
+
+    bare = candidate.symbol.replace(".NS", "")
+    now  = datetime.utcnow()
+
+    # Cooldown: skip if we already alerted for this symbol recently AND the
+    # trade wasn't just executed (executed = always send)
+    if not executed:
+        last_sent = _shortlist_alerted.get(bare)
+        if last_sent and (now - last_sent).total_seconds() < _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
+            return
+
+    # Build AI explanation — try Tavily research first (real web data), then LLM.
+    ai_note = ""
+    subs   = getattr(candidate, "hub_subscores", {}) or {}
+    regime = getattr(candidate, "regime", "") or subs.get("regime", "")
+    tech   = float(subs.get("technical",   0))
+    news_s = float(subs.get("news",        0))
+    earn   = float(subs.get("earnings",    0))
+    fund   = float(subs.get("fundamental", 0))
+    score  = candidate.master_score or 0.0
+    entry  = candidate.entry
+    stop   = candidate.stop
+    risk   = abs(entry - stop)
+    t1     = round(entry + risk, 2)
+    t2     = round(entry + 2 * risk, 2)
+
+    # 1. Try Tavily web research (factual, real-time, costs 2 credits)
+    try:
+        from engine.tavily_enricher import research_stock_for_alert
+        from utils.config import settings as _cfg
+        if getattr(_cfg, "tavily_available", False):
+            ai_note = await research_stock_for_alert(
+                symbol=candidate.symbol,
+                score=score, tech_score=tech, news_score=news_s,
+                regime=regime, entry=entry, stop=stop, t1=t1, t2=t2,
+            ) or ""
+    except Exception as exc:
+        logger.debug(f"[agent/shortlist] Tavily research failed for {bare}: {exc}")
+
+    # 2. Fallback to local LLM if Tavily returned nothing
+    if not ai_note:
+        try:
+            llm_prompt = (
+                f"Indian stock: {bare}\n"
+                f"Hub 7-factor score: {score:+.1f} "
+                f"(Technical={tech:+.0f}, News={news_s:+.0f}, "
+                f"Earnings={earn:+.0f}, Fundamental={fund:+.0f})\n"
+                f"Regime: {regime}\n"
+                f"Entry ₹{entry:.0f}, Stop ₹{stop:.0f}, T1 ₹{t1:.0f}, T2 ₹{t2:.0f}\n\n"
+                f"In 3 short sentences: WHY strong buy? Key risk? When to EXIT?"
+            )
+            from utils.llm import call_llm_chat
+            ai_note = await call_llm_chat(
+                [
+                    {"role": "system", "content": "Concise Indian equity analyst. Max 3 sentences."},
+                    {"role": "user",   "content": llm_prompt},
+                ],
+                max_tokens=200,
+                temperature=0.3,
+                timeout=50.0,
+                groq_fallback=False,  # background task — protect Groq quota for user-facing requests
+            ) or ""
+        except Exception as exc:
+            logger.debug(f"[agent/shortlist] LLM fallback failed for {bare}: {exc}")
+
+    # Send
+    try:
+        from integrations.telegram_service import send, fmt_shortlist_alert
+        msg = fmt_shortlist_alert(candidate, df=df, ai_note=ai_note, executed=executed)
+        await send(msg)
+        _shortlist_alerted[bare] = now
+        logger.info(f"[agent/shortlist] ✓ Telegram alert sent for {bare} (executed={executed})")
+    except Exception as exc:
+        logger.warning(f"[agent/shortlist] Telegram send failed for {bare}: {exc}")
+
+
+async def _build_scan_universe(session: AsyncSession) -> list[str]:
+    """Return the agent's scan universe.
+
+    Priority:
+      1. Market shortlist BUY/STRONG_BUY rows (scanner already ranked them)
+      2. User watchlist additions
+      3. Hard-coded NSE large-cap fallback (ensures we always scan something)
+
+    Deduplication is applied; result is capped at 150 symbols to avoid
+    very long cycles when the shortlist is large.
+    """
+    from db.models import MarketShortlist, UserWatchlist
+    from sqlalchemy import select as _sel
+
+    seen: set[str] = set()
+    universe: list[str] = []
+
+    # 1. BUY-signaled stocks from the latest market shortlist
+    try:
+        rows = (await session.execute(
+            _sel(MarketShortlist.symbol, MarketShortlist.signal, MarketShortlist.master_score)
+            .where(MarketShortlist.signal.in_(["BUY", "STRONG_BUY", "HOLD"]))
+            .order_by(MarketShortlist.master_score.desc())
+            .limit(120)
+        )).all()
+        for row in rows:
+            sym = row.symbol if row.symbol.endswith(".NS") else row.symbol + ".NS"
+            if sym not in seen:
+                seen.add(sym)
+                universe.append(sym)
+    except Exception as exc:
+        logger.warning(f"[agent] shortlist fetch failed: {exc}")
+
+    # 2. User priority watchlist
+    try:
+        wl_rows = (await session.execute(
+            _sel(UserWatchlist.symbol)
+        )).scalars().all()
+        for sym in wl_rows:
+            s = sym if sym.endswith(".NS") else sym + ".NS"
+            if s not in seen:
+                seen.add(s)
+                universe.append(s)
+    except Exception:
+        pass
+
+    # 3. Fallback — large-cap hardcoded list (in case DB is empty / first run)
+    for sym in settings.nse_symbols:
+        if sym not in seen:
+            seen.add(sym)
+            universe.append(sym)
+
+    logger.info(f"[agent] scan universe: {len(universe)} symbols "
+                f"({min(len(universe), 120)} from shortlist)")
+    return universe[:150]
+
+
+async def _fetch_hub_scores(universe: list[str], session: AsyncSession) -> dict[str, dict]:
+    """Fetch hub composite scores + signals for all universe symbols in one query."""
+    from db.models import MarketShortlist
+    from sqlalchemy import select as _sel
+
+    bare_symbols = [s.replace(".NS", "") for s in universe]
+    ns_symbols   = [s if s.endswith(".NS") else s + ".NS" for s in universe]
+
+    try:
+        rows = (await session.execute(
+            _sel(
+                MarketShortlist.symbol,
+                MarketShortlist.master_score,
+                MarketShortlist.signal,
+            ).where(MarketShortlist.symbol.in_(bare_symbols + ns_symbols))
+            .order_by(MarketShortlist.created_at.desc())
+        )).all()
+
+        result: dict[str, dict] = {}
+        for row in rows:
+            bare = row.symbol.replace(".NS", "")
+            if bare not in result:
+                result[bare] = {
+                    "composite_score": row.master_score,
+                    "signal":          row.signal,
+                }
+        return result
+    except Exception as exc:
+        logger.warning(f"[agent] hub score prefetch failed: {exc}")
+        return {}
+
+
 async def _log_skipped_decision(
     symbol: str,
-    decision,
-    risk_reason: str,
+    drop_reason: str,
     session: AsyncSession,
+    candidate=None,
+    regime: str = "",
+    macro_bias: int = 0,
+    fund_score: int = 0,
+    decision=None,  # AgentDecisionOutput, populated when risk-manager blocked
 ) -> None:
+    """Log every rejected trade to agent_decisions before dropping."""
     try:
         from db.models import AgentDecision
+
+        # Use decision fields when available (risk-manager block), else candidate fields
+        src = decision if decision is not None else candidate
+
         db_dec = AgentDecision(
             symbol=symbol,
-            action=decision.action,
-            confidence=decision.confidence,
-            regime=decision.regime,
-            strategy=decision.strategy,
-            entry=decision.entry,
-            stop=decision.stop,
-            target=decision.target,
+            action=getattr(src, "action", None) or getattr(src, "side", "SKIP"),
+            confidence=getattr(src, "confidence", 0),
+            regime=getattr(decision, "regime", regime),
+            strategy=getattr(src, "strategy", ""),
+            entry=getattr(src, "entry", None),
+            stop=getattr(src, "stop", None),
+            target=getattr(src, "target", None),
             qty=0,
-            risk_pct=decision.risk_pct,
-            reasons=decision.reasons,
-            macro_bias=decision.macro_bias,
-            fund_score=decision.fund_score,
-            skip_reason=risk_reason,
+            risk_pct=getattr(src, "risk_pct", 0.0),
+            reasons=getattr(src, "reasons", []),
+            macro_bias=getattr(decision, "macro_bias", macro_bias),
+            fund_score=getattr(decision, "fund_score", fund_score),
+            skip_reason=drop_reason,
+            master_score=getattr(src, "master_score", None),
+            confidence_factors=getattr(decision, "confidence_factors", None),
             is_paper=settings.AGENT_PAPER_MODE,
             order_id=None,
         )
@@ -229,6 +711,8 @@ async def _log_skipped_decision(
 
 def eod_reconcile() -> None:
     """Reset daily counters at EOD."""
+    global _portfolio_hydrated
     portfolio = _get_portfolio()
     portfolio.reset_day()
+    _portfolio_hydrated = False  # force re-hydration next cycle (picks up any DB changes)
     logger.info("[agent] EOD reset complete")

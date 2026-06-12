@@ -13,7 +13,7 @@ import SellModal from '../components/portfolio/SellModal'
 import AllocationCharts from '../components/portfolio/AllocationCharts'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
 import { formatINR } from '../utils/indianFormat'
-import { apiFetch } from '../api/client'
+import { apiFetch, getZerodhaLoginUrl, getZerodhaStatus } from '../api/client'
 
 /* ── Agent activity strip ──────────────────────────────────────────────────
    Inline panel showing the AI agent's paper-trading state alongside the
@@ -198,7 +198,7 @@ const TABS = [
 export default function PortfolioTracker() {
   const {
     portfolios, activeId, setActiveId, detail, summary,
-    loading, detailLoading, reload,
+    loading, detailLoading, reload, refreshPortfolios,
     createPortfolio, deletePortfolio,
     addHolding, sellHolding, deleteHolding,
     searchStocks, getTransactions,
@@ -213,6 +213,71 @@ export default function PortfolioTracker() {
   const [quickCreate,    setQuickCreate]    = useState(false)
   const [quickName,      setQuickName]      = useState('')
   const [quickCreating,  setQuickCreating]  = useState(false)
+  const [zStatus,        setZStatus]        = useState(null)
+  const [zBusy,          setZBusy]          = useState(false)
+
+  // ── Zerodha connection: status, sync, and direct-login popup ──────────────
+  async function fetchZStatus() {
+    try { setZStatus(await getZerodhaStatus()) } catch { setZStatus(null) }
+  }
+
+  useEffect(() => { fetchZStatus() }, [])
+
+  // Pull live Zerodha holdings into a "Zerodha Demat" portfolio (auto-created
+  // by the backend) and surface it on this page.
+  async function syncZerodha() {
+    setZBusy(true)
+    try {
+      const d = await apiFetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
+      toast.success(`Synced ${d.synced ?? 0} Zerodha holdings`)
+      await refreshPortfolios()          // refresh the portfolios LIST (fixes "No portfolios yet")
+      if (d.portfolio_id) setActiveId(d.portfolio_id)
+      await reload()
+    } catch (err) {
+      const msg = (err?.message || '').includes('HTTP 4')
+        ? 'Connect Zerodha first'
+        : 'Zerodha sync failed'
+      toast.error(msg)
+    } finally {
+      setZBusy(false)
+    }
+  }
+
+  // Open the Zerodha login popup DIRECTLY from this page (no page redirect).
+  // The popup must open synchronously inside the click gesture or the browser's
+  // popup blocker kills it; we then redirect the already-open popup to the URL.
+  async function handleConnectZerodha() {
+    if (zStatus?.connected) { await syncZerodha(); return }
+    const popup = window.open('about:blank', 'zerodha_login', 'width=600,height=720,left=200,top=80')
+    try {
+      const res = await getZerodhaLoginUrl()
+      if (popup && !popup.closed) {
+        popup.location.href = res.url
+        toast('Complete login in the popup window…')
+      } else {
+        window.location.href = res.url   // popup blocked → same-tab fallback
+      }
+    } catch (err) {
+      if (popup && !popup.closed) popup.close()
+      toast.error(err?.response?.data?.detail || 'Could not fetch login URL — check ZERODHA_API_KEY in .env')
+    }
+  }
+
+  // The OAuth callback page postMessages 'zerodha_connected' to this window.
+  // On success: refresh status, auto-sync holdings, and show them here.
+  useEffect(() => {
+    async function onMsg(e) {
+      if (e.data === 'zerodha_connected') {
+        await fetchZStatus()
+        await syncZerodha()
+      } else if (typeof e.data === 'string' && e.data.startsWith('zerodha_error')) {
+        toast.error('Zerodha login failed — try again')
+      }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function loadTransactions(symbol) {
     setTxLoading(true)
@@ -270,6 +335,38 @@ export default function PortfolioTracker() {
             onCreate={createPortfolio}
             onDelete={deletePortfolio}
           />
+          {/* Zerodha Connect / Login — always visible. Opens the Kite login
+              popup DIRECTLY from this page; on success it auto-syncs holdings
+              and shows them here (no redirect to a separate page). */}
+          {zStatus?.connected ? (
+            <span
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/8 text-emerald-400 text-xs font-semibold"
+              title={`Connected as ${zStatus.user_name || zStatus.user_id || ''} · token expires ${zStatus.token_expires_at || ''}`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              Zerodha · {zStatus.user_name?.split(' ')[0] || 'Connected'}
+            </span>
+          ) : (
+            <button
+              onClick={handleConnectZerodha}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 hover:border-blue-500/50 transition-colors"
+              title="Open Zerodha Kite login to connect live prices + real holdings"
+            >
+              Connect / Login Zerodha <ExternalLink size={11} />
+            </button>
+          )}
+          {/* Sync button — pull Zerodha holdings into a portfolio. Available as
+              soon as you're connected, even before any local portfolio exists. */}
+          {zStatus?.connected && (
+            <button
+              onClick={syncZerodha}
+              disabled={zBusy}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 transition-colors disabled:opacity-50"
+              title="Pull live Zerodha Demat holdings into this view"
+            >
+              <RefreshCw size={13} className={zBusy ? 'animate-spin' : ''} /> Sync Holdings
+            </button>
+          )}
           {activeId && (
             <>
               <button
@@ -279,38 +376,6 @@ export default function PortfolioTracker() {
               >
                 <RefreshCw size={14} className={detailLoading ? 'animate-spin' : ''} />
               </button>
-              <button
-                onClick={async () => {
-                  try {
-                    // apiFetch returns parsed JSON and throws on non-2xx,
-                    // so an empty catch + error.message gives us both the
-                    // 4xx "connect Zerodha first" path and the transport
-                    // failure path without juggling Response objects.
-                    const d = await apiFetch('/api/v1/portfolios/sync-zerodha', { method: 'POST' })
-                    toast.success(`Synced ${d.synced} Zerodha holdings`)
-                    reload()
-                  } catch (err) {
-                    const msg = (err?.message || '').includes('HTTP 4')
-                      ? 'Connect Zerodha first (Login link below)'
-                      : 'Zerodha sync failed'
-                    toast.error(msg)
-                  }
-                }}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 transition-colors"
-                title="Pull live Zerodha Demat holdings into this view"
-              >
-                Sync Zerodha
-              </button>
-              {/* Live Kite Connect actions (OAuth, GTT, MF orders, etc.) live
-                  at /zerodha/connect now that this page is the unified
-                  Zerodha view. */}
-              <Link
-                to="/zerodha/connect"
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-muted hover:text-blue-400 hover:border-blue-500/40 text-xs font-semibold transition-colors"
-                title="Kite Connect login, GTT, MF orders, advanced features"
-              >
-                Connect / Login <ExternalLink size={11} />
-              </Link>
               <button
                 onClick={() => setShowAdd(true)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-semibold hover:opacity-90 transition-opacity"
@@ -327,7 +392,26 @@ export default function PortfolioTracker() {
         <div className="bg-panel border border-border rounded-xl p-12 text-center space-y-4">
           <Briefcase size={40} className="text-muted/40 mx-auto" />
           <p className="text-slate-300 font-semibold">No portfolios yet</p>
-          <p className="text-muted text-sm">Create your first portfolio to start tracking your holdings.</p>
+          {zStatus?.connected ? (
+            <>
+              <p className="text-muted text-sm">
+                Connected to Zerodha as <span className="text-emerald-400 font-medium">{zStatus.user_name || zStatus.user_id}</span>.
+                Pull your live Demat holdings, or create a portfolio manually.
+              </p>
+              <button
+                onClick={syncZerodha}
+                disabled={zBusy}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-cyan-500 text-white text-sm font-semibold disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={zBusy ? 'animate-spin' : ''} /> Sync Zerodha Holdings
+              </button>
+              <p className="text-muted/60 text-xs">or</p>
+            </>
+          ) : (
+            <p className="text-muted text-sm">
+              Connect Zerodha (top right) to pull your real holdings, or create a portfolio manually.
+            </p>
+          )}
           {quickCreate ? (
             <form
               className="flex items-center gap-2 justify-center"

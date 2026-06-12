@@ -20,6 +20,7 @@
  *     { id, event_type, symbol, message, data, timestamp }
  */
 import { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AreaChart, Area, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine,
@@ -36,6 +37,7 @@ import LoadingSpinner      from '../components/LoadingSpinner';
 import {
   getSimulationPerformance, getSimulationLogs,
   getPortfolio, getPortfolioSnapshots, getSimulationAnalysis,
+  getPortfolioPositions,
 } from '../api/client';
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -57,8 +59,9 @@ function gradientOffset(snapshots) {
   const vals = snapshots.map((s) => s.balance ?? s.equity ?? 0);
   const max  = Math.max(...vals);
   const min  = Math.min(...vals);
-  if (max === min) return max >= 1000 ? 1 : 0;
-  return Math.min(1, Math.max(0, (max - 1000) / (max - min)));
+  const start = 500000;
+  if (max === min) return max >= start ? 1 : 0;
+  return Math.min(1, Math.max(0, (max - start) / (max - min)));
 }
 
 function EquityTooltip({ active, payload, label }) {
@@ -134,6 +137,7 @@ export default function Simulation() {
   const [snapshots,  setSnapshots]  = useState([]);
   const [logs,       setLogs]       = useState([]);
   const [analysis,   setAnalysis]   = useState([]);
+  const [positions,  setPositions]  = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [lastRefresh, setLastRefresh] = useState(null);
 
@@ -145,12 +149,20 @@ export default function Simulation() {
       getPortfolioSnapshots().then((d) => setSnapshots(Array.isArray(d) ? d : [])).catch(() => null),
       getSimulationLogs().then((d) => setLogs(Array.isArray(d) ? d : [])).catch(() => null),
       getSimulationAnalysis().then((d) => setAnalysis(Array.isArray(d) ? d : [])).catch(() => null),
+      getPortfolioPositions().then((d) => setPositions(Array.isArray(d) ? d : [])).catch(() => null),
     ]);
     setLoading(false);
     setLastRefresh(new Date());
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Positions move with the market — refresh every 30 s while the page is open
+    const id = setInterval(() => {
+      getPortfolioPositions().then((d) => setPositions(Array.isArray(d) ? d : [])).catch(() => null);
+    }, 30000);
+    return () => clearInterval(id);
+  }, []);
 
   const formattedLogs   = useMemo(() => logs.map(formatLog), [logs]);
   const signalAnalysis  = useMemo(() => deriveSignalAnalysis(analysis), [analysis]);
@@ -193,10 +205,10 @@ export default function Simulation() {
       <section className="space-y-3">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-widest">Performance Summary</h3>
         <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-          <MetricCard title="Signals Generated"  value={perf?.total_signals_generated ?? 0} subtitle="AI trade signals produced"    icon={Zap}         />
-          <MetricCard title="Trades Taken"        value={perf?.trades_taken            ?? 0} subtitle="Orders executed"              icon={CheckCircle} />
-          <MetricCard title="Trades Rejected"     value={perf?.trades_rejected         ?? 0} subtitle="Filtered out by risk rules"   icon={XCircle}     />
-          <MetricCard title="Open Positions"      value={(perf?.trades_taken ?? 0) - (perf?.trades_rejected ?? 0) > 0 ? '—' : 0} subtitle="Currently running" icon={Activity} />
+          <MetricCard title="Signals Generated"  value={perf?.total_signals_generated ?? 0} format="count" subtitle="AI trade signals produced"    icon={Zap}         />
+          <MetricCard title="Trades Taken"        value={perf?.trades_taken            ?? 0} format="count" subtitle="Orders executed"              icon={CheckCircle} />
+          <MetricCard title="Trades Rejected"     value={perf?.trades_rejected         ?? 0} format="count" subtitle="Filtered out by risk rules"   icon={XCircle}     />
+          <MetricCard title="Open Positions"      value={positions.length} format="count" subtitle="Live in open_positions" icon={Activity} />
         </div>
         <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
           <MetricCard
@@ -216,7 +228,7 @@ export default function Simulation() {
           <MetricCard
             title="Total ROI"
             value={fmtPct(perf?.roi_percent)}
-            subtitle="Return on $1,000 starting balance"
+            subtitle="Return on ₹5,00,000 starting balance"
             trend={perf?.roi_percent ?? 0}
             icon={TrendingUp}
           />
@@ -228,6 +240,72 @@ export default function Simulation() {
             icon={TrendingDown}
           />
         </div>
+      </section>
+
+      {/* ── Section 1b — Open Positions ── */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-widest">
+            Open Positions <span className="text-slate-500 normal-case font-normal">· {positions.length} live</span>
+          </h3>
+          <span className="text-[10px] text-muted">SL trails by 1×ATR after Target 1 · rides to Target 2</span>
+        </div>
+
+        {positions.length === 0 ? (
+          <div className="rounded-xl border border-border bg-panel px-4 py-8 text-center text-muted text-sm">
+            No open positions. The agent opens trades during NSE hours when signals clear the risk gates.
+          </div>
+        ) : (
+          <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+            {/* desktop header */}
+            <div className="hidden md:grid grid-cols-[1.3fr_70px_repeat(4,1fr)_90px_110px] gap-3 px-4 py-2.5 text-[10px] text-muted uppercase tracking-wider border-b border-border">
+              <span>Symbol</span><span>Side</span><span>Entry</span><span>Current</span>
+              <span>Stop (trailing)</span><span>Target 2</span><span>Unreal P&L</span><span>Management</span>
+            </div>
+            <div className="divide-y divide-border">
+              {positions.map((p) => {
+                const isBuy = String(p.direction).toUpperCase() === 'BUY';
+                const pnlUp = (p.unrealised_pnl ?? 0) >= 0;
+                const tkr = p.symbol?.replace('.NS', '');
+                return (
+                  <Link key={p.id} to={`/s/${tkr}`}
+                    className="grid grid-cols-2 md:grid-cols-[1.3fr_70px_repeat(4,1fr)_90px_110px] gap-2 md:gap-3 px-4 py-2.5 items-center hover:bg-white/[0.02] transition-colors">
+                    <div className="min-w-0">
+                      <p className="text-slate-200 text-sm font-semibold truncate">{tkr}</p>
+                      <p className="text-muted text-[10px] md:hidden">{isBuy ? 'LONG' : 'SHORT'} · entry ₹{(+p.entry_price).toFixed(2)}</p>
+                    </div>
+                    <span className={`hidden md:inline text-[10px] font-bold px-1.5 py-0.5 rounded border ${isBuy ? 'text-profit bg-profit/10 border-profit/25' : 'text-loss bg-loss/10 border-loss/25'}`}>
+                      {isBuy ? 'LONG' : 'SHORT'}
+                    </span>
+                    <span className="hidden md:block font-mono text-xs text-slate-300">₹{(+p.entry_price).toFixed(2)}</span>
+                    <span className="hidden md:block font-mono text-xs text-slate-200">₹{(+p.current_price).toFixed(2)}</span>
+                    <span className="hidden md:block font-mono text-xs text-loss">₹{(+p.stop_loss).toFixed(2)}</span>
+                    <span className="hidden md:block font-mono text-xs text-profit">₹{(+(p.target_2 ?? p.take_profit)).toFixed(2)}</span>
+                    <div className="text-right md:text-left">
+                      <span className={`font-mono text-xs font-bold ${pnlUp ? 'text-profit' : 'text-loss'}`}>
+                        {pnlUp ? '+' : ''}{(p.unrealised_pct ?? 0).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="hidden md:flex items-center gap-1">
+                      {p.trailing ? (
+                        <span className="text-[9px] font-bold text-cyan bg-cyan/10 border border-cyan/30 px-1 rounded" title="Target 1 hit — stop now trailing by 1×ATR">
+                          TRAILING
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-medium text-muted bg-white/5 border border-border px-1 rounded" title="Pre-Target 1 — fixed stop">
+                          T1 PENDING
+                        </span>
+                      )}
+                      {p.level_source && (
+                        <span className="text-[9px] text-muted/70 uppercase">{p.level_source}</span>
+                      )}
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Section 2 — Equity Curve ── */}
@@ -258,8 +336,8 @@ export default function Simulation() {
                 <YAxis tick={{ fill: '#64748B', fontSize: 11 }} tickLine={false} axisLine={false}
                   tickFormatter={(v) => `₹${v.toLocaleString('en-IN')}`} width={72} />
                 <Tooltip content={<EquityTooltip />} />
-                <ReferenceLine y={1000} stroke="#6B7280" strokeDasharray="6 3"
-                  label={{ value: 'Start $1,000', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
+                <ReferenceLine y={500000} stroke="#6B7280" strokeDasharray="6 3"
+                  label={{ value: 'Start ₹5L', fill: '#6B7280', fontSize: 11, position: 'insideTopRight' }} />
                 <Area type="monotone" dataKey="balance" stroke="url(#eqStroke)" strokeWidth={2}
                   fill="url(#eqGrad)" dot={false} activeDot={{ r: 4, fill: '#F1F5F9' }} />
               </AreaChart>

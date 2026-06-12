@@ -6,6 +6,7 @@
 import asyncio
 
 from tasks.celery_app import celery_app
+from utils.config import settings
 from utils.logger import logger
 
 
@@ -43,6 +44,19 @@ async def _loop():
                 f"[paper_trade_loop] {len(auto_closed)} position(s) auto-closed "
                 f"this cycle"
             )
+            # Telegram exit alerts
+            if settings.telegram_available:
+                from integrations.telegram_service import send, fmt_exit
+                for c in auto_closed:
+                    await send(fmt_exit(
+                        symbol=c["symbol"],
+                        side=c["direction"],
+                        entry=c["entry_price"],
+                        exit_price=c["exit_price"],
+                        qty=c["size_units"],
+                        pnl=c["pnl"],
+                        reason=c["reason"],
+                    ))
 
         # ── Step 2: generate actionable signals for all watchlist symbols ─────
         signals = await analyze_all_symbols(session)
@@ -78,15 +92,23 @@ async def _loop():
                 continue
 
             pos_size = calculate_position_size(signal, balance)
-            trade    = await open_paper_trade(signal, pos_size, session)
+            try:
+                trade = await open_paper_trade(signal, pos_size, session)
+            except ValueError as exc:
+                logger.warning(f"[paper_trade_loop] {exc}")
+                continue
 
-            balance -= pos_size["usd_value"] * 0.1
+            balance -= pos_size["usd_value"]
             pos_result     = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 
             explanation  = await generate_trade_explanation(signal)
             notification = format_paper_trade_notification(trade, explanation)
             logger.info(notification)
+
+            if settings.telegram_available:
+                from integrations.telegram_service import send, fmt_entry
+                await send(fmt_entry(signal, qty=pos_size.get("units", 0)))
 
         # ── Step 5: persist today's performance snapshot ──────────────────────
         await VirtualWallet.take_daily_snapshot(session)

@@ -919,10 +919,13 @@ class AgentDecision(Base):
     reasons:     Mapped[list]         = mapped_column(JSON,  nullable=False, default=list)
     macro_bias:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
     fund_score:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
-    skip_reason: Mapped[str | None]   = mapped_column(String(100), nullable=True)
-    is_paper:    Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
-    order_id:    Mapped[str | None]   = mapped_column(String(60),  nullable=True)
-    created_at:  Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    skip_reason:        Mapped[str | None]   = mapped_column(String(200), nullable=True)
+    is_paper:           Mapped[bool]         = mapped_column(Boolean, nullable=False, default=True)
+    order_id:           Mapped[str | None]   = mapped_column(String(60),  nullable=True)
+    # Audit columns added for multiplicative-confidence pipeline (hub 7-factor)
+    master_score:       Mapped[float | None] = mapped_column(Float,  nullable=True)
+    confidence_factors: Mapped[dict | None]  = mapped_column(JSON,   nullable=True)
+    created_at:         Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     def __repr__(self) -> str:
         return f"<AgentDecision {self.action} {self.symbol} conf={self.confidence} {self.strategy}>"
@@ -941,13 +944,16 @@ class AgentTrade(Base):
     symbol:        Mapped[str]          = mapped_column(String(30),  nullable=False)
     side:          Mapped[str]          = mapped_column(String(10),  nullable=False)
     qty:           Mapped[int]          = mapped_column(Integer,     nullable=False)
+    # CNC = delivery (long only, T+1 settlement); MIS = intraday (short selling allowed,
+    # must square off by 3:20 PM IST); NRML = overnight F&O
+    product:       Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     entry_price:   Mapped[float]        = mapped_column(Float,       nullable=False)
     exit_price:    Mapped[float | None] = mapped_column(Float,       nullable=True)
     stop_price:    Mapped[float]        = mapped_column(Float,       nullable=False)
     target_price:  Mapped[float]        = mapped_column(Float,       nullable=False)
     entry_ts:      Mapped[datetime]     = mapped_column(DateTime,    nullable=False)
     exit_ts:       Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    exit_reason:   Mapped[str | None]   = mapped_column(String(30),  nullable=True)
+    exit_reason:   Mapped[str | None]   = mapped_column(String(50),  nullable=True)
     pnl:           Mapped[float | None] = mapped_column(Float,       nullable=True)
     pnl_pct:       Mapped[float | None] = mapped_column(Float,       nullable=True)
     strategy:      Mapped[str]          = mapped_column(String(50),  nullable=False, default="")
@@ -1098,3 +1104,151 @@ class MFIntelligenceScore(Base):
 
     def __repr__(self) -> str:
         return f"<MFIntelligenceScore {self.scheme_code} {self.master_score:.1f} {self.signal}>"
+
+
+# ── User Watchlist ─────────────────────────────────────────────────────────────
+
+class MarketShortlist(Base):
+    """Top-N NSE symbols the market scanner selected in the latest 15-min cycle.
+
+    Overwritten each cycle — always reflects the current best opportunities.
+    The trade loop reads this instead of the hardcoded watchlist so the agent
+    covers the full NSE universe without having to deep-analyse 9,600 stocks
+    every 60 seconds.
+    """
+    __tablename__ = "market_shortlist"
+    __table_args__ = (
+        Index("ix_msl_rank",       "rank"),
+        Index("ix_msl_created_at", "created_at"),
+    )
+
+    id:                  Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:              Mapped[str]      = mapped_column(String(30), nullable=False)
+    master_score:        Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    volume_ratio:        Mapped[float]    = mapped_column(Float, nullable=False, default=1.0)
+    rsi:                 Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_vs_ema20:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    signal:              Mapped[str]      = mapped_column(String(15), nullable=False, default="HOLD")
+    sector:              Mapped[str]      = mapped_column(String(80), nullable=False, default="")
+    rank:                Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    upper_circuit_days:  Mapped[int | None]   = mapped_column(Integer, nullable=True, default=0)
+    volume_surge:        Mapped[float | None] = mapped_column(Float, nullable=True, default=1.0)
+    created_at:          Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<MarketShortlist #{self.rank} {self.symbol} score={self.master_score:.1f}>"
+
+
+class UserWatchlist(Base):
+    """Symbols the user has manually added to the agent scan universe.
+
+    These are appended to the hardcoded WATCHLIST_NSE_LARGE_CAP/MID_CAP lists
+    so the automated paper-trade loop also analyses and trades them.
+    """
+    __tablename__ = "user_watchlist"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:     Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)
+    added_at:   Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    is_active:  Mapped[bool]     = mapped_column(Boolean, default=True, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<UserWatchlist {self.symbol}>"
+
+
+class HubUniverse(Base):
+    """The configurable universe the Master Intelligence Hub deep-scores each
+    cycle (7-factor). Rebuilt daily as the top-N NSE equities by average daily
+    turnover (₹ volume × close), excluding bonds/SME. Replaces the old hardcoded
+    ~22-symbol list so news/fundamentals/earnings/macro apply to ~500 liquid names.
+    """
+    __tablename__ = "hub_universe"
+    __table_args__ = (
+        Index("ix_hub_universe_rank", "rank"),
+    )
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:      Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)
+    turnover_cr: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
+    rank:        Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    updated_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<HubUniverse #{self.rank} {self.symbol} ₹{self.turnover_cr:.1f}Cr/day>"
+
+
+# ── Portfolio Capital Model ────────────────────────────────────────────────────
+
+class PortfolioPolicy(Base):
+    """Agent paper-portfolio risk policy — single live row (id=1).
+
+    Controls position sizing caps, sector concentration limits, and rebalancing
+    thresholds so the trade loop implements Modern Portfolio Theory constraints
+    rather than deploying capital ad-hoc.
+    """
+    __tablename__ = "portfolio_policy"
+
+    id:                     Mapped[int]   = mapped_column(Integer, primary_key=True, autoincrement=True)
+    risk_tolerance:         Mapped[str]   = mapped_column(String(20),  nullable=False, default="MODERATE")   # LOW | MODERATE | HIGH
+    target_annual_return:   Mapped[float] = mapped_column(Float, nullable=False, default=15.0)   # %
+    max_single_stock_weight: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)  # % of equity
+    max_sector_weight:      Mapped[float] = mapped_column(Float, nullable=False, default=25.0)   # % of equity
+    min_cash_reserve:       Mapped[float] = mapped_column(Float, nullable=False, default=10.0)   # % of equity
+    rebalance_threshold:    Mapped[float] = mapped_column(Float, nullable=False, default=5.0)    # drift % before rebalance trigger
+    risk_free_rate:         Mapped[float] = mapped_column(Float, nullable=False, default=7.1)    # India 10Y GSec %
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PortfolioPolicy risk={self.risk_tolerance} "
+            f"max_stock={self.max_single_stock_weight}% "
+            f"max_sector={self.max_sector_weight}% "
+            f"cash_floor={self.min_cash_reserve}%>"
+        )
+
+
+class AgentCapitalSnapshot(Base):
+    """Daily capital model snapshot — position weights, sector weights, beta,
+    Sharpe/Treynor/Jensen.  One row per day, inserted by the nightly performance task.
+
+    Used by the Portfolio Analytics page and the weekly AI Telegram report.
+    """
+    __tablename__ = "agent_capital_snapshots"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", name="uq_capital_snapshot_date"),
+        Index("ix_capital_snapshot_date", "snapshot_date"),
+    )
+
+    id:             Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    snapshot_date:  Mapped[date]         = mapped_column(Date, nullable=False)
+
+    # Capital allocation
+    equity:         Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    cash:           Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    cash_pct:       Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    num_positions:  Mapped[int]          = mapped_column(Integer, nullable=False, default=0)
+
+    # Performance metrics (annualized)
+    portfolio_return: Mapped[float | None] = mapped_column(Float, nullable=True)   # %
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)   # NIFTY %
+    portfolio_beta:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    portfolio_stddev: Mapped[float | None] = mapped_column(Float, nullable=True)   # annualized
+    sharpe_ratio:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    treynor_ratio:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    jensens_alpha:    Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Allocation JSON blobs
+    sector_weights:   Mapped[dict | None] = mapped_column(JSON, nullable=True)    # {sector: pct}
+    position_weights: Mapped[dict | None] = mapped_column(JSON, nullable=True)    # {symbol: pct}
+    rebalance_needed: Mapped[bool]        = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentCapitalSnapshot {self.snapshot_date} "
+            f"equity={self.equity:.0f} sharpe={self.sharpe_ratio} "
+            f"alpha={self.jensens_alpha}>"
+        )

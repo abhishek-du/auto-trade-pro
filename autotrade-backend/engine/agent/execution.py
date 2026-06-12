@@ -27,8 +27,20 @@ class AgentExecutionManager:
 
     async def _paper_execute(self, decision, session: AsyncSession) -> str:
         from db.models import AgentDecision, AgentTrade
+        from paper_trading.virtual_wallet import VirtualWallet
 
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        trade_value = round(decision.qty * decision.entry, 2)
+
+        # Deduct full trade value from the shared VirtualWallet (same ₹5L pool as scanner).
+        # Block the trade if wallet has insufficient funds.
+        ok, msg = await VirtualWallet.deduct_margin(session, trade_value, decision.symbol)
+        if not ok:
+            logger.warning(
+                f"[agent] PAPER BUY blocked for {decision.symbol}: {msg} "
+                f"(needed ₹{trade_value:,.0f})"
+            )
+            return ""
 
         db_dec = AgentDecision(
             symbol=decision.symbol,
@@ -44,6 +56,8 @@ class AgentExecutionManager:
             reasons=decision.reasons,
             macro_bias=decision.macro_bias,
             fund_score=decision.fund_score,
+            master_score=getattr(decision, "master_score", None),
+            confidence_factors=getattr(decision, "confidence_factors", None),
             is_paper=True,
             order_id=order_id,
         )
@@ -54,6 +68,7 @@ class AgentExecutionManager:
             symbol=decision.symbol,
             side=decision.action,
             qty=decision.qty,
+            product=getattr(decision, "product", "CNC"),
             entry_price=decision.entry,
             stop_price=decision.stop,
             target_price=decision.target,
@@ -69,7 +84,8 @@ class AgentExecutionManager:
             f"[PAPER] {decision.action} {decision.qty} {decision.symbol} "
             f"@ ₹{decision.entry:.2f} | stop=₹{decision.stop:.2f} "
             f"target=₹{decision.target:.2f} | conf={decision.confidence}% "
-            f"RR={decision.risk_reward} | {decision.strategy}"
+            f"RR={decision.risk_reward} | {decision.strategy} "
+            f"| wallet deducted ₹{trade_value:,.0f}"
         )
         return order_id
 
@@ -77,6 +93,31 @@ class AgentExecutionManager:
         if not settings.ZERODHA_ENABLED:
             logger.error("[agent] Live execution attempted but Zerodha not connected")
             return None
+
+        product = getattr(decision, "product", "CNC")
+
+        # NSE/BSE Rule: CNC delivery SELL requires an existing holding.
+        # Short selling without owning shares is illegal in delivery segment.
+        # Only MIS (intraday) permits selling without prior ownership.
+        if decision.action == "SELL" and product == "CNC":
+            from db.models import ZerodhaPosition
+            from sqlalchemy import select as _sel
+            bare = decision.symbol.replace(".NS", "")
+            held = (await session.execute(
+                _sel(ZerodhaPosition.quantity).where(
+                    ZerodhaPosition.tradingsymbol == bare,
+                    ZerodhaPosition.product == "CNC",
+                )
+            )).scalar_one_or_none()
+            if not held or int(held) < decision.qty:
+                logger.warning(
+                    f"[agent] SELL {bare} blocked — not in CNC holdings "
+                    f"(held={held or 0}, requested={decision.qty}). "
+                    f"SEBI/NSE rule: delivery short selling not allowed. "
+                    f"Use MIS product for intraday shorts."
+                )
+                return None
+
         try:
             from engine.zerodha_executor import place_real_order
             result = await place_real_order(
@@ -84,13 +125,55 @@ class AgentExecutionManager:
                 transaction_type=decision.action,
                 quantity=decision.qty,
                 session=session,
-                signal_id=str(decision.ts),
-                confidence=float(decision.confidence),
+                product=product,
+                signal=decision,
             )
             return result.get("order_id") if result else None
         except Exception as exc:
             logger.error(f"[agent] Live order failed for {decision.symbol}: {exc}")
             return None
+
+    async def _fetch_hub_scores_for_exits(
+        self,
+        symbols: list[str],
+        session: AsyncSession,
+    ) -> dict[str, float]:
+        """Batch-fetch latest Hub master_score for all open positions (one query).
+
+        Returns {bare_symbol: master_score}. Scores older than 2 hours are
+        excluded — stale data is worse than no data for exit decisions.
+        """
+        from db.models import MasterIntelligenceScore
+        from sqlalchemy import select
+        from datetime import timedelta
+
+        if not symbols:
+            return {}
+        bare = [s.replace(".NS", "") for s in symbols]
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        try:
+            rows = (await session.execute(
+                select(
+                    MasterIntelligenceScore.symbol,
+                    MasterIntelligenceScore.master_score,
+                    MasterIntelligenceScore.scored_at,
+                )
+                .where(
+                    MasterIntelligenceScore.symbol.in_(bare + symbols),
+                    MasterIntelligenceScore.scored_at >= cutoff,
+                )
+                .order_by(MasterIntelligenceScore.scored_at.desc())
+            )).all()
+
+            result: dict[str, float] = {}
+            for row in rows:
+                key = row.symbol.replace(".NS", "")
+                if key not in result:          # keep most recent per symbol
+                    result[key] = row.master_score
+            return result
+        except Exception as exc:
+            logger.debug(f"[exits] hub score batch fetch failed: {exc}")
+            return {}
 
     async def check_and_close_positions(
         self,
@@ -98,6 +181,14 @@ class AgentExecutionManager:
         current_prices: dict,
         session: AsyncSession,
     ) -> None:
+        open_syms = list(portfolio_ctx.open_positions.keys())
+
+        # Batch-fetch Hub scores once for all open positions
+        hub_exit_enabled = getattr(settings, "AGENT_HUB_EXIT_ENABLED", True)
+        hub_scores: dict[str, float] = {}
+        if hub_exit_enabled and open_syms:
+            hub_scores = await self._fetch_hub_scores_for_exits(open_syms, session)
+
         for symbol, pos in list(portfolio_ctx.open_positions.items()):
             price_data = current_prices.get(symbol, {})
             price = float(price_data.get("price", 0) or 0)
@@ -129,6 +220,46 @@ class AgentExecutionManager:
 
             should_close = False
             exit_reason  = ""
+
+            # ── Hub 7-Factor exit check ───────────────────────────────────────
+            # Exit a BUY position early when company/market intelligence changes:
+            #   HUB_REVERSAL    — score crossed to negative (bad news/earnings/macro)
+            #   HUB_DETERIORATION — score still positive but too weak to justify holding
+            # This fires BEFORE the price-based checks so we get out before
+            # the ATR stop is reached (better fill, smaller loss).
+            if hub_exit_enabled and not should_close:
+                bare_sym = symbol.replace(".NS", "")
+                hub_score = hub_scores.get(bare_sym)
+                reversal_threshold = getattr(settings, "AGENT_HUB_EXIT_REVERSAL_THRESHOLD", -10)
+                score_floor        = getattr(settings, "AGENT_HUB_EXIT_SCORE_FLOOR", 5)
+
+                if hub_score is not None:
+                    if pos["side"] == "BUY":
+                        if hub_score <= reversal_threshold:
+                            should_close = True
+                            exit_reason  = f"HUB_REVERSAL:{hub_score:.1f}"
+                            logger.info(
+                                f"[hub_exit] {symbol} BUY → EXIT | "
+                                f"score={hub_score:.1f} ≤ reversal threshold {reversal_threshold} | "
+                                f"company/market turned bearish"
+                            )
+                        elif hub_score < score_floor:
+                            should_close = True
+                            exit_reason  = f"HUB_DETERIORATION:{hub_score:.1f}"
+                            logger.info(
+                                f"[hub_exit] {symbol} BUY → EXIT | "
+                                f"score={hub_score:.1f} < floor {score_floor} | "
+                                f"conviction too weak to hold"
+                            )
+                    elif pos["side"] == "SELL":
+                        # Reverse: SELL position exits when score flips positive
+                        if hub_score >= abs(reversal_threshold):
+                            should_close = True
+                            exit_reason  = f"HUB_REVERSAL_BULLISH:{hub_score:.1f}"
+                            logger.info(
+                                f"[hub_exit] {symbol} SELL → EXIT | "
+                                f"score={hub_score:.1f} flipped positive"
+                            )
 
             if pos["side"] == "BUY":
                 # ── Multi-target exit ladder ──────────────────────────────────
@@ -231,7 +362,8 @@ class AgentExecutionManager:
         session: AsyncSession,
     ) -> None:
         from db.models import AgentTrade
-        from sqlalchemy import select, update
+        from paper_trading.virtual_wallet import VirtualWallet
+        from sqlalchemy import select
 
         res = await session.execute(
             select(AgentTrade).where(
@@ -246,4 +378,19 @@ class AgentExecutionManager:
             trade.exit_ts     = datetime.utcnow()
             trade.exit_reason = reason
             trade.pnl         = pnl
+            trade_value = round(trade.qty * trade.entry_price, 2)
+            await VirtualWallet.return_margin(session, trade_value, pnl, symbol)
             await session.commit()
+
+            # Telegram exit alert
+            if settings.telegram_available:
+                from integrations.telegram_service import send, fmt_exit
+                await send(fmt_exit(
+                    symbol=symbol,
+                    side=trade.side,
+                    entry=float(trade.entry_price),
+                    exit_price=exit_price,
+                    qty=int(trade.qty),
+                    pnl=pnl,
+                    reason=reason,
+                ))

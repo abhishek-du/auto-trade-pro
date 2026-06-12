@@ -20,7 +20,7 @@ from engine.indicators import IndicatorSignals
 from utils.config import settings
 from utils.logger import logger
 
-_FH_BASE = "https://finnhub.io/api/v1"
+_FH_BASE = None  # resolved lazily from settings.FINNHUB_BASE_URL
 
 
 # ── Reasoning generator ───────────────────────────────────────────────────────
@@ -334,8 +334,9 @@ async def fetch_stock_news(symbol: str) -> list[dict]:
     to_dt   = datetime.date.today().strftime("%Y-%m-%d")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            fh_base = settings.FINNHUB_BASE_URL
             r = await client.get(
-                f"{_FH_BASE}/company-news",
+                f"{fh_base}/company-news",
                 params={"symbol": f"NSE:{symbol}", "from": from_dt, "to": to_dt, "token": settings.FINNHUB_KEY},
             )
             if r.status_code != 200:
@@ -368,44 +369,97 @@ async def groq_commentary(
     sig: IndicatorSignals,
     reasoning: dict,
     setup: dict,
+    news: list | None = None,
+    research_note: str = "",
+    screener_summary: str = "",
 ) -> str:
-    """Generate a concise AI market commentary using Groq.  Returns '' on failure."""
+    """Generate expert-level equity research commentary using Groq. Returns '' on failure."""
     if not settings.groq_available:
         return ""
 
-    bull_pts = "\n".join(f"• {r}" for r in reasoning["bullish"])
-    bear_pts = "\n".join(f"• {r}" for r in reasoning["bearish"])
+    bull_pts  = "\n".join(f"• {r}" for r in reasoning["bullish"])
+    bear_pts  = "\n".join(f"• {r}" for r in reasoning["bearish"])
+    neut_pts  = "\n".join(f"• {r}" for r in reasoning.get("neutral", []))
+
+    bb_pos = getattr(sig, "bb_position", "")
+    ichi   = getattr(sig, "ichimoku_signal", "")
+    adx_d  = getattr(sig, "adx_direction", "")
+    st_dir = getattr(sig, "supertrend_direction", "")
+    st_val = getattr(sig, "supertrend", None)
+
+    news_section = ""
+    if news:
+        news_lines = []
+        for item in news[:5]:
+            hl  = item.get("headline", "")
+            src = item.get("source", "")
+            dt  = (item.get("published_at") or "")[:10]
+            sm  = (item.get("summary") or "")[:200]
+            news_lines.append(f"• [{dt}] {hl} ({src})\n  Summary: {sm}")
+        news_section = "RECENT NEWS & EVENTS:\n" + "\n".join(news_lines)
 
     prompt = (
-        f"Stock: NSE:{symbol}\n"
-        f"Current Price: ₹{ltp:.2f}  ({change_pct:+.2f}% today)\n"
-        f"Signal: {setup['signal']}  |  Composite Score: {sig.composite_score:.1f}/100\n"
-        f"RSI: {sig.rsi:.1f}  EMA Trend: {sig.ema_trend}  Ichimoku: {sig.ichimoku_signal}\n"
-        f"Supertrend: {sig.supertrend_direction}  ADX: {sig.adx:.1f}\n\n"
-        f"Bullish factors:\n{bull_pts or 'None'}\n\n"
-        f"Bearish factors:\n{bear_pts or 'None'}\n\n"
-        f"Entry zone: ₹{setup['entry_low']}–₹{setup['entry_high']}  "
-        f"SL: ₹{setup['stop_loss']} ({setup['stop_loss_pct']:.1f}%)  "
-        f"T1: ₹{setup['target_1']} (+{setup['target_1_pct']:.1f}%)  "
-        f"R:R {setup['risk_reward']:.1f}x\n\n"
-        "Write a concise 3-4 sentence professional stock analysis covering: (1) what the chart is telling us "
-        "right now, (2) the key levels to watch, and (3) the trade approach. Be specific about price levels. "
-        "Keep under 130 words. End with one sentence on risk. This is for informational purposes only."
+        f"STOCK: NSE:{symbol}\n"
+        f"LTP: ₹{ltp:.2f}  ({change_pct:+.2f}% today)\n"
+        f"SIGNAL: {setup['signal']}  |  Technical Score: {sig.composite_score:.1f}/100\n\n"
+        f"TECHNICAL INDICATORS:\n"
+        f"• RSI {sig.rsi:.1f} ({sig.rsi_signal}) | MACD histogram {sig.macd_histogram:.2f} ({sig.macd_cross})\n"
+        f"• EMA Trend: {sig.ema_trend} | BB Position: {bb_pos}\n"
+        f"• Ichimoku: {ichi} | Supertrend: {st_dir}"
+        + (f" at ₹{st_val:.2f}" if st_val else "") +
+        f" | ADX {sig.adx:.1f} ({sig.adx_trend_strength}, {adx_d})\n"
+        f"• Stochastic: K={sig.stoch_k:.1f}, D={sig.stoch_d:.1f} ({sig.stoch_signal})\n\n"
+        f"BULLISH SIGNALS:\n{bull_pts or 'None'}\n\n"
+        f"BEARISH SIGNALS:\n{bear_pts or 'None'}\n\n"
+        + (f"NEUTRAL:\n{neut_pts}\n\n" if neut_pts else "")
+        + f"TRADE SETUP:\n"
+        f"• Entry zone: ₹{setup['entry_low']}–₹{setup['entry_high']}\n"
+        f"• Stop loss: ₹{setup['stop_loss']} ({setup['stop_loss_pct']:.1f}%)\n"
+        f"• Target 1: ₹{setup['target_1']} (+{setup['target_1_pct']:.1f}%) | "
+        f"Target 2: ₹{setup['target_2']} (+{setup['target_2_pct']:.1f}%)\n"
+        f"• Risk-reward: {setup['risk_reward']:.1f}x\n\n"
+        + (news_section + "\n\n" if news_section else "")
+        + (f"WEB RESEARCH (Tavily):\n{research_note}\n\n" if research_note else "")
+        + (f"SCREENER.IN FUNDAMENTALS:\n{screener_summary}\n\n" if screener_summary else "")
+        + "Write a comprehensive 4-5 paragraph expert equity research note:\n\n"
+        "PARAGRAPH 1 — MARKET STRUCTURE: Describe exactly what the chart is showing. "
+        "What trend/pattern is forming? Where is the stock in relation to its key moving averages, "
+        "Bollinger Bands, and Supertrend? Is this a breakout, breakdown, mean-reversion, or consolidation setup?\n\n"
+        "PARAGRAPH 2 — TECHNICAL LEVELS & TRIGGERS: Specify exact rupee levels — "
+        "support, resistance, entry zone, stop-loss, and targets. "
+        "What specific price action would CONFIRM the trade (e.g., close above ₹X with volume)? "
+        "What would INVALIDATE the setup?\n\n"
+        "PARAGRAPH 3 — NEWS & BUSINESS CONTEXT: Interpret what the recent news means for the company. "
+        "How does each news item affect the company's revenue, margins, order book, or competitive position? "
+        "What is the market pricing in or ignoring?\n\n"
+        "PARAGRAPH 4 — RISK FACTORS: 3-4 specific risks to this trade. "
+        "Include both technical risk (SL level) and fundamental risk (business/macro).\n\n"
+        "PARAGRAPH 5 — TRADE MANAGEMENT: Specific entry advice (limit order vs breakout buy), "
+        "position sizing guidance (% of portfolio for this risk level), "
+        "and when to review/exit the trade.\n\n"
+        "Use precise rupee levels throughout. Write like a SEBI-registered research analyst — "
+        "professional, specific, data-driven. This is for informational purposes only."
     )
 
+    # Use Groq directly for deep analysis — Ollama (deepseek-r1) is too slow (~2-4 min)
+    # for a user-facing request. Groq responds in 3-8s with the same quality.
     from utils.llm import call_groq_chat
     reply = await call_groq_chat(
         [
             {
                 "role": "system",
                 "content": (
-                    "You are a concise, professional NSE (Indian stock market) technical analyst. "
-                    "Give specific, actionable analysis using the data provided. "
-                    "Always mention this is for informational purposes only, not financial advice."
+                    "You are a senior equity research analyst at a top Indian brokerage, "
+                    "covering NSE-listed stocks. You write detailed, specific, expert-level "
+                    "research notes that combine technical analysis with business context and news interpretation. "
+                    "Always use exact rupee price levels. Never use vague terms like 'good support' "
+                    "without specifying the exact level. Write in the style of a Goldman Sachs or "
+                    "Kotak Securities research note. End every analysis with: "
+                    "'This report is for informational purposes only and does not constitute financial advice.'"
                 ),
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=220, temperature=0.3, timeout=20.0,
+        max_tokens=700, temperature=0.25, timeout=35.0,
     )
     return reply or ""
