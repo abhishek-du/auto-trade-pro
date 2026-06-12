@@ -5,7 +5,7 @@ import {
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList,
+  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
@@ -46,6 +46,7 @@ export const SECTIONS = [
       { to: '/zerodha',     label: 'Portfolio',        Icon: Briefcase, badge: 'zerodha' },
       { to: '/agent',       label: 'Trading Agent',    Icon: BrainCircuit, badge: 'agentBadge' },
       { to: '/doctor',      label: 'Portfolio Doctor', Icon: Stethoscope, badge: 'doctorBadge' },
+      { to: '/portfolio-analytics', label: 'Capital Model',     Icon: Scale },
       { to: '/allocation',  label: 'Asset Allocation', Icon: IndianRupee, badge: 'allocation' },
       { to: '/sip',         label: 'SIP Goals',        Icon: Target },
       { to: '/tax',         label: 'Tax Calculator',   Icon: Receipt },

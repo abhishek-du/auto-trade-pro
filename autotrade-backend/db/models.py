@@ -1175,3 +1175,80 @@ class HubUniverse(Base):
 
     def __repr__(self) -> str:
         return f"<HubUniverse #{self.rank} {self.symbol} ₹{self.turnover_cr:.1f}Cr/day>"
+
+
+# ── Portfolio Capital Model ────────────────────────────────────────────────────
+
+class PortfolioPolicy(Base):
+    """Agent paper-portfolio risk policy — single live row (id=1).
+
+    Controls position sizing caps, sector concentration limits, and rebalancing
+    thresholds so the trade loop implements Modern Portfolio Theory constraints
+    rather than deploying capital ad-hoc.
+    """
+    __tablename__ = "portfolio_policy"
+
+    id:                     Mapped[int]   = mapped_column(Integer, primary_key=True, autoincrement=True)
+    risk_tolerance:         Mapped[str]   = mapped_column(String(20),  nullable=False, default="MODERATE")   # LOW | MODERATE | HIGH
+    target_annual_return:   Mapped[float] = mapped_column(Float, nullable=False, default=15.0)   # %
+    max_single_stock_weight: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)  # % of equity
+    max_sector_weight:      Mapped[float] = mapped_column(Float, nullable=False, default=25.0)   # % of equity
+    min_cash_reserve:       Mapped[float] = mapped_column(Float, nullable=False, default=10.0)   # % of equity
+    rebalance_threshold:    Mapped[float] = mapped_column(Float, nullable=False, default=5.0)    # drift % before rebalance trigger
+    risk_free_rate:         Mapped[float] = mapped_column(Float, nullable=False, default=7.1)    # India 10Y GSec %
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PortfolioPolicy risk={self.risk_tolerance} "
+            f"max_stock={self.max_single_stock_weight}% "
+            f"max_sector={self.max_sector_weight}% "
+            f"cash_floor={self.min_cash_reserve}%>"
+        )
+
+
+class AgentCapitalSnapshot(Base):
+    """Daily capital model snapshot — position weights, sector weights, beta,
+    Sharpe/Treynor/Jensen.  One row per day, inserted by the nightly performance task.
+
+    Used by the Portfolio Analytics page and the weekly AI Telegram report.
+    """
+    __tablename__ = "agent_capital_snapshots"
+    __table_args__ = (
+        UniqueConstraint("snapshot_date", name="uq_capital_snapshot_date"),
+        Index("ix_capital_snapshot_date", "snapshot_date"),
+    )
+
+    id:             Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    snapshot_date:  Mapped[date]         = mapped_column(Date, nullable=False)
+
+    # Capital allocation
+    equity:         Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    cash:           Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    cash_pct:       Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
+    num_positions:  Mapped[int]          = mapped_column(Integer, nullable=False, default=0)
+
+    # Performance metrics (annualized)
+    portfolio_return: Mapped[float | None] = mapped_column(Float, nullable=True)   # %
+    benchmark_return: Mapped[float | None] = mapped_column(Float, nullable=True)   # NIFTY %
+    portfolio_beta:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    portfolio_stddev: Mapped[float | None] = mapped_column(Float, nullable=True)   # annualized
+    sharpe_ratio:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    treynor_ratio:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    jensens_alpha:    Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Allocation JSON blobs
+    sector_weights:   Mapped[dict | None] = mapped_column(JSON, nullable=True)    # {sector: pct}
+    position_weights: Mapped[dict | None] = mapped_column(JSON, nullable=True)    # {symbol: pct}
+    rebalance_needed: Mapped[bool]        = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentCapitalSnapshot {self.snapshot_date} "
+            f"equity={self.equity:.0f} sharpe={self.sharpe_ratio} "
+            f"alpha={self.jensens_alpha}>"
+        )

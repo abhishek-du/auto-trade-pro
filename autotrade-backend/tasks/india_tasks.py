@@ -191,7 +191,8 @@ async def _india_fundamental_update():
         await session.commit()
 
 
-@celery_app.task(name="tasks.india_fundamental_update")
+@celery_app.task(name="tasks.india_fundamental_update",
+                 soft_time_limit=5400, time_limit=6000)   # 90 min / 100 min cap
 def india_fundamental_update():
     """Weekly fundamental data refresh (PE, ROE, promoter holding…) for all NSE stocks."""
     logger.info("[india_fundamentals] Starting weekly refresh")
@@ -199,6 +200,70 @@ def india_fundamental_update():
 
 
 # ── 6. india_trade_loop — every 60 s ─────────────────────────────────────────
+
+# Cooldown tracking: don't re-alert the same symbol within 4 h
+_shortlist_alerted_loop: dict[str, "datetime.datetime"] = {}
+_SHORTLIST_COOLDOWN_H = 4
+_MAX_SHORTLIST_PER_CYCLE = 5
+
+
+async def _send_loop_shortlist_alert(signal) -> None:
+    """Send a shortlist Telegram alert for a hub BUY candidate.
+
+    Fires regardless of whether a trade was actually opened — the channel
+    receives intelligence on every high-conviction setup the agent sees.
+    Respects a 4-hour per-symbol cooldown. Non-blocking; swallows all errors.
+    """
+    from utils.config import settings as _s
+    if not _s.telegram_available:
+        return
+    bare = signal.symbol.replace(".NS", "")
+    now  = datetime.datetime.utcnow()
+    last = _shortlist_alerted_loop.get(bare)
+    if last and (now - last).total_seconds() < _SHORTLIST_COOLDOWN_H * 3600:
+        return
+
+    entry  = signal.entry_price
+    stop   = signal.stop_loss
+    t1     = signal.take_profit
+    t2     = getattr(signal, "target_2", round(entry + 2 * abs(entry - stop), 2))
+    risk   = abs(entry - stop)
+    rr     = round(abs(t2 - entry) / risk, 1) if risk > 0 else 0
+    score  = round(signal.final_score, 1)
+    conf   = round(signal.confidence, 0)
+    reason = (signal.reasoning_points[0] if signal.reasoning_points else "")[:400]
+
+    # Tavily research note (2 credits, non-blocking)
+    ai_note = ""
+    try:
+        from engine.tavily_enricher import research_stock_for_alert
+        if _s.tavily_available:
+            ai_note = await research_stock_for_alert(
+                symbol=signal.symbol, score=float(score),
+                tech_score=0, news_score=0, regime=getattr(signal, "regime", ""),
+                entry=entry, stop=stop, t1=t1, t2=t2,
+            ) or ""
+    except Exception:
+        pass
+
+    ai_block = f"\n\n🤖 <i>{ai_note[:500]}</i>" if ai_note else ""
+
+    msg = (
+        f"📡 <b>SHORTLIST ALERT — {bare}</b>\n"
+        f"Hub Score: <b>{score:+.0f}</b>  |  Conf: <b>{conf:.0f}%</b>  |  {signal.action}\n\n"
+        f"💰 Entry <b>₹{entry:.0f}</b>  ·  SL ₹{stop:.0f}  ·  T1 ₹{t1:.0f}  ·  T2 ₹{t2:.0f}\n"
+        f"R:R = {rr}x  |  Regime: {getattr(signal, 'regime', 'UNKNOWN')}\n"
+        f"\n📋 <i>{reason}</i>"
+        f"{ai_block}"
+    )
+    try:
+        from integrations.telegram_service import send
+        await send(msg)
+        _shortlist_alerted_loop[bare] = now
+        logger.info(f"[trade_loop/shortlist] ✓ alert sent for {bare} score={score:+.0f}")
+    except Exception as exc:
+        logger.debug(f"[trade_loop/shortlist] send failed {bare}: {exc}")
+
 
 async def _india_trade_loop():
     from sqlalchemy import select
@@ -218,11 +283,6 @@ async def _india_trade_loop():
     from tasks._db import celery_session
 
     from utils.config import settings as _cfg
-    # Kill-switch: when scanner_enabled=false in runtime_settings, the agent
-    # runs solo and the SCAN paper trader stays silent.
-    if not getattr(_cfg, "SCANNER_ENABLED", True):
-        logger.info("[india_trade_loop] scanner disabled (SCANNER_ENABLED=false) — agent runs solo")
-        return
 
     now_ist   = datetime.datetime.now(_IST)
     is_window = _is_india_trading_window()
@@ -243,6 +303,19 @@ async def _india_trade_loop():
             logger.info(
                 f"[india_trade_loop] {len(auto_closed)} position(s) auto-closed"
             )
+            from utils.config import settings as _s
+            if _s.telegram_available:
+                from integrations.telegram_service import send, fmt_exit
+                for c in auto_closed:
+                    await send(fmt_exit(
+                        symbol=c["symbol"],
+                        side=c["direction"],
+                        entry=c["entry_price"],
+                        exit_price=c["exit_price"],
+                        qty=c["size_units"],
+                        pnl=c["pnl"],
+                        reason=c["reason"],
+                    ))
 
         # Step 2: read actionable signals from market_shortlist — the SINGLE source of
         # truth produced by the market scanner (compute_indicators → composite_score →
@@ -265,21 +338,34 @@ async def _india_trade_loop():
         # the technical-only fallback was removed so the agent never trades a name
         # it hasn't fully vetted. The Hub recomputes every 15 min → cheap DB read.
 
+        # ── Get the LATEST score for each symbol, then filter by signal.
+        # Doing DISTINCT ON + signal filter in one query is wrong: it returns the
+        # latest BUY record which may be days old (e.g., HDFCGOLD STRONG_BUY June 10
+        # while today's hub says NEUTRAL). Always trade the current assessment.
+        from sqlalchemy import func as _func
+        _latest_subq = (
+            select(
+                MasterIntelligenceScore.symbol.label("sym"),
+                _func.max(MasterIntelligenceScore.scored_at).label("max_at"),
+            )
+            .where(MasterIntelligenceScore.symbol.like("%.NS"))
+            .group_by(MasterIntelligenceScore.symbol)
+        ).subquery()
+
         hub_subq = (
             select(
                 MasterIntelligenceScore.symbol,
                 MasterIntelligenceScore.master_score,
                 MasterIntelligenceScore.signal,
             )
-            .distinct(MasterIntelligenceScore.symbol)
+            .join(
+                _latest_subq,
+                (MasterIntelligenceScore.symbol == _latest_subq.c.sym)
+                & (MasterIntelligenceScore.scored_at == _latest_subq.c.max_at),
+            )
             .where(
                 MasterIntelligenceScore.is_blocked == False,
                 MasterIntelligenceScore.signal.in_(_ACTIONABLE),
-                MasterIntelligenceScore.symbol.like("%.NS"),
-            )
-            .order_by(
-                MasterIntelligenceScore.symbol,
-                MasterIntelligenceScore.scored_at.desc(),
             )
         ).subquery()
         hub_rows = (await session.execute(select(hub_subq))).all()
@@ -301,6 +387,20 @@ async def _india_trade_loop():
         logger.info(
             f"[india_trade_loop] candidates: {len(candidates)} (Hub 7-factor only)"
         )
+
+        # ── Portfolio-aware weight caps ──────────────────────────────────────
+        from engine.portfolio_analytics import (
+            get_position_weights,
+            get_sector_weights,
+            compute_adjusted_score,
+        )
+        from db.models import PortfolioPolicy
+        _policy_row = (await session.execute(select(PortfolioPolicy).limit(1))).scalar_one_or_none()
+        _max_stock_w  = float(_policy_row.max_single_stock_weight) if _policy_row else 10.0
+        _max_sector_w = float(_policy_row.max_sector_weight) if _policy_row else 25.0
+
+        _pos_weights    = await get_position_weights(session)
+        _sector_weights = await get_sector_weights(session, _pos_weights)
 
         signals: list = []
         for c in candidates:
@@ -329,6 +429,23 @@ async def _india_trade_loop():
                 stop_loss, take_profit = entry_price * 0.95, entry_price * 1.10
             else:
                 stop_loss, take_profit = entry_price * 1.05, entry_price * 0.90
+
+            # ── Portfolio caps: skip if single-stock or sector limit exceeded ──
+            if action == "BUY":
+                sym_w    = _pos_weights.get(c["symbol"], 0.0)
+                sec      = c.get("sector", "Other") or "Other"
+                sector_w = _sector_weights.get(sec, 0.0)
+
+                if sym_w >= _max_stock_w:
+                    continue  # already at cap for this stock
+                if sector_w >= _max_sector_w:
+                    continue  # sector cap reached
+
+                # Adjusted confidence: scales down as current weight approaches cap
+                adj_conf = compute_adjusted_score(conf, sym_w, _max_stock_w)
+                if adj_conf <= 0:
+                    continue
+                conf = adj_conf  # use the portfolio-aware score
 
             if c["source"] == "hub":
                 why = (f"Hub 7-factor score {c['score']:+.0f} → {c['signal']} "
@@ -424,6 +541,17 @@ async def _india_trade_loop():
             except Exception as exc:
                 logger.debug(f"[india_trade_loop] {signal.symbol} level calc failed: {exc}")
 
+        # Step 4c: shortlist Telegram alerts — top-N BUY candidates with
+        # score >= 40, regardless of whether a trade can be placed this cycle.
+        _alerted_count = 0
+        for sig in level_pool:
+            if _alerted_count >= _MAX_SHORTLIST_PER_CYCLE:
+                break
+            if sig.action != "BUY" or sig.final_score < 40:
+                continue
+            await _send_loop_shortlist_alert(sig)
+            _alerted_count += 1
+
         # Step 5: current wallet state
         summary        = await VirtualWallet.get_summary(session)
         balance        = summary["balance"]
@@ -466,6 +594,11 @@ async def _india_trade_loop():
             explanation  = await generate_trade_explanation(signal)
             notification = format_paper_trade_notification(trade, explanation)
             logger.info(notification)
+
+            from utils.config import settings as _s
+            if _s.telegram_available:
+                from integrations.telegram_service import send, fmt_entry
+                await send(fmt_entry(signal, qty=pos_size.get("units", 0)))
 
         logger.info(f"[india_trade_loop] opened {opened} new position(s) this cycle")
 
@@ -634,6 +767,20 @@ def refresh_live_prices_task():
     _run_async(_run())
 
 
+# ── 11b. Sector mapping cache rebuild — Sunday 19:00 UTC (weekly) ─────────────
+
+@celery_app.task(name="tasks.rebuild_sector_cache")
+def rebuild_sector_cache_task():
+    """Rebuild yfinance-based sector mapping for all 9,600+ NSE stocks. Weekly."""
+    async def _run():
+        from tasks._db import celery_session
+        from utils.sector_cache import rebuild_sector_cache
+        async with celery_session() as session:
+            count = await rebuild_sector_cache(session)
+        logger.info(f"[sector_cache] rebuild complete: {count} mappings")
+    _run_async(_run())
+
+
 # ── 12. Sector data refresh — every 60 s ─────────────────────────────────────
 
 @celery_app.task(name="tasks.refresh_sector_data")
@@ -708,6 +855,169 @@ def refresh_ipo_data():
     logger.info("[ipo_refresh] Starting")
     _run_async(_run())
     logger.info("[ipo_refresh] Done")
+
+
+# ── 16. Daily capital snapshot (Sharpe/Treynor/Jensen) ───────────────────────
+
+async def _save_capital_snapshot():
+    from engine.portfolio_analytics import save_capital_snapshot
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        snap = await save_capital_snapshot(session)
+        await session.commit()
+    return snap
+
+
+@celery_app.task(name="tasks.india_tasks.save_capital_snapshot")
+def save_capital_snapshot_task():
+    """Compute and save today's portfolio capital model snapshot (Sharpe/Treynor/Jensen).
+    Runs daily at 4:15 PM IST = 10:45 UTC, right after market close.
+    """
+    logger.info("[capital_snapshot] Computing daily portfolio metrics")
+    _run_async(_save_capital_snapshot())
+    logger.info("[capital_snapshot] Done")
+
+
+# ── 17. Weekly portfolio rebalancing ─────────────────────────────────────────
+
+async def _weekly_portfolio_rebalance():
+    from engine.portfolio_analytics import compute_rebalance_trades, save_capital_snapshot
+    from tasks._db import celery_session
+    from utils.config import settings
+
+    async with celery_session() as session:
+        snap = await save_capital_snapshot(session)
+        trades = await compute_rebalance_trades(session)
+        await session.commit()
+
+    if not trades:
+        logger.info("[rebalance] No rebalancing needed this week")
+        if settings.telegram_available:
+            from integrations.telegram_service import send
+            await send("⚖️ <b>Weekly Rebalance Check</b>\n\nPortfolio is within tolerance — no rebalancing needed.")
+        return
+
+    lines = [f"⚖️ <b>Weekly Portfolio Rebalance — {datetime.date.today()}</b>\n"]
+    for t in trades[:10]:
+        action_emoji = "🟢" if t["action"] == "BUY" else "🔴"
+        lines.append(
+            f"{action_emoji} <b>{t['action']}</b> {t['symbol'].replace('.NS','')}: "
+            f"current {t['current_weight']:.1f}% → target {t['target_weight']:.1f}% "
+            f"(drift {t['drift']:.1f}%)"
+        )
+        lines.append(f"   <i>{t['reason']}</i>")
+
+    if snap:
+        lines.append(
+            f"\n📊 Sharpe: <b>{snap.sharpe_ratio:.2f}</b>  "
+            f"Treynor: <b>{snap.treynor_ratio:.2f}</b>  "
+            f"Alpha: <b>{snap.jensens_alpha:+.2f}%</b>"
+            if snap.sharpe_ratio else "\n📊 Insufficient data for risk metrics"
+        )
+
+    msg = "\n".join(lines)
+    logger.info(f"[rebalance] {len(trades)} rebalance signals generated")
+    if settings.telegram_available:
+        from integrations.telegram_service import send
+        await send(msg)
+
+
+@celery_app.task(name="tasks.india_tasks.weekly_portfolio_rebalance")
+def weekly_portfolio_rebalance():
+    """Weekly portfolio rebalancing check: equal-weight top-10 Hub BUY signals.
+    Sends Telegram alert with BUY/SELL signals + performance metrics.
+    Runs Sunday 17:00 UTC (10:30 PM IST).
+    """
+    logger.info("[rebalance] Starting weekly portfolio rebalance check")
+    _run_async(_weekly_portfolio_rebalance())
+
+
+# ── 18. Weekly AI portfolio report via Telegram ───────────────────────────────
+
+async def _weekly_ai_portfolio_report():
+    from engine.portfolio_analytics import (
+        compute_performance_metrics,
+        get_position_weights,
+        get_sector_weights,
+    )
+    from tasks._db import celery_session
+    from utils.config import settings
+    from utils.llm import llm_client
+
+    if not settings.telegram_available:
+        return
+
+    async with celery_session() as session:
+        metrics = await compute_performance_metrics(session, days=30)
+        pos_weights = await get_position_weights(session)
+        sector_weights = await get_sector_weights(session, pos_weights)
+
+    # ── Build LLM prompt ──────────────────────────────────────────────────────
+    metrics_text = (
+        f"Portfolio Return (annualized): {metrics.get('portfolio_return', 'N/A')}%\n"
+        f"NIFTY Benchmark Return: {metrics.get('benchmark_return', 'N/A')}%\n"
+        f"Portfolio Beta: {metrics.get('portfolio_beta', 'N/A')}\n"
+        f"Std Deviation (annualized): {metrics.get('portfolio_stddev', 'N/A')}%\n"
+        f"Sharpe Ratio: {metrics.get('sharpe_ratio', 'N/A')}\n"
+        f"Treynor Ratio: {metrics.get('treynor_ratio', 'N/A')}\n"
+        f"Jensen's Alpha: {metrics.get('jensens_alpha', 'N/A')}%\n"
+        f"Risk-free Rate: {metrics.get('risk_free_rate', 7.1)}%"
+    )
+    top_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)[:5]
+    sectors_text = "\n".join(f"  {s}: {w:.1f}%" for s, w in top_sectors)
+    top_positions = sorted(pos_weights.items(), key=lambda x: x[1], reverse=True)[:8]
+    positions_text = "\n".join(f"  {s.replace('.NS','')}: {w:.1f}%" for s, w in top_positions)
+
+    prompt = f"""You are AutoTrade Pro's AI portfolio manager. Write a brief (150-200 word) weekly portfolio report for a paper-trading agent focused on NSE Indian equities.
+
+Performance Metrics (last 30 days):
+{metrics_text}
+
+Top Sector Exposure:
+{sectors_text}
+
+Top Position Weights:
+{positions_text}
+
+Write a professional 3-paragraph Telegram-friendly report:
+1. Performance summary vs benchmark (NIFTY)
+2. Risk analysis (Sharpe, Treynor, Jensen interpretation — is alpha positive?)
+3. Actionable recommendation for next week
+
+Use plain text with minimal HTML tags (only <b> for emphasis). Be concise and specific."""
+
+    try:
+        client = llm_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            temperature=0.3,
+        )
+        ai_text = response.choices[0].message.content.strip()
+    except Exception as exc:
+        logger.warning(f"[weekly_report] LLM failed: {exc}")
+        ai_text = (
+            f"Portfolio Return: {metrics.get('portfolio_return', 'N/A')}% vs NIFTY "
+            f"{metrics.get('benchmark_return', 'N/A')}%\n"
+            f"Sharpe: {metrics.get('sharpe_ratio', 'N/A')}  "
+            f"Alpha: {metrics.get('jensens_alpha', 'N/A')}%"
+        )
+
+    header = f"📈 <b>Weekly Portfolio Report — {datetime.date.today()}</b>\n\n"
+    from integrations.telegram_service import send
+    await send(header + ai_text)
+    logger.info("[weekly_report] AI portfolio report sent")
+
+
+@celery_app.task(name="tasks.india_tasks.weekly_ai_portfolio_report")
+def weekly_ai_portfolio_report():
+    """Generate and send weekly AI portfolio performance report via Telegram.
+    Runs Sunday 17:30 UTC (11:00 PM IST).
+    """
+    logger.info("[weekly_report] Starting weekly AI portfolio report")
+    _run_async(_weekly_ai_portfolio_report())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -852,15 +1162,16 @@ def run_master_intelligence_cycle():
             await session.commit()
 
             try:
-                ctx = await build_master_context(portfolio, session)
+                # Build universe first so Tavily can enrich missing news in build_master_context
+                from engine.hub_universe import get_hub_universe
+                universe = await get_hub_universe(session)
+
+                ctx = await build_master_context(portfolio, session, hub_universe=universe)
                 logger.info(
                     f"[hub] context: macro_bias={ctx.macro.total_macro_bias:+d} "
                     f"vix={ctx.macro.india_vix:.1f} mood={ctx.macro.nse_market_mood} "
                     f"news={len(ctx.news.scores_by_symbol)} earnings={len(ctx.earnings.tones_by_symbol)}"
                 )
-
-                from engine.hub_universe import get_hub_universe
-                universe = await get_hub_universe(session)
                 logger.info(f"[hub] scoring universe of {len(universe)} symbols")
                 # Daily candles: the 500-name universe is backfilled at 1d (only
                 # the ~22 legacy large-caps have live 1h bars). Score on '1d' so
