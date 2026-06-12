@@ -278,7 +278,7 @@ def _postmortem_template(symbol: str, side: str, entry: float, exit_price: float
 def build_expert_note(symbol: str, direction: str, entry: float, stop: float,
                       target_1: float, target_2: float, confidence: float,
                       hub: dict | None, reasoning: str,
-                      strategy: str = "HUB_SIGNAL", regime: str = "UNKNOWN") -> str:
+                      strategy: str = "HUB_SIGNAL", regime: str = "") -> str:
     """Entry rationale: 'Why Bought'. Uses Groq when enabled, else rich template."""
     template = _entry_template(symbol, direction, entry, stop, target_1, target_2,
                                confidence, hub, reasoning, strategy, regime)

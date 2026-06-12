@@ -270,10 +270,19 @@ async def _process_symbol(
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
-    # 1. Get candle data from DB
+    # 1. Get candle data from DB — fallback chain: 5m → 1h → 1d
     from crawler.price_feed import get_latest_candles
 
+    _timeframe_used = settings.AGENT_TIMEFRAME
     candles = await get_latest_candles(symbol, settings.AGENT_TIMEFRAME, 300, session)
+    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and settings.AGENT_TIMEFRAME != "1h":
+        candles = await get_latest_candles(symbol, "1h", 300, session)
+        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
+            _timeframe_used = "1h"
+    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and _timeframe_used != "1d":
+        candles = await get_latest_candles(symbol, "1d", 300, session)
+        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
+            _timeframe_used = "1d"
     if not candles or len(candles) < settings.AGENT_WARMUP_BARS:
         return None
 
@@ -320,6 +329,9 @@ async def _process_symbol(
     # 4b. Fallback — technical-only strategy selector when no fresh Hub score.
     if not hub_override:
         candidate = _selector.propose(symbol, df, features, macro_bias, fund_grade)
+        # Stamp regime from features so Telegram alerts always have a real value
+        if candidate is not None:
+            candidate.regime = features.regime
 
     # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
     #     candidate regardless of whether execution ultimately proceeds.
@@ -397,7 +409,47 @@ async def _process_symbol(
         )
         return None
 
-    # 7. Execute
+    # 7. Pre-trade research gate (BUY only) — Screener + yfinance + Tavily + LLM veto
+    #    Runs BEFORE execution so bad trades are blocked with real data, not just
+    #    technical signals. Cached 20 min so repeated scans of the same symbol are free.
+    if decision.action == "BUY":
+        try:
+            from engine.pre_trade_research import run_pre_trade_research
+            research = await asyncio.wait_for(
+                run_pre_trade_research(
+                    symbol=symbol,
+                    action=decision.action,
+                    score=decision.master_score or decision.confidence,
+                    regime=decision.regime,
+                    entry=decision.entry,
+                    stop=decision.stop,
+                    t1=decision.target,
+                    fund_grade=decision.fund_grade,
+                ),
+                timeout=12.0,
+            )
+            if research.get("veto"):
+                veto_reason = research["veto_reason"]
+                logger.warning(f"[agent] PRE-TRADE VETO {symbol}: {veto_reason}")
+                await _log_skipped_decision(
+                    symbol=symbol,
+                    candidate=candidate,
+                    regime=features.regime,
+                    macro_bias=macro_bias,
+                    fund_score=fund_score,
+                    drop_reason=f"pre_trade_veto:{veto_reason}",
+                    session=session,
+                    decision=decision,
+                )
+                return None
+            # Append research note to decision reasons for audit trail
+            note = research.get("research_note", "")
+            if note:
+                decision.reasons.append(f"[web] {note[:200]}")
+        except (asyncio.TimeoutError, Exception) as _exc:
+            logger.debug(f"[agent] pre-trade research error for {symbol}: {_exc} → ALLOW")
+
+    # 8. Execute
     order_id = await _executor.execute(decision, session)
 
     if order_id:
@@ -463,7 +515,7 @@ async def _send_shortlist_alert(
     # Build AI explanation — try Tavily research first (real web data), then LLM.
     ai_note = ""
     subs   = getattr(candidate, "hub_subscores", {}) or {}
-    regime = subs.get("regime", "")
+    regime = getattr(candidate, "regime", "") or subs.get("regime", "")
     tech   = float(subs.get("technical",   0))
     news_s = float(subs.get("news",        0))
     earn   = float(subs.get("earnings",    0))

@@ -20,7 +20,7 @@ from engine.indicators import IndicatorSignals
 from utils.config import settings
 from utils.logger import logger
 
-_FH_BASE = "https://finnhub.io/api/v1"
+_FH_BASE = None  # resolved lazily from settings.FINNHUB_BASE_URL
 
 
 # ── Reasoning generator ───────────────────────────────────────────────────────
@@ -334,8 +334,9 @@ async def fetch_stock_news(symbol: str) -> list[dict]:
     to_dt   = datetime.date.today().strftime("%Y-%m-%d")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            fh_base = settings.FINNHUB_BASE_URL
             r = await client.get(
-                f"{_FH_BASE}/company-news",
+                f"{fh_base}/company-news",
                 params={"symbol": f"NSE:{symbol}", "from": from_dt, "to": to_dt, "token": settings.FINNHUB_KEY},
             )
             if r.status_code != 200:
@@ -369,6 +370,8 @@ async def groq_commentary(
     reasoning: dict,
     setup: dict,
     news: list | None = None,
+    research_note: str = "",
+    screener_summary: str = "",
 ) -> str:
     """Generate expert-level equity research commentary using Groq. Returns '' on failure."""
     if not settings.groq_available:
@@ -416,6 +419,8 @@ async def groq_commentary(
         f"Target 2: ₹{setup['target_2']} (+{setup['target_2_pct']:.1f}%)\n"
         f"• Risk-reward: {setup['risk_reward']:.1f}x\n\n"
         + (news_section + "\n\n" if news_section else "")
+        + (f"WEB RESEARCH (Tavily):\n{research_note}\n\n" if research_note else "")
+        + (f"SCREENER.IN FUNDAMENTALS:\n{screener_summary}\n\n" if screener_summary else "")
         + "Write a comprehensive 4-5 paragraph expert equity research note:\n\n"
         "PARAGRAPH 1 — MARKET STRUCTURE: Describe exactly what the chart is showing. "
         "What trend/pattern is forming? Where is the stock in relation to its key moving averages, "
@@ -436,6 +441,8 @@ async def groq_commentary(
         "professional, specific, data-driven. This is for informational purposes only."
     )
 
+    # Use Groq directly for deep analysis — Ollama (deepseek-r1) is too slow (~2-4 min)
+    # for a user-facing request. Groq responds in 3-8s with the same quality.
     from utils.llm import call_groq_chat
     reply = await call_groq_chat(
         [

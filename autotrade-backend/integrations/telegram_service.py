@@ -348,7 +348,9 @@ def fmt_shortlist_alert(
 
     hub     = getattr(candidate, "hub_subscores", {}) or {}
     rd      = hub.get("reasoning", {}) if isinstance(hub.get("reasoning"), dict) else {}
-    regime  = hub.get("regime") or rd.get("regime") or getattr(candidate, "regime", "") or ""
+    # Prefer candidate.regime (set from DB row or features), then hub_subscores, then reasoning dict
+    _cand_regime = getattr(candidate, "regime", "") or ""
+    regime  = _cand_regime or hub.get("regime") or rd.get("regime") or ""
     signal  = hub.get("signal") or "BUY"
     regime_emoji = _REGIME_EMOJI.get(regime, "📈")
 
@@ -379,7 +381,7 @@ def fmt_shortlist_alert(
         f"🔥 <b>{'STRONG ' if signal == 'STRONG_BUY' else ''}BUY SIGNAL</b> 🔥",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"📌 <b>{sym}</b>  ·  Score: <b>{score:+.1f}</b>  ·  Signal: <b>{signal}</b>",
-        f"{regime_emoji} Regime: <b>{regime}</b>",
+        f"{regime_emoji} Regime: <b>{regime or 'N/A'}</b>",
         f"",
         f"<b>💰 Entry :</b>  ₹{entry:,.2f}",
         f"<b>🛑 Stop  :</b>  ₹{stop:,.2f}  (−₹{risk:.0f}  ·  {risk/entry*100:.1f}%)" if entry else f"<b>🛑 Stop  :</b>  ₹{stop:,.2f}",

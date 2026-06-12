@@ -177,11 +177,11 @@ class Settings(BaseSettings):
     HUB_UNIVERSE_MIN_TURNOVER_CR: float = 20.0  # min ₹ Cr/day to qualify
 
     # Universe / timing
-    # 1h matches what the candles table actually has (282k 1h rows, 0 rows at 15m).
-    # 60 bars ≈ 8 NSE trading days — enough for RSI/EMA50 settling on liquid names
-    # without locking out mid-caps that have less history persisted.
-    AGENT_TIMEFRAME:            str   = "1h"
-    AGENT_WARMUP_BARS:          int   = 60
+    # 5m gives the agent near-real-time price action (75 bars ≈ 1 trading day).
+    # Fallback chain in agent_loop: 5m → 1h → 1d so older symbols still score.
+    # Hub scoring stays on 1d (2000-symbol universe; 5m granularity unnecessary).
+    AGENT_TIMEFRAME:            str   = "5m"
+    AGENT_WARMUP_BARS:          int   = 75
     # NSE regular session: 9:15 AM – 3:30 PM IST
     # MIS (intraday) auto-squareoff: 3:20 PM IST (Zerodha)
     # Agent starts scanning at 9:15; initiates MIS close sweep at 3:15 (5 min buffer)

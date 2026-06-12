@@ -820,9 +820,59 @@ async def _run_deep_analysis_core(sym: str) -> dict:
     reasoning = generate_reasoning(sig, ltp)
     setup     = build_trade_setup(sig, ltp, signal_label)
 
-    # Fetch news first so Groq can interpret headlines in context
-    news    = await fetch_stock_news(sym)
-    ai_text = await groq_commentary(sym, ltp, chg_pct, sig, reasoning, setup, news=news)
+    # Fetch news + Tavily web research concurrently so the LLM gets full context
+    from engine.tavily_enricher import search_and_crawl
+    from engine.screener_deep import fetch_screener_deep
+
+    news_task     = asyncio.ensure_future(fetch_stock_news(sym))
+    tavily_task   = asyncio.ensure_future(
+        asyncio.wait_for(search_and_crawl(f"{sym}.NS"), timeout=12.0)
+    )
+    screener_task = asyncio.ensure_future(
+        asyncio.wait_for(fetch_screener_deep(sym), timeout=15.0)
+    )
+
+    news, tavily_data, screener_data = await asyncio.gather(
+        news_task, tavily_task, screener_task, return_exceptions=True
+    )
+    if isinstance(news, Exception):
+        news = []
+    if isinstance(tavily_data, Exception):
+        tavily_data = {}
+    if isinstance(screener_data, Exception):
+        screener_data = {}
+
+    research_note = tavily_data.get("search_answer", "") or " | ".join(
+        (tavily_data.get("snippets") or [])[:3]
+    )
+    research_headlines = tavily_data.get("headlines", [])
+
+    # Build a short screener summary for the LLM prompt
+    hr = (screener_data or {}).get("header_ratios", {})
+    screener_summary = ""
+    if hr:
+        parts = []
+        if hr.get("market_cap_cr"):  parts.append(f"MCap ₹{hr['market_cap_cr']} Cr")
+        if hr.get("pe_ratio"):       parts.append(f"PE {hr['pe_ratio']}")
+        if hr.get("roe"):            parts.append(f"ROE {hr['roe']}%")
+        if hr.get("roce"):           parts.append(f"ROCE {hr['roce']}%")
+        if hr.get("pb_ratio"):       parts.append(f"PB {hr['pb_ratio']}")
+        if hr.get("dividend_yield"): parts.append(f"Div {hr['dividend_yield']}%")
+        sh = (screener_data or {}).get("shareholding", {})
+        if sh.get("promoter_holding"): parts.append(f"Promoter {sh['promoter_holding']}%")
+        if sh.get("pledged_pct"):      parts.append(f"Pledged {sh['pledged_pct']}%")
+        cg = (screener_data or {}).get("compounded_growth", {})
+        if cg:
+            growth_str = " | ".join(f"{k}: {v}%" for k, v in list(cg.items())[:4])
+            if growth_str: parts.append(f"Growth: {growth_str}")
+        screener_summary = " | ".join(parts)
+
+    ai_text = await groq_commentary(
+        sym, ltp, chg_pct, sig, reasoning, setup,
+        news=news,
+        research_note=research_note,
+        screener_summary=screener_summary,
+    )
 
     return {
         "symbol":          sym,
@@ -860,10 +910,15 @@ async def _run_deep_analysis_core(sym: str) -> dict:
             "stoch_signal":     sig.stoch_signal,
         },
 
-        "reasoning":  reasoning,
-        "trade_setup": setup,
-        "news":        news,
-        "ai_summary":  ai_text,
+        "reasoning":           reasoning,
+        "trade_setup":         setup,
+        "news":                news,
+        "ai_summary":          ai_text,
+        "expert_analysis":     ai_text,
+        "research_note":       research_note,
+        "research_headlines":  research_headlines,
+        "research_sentiment":  tavily_data.get("sentiment", 0.0),
+        "screener_summary":    screener_summary,
     }
 
 

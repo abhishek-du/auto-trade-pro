@@ -145,6 +145,9 @@ class MasterContext:
     # symbol → fundamental_score (0–100), pre-loaded once from FundamentalData
     # so scoring 500 symbols needs ZERO live fundamental API calls.
     fundamentals_by_symbol: dict = field(default_factory=dict)
+    # symbol → (profit_growth_3yr, revenue_growth_3yr) — used as earnings proxy
+    # for symbols with no transcript in EarningsCallSummary.
+    growth_by_symbol: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -458,11 +461,24 @@ async def build_master_context(
     # FundamentalData is keyed on the bare ticker (e.g. "RELIANCE").
     from db.models import FundamentalData
     fund_rows = (await session.execute(
-        select(FundamentalData.symbol, FundamentalData.fundamental_score)
+        select(
+            FundamentalData.symbol,
+            FundamentalData.fundamental_score,
+            FundamentalData.profit_growth_3yr,
+            FundamentalData.revenue_growth_3yr,
+        )
     )).all()
     fundamentals_by_symbol = {
         r.symbol.replace(".NS", ""): float(r.fundamental_score)
         for r in fund_rows if r.fundamental_score is not None
+    }
+    growth_by_symbol = {
+        r.symbol.replace(".NS", ""): (
+            float(r.profit_growth_3yr)  if r.profit_growth_3yr  is not None else None,
+            float(r.revenue_growth_3yr) if r.revenue_growth_3yr is not None else None,
+        )
+        for r in fund_rows
+        if r.profit_growth_3yr is not None or r.revenue_growth_3yr is not None
     }
 
     now = datetime.utcnow().isoformat()
@@ -470,6 +486,7 @@ async def build_master_context(
         built_at=now, bar_time=now, macro=macro, sectors=sectors,
         news=news, earnings=earnings, options=options, portfolio=portfolio,
         fundamentals_by_symbol=fundamentals_by_symbol,
+        growth_by_symbol=growth_by_symbol,
     )
 
     # Publish to module caches for macro agent / decision engine / chat
@@ -501,10 +518,15 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     except Exception:
         features, regime = None, "UNKNOWN"
 
-    # 2. News (15%) — RSS/DB score; falls back to yfinance headlines scored by
+    bare = symbol.replace(".NS", "")
+
+    # 2. News/Sentiment (15%) — RSS/DB score; falls back to yfinance headlines scored by
     # FinBERT (keyword fallback if torch absent) for small caps with no RSS coverage.
+    # Final fallback: use 3-year profit growth as a sentiment proxy for stocks with
+    # zero media presence (common for PSUs, micro-caps, and defense/infra names).
     _has_news = symbol in ctx.news.scores_by_symbol
     raw_news = ctx.news.scores_by_symbol.get(symbol, 0.0)
+    _news_source = "rss"
     if not _has_news:
         try:
             import yfinance as yf
@@ -518,9 +540,43 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
                 raw_news = _score_headlines_finbert(headlines_yf)
                 if raw_news != 0.0:
                     _has_news = True
+                    _news_source = "yfinance"
                     logger.debug(f"[hub/yf_news] {symbol}: yfinance score={raw_news:+.2f}")
         except Exception:
             pass
+    # Growth-based sentiment proxy — applied only when no news source has any data.
+    # Rationale: consistently growing companies tend to attract positive media when
+    # coverage finally appears; this prevents a perpetual 0% weight for small-caps.
+    if not _has_news:
+        _growth = ctx.growth_by_symbol.get(bare)
+        pg = rg = None
+        if _growth:
+            pg, rg = _growth  # profit_growth_3yr, revenue_growth_3yr
+        if pg is not None:
+            if pg > 20 and (rg is None or rg > 10):
+                raw_news, _news_source = 0.20, "growth_proxy"
+            elif pg > 10:
+                raw_news, _news_source = 0.10, "growth_proxy"
+            elif pg < -10 or (rg is not None and rg < -5):
+                raw_news, _news_source = -0.15, "growth_proxy"
+            else:
+                raw_news, _news_source = 0.05, "growth_proxy"
+            _has_news = True
+            logger.debug(f"[hub/growth_proxy] {symbol}: pg={pg:.1f}% rg={rg} → news_proxy={raw_news:+.2f}")
+        elif bare in ctx.fundamentals_by_symbol:
+            # Last resort: use fundamental quality score as a very weak sentiment proxy.
+            # fund_score > 65 = quality company → slight positive; < 40 = weak → slight negative.
+            fs = ctx.fundamentals_by_symbol[bare]
+            if fs >= 65:
+                raw_news, _news_source = 0.10, "fundamental_proxy"
+            elif fs >= 50:
+                raw_news, _news_source = 0.04, "fundamental_proxy"
+            elif fs < 40:
+                raw_news, _news_source = -0.08, "fundamental_proxy"
+            else:
+                raw_news, _news_source = 0.02, "fundamental_proxy"
+            _has_news = True
+            logger.debug(f"[hub/fund_proxy] {symbol}: fund_score={fs:.1f} → news_proxy={raw_news:+.2f}")
     news_score = max(-100, min(100, raw_news * 100))
 
     # 3. Sector (15%) — GENERAL/unmapped falls back to market breadth bias so
@@ -535,13 +591,39 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     # 4. Macro (10%)
     macro_score = max(-50, min(50, ctx.macro.total_macro_bias * 12))
 
-    # 5. Earnings (10%)
-    tone = ctx.earnings.tones_by_symbol.get(symbol, "NEUTRAL")
+    # 5. Earnings (10%) — primary: EarningsCallSummary transcript NLP tone.
+    # Fallback: derive tone from FundamentalData 3-year profit/revenue growth so
+    # small-caps and PSUs without indexed transcripts still carry an earnings signal.
+    _earnings_source = "transcript"
+    tone = ctx.earnings.tones_by_symbol.get(symbol)
+    if tone is None:
+        _growth = ctx.growth_by_symbol.get(bare)
+        pg = _growth[0] if _growth else None
+        if pg is not None:
+            if pg > 20:
+                tone, _earnings_source = "OPTIMISTIC", "growth_proxy"
+            elif pg > 0:
+                tone, _earnings_source = "NEUTRAL",    "growth_proxy"
+            else:
+                tone, _earnings_source = "CAUTIOUS",   "growth_proxy"
+            logger.debug(f"[hub/earn_proxy] {symbol}: pg={pg:.1f}% → {tone}")
+        elif bare in ctx.fundamentals_by_symbol:
+            # Fundamental quality score as earnings proxy when no growth data
+            fs = ctx.fundamentals_by_symbol[bare]
+            if fs >= 65:
+                tone, _earnings_source = "OPTIMISTIC", "fundamental_proxy"
+            elif fs >= 50:
+                tone, _earnings_source = "NEUTRAL",    "fundamental_proxy"
+            else:
+                tone, _earnings_source = "CAUTIOUS",   "fundamental_proxy"
+            logger.debug(f"[hub/earn_fund_proxy] {symbol}: fund_score={fs:.1f} → {tone}")
+    if tone is None:
+        tone = "NEUTRAL"
+        _earnings_source = "default"
     earnings_score = _EARNINGS_SCORE.get(tone, 0)
 
     # 6. Fundamental (10%) — DB-cached score only (no live API call per symbol).
     # Neutral 50 when the symbol isn't in FundamentalData yet (weekly task fills it).
-    bare = symbol.replace(".NS", "")
     fund_score = ctx.fundamentals_by_symbol.get(bare, 50.0)
     fund_grade = (
         "STRONG" if fund_score >= 70 else "GOOD" if fund_score >= 55
@@ -556,12 +638,13 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     # don't dilute the ones that have a genuine signal.
     # Exceptions: sector always has a signal (known sector or market breadth proxy);
     # news is considered covered if Tavily, RSS, or yfinance contributed a score.
+    _has_earnings = (tone != "NEUTRAL" or _earnings_source != "default")
     _w = {
         "technical":   0.35,
         "news":        0.15 if _has_news else 0.0,
         "sector":      0.15,  # always: known sector or market breadth fallback
         "macro":       0.10,
-        "earnings":    0.10 if symbol in ctx.earnings.tones_by_symbol else 0.0,
+        "earnings":    0.10 if _has_earnings else 0.0,
         "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
         "options":     0.05,
     }
@@ -642,6 +725,7 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "composite_score":  _nf(signals.composite_score),
     }
 
+    _growth_vals = ctx.growth_by_symbol.get(bare, (None, None))
     reasoning = {
         "technical": round(technical_score, 1), "news": round(news_score, 1),
         "sector": round(sector_score, 1), "macro": round(macro_score, 1),
@@ -652,6 +736,10 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
         "headlines": ctx.news.headlines_by_symbol.get(symbol, []),
         "active_weights": {k: round(v, 3) for k, v in _w.items()},
+        "news_source":     _news_source,
+        "earnings_source": _earnings_source,
+        "profit_growth_3yr":  _growth_vals[0],
+        "revenue_growth_3yr": _growth_vals[1],
         "tech_detail": tech_detail,
         "macro_detail": {
             "fii_net_3d":  round(ctx.macro.fii_net_3d, 1),
@@ -696,16 +784,18 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     from crawler.price_feed import get_latest_candles
 
     # Phase 1: fetch candles sequentially (DB-bound, shared session)
-    # Fallback chain: requested timeframe → 1h → skip.
-    # This lets the Hub score symbols that only have intraday bars (e.g. freshly
-    # added stocks before the weekly 1d backfill has run).
-    _fallback = "1h" if timeframe != "1h" else None
+    # Fallback chain: requested timeframe → 1h → 1d → skip.
+    _FALLBACKS = {"5m": ["1h", "1d"], "1h": ["1d"], "15m": ["1h", "1d"], "1d": []}
+    _fallbacks = _FALLBACKS.get(timeframe, ["1h", "1d"])
     dfs: dict = {}
     for symbol in symbols:
         try:
             candles = await get_latest_candles(symbol, timeframe, 300, session)
-            if (not candles or len(candles) < 50) and _fallback:
-                candles = await get_latest_candles(symbol, _fallback, 300, session)
+            for fb in _fallbacks:
+                if not candles or len(candles) < 50:
+                    candles = await get_latest_candles(symbol, fb, 300, session)
+                else:
+                    break
             if not candles or len(candles) < 50:
                 continue
             cs = sorted(candles, key=lambda c: c.timestamp)

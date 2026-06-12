@@ -24,6 +24,98 @@ import CandlestickChart from '../components/chart/CandlestickChart';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function renderExpertMarkdown(text) {
+  if (!text) return null
+  const lines = text.split('\n')
+  const result = []
+  let key = 0
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    const line = raw.trim()
+
+    if (!line) {
+      result.push(<div key={key++} className="h-3" />)
+      continue
+    }
+
+    // Heading: line that is entirely **...** or starts with #
+    const headingMatch = line.match(/^#{1,3}\s+(.+)$/)
+    const boldLineMatch = line.match(/^\*\*(.+)\*\*[:\s]*$/)
+    if (headingMatch || boldLineMatch) {
+      const txt = headingMatch ? headingMatch[1] : boldLineMatch[1]
+      const isH1 = line.startsWith('# ') || (boldLineMatch && !line.match(/^\*\*[^*]+\*\*:/))
+      result.push(
+        <div key={key++} className={`font-bold mt-4 mb-1 ${isH1 ? 'text-violet-300 text-base' : 'text-cyan-300 text-sm'}`}>
+          {txt}
+        </div>
+      )
+      continue
+    }
+
+    // Numbered list: "1. " or "1) "
+    const numMatch = line.match(/^(\d+)[.)]\s+(.*)$/)
+    if (numMatch) {
+      result.push(
+        <div key={key++} className="flex items-start gap-2 my-1 ml-2">
+          <span className="text-violet-400 font-semibold text-sm shrink-0 mt-0.5">{numMatch[1]}.</span>
+          <span className="text-slate-200 text-sm leading-relaxed">{inlineFormat(numMatch[2])}</span>
+        </div>
+      )
+      continue
+    }
+
+    // Bullet
+    const bulletMatch = line.match(/^[-•*]\s+(.*)$/)
+    if (bulletMatch) {
+      result.push(
+        <div key={key++} className="flex items-start gap-2 my-1 ml-2">
+          <span className="text-violet-400 mt-1.5 shrink-0" style={{ fontSize: 6 }}>●</span>
+          <span className="text-slate-200 text-sm leading-relaxed">{inlineFormat(bulletMatch[1])}</span>
+        </div>
+      )
+      continue
+    }
+
+    // Normal paragraph
+    result.push(
+      <p key={key++} className="text-slate-300 text-sm leading-relaxed my-1">{inlineFormat(line)}</p>
+    )
+  }
+  return result
+}
+
+function inlineFormat(text) {
+  const parts = []
+  const re = /(\*\*(.+?)\*\*|\*(.+?)\*|₹[\d,]+(?:\.\d+)?(?:\s*(?:Cr|L|K))?|[+-]?\d+\.?\d*%|\b(BUY|SELL|HOLD|STRONG_BUY|STRONG_SELL|BULLISH|BEARISH)\b)/g
+  let last = 0, m
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index))
+    const tok = m[0]
+    if (tok.startsWith('**')) {
+      parts.push(<strong key={m.index} className="font-semibold text-slate-100">{m[2]}</strong>)
+    } else if (tok.startsWith('*')) {
+      parts.push(<em key={m.index} className="italic text-slate-300">{m[3]}</em>)
+    } else if (/^(BUY|STRONG_BUY|BULLISH)$/.test(tok)) {
+      parts.push(<span key={m.index} className="mx-0.5 px-1.5 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400">{tok}</span>)
+    } else if (/^(SELL|STRONG_SELL|BEARISH)$/.test(tok)) {
+      parts.push(<span key={m.index} className="mx-0.5 px-1.5 py-0.5 rounded text-xs font-bold bg-red-500/20 text-red-400">{tok}</span>)
+    } else if (tok === 'HOLD') {
+      parts.push(<span key={m.index} className="mx-0.5 px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-700 text-slate-300">{tok}</span>)
+    } else if (tok.startsWith('₹')) {
+      parts.push(<span key={m.index} className="font-semibold text-sky-400">{tok}</span>)
+    } else if (tok.includes('%')) {
+      const isPos = tok.startsWith('+') || (!tok.startsWith('-') && parseFloat(tok) > 0)
+      parts.push(<span key={m.index} className={isPos ? 'text-emerald-400 font-medium' : 'text-red-400 font-medium'}>{tok}</span>)
+    } else {
+      parts.push(tok)
+    }
+    last = m.index + tok.length
+  }
+  if (last < text.length) parts.push(text.slice(last))
+  return parts.length === 1 && typeof parts[0] === 'string' ? parts[0] : parts
+}
+
 const fmt = (n, d = 2) =>
   n == null || isNaN(n) ? '—'
   : Number(n).toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -1185,13 +1277,43 @@ export default function StockDetail() {
       <section className="px-5 pb-6" style={{ background: '#080D1A' }}>
         <SectionLabel>Section 5 · AI equity research</SectionLabel>
 
+        {/* Tavily web research note — shown above LLM analysis if available */}
+        {deepSettled && deep?.research_note && (
+          <div className="rounded-xl border border-cyan/20 p-4 mb-4" style={{ background: 'rgba(6,182,212,0.04)' }}>
+            <div className="flex items-center gap-2 mb-2">
+              <Zap size={12} className="text-cyan" />
+              <span className="text-cyan text-[10px] font-bold uppercase tracking-wider">Live Web Research</span>
+              <span className="ml-auto text-muted text-[10px]">Tavily · scraped now</span>
+            </div>
+            <p className="text-slate-300 text-sm leading-relaxed">{deep.research_note}</p>
+            {(deep.research_headlines || []).length > 0 && (
+              <div className="mt-2 space-y-1">
+                {deep.research_headlines.slice(0, 3).map((h, i) => (
+                  <div key={i} className="flex gap-1.5 text-[11px] text-muted">
+                    <span className="text-cyan shrink-0">›</span><span>{h}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Screener.in fundamentals summary pill row */}
+        {deepSettled && deep?.screener_summary && (
+          <div className="flex flex-wrap gap-2 mb-4">
+            {deep.screener_summary.split(' | ').map((part, i) => (
+              <span key={i} className="text-[11px] bg-white/[0.04] border border-border rounded px-2 py-1 text-slate-300 font-mono">{part}</span>
+            ))}
+          </div>
+        )}
+
         {/* Executive summary — expert Groq analysis */}
         <div className="rounded-2xl border border-blue-500/20 p-5 mb-4 relative overflow-hidden"
           style={{ background: 'linear-gradient(145deg,#131E30,#0F1829)', boxShadow: '0 0 40px -15px rgba(139,92,246,0.3)' }}>
           <div className="flex items-start justify-between mb-3">
             <div>
               <div className="text-violet-400 text-[10px] uppercase tracking-[0.2em] font-bold">Expert Research Analysis</div>
-              <div className="text-muted text-[10px] mt-0.5">AI-generated · powered by Groq LLM · not financial advice</div>
+              <div className="text-muted text-[10px] mt-0.5">AI-generated · LLM with Screener + Tavily context · not financial advice</div>
             </div>
             {conf != null && (
               <div className="text-right shrink-0 ml-4">
@@ -1202,12 +1324,12 @@ export default function StockDetail() {
           </div>
           {verdictPending ? (
             <div className="space-y-2"><Skel w="w-full" h="h-4" /><Skel w="w-full" h="h-4" /><Skel w="w-5/6" h="h-4" /></div>
-          ) : deep?.ai_summary ? (
-            <div className="text-slate-200 text-sm leading-relaxed whitespace-pre-line">{deep.ai_summary}</div>
+          ) : (deep?.ai_summary || deep?.expert_analysis) ? (
+            <div className="space-y-0.5">{renderExpertMarkdown(deep.expert_analysis || deep.ai_summary)}</div>
           ) : !deepSettled ? (
             <div className="flex items-center gap-2 text-muted text-sm">
               <div className="w-3 h-3 rounded-full bg-violet-500/30 animate-pulse" />
-              Generating expert analysis…
+              Generating expert analysis (fetching Screener + web research)…
             </div>
           ) : (
             <p className="text-slate-300 text-sm leading-relaxed">
@@ -2091,11 +2213,26 @@ export default function StockDetail() {
                     </div>
                   )}
 
-                  {/* No structured data found but has summary */}
+                  {/* No structured data found — non-F&O or no coverage */}
                   {!optionsResearch.pcr && !optionsResearch.max_pain && !optionsResearch.iv &&
                    !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (
-                    <div className="text-muted text-xs">
-                      No structured F&O data found. {display} may be a non-F&O stock or options data is not yet indexed.
+                    <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                      <ShieldAlert size={14} className="text-amber-400 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="text-amber-400 text-sm font-semibold">Not in F&O Segment</div>
+                        <div className="text-muted text-xs mt-1 leading-relaxed">
+                          {display} does not appear to have equity derivatives (Futures &amp; Options) traded on NSE.
+                          F&amp;O eligibility requires market cap &gt; ₹5,000 Cr and minimum average daily turnover.
+                          The agent searched the web but found no options chain data for this symbol.
+                        </div>
+                        {optionsResearch.headlines?.length > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {optionsResearch.headlines.slice(0, 3).map((h, i) => (
+                              <li key={i} className="text-slate-400 text-[11px]">• {h}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -2104,8 +2241,11 @@ export default function StockDetail() {
                   Agent is searching the web for {display} F&O data…
                 </div>
               ) : (
-                <div className="text-muted text-xs">
-                  Options research unavailable (Tavily API required).
+                <div className="flex items-start gap-3 p-3 rounded-lg bg-white/[0.02] border border-border">
+                  <ShieldAlert size={14} className="text-muted shrink-0 mt-0.5" />
+                  <div className="text-muted text-xs leading-relaxed">
+                    Agent options research not loaded yet — trigger a page refresh or set <code className="text-cyan">TAVILY_API_KEY</code> in <code className="text-cyan">.env</code> to enable live web search.
+                  </div>
                 </div>
               )}
 
