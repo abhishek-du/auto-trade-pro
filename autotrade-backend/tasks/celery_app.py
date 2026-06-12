@@ -115,6 +115,12 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week=0, hour=18, minute=30),
     },
 
+    # Weekly Sunday 19:00 UTC: rebuild yfinance sector mapping for all NSE EQ symbols
+    "sector-cache-rebuild-weekly": {
+        "task":     "tasks.rebuild_sector_cache",
+        "schedule": crontab(day_of_week=0, hour=19, minute=0),
+    },
+
     # Weekly Sunday 01:00 UTC (06:30 IST, before market open): refresh last week
     # of daily candles for the FULL NSE universe via Zerodha Kite. Keeps every
     # symbol's bars current so the scanner/agent cover the whole market.
@@ -216,6 +222,24 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_tasks.refresh_ipo_data",
         "schedule": 1800,
         "options":  {"countdown": 20},
+    },
+
+    # Daily 10:45 UTC = 4:15 PM IST: save capital snapshot with Sharpe/Treynor/Jensen
+    "capital-snapshot-daily": {
+        "task":     "tasks.india_tasks.save_capital_snapshot",
+        "schedule": crontab(hour=10, minute=45),
+    },
+
+    # Weekly Sunday 17:00 UTC = 10:30 PM IST: rebalance check + Telegram alert
+    "weekly-portfolio-rebalance": {
+        "task":     "tasks.india_tasks.weekly_portfolio_rebalance",
+        "schedule": crontab(day_of_week="sunday", hour=17, minute=0),
+    },
+
+    # Weekly Sunday 17:30 UTC = 11:00 PM IST: AI portfolio report via Telegram
+    "weekly-ai-portfolio-report": {
+        "task":     "tasks.india_tasks.weekly_ai_portfolio_report",
+        "schedule": crontab(day_of_week="sunday", hour=17, minute=30),
     },
 
     # ── Kite library tasks (post market-close holdings, daily candles, etc.) ──
