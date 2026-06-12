@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-DATABASE_URL = "postgresql+asyncpg://autotrade:autotrade@localhost:5432/autotrade_pro"
+from utils.config import settings
+
+DATABASE_URL = os.environ.get("DATABASE_URL") or settings.DATABASE_URL
 
 BATCH_SIZE = 50   # symbols per yfinance download call
 PERIOD     = "2y"  # 2 years gives 500+ trading days — enough for all indicators
