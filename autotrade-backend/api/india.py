@@ -1249,6 +1249,29 @@ async def get_financials(symbol: str):
 
 
 @router.get(
+    "/options-research/{symbol}",
+    summary="Agent-driven options/F&O research via Tavily — discovers best sources dynamically",
+)
+async def get_options_research(symbol: str):
+    """Let the agent search the open web for options chain data, PCR, max pain, IV.
+
+    No hardcoded data source — Tavily finds the best available pages on the web
+    (NSE, broker portals, financial media, options analytics sites) and the LLM
+    synthesizes a 2-3 sentence F&O insight. Results vary by what's currently
+    published online.
+    """
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    ns_sym = sym + ".NS"
+    from engine.tavily_enricher import research_options_chain
+    try:
+        data = await research_options_chain(ns_sym)
+        return {"symbol": sym, **data}
+    except Exception as exc:
+        logger.warning(f"[options_research] {sym}: {exc}")
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.get(
     "/screener-deep/{symbol}",
     summary="Full Screener.in data: quarterly P&L, balance sheet, cash flow, shareholding, pros/cons",
 )
