@@ -34,25 +34,52 @@ async def rebuild_hub_universe(
 
     min_turnover = min_turnover_cr * 1e7  # ₹ Cr → ₹
 
-    # Average daily turnover (volume × close) over the last 30 calendar days.
-    # Exclude bond/debt symbols (contain digits, or -SG/-SM/-ST/-BE/-BZ suffixes).
-    rows = (await session.execute(text("""
+    _exclude = """
+        AND symbol LIKE '%.NS'
+        AND symbol !~ '[0-9]'
+        AND symbol NOT LIKE '%-SG.NS'
+        AND symbol NOT LIKE '%-SM.NS'
+        AND symbol NOT LIKE '%-ST.NS'
+        AND symbol NOT LIKE '%-BE.NS'
+        AND symbol NOT LIKE '%-BZ.NS'
+    """
+
+    # Primary: 1d candles (most accurate for daily turnover).
+    rows = (await session.execute(text(f"""
         SELECT symbol, AVG(volume * close) AS turnover
         FROM candles
         WHERE timeframe = '1d'
           AND timestamp > NOW() - INTERVAL '30 days'
-          AND symbol LIKE '%.NS'
-          AND symbol !~ '[0-9]'                         -- drop numeric debt codes
-          AND symbol NOT LIKE '%-SG.NS'
-          AND symbol NOT LIKE '%-SM.NS'
-          AND symbol NOT LIKE '%-ST.NS'
-          AND symbol NOT LIKE '%-BE.NS'
-          AND symbol NOT LIKE '%-BZ.NS'
+          {_exclude}
         GROUP BY symbol
         HAVING AVG(volume * close) >= :min_t
         ORDER BY turnover DESC
         LIMIT :n
     """), {"min_t": min_turnover, "n": top_n})).all()
+
+    # Fallback: when 1d candles are absent (pre-backfill cold start), use 1h
+    # bars aggregated to a daily-equivalent turnover estimate.  A trading day
+    # has ~6.25 NSE hours, so summing 1h volume*close gives a comparable figure.
+    if not rows:
+        logger.info("[hub_universe] no 1d candles — falling back to 1h for turnover ranking")
+        rows = (await session.execute(text(f"""
+            SELECT symbol,
+                   AVG(daily_turnover) AS turnover
+            FROM (
+                SELECT symbol,
+                       DATE(timestamp) AS day,
+                       SUM(volume * close) AS daily_turnover
+                FROM candles
+                WHERE timeframe = '1h'
+                  AND timestamp > NOW() - INTERVAL '30 days'
+                  {_exclude}
+                GROUP BY symbol, DATE(timestamp)
+            ) daily
+            GROUP BY symbol
+            HAVING AVG(daily_turnover) >= :min_t
+            ORDER BY turnover DESC
+            LIMIT :n
+        """), {"min_t": min_turnover, "n": top_n})).all()
 
     await session.execute(delete(HubUniverse))
     for rank, r in enumerate(rows, start=1):
