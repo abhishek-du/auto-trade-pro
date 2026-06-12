@@ -175,7 +175,7 @@ function ConnectionCard({ status, onConnect, onDisconnect, redirectUrl }) {
                       Required: Redirect URL in Zerodha Developer Console
                     </p>
                     <code className="text-cyan text-xs break-all">
-                      {redirectUrl || 'http://localhost:8000/api/v1/zerodha/callback'}
+                      {redirectUrl || `${window.location.origin}/api/v1/zerodha/callback`}
                     </code>
                     <p className="text-slate-500 text-[11px] mt-1">
                       Go to kite.zerodha.com → My Apps → your app → set this exact URL as the Redirect URL.

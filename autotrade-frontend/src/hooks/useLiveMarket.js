@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { getLivePrices, getMarketSummary, getTopMovers } from '../api/client';
 
-const WS_URL = 'ws://localhost:8000/ws/live-prices';
 const RECONNECT_MS = 5_000;
+function _wsUrl() {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/ws/live-prices`;
+}
 
 export function useLiveMarket() {
   const [prices,      setPrices]      = useState({});
@@ -34,7 +37,7 @@ export function useLiveMarket() {
     if (!mountedRef.current) return;
     if (wsRef.current && wsRef.current.readyState < 2) return; // already open/connecting
 
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocket(_wsUrl());
     wsRef.current = ws;
 
     ws.onopen = () => {

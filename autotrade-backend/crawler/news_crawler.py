@@ -30,17 +30,10 @@ _SENTIMENT_WINDOW: int = 10
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_NEWSAPI_BASE  = "https://newsapi.org/v2/everything"
-_FINNHUB_BASE  = "https://finnhub.io/api/v1"
-# India-first RSS feeds (no key, no rate limit). Empty/blocked feeds are
-# skipped gracefully by fetch_free_rss_news(). Moneycontrol, Business Standard
-# and Mint reliably return market headlines; ET is best-effort.
-_RSS_FEEDS     = [
-    "https://www.moneycontrol.com/rss/latestnews.xml",
-    "https://www.business-standard.com/rss/markets-106.rss",
-    "https://www.livemint.com/rss/markets",
-    "https://economictimes.indiatimes.com/markets/rss.cms",
-]
+_NEWSAPI_BASE  = settings.NEWSAPI_BASE_URL
+_FINNHUB_BASE  = settings.FINNHUB_BASE_URL
+# India-first RSS feeds — configured via RSS_FEED_URLS in .env (comma-separated)
+_RSS_FEEDS     = [u.strip() for u in settings.RSS_FEED_URLS.split(",") if u.strip()]
 _FOREX_CODES   = {"EUR", "USD", "GBP", "JPY", "AUD", "CHF", "CAD"}
 _FINBERT_MODEL = "ProsusAI/finbert"
 

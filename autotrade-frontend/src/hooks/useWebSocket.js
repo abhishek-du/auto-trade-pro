@@ -7,7 +7,8 @@ export function useWebSocket(path, { onMessage, reconnectDelay = 3000 } = {}) {
   const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
-    const url = `ws://localhost:8000${path}`;
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${window.location.host}${path}`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

@@ -78,11 +78,41 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""   # from @BotFather
     TELEGRAM_CHAT_ID:   str = ""   # user/channel ID (e.g. 693584236)
 
+    # ── Web research (Tavily) ─────────────────────────────────────────────────
+    # Real-time news enrichment for small-caps + shortlist alert AI notes.
+    # 1000 free credits/month (basic search = 1 credit, advanced = 2 credits).
+    TAVILY_API_KEY: str = ""   # required — set in .env
+
     # ── LLM ───────────────────────────────────────────────────────────────────
-    # Groq: fast inference — signal commentary, quick market analysis
-    GROQ_API_KEY: str = ""
+    # Ollama: local inference (primary) — no rate limits, runs on localhost
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL:    str = "qwen2.5:3b"
+    OLLAMA_TIMEOUT:  float = 120.0
+    # Groq: cloud fast inference (fallback when Ollama unavailable)
+    GROQ_API_KEY:   str = ""
+    GROQ_MODEL:     str = "llama-3.3-70b-versatile"
     # Claude: detailed explanations — strategy breakdowns, deeper reasoning
     ANTHROPIC_API_KEY: str = ""
+    CLAUDE_MODEL:      str = "claude-sonnet-4-6"
+
+    # ── CORS ──────────────────────────────────────────────────────────────────
+    # Comma-separated list of allowed origins. If empty, defaults to localhost
+    # dev URLs. Override in .env for staging/production deployments.
+    CORS_ORIGINS: str = ""
+
+    # ── Third-party API base URLs ─────────────────────────────────────────────
+    # Centralised so they can be overridden for testing or if vendors change URLs.
+    NEWSAPI_BASE_URL:      str = "https://newsapi.org/v2/everything"
+    FINNHUB_BASE_URL:      str = "https://finnhub.io/api/v1"
+    ALPHA_VANTAGE_BASE_URL: str = "https://www.alphavantage.co"
+    BSE_API_BASE_URL:      str = "https://api.bseindia.com"
+    # Comma-separated RSS feed URLs for free news (no key required)
+    RSS_FEED_URLS: str = (
+        "https://www.moneycontrol.com/rss/latestnews.xml,"
+        "https://www.business-standard.com/rss/markets-106.rss,"
+        "https://www.livemint.com/rss/markets,"
+        "https://economictimes.indiatimes.com/markets/rss.cms"
+    )
 
     # ── Zerodha Kite (read-only portfolio tracking — legacy kiteconnect lib) ────
     KITE_API_KEY:      str = ""
@@ -207,6 +237,10 @@ class Settings(BaseSettings):
     GOOGLE_SERVICE_ACCOUNT_JSON: str = ""
 
     @property
+    def ollama_available(self) -> bool:
+        return bool(self.OLLAMA_BASE_URL and self.OLLAMA_MODEL)
+
+    @property
     def telegram_available(self) -> bool:
         return bool(self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_CHAT_ID)
 
@@ -228,6 +262,10 @@ class Settings(BaseSettings):
     @property
     def ipoalerts_available(self) -> bool:
         return bool(self.IPOALERTS_API_KEY)
+
+    @property
+    def tavily_available(self) -> bool:
+        return bool(self.TAVILY_API_KEY)
 
     @property
     def groq_available(self) -> bool:
