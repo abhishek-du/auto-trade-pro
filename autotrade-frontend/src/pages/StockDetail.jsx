@@ -314,6 +314,8 @@ export default function StockDetail() {
   const [companyProfile,setCompanyProfile]= useState(null);
   const [financials,    setFinancials]    = useState(null);
   const [peers,         setPeers]         = useState(null);
+  const [screenerData,  setScreenerData]  = useState(null);  // Screener.in + NSE deep
+  const [screenerLoading,setScreenerLoading] = useState(false);
   const [fundLoading,   setFundLoading]   = useState(true);
   const [deepSettled,   setDeepSettled]   = useState(false);
   const [loading,       setLoading]       = useState(true);
@@ -356,6 +358,13 @@ export default function StockDetail() {
         .then(d => setFinancials(d)).catch(() => {});
       apiFetch(`/api/v1/india/peers/${encodeURIComponent(display)}`)
         .then(d => setPeers(d)).catch(() => {});
+
+      // Screener.in + NSE deep data — slowest (~5-8 s), load last
+      setScreenerLoading(true);
+      apiFetch(`/api/v1/india/screener-deep/${encodeURIComponent(display)}`)
+        .then(d => setScreenerData(d))
+        .catch(() => {})
+        .finally(() => setScreenerLoading(false));
 
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
@@ -579,6 +588,16 @@ export default function StockDetail() {
 
       {error && (
         <div className="mx-5 mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">{error}</div>
+      )}
+
+      {/* Full-page spinner — visible during the very first load before price data arrives */}
+      {loading && !price && !deep && (
+        <div className="flex-1 grid place-items-center py-24">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-8 h-8 border-2 border-cyan/30 border-t-cyan rounded-full animate-spin" />
+            <span className="text-muted text-sm">Loading {display}…</span>
+          </div>
+        </div>
       )}
 
       {/* Terminal no-data state — every analysis source returned nothing
@@ -1523,6 +1542,326 @@ export default function StockDetail() {
           ) : <div className="text-muted text-sm">{fundLoading ? 'Loading ownership data…' : 'Ownership data not available for this symbol.'}</div>}
         </DeepTab>
 
+        {/* Screener.in Deep Data */}
+        <DeepTab label="Screener.in Deep" subtitle="Quarterly P&L · Balance sheet · Cash flows · Shareholding · Pros/Cons" icon={BarChart2}>
+          {screenerLoading ? (
+            <div className="text-muted text-sm animate-pulse">Crawling Screener.in + NSE India… (~5 s)</div>
+          ) : screenerData ? (() => {
+            const sc  = screenerData.screener  || {};
+            const nse = screenerData.nse       || {};
+            const hr  = sc.header_ratios       || {};
+            const pc  = sc.pros_cons           || {};
+            const qt  = sc.quarterly           || {};
+            const ap  = sc.annual_pl           || {};
+            const bs  = sc.balance_sheet       || {};
+            const cf  = sc.cash_flow           || {};
+            const sh  = sc.shareholding        || {};
+            const cg  = sc.compounded_growth   || {};
+            const eps = sc.annual_eps          || [];
+            const nq  = nse.quote              || {};
+            const ti  = nse.trade_info         || {};
+            const ca  = nse.corporate_actions  || [];
+            const fr  = nse.financial_results  || [];
+            const bm  = nse.board_meetings     || [];
+            const idx = nse.index_membership   || [];
+
+            // Helper: render a generic table from {periods, rows}
+            const DataTable = ({ data, title, maxCols = 8 }) => {
+              if (!data?.periods?.length || !data?.rows) return null;
+              const periods = data.periods.slice(0, maxCols);
+              const rows = Object.entries(data.rows).slice(0, 20);
+              if (!rows.length) return null;
+              return (
+                <div>
+                  {title && <div className="text-muted text-[10px] uppercase tracking-wider mb-2">{title}</div>}
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-xs min-w-[500px]">
+                      <thead>
+                        <tr className="border-b border-border bg-surface">
+                          <th className="text-left px-3 py-2 text-muted font-medium sticky left-0 bg-surface min-w-[130px]">Metric</th>
+                          {periods.map(p => <th key={p} className="text-right px-2 py-2 text-muted font-medium whitespace-nowrap">{p}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map(([name, vals]) => {
+                          const vSlice = vals.slice(0, maxCols);
+                          if (vSlice.every(v => v == null)) return null;
+                          const isProfit = name.toLowerCase().includes('profit') || name.toLowerCase().includes('pat') || name.toLowerCase().includes('net');
+                          return (
+                            <tr key={name} className="border-b border-border/40 hover:bg-white/[0.02]">
+                              <td className="px-3 py-2 text-slate-300 sticky left-0 bg-[#0f1117] whitespace-nowrap">{name}</td>
+                              {vSlice.map((v, i) => (
+                                <td key={i} className={`px-2 py-2 text-right font-mono ${v != null && v < 0 && isProfit ? 'text-loss' : v != null && v > 0 && isProfit ? 'text-profit' : 'text-slate-200'}`}>
+                                  {v != null ? v.toLocaleString('en-IN') : '—'}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        }).filter(Boolean)}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="text-muted text-[10px] mt-1">Values in ₹ Cr · Source: Screener.in</div>
+                </div>
+              );
+            };
+
+            return (
+              <div className="space-y-6">
+                {/* NSE Live Quote Banner */}
+                {nq.ltp && (
+                  <div className="bg-surface rounded-lg border border-border p-4">
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">NSE Live Quote</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {[
+                        { k: 'LTP', v: nq.ltp != null ? `₹${nq.ltp?.toLocaleString('en-IN')}` : null, c: (nq.change_pct||0) >= 0 ? 'text-profit' : 'text-loss' },
+                        { k: 'Change', v: nq.change_pct != null ? `${nq.change_pct > 0 ? '+' : ''}${nq.change_pct}%` : null, c: (nq.change_pct||0) >= 0 ? 'text-profit' : 'text-loss' },
+                        { k: 'VWAP', v: nq.vwap != null ? `₹${nq.vwap}` : null, c: 'text-slate-200' },
+                        { k: 'Day Range', v: nq.day_low && nq.day_high ? `₹${nq.day_low} – ₹${nq.day_high}` : null, c: 'text-slate-200' },
+                        { k: '52W High', v: nq.week52_high != null ? `₹${nq.week52_high}` : null, c: 'text-profit' },
+                        { k: '52W Low', v: nq.week52_low != null ? `₹${nq.week52_low}` : null, c: 'text-loss' },
+                        { k: 'Upper Circuit', v: nq.upper_circuit != null ? `₹${nq.upper_circuit}` : null, c: 'text-amber-400' },
+                        { k: 'Lower Circuit', v: nq.lower_circuit != null ? `₹${nq.lower_circuit}` : null, c: 'text-amber-400' },
+                        { k: 'Face Value', v: nq.face_value != null ? `₹${nq.face_value}` : null, c: 'text-slate-200' },
+                        { k: 'Lot Size', v: nq.market_lot, c: 'text-slate-200' },
+                        { k: 'Vol (today)', v: nq.total_traded_qty != null ? nq.total_traded_qty.toLocaleString('en-IN') : null, c: 'text-slate-200' },
+                        { k: 'Traded Val', v: nq.total_traded_val != null ? `₹${nq.total_traded_val.toLocaleString('en-IN')} Cr` : null, c: 'text-slate-200' },
+                      ].filter(x => x.v != null).map(({ k, v, c }) => (
+                        <div key={k} className="bg-[#0f1117] rounded border border-border/50 p-2">
+                          <div className="text-muted text-[10px]">{k}</div>
+                          <div className={`font-mono text-sm font-semibold mt-0.5 ${c}`}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {idx.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <span className="text-muted text-[10px]">Index member:</span>
+                        {idx.slice(0,6).map(i => (
+                          <span key={i} className="text-[10px] text-cyan bg-cyan/10 border border-cyan/20 px-2 py-0.5 rounded">{i}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Delivery % trend */}
+                {ti.delivery_last5?.length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Delivery % (last 5 sessions) — NSE</div>
+                    <div className="grid grid-cols-5 gap-2">
+                      {ti.delivery_last5.map((d, i) => (
+                        <div key={i} className="bg-surface rounded border border-border p-2 text-center">
+                          <div className="text-muted text-[10px] truncate">{d.date?.slice(0,6) || `Day-${i+1}`}</div>
+                          <div className={`font-mono text-sm font-bold mt-0.5 ${(d.delivery_pct||0) > 50 ? 'text-profit' : (d.delivery_pct||0) > 30 ? 'text-amber-400' : 'text-loss'}`}>
+                            {d.delivery_pct != null ? `${d.delivery_pct}%` : '—'}
+                          </div>
+                          <div className="text-muted text-[9px]">{d.qty != null ? (d.qty/1e5).toFixed(1)+'L' : ''}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {ti.delivery_pct_avg != null && (
+                      <div className="text-muted text-[11px] mt-1">5-day avg delivery: <span className={`font-semibold ${ti.delivery_pct_avg > 50 ? 'text-profit' : 'text-amber-400'}`}>{ti.delivery_pct_avg}%</span></div>
+                    )}
+                  </div>
+                )}
+
+                {/* Screener Key Ratios */}
+                {Object.keys(hr).length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Key Ratios · Screener.in</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {[
+                        { k: 'Mkt Cap', v: hr.market_cap_cr != null ? `₹${hr.market_cap_cr?.toLocaleString('en-IN')} Cr` : null, c: 'text-slate-200' },
+                        { k: 'Current Price', v: hr.current_price != null ? `₹${hr.current_price}` : null, c: 'text-slate-200' },
+                        { k: 'PE', v: hr.pe_ratio != null ? `${hr.pe_ratio}×` : null, c: hr.pe_ratio > 40 ? 'text-amber-400' : 'text-profit' },
+                        { k: 'PB', v: hr.pb_ratio != null ? `${hr.pb_ratio}×` : null, c: 'text-slate-200' },
+                        { k: 'ROE', v: hr.roe != null ? `${hr.roe}%` : null, c: hr.roe > 15 ? 'text-profit' : 'text-amber-400' },
+                        { k: 'ROCE', v: hr.roce != null ? `${hr.roce}%` : null, c: hr.roce > 15 ? 'text-profit' : 'text-amber-400' },
+                        { k: 'Book Value', v: hr.book_value != null ? `₹${hr.book_value}` : null, c: 'text-slate-200' },
+                        { k: 'Div Yield', v: hr.dividend_yield != null ? `${hr.dividend_yield}%` : null, c: 'text-cyan' },
+                        { k: '52W High', v: hr.high_52w != null ? `₹${hr.high_52w}` : null, c: 'text-profit' },
+                        { k: '52W Low', v: hr.low_52w != null ? `₹${hr.low_52w}` : null, c: 'text-loss' },
+                        { k: 'Face Value', v: hr.face_value != null ? `₹${hr.face_value}` : null, c: 'text-slate-200' },
+                      ].filter(x => x.v != null).map(({ k, v, c }) => (
+                        <div key={k} className="bg-surface rounded border border-border/50 p-2">
+                          <div className="text-muted text-[10px]">{k}</div>
+                          <div className={`font-mono text-sm font-semibold mt-0.5 ${c}`}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Pros & Cons */}
+                {(pc.pros?.length > 0 || pc.cons?.length > 0) && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {pc.pros?.length > 0 && (
+                      <div className="bg-profit/5 border border-profit/20 rounded-lg p-4">
+                        <div className="text-profit text-xs font-semibold mb-2">✅ Pros</div>
+                        <ul className="space-y-1.5">
+                          {pc.pros.map((p, i) => <li key={i} className="text-slate-300 text-xs">• {p}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {pc.cons?.length > 0 && (
+                      <div className="bg-loss/5 border border-loss/20 rounded-lg p-4">
+                        <div className="text-loss text-xs font-semibold mb-2">⚠️ Cons</div>
+                        <ul className="space-y-1.5">
+                          {pc.cons.map((c, i) => <li key={i} className="text-slate-300 text-xs">• {c}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Compounded Growth Rates */}
+                {Object.keys(cg).length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Compounded Growth Rates</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {Object.entries(cg).map(([k, v]) => (
+                        <div key={k} className="bg-surface rounded border border-border/50 p-2">
+                          <div className="text-muted text-[10px] capitalize">{k}</div>
+                          <div className={`font-mono text-sm font-semibold mt-0.5 ${v > 15 ? 'text-profit' : v > 0 ? 'text-amber-400' : 'text-loss'}`}>{v}%</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Quarterly Results */}
+                <DataTable data={qt} title="Quarterly Results (₹ Cr)" maxCols={8} />
+
+                {/* Annual P&L */}
+                <DataTable data={ap} title="Annual P&L (₹ Cr)" maxCols={10} />
+
+                {/* Balance Sheet */}
+                <DataTable data={bs} title="Balance Sheet (₹ Cr)" maxCols={10} />
+
+                {/* Cash Flow */}
+                <DataTable data={cf} title="Cash Flow (₹ Cr)" maxCols={10} />
+
+                {/* Shareholding Pattern Trend */}
+                {sh.shareholding_trend && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Shareholding Pattern Trend</div>
+                    <div className="overflow-x-auto rounded-lg border border-border">
+                      <table className="w-full text-xs min-w-[400px]">
+                        <thead>
+                          <tr className="border-b border-border bg-surface">
+                            <th className="text-left px-3 py-2 text-muted">Holder</th>
+                            {(sh.periods || []).slice(0,8).map(p => (
+                              <th key={p} className="text-right px-2 py-2 text-muted whitespace-nowrap">{p}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(sh.shareholding_trend.rows || {}).map(([name, vals]) => {
+                            const isPromoter = name.toLowerCase().includes('promoter');
+                            const isFII = name.toLowerCase().includes('fii') || name.toLowerCase().includes('foreign');
+                            const c = isPromoter ? 'text-cyan' : isFII ? 'text-violet-400' : 'text-slate-200';
+                            return (
+                              <tr key={name} className="border-b border-border/40 hover:bg-white/[0.02]">
+                                <td className={`px-3 py-2 font-medium ${c}`}>{name}</td>
+                                {vals.slice(0,8).map((v, i) => (
+                                  <td key={i} className={`px-2 py-2 text-right font-mono ${c}`}>
+                                    {v != null ? `${v}%` : '—'}
+                                  </td>
+                                ))}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* NSE Financial Results */}
+                {fr.length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Financial Results — NSE Filings</div>
+                    <div className="overflow-x-auto rounded-lg border border-border">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-border bg-surface">
+                            <th className="text-left px-3 py-2 text-muted">Period</th>
+                            <th className="text-right px-3 py-2 text-muted">Sales ₹Cr</th>
+                            <th className="text-right px-3 py-2 text-muted">Net Profit ₹Cr</th>
+                            <th className="text-right px-3 py-2 text-muted">EPS</th>
+                            <th className="text-left px-3 py-2 text-muted">Type</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {fr.map((r, i) => (
+                            <tr key={i} className="border-b border-border/40 hover:bg-white/[0.02]">
+                              <td className="px-3 py-2 text-slate-300">{r.period}</td>
+                              <td className="px-3 py-2 text-right font-mono text-slate-200">{r.sales != null ? r.sales.toLocaleString('en-IN') : '—'}</td>
+                              <td className={`px-3 py-2 text-right font-mono ${(r.net_profit||0) >= 0 ? 'text-profit' : 'text-loss'}`}>{r.net_profit != null ? r.net_profit.toLocaleString('en-IN') : '—'}</td>
+                              <td className="px-3 py-2 text-right font-mono text-slate-200">{r.eps != null ? r.eps : '—'}</td>
+                              <td className="px-3 py-2 text-muted text-[10px]">{r.result_type}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Corporate Actions */}
+                {ca.length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Corporate Actions — NSE</div>
+                    <div className="divide-y divide-border rounded-lg border border-border overflow-hidden">
+                      {ca.slice(0,10).map((a, i) => (
+                        <div key={i} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02]">
+                          <span className="text-muted text-[11px] w-20 shrink-0">{a.ex_date}</span>
+                          <span className="text-slate-300 text-xs flex-1">{a.purpose}</span>
+                          {a.remarks && <span className="text-muted text-[10px]">{a.remarks}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Board Meetings */}
+                {bm.length > 0 && (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Board Meetings — NSE</div>
+                    <div className="divide-y divide-border rounded-lg border border-border overflow-hidden">
+                      {bm.map((m, i) => (
+                        <div key={i} className="flex items-center gap-3 px-4 py-2 hover:bg-white/[0.02]">
+                          <span className="text-cyan text-[11px] w-24 shrink-0">{m.meeting_date}</span>
+                          <span className="text-slate-300 text-xs">{m.purpose}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Source links */}
+                <div className="flex gap-3 pt-1">
+                  <a href={`https://www.screener.in/company/${display}/`} target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-slate-300 bg-white/5 border border-border px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors">
+                    Screener.in →
+                  </a>
+                  <a href={`https://www.nseindia.com/get-quotes/equity?symbol=${display}`} target="_blank" rel="noopener noreferrer"
+                    className="text-xs text-cyan bg-cyan/5 border border-cyan/20 px-3 py-1.5 rounded-lg hover:bg-cyan/10 transition-colors">
+                    NSE India →
+                  </a>
+                </div>
+              </div>
+            );
+          })() : (
+            <div className="text-muted text-sm">
+              Screener.in data not available.{' '}
+              <a href={`https://www.screener.in/company/${display}/`} target="_blank" rel="noopener noreferrer" className="text-cyan hover:underline">
+                Open Screener.in →
+              </a>
+            </div>
+          )}
+        </DeepTab>
+
         {/* Peers */}
         <DeepTab label="Sector Peers" subtitle="Top-ranked stocks in same sector" icon={Users}>
           {peers?.peers?.length > 0 ? (
@@ -1591,7 +1930,7 @@ export default function StockDetail() {
           <div className="space-y-4">
             {/* F&O Eligibility Status */}
             {(() => {
-              const mcap = fund?.market_cap_cr ?? companyProfile?.market_cap ? companyProfile.market_cap / 1e7 : null;
+              const mcap = fund?.market_cap_cr ?? (companyProfile?.market_cap != null ? companyProfile.market_cap / 1e7 : null);
               const eligible = mcap != null ? mcap > 5000 : null;
               return (
                 <div className={`flex items-start gap-3 p-3 rounded-lg border ${eligible === true ? 'bg-profit/5 border-profit/20' : eligible === false ? 'bg-amber-500/5 border-amber-500/20' : 'bg-white/[0.02] border-border'}`}>
