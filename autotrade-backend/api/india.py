@@ -12,7 +12,7 @@ import time as _time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1146,10 +1146,19 @@ async def get_fundamentals(symbol: str, db: AsyncSession = Depends(get_db)):
     "/fundamentals/refresh",
     summary="Trigger a full fundamental data refresh for all NSE symbols",
 )
-async def refresh_fundamentals(db: AsyncSession = Depends(get_db)):
-    await run_fundamental_update(db)
-    await db.commit()
-    return {"status": "ok", "message": "Fundamental update complete"}
+async def refresh_fundamentals(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fire-and-forget: returns immediately; update runs in the background (~30 min)."""
+    async def _run():
+        from db.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            await run_fundamental_update(session)
+            await session.commit()
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Fundamental update running in background (~30 min). Watch server logs for [fundamental_update] progress."}
 
 
 @router.get(
@@ -1237,6 +1246,37 @@ async def get_financials(symbol: str):
         "balance_sheet": _df_to_rows(balance_df),
         "cashflow":     _df_to_rows(cashflow_df),
     }
+
+
+@router.get(
+    "/screener-deep/{symbol}",
+    summary="Full Screener.in data: quarterly P&L, balance sheet, cash flow, shareholding, pros/cons",
+)
+async def get_screener_deep(symbol: str):
+    """Crawl and parse the complete Screener.in company page.
+
+    Returns quarterly results, annual P&L (10 years), balance sheet, cash flow,
+    compounded growth rates, shareholding trend, pros/cons, key ratios.
+
+    First call may take ~5 s (HTTP + parse). Results are NOT cached server-side —
+    the frontend should cache the response itself.
+    """
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    from engine.screener_deep import fetch_screener_deep
+    from engine.nse_crawler import fetch_nse_deep
+    try:
+        screener, nse = await asyncio.gather(
+            fetch_screener_deep(sym),
+            fetch_nse_deep(sym),
+            return_exceptions=True,
+        )
+        return {
+            "screener": screener if isinstance(screener, dict) else {},
+            "nse":      nse      if isinstance(nse,      dict) else {},
+        }
+    except Exception as exc:
+        logger.warning(f"[screener_deep] {sym}: {exc}")
+        raise HTTPException(status_code=503, detail=f"Data fetch failed: {exc}")
 
 
 @router.get(
