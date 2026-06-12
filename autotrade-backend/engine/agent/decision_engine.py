@@ -399,6 +399,20 @@ async def fetch_hub_candidate(
         strategy="HUB_7FACTOR",
         size_factor=size_factor,
         master_score=master_score,
+        regime=row.regime or regime,  # carry real regime through to Telegram alerts
+        hub_subscores={
+            "technical":   row.technical_score,
+            "news":        row.news_score,
+            "sector":      row.sector_score,
+            "macro":       row.macro_score,
+            "earnings":    row.earnings_score,
+            "fundamental": row.fundamental_score,
+            "options":     row.options_score,
+            "signal":      row.signal,
+            "regime":      row.regime or regime,
+            "reasoning":   row.reasoning or {},
+            "scored_at":   row.scored_at.isoformat(),
+        },
     )
     return candidate
 

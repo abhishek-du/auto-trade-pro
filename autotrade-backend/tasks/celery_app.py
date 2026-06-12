@@ -259,6 +259,13 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_check_token",
         "schedule": crontab(hour=0, minute=35),
     },
+    # Daily 02:30 UTC = 08:00 IST: auto-refresh access token before market open.
+    # Uses ZERODHA_USER_ID + ZERODHA_PASSWORD + ZERODHA_TOTP_SECRET from .env.
+    # On success ZERODHA_ENABLED flips to True in-memory so the ticker can start.
+    "kite-token-refresh-daily": {
+        "task":     "tasks.zerodha_token_refresh",
+        "schedule": crontab(hour=2, minute=30, day_of_week="1-5"),
+    },
     "kite-start-ticker-on-open": {
         "task":     "tasks.kite_start_ticker",
         "schedule": crontab(hour=3, minute=45),

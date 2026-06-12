@@ -768,7 +768,7 @@ async def generate_ai_narrative(
         )
         return narrative, False
 
-    from utils.llm import call_groq_chat
+    from utils.llm import call_llm_chat as call_groq_chat
     text = await call_groq_chat(
         [
             {"role": "system", "content": system},

@@ -17,13 +17,17 @@ router = APIRouter(tags=["Intelligence Hub"])
 
 def _build_factor_explanations(components: dict, reasoning: dict) -> dict:
     """Generate human-readable WHY explanations for each of the 7 Hub factors."""
-    aw          = reasoning.get("active_weights", {})
-    headlines   = reasoning.get("headlines", [])
-    news_tone   = reasoning.get("news_tone", "NEUTRAL")
-    sector_name = reasoning.get("sector_name", "GENERAL")
-    sector_mood = reasoning.get("sector_mood", "NEUTRAL")
-    regime      = reasoning.get("regime", "UNKNOWN")
-    fund_grade  = reasoning.get("fund_grade", "WATCHLIST")
+    aw              = reasoning.get("active_weights", {})
+    headlines       = reasoning.get("headlines", [])
+    news_tone       = reasoning.get("news_tone", "NEUTRAL")
+    news_source     = reasoning.get("news_source", "rss")
+    earnings_source = reasoning.get("earnings_source", "transcript")
+    profit_growth   = reasoning.get("profit_growth_3yr")
+    revenue_growth  = reasoning.get("revenue_growth_3yr")
+    sector_name     = reasoning.get("sector_name", "GENERAL")
+    sector_mood     = reasoning.get("sector_mood", "NEUTRAL")
+    regime          = reasoning.get("regime", "UNKNOWN")
+    fund_grade      = reasoning.get("fund_grade", "WATCHLIST")
 
     TRACKED = ["IT", "Banking", "Pharma", "Auto", "FMCG", "Metals", "Energy", "Infra", "Consumer", "Telecom"]
 
@@ -90,6 +94,33 @@ def _build_factor_explanations(components: dict, reasoning: dict) -> dict:
             "gaps are common for PSUs, small-caps, and stocks with low media coverage."
         )
         news_verdict = "No Coverage"
+    elif news_source in ("growth_proxy", "fundamental_proxy"):
+        pg_str = f"{profit_growth:+.1f}%" if profit_growth is not None else "N/A"
+        rg_str = f"{revenue_growth:+.1f}%" if revenue_growth is not None else "N/A"
+        if n > 15:
+            news_verdict = "Positive (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Consistently growing companies tend to attract positive interest when coverage appears. "
+                f"Score {n:+.0f} is a conservative growth-proxy signal, not a FinBERT news score."
+            )
+        elif n < -10:
+            news_verdict = "Cautious (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Declining profits or revenues suggest caution even without explicit negative news. "
+                f"Score {n:+.0f} is a growth-proxy signal."
+            )
+        else:
+            news_verdict = "Neutral (Growth)"
+            news_detail = (
+                f"No media coverage found — sentiment estimated from 3-year financial growth. "
+                f"Profit CAGR: {pg_str} | Revenue CAGR: {rg_str}. "
+                f"Modest growth suggests neutral market interest. "
+                f"Score {n:+.0f} is a conservative growth-proxy signal."
+            )
     else:
         hl_snippet = f" Latest: \"{headlines[0][:90]}\"" if headlines else ""
         if n > 30:
@@ -194,6 +225,33 @@ def _build_factor_explanations(components: dict, reasoning: dict) -> dict:
             "this is not a negative signal. PSUs and some mid-caps often lack indexed transcripts."
         )
         earn_verdict = "No Transcript"
+    elif earnings_source in ("growth_proxy", "fundamental_proxy"):
+        pg_str = f"{profit_growth:+.1f}%" if profit_growth is not None else "N/A"
+        rg_str = f"{revenue_growth:+.1f}%" if revenue_growth is not None else "N/A"
+        if e >= 25:
+            earn_verdict = "Optimistic (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Strong and consistent growth signals management execution quality. "
+                f"Score {e:+.0f} reflects the growth trajectory, not a management tone call."
+            )
+        elif e >= 0:
+            earn_verdict = "Neutral (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Moderate growth: company is expanding but not at an exceptional pace. "
+                f"Score {e:+.0f}."
+            )
+        else:
+            earn_verdict = "Cautious (Growth)"
+            earn_detail = (
+                f"No earnings transcript — quality inferred from 3-year financial growth. "
+                f"Profit CAGR {pg_str} | Revenue CAGR {rg_str}. "
+                f"Flat or declining profits warrant caution. "
+                f"Score {e:+.0f}."
+            )
     elif e >= 25:
         earn_detail = (
             f"OPTIMISTIC earnings tone (score {e:+.0f}). Management expressed positive guidance "
@@ -502,6 +560,119 @@ async def trigger_cycle():
     except Exception as exc:
         # Fallback: run inline if broker unavailable
         raise HTTPException(503, f"Could not queue cycle: {exc}")
+
+
+@router.post("/rescore/{symbol}")
+async def rescore_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Rescore a single symbol inline (skips Celery — instant result).
+
+    Use when you need the latest score for one symbol without waiting for
+    the full 2000-symbol Hub cycle. Returns the updated score breakdown.
+    """
+    from engine.intelligence_hub import (
+        score_symbol, build_macro_context, build_news_context,
+        build_earnings_context, build_options_context, build_sector_context,
+        MasterContext, PortfolioContext, enrich_news_context_with_tavily,
+    )
+    from db.models import FundamentalData
+    from sqlalchemy import select as _sel
+    from datetime import datetime as _dt
+
+    bare = symbol.replace(".NS", "").replace(".BO", "").upper()
+    sym  = bare + ".NS"
+
+    try:
+        macro    = await build_macro_context(db)
+        news     = await build_news_context(db)
+        earnings = await build_earnings_context(db)
+        options  = await build_options_context(db)
+        sectors  = build_sector_context()
+        portfolio = PortfolioContext(equity=100000, cash=100000)
+
+        # Tavily enrichment for this specific symbol
+        news = await enrich_news_context_with_tavily(news, [sym])
+
+        rows = (await db.execute(
+            _sel(FundamentalData.symbol, FundamentalData.fundamental_score,
+                 FundamentalData.profit_growth_3yr, FundamentalData.revenue_growth_3yr)
+        )).all()
+        fund_by_sym = {r.symbol.replace(".NS", ""): float(r.fundamental_score)
+                       for r in rows if r.fundamental_score is not None}
+        growth_by_sym = {
+            r.symbol.replace(".NS", ""): (
+                float(r.profit_growth_3yr)  if r.profit_growth_3yr  is not None else None,
+                float(r.revenue_growth_3yr) if r.revenue_growth_3yr is not None else None,
+            )
+            for r in rows
+            if r.profit_growth_3yr is not None or r.revenue_growth_3yr is not None
+        }
+        now = _dt.utcnow().isoformat()
+        ctx = MasterContext(
+            built_at=now, bar_time=now, macro=macro, sectors=sectors,
+            news=news, earnings=earnings, options=options, portfolio=portfolio,
+            fundamentals_by_symbol=fund_by_sym, growth_by_symbol=growth_by_sym,
+        )
+
+        # Fetch candles — try 15m, fall back to 1h
+        import pandas as pd
+        from crawler.price_feed import get_latest_candles
+        candles = await get_latest_candles(sym, "15m", 300, db)
+        if not candles or len(candles) < 50:
+            candles = await get_latest_candles(sym, "1h", 300, db)
+        if not candles or len(candles) < 50:
+            candles = await get_latest_candles(sym, "1d", 300, db)
+        if not candles or len(candles) < 20:
+            raise HTTPException(404, f"Insufficient price history for {sym}")
+        candles_sorted = sorted(candles, key=lambda c: c.timestamp)
+        df = pd.DataFrame([{
+            "open": float(c.open), "high": float(c.high),
+            "low":  float(c.low),  "close": float(c.close),
+            "volume": float(c.volume), "timestamp": c.timestamp,
+        } for c in candles_sorted]).set_index("timestamp")
+
+        result = await score_symbol(sym, df, ctx, db)
+        if result is None:
+            raise HTTPException(404, f"Could not score {sym} — no price data in DB")
+
+        # Persist the single score
+        from engine.intelligence_hub import persist_scores
+        await persist_scores([result], _dt.utcnow(), db)
+
+        # Return from the ScoredStock result directly (freshest data)
+        r = result.reasoning
+        return {
+            "symbol":    result.symbol,
+            "rescored":  True,
+            "scored_at": _dt.utcnow().isoformat(),
+            "master_score":   result.master_score,
+            "signal":         result.signal,
+            "regime":         result.regime,
+            "is_blocked":     result.is_blocked,
+            "news_score":     r.get("news"),
+            "earnings_score": r.get("earnings"),
+            "technical_score": r.get("technical"),
+            "fundamental_score": r.get("fundamental"),
+            "sector_score":   r.get("sector"),
+            "macro_score":    r.get("macro"),
+            "options_score":  r.get("options"),
+            "reasoning":      r,
+            "factor_explanations": _build_factor_explanations(
+                {
+                    "technical":   r.get("technical", 0),
+                    "news":        r.get("news", 0),
+                    "sector":      r.get("sector", 0),
+                    "macro":       r.get("macro", 0),
+                    "earnings":    r.get("earnings", 0),
+                    "fundamental": r.get("fundamental", 0),
+                    "options":     r.get("options", 0),
+                },
+                r,
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Rescore failed: {exc}")
 
 
 # ── helper ────────────────────────────────────────────────────────────────────

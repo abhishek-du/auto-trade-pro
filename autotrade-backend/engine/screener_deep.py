@@ -129,21 +129,47 @@ def _parse_header_ratios(soup) -> dict:
 
 def _parse_pros_cons(soup) -> dict:
     """Parse 'Pros' and 'Cons' bullet lists from Screener."""
-    pros, cons = [], []
-    for ul in soup.find_all("ul", class_=lambda c: c and ("pros" in c or "fa-check" in str(c))):
-        pros = [_clean_text(li) for li in ul.find_all("li") if _clean_text(li)]
-    for ul in soup.find_all("ul", class_=lambda c: c and ("cons" in c or "fa-times" in str(c))):
-        cons = [_clean_text(li) for li in ul.find_all("li") if _clean_text(li)]
+    pros: list[str] = []
+    cons: list[str] = []
 
-    # Fallback: look for headings "Pros" / "Cons"
-    if not pros and not cons:
-        for section in soup.find_all("section"):
-            h = section.find(["h2","h3","h4"])
-            heading = _clean_text(h).lower() if h else ""
-            items = [_clean_text(li) for li in section.find_all("li") if _clean_text(li)]
-            if "pros" in heading:
+    # Strategy 1: <div class="pros"> / <div class="cons"> (Screener's main pattern)
+    for tag in ["div", "ul", "section"]:
+        for el in soup.find_all(tag, class_=lambda c: c and "pros" in str(c).lower().split()):
+            items = [_clean_text(li) for li in el.find_all("li") if _clean_text(li)]
+            if items:
                 pros = items
-            elif "cons" in heading:
+                break
+        for el in soup.find_all(tag, class_=lambda c: c and "cons" in str(c).lower().split()):
+            items = [_clean_text(li) for li in el.find_all("li") if _clean_text(li)]
+            if items:
+                cons = items
+                break
+        if pros or cons:
+            break
+
+    # Strategy 2: anchor with id="pros" / id="cons" and a sibling ul
+    if not pros:
+        anchor = soup.find(id="pros") or soup.find("a", attrs={"name": "pros"})
+        if anchor:
+            ul = anchor.find_next("ul")
+            if ul:
+                pros = [_clean_text(li) for li in ul.find_all("li") if _clean_text(li)]
+    if not cons:
+        anchor = soup.find(id="cons") or soup.find("a", attrs={"name": "cons"})
+        if anchor:
+            ul = anchor.find_next("ul")
+            if ul:
+                cons = [_clean_text(li) for li in ul.find_all("li") if _clean_text(li)]
+
+    # Strategy 3: scan every section/div for a "Pros" / "Cons" heading
+    if not pros and not cons:
+        for section in soup.find_all(["section", "div"]):
+            h = section.find(["h2", "h3", "h4", "b", "strong"])
+            heading = (_clean_text(h) or "").lower()
+            items = [_clean_text(li) for li in section.find_all("li") if _clean_text(li)]
+            if "pros" in heading and items and not pros:
+                pros = items
+            elif "cons" in heading and items and not cons:
                 cons = items
 
     return {"pros": pros[:8], "cons": cons[:8]}

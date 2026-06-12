@@ -163,6 +163,7 @@ async def _llm_verdict(
     t1: float,
     research_note: str,
     fund_grade: str,
+    enriched_ctx: dict | None = None,
 ) -> tuple[bool, str]:
     """Ask LLM: CONFIRM or VETO this trade? Returns (veto, reason)."""
     system = (
@@ -170,11 +171,18 @@ async def _llm_verdict(
         "Review the trade proposal and respond EXACTLY with one of:\n"
         "  CONFIRM\n"
         "  VETO: <one sentence reason>\n"
-        "Base your VETO only on clear fundamental or news red flags — "
-        "never veto based on price momentum alone."
+        "Veto only on clear red flags: high promoter pledging, declining earnings trend, "
+        "fraud/SEBI/NCLT news, very high debt. Never veto on price momentum alone."
     )
 
     rr = round(abs(t1 - entry) / abs(entry - stop), 2) if abs(entry - stop) > 0 else 0
+
+    # Build rich context block from enriched_ctx
+    ctx_block = ""
+    if enriched_ctx:
+        from engine.stock_enricher import format_for_llm
+        ctx_block = format_for_llm(enriched_ctx, symbol)
+
     prompt = (
         f"Trade Proposal\n"
         f"  Symbol : {symbol.replace('.NS', '')} (NSE)\n"
@@ -182,7 +190,12 @@ async def _llm_verdict(
         f"  Hub Score : {score:+.0f}  |  Regime : {regime}\n"
         f"  Entry ₹{entry:.2f}  SL ₹{stop:.2f}  T1 ₹{t1:.2f}  R:R {rr:.1f}x\n"
         f"  Fundamental Grade : {fund_grade}\n"
-        f"  Latest Web Research : {research_note or 'No news found in past 7 days.'}\n\n"
+    )
+    if ctx_block:
+        prompt += f"\n{ctx_block}\n"
+    news = enriched_ctx.get("tavily_news", research_note) if enriched_ctx else research_note
+    prompt += (
+        f"\n  Latest Web Research : {news or 'No news found in past 7 days.'}\n\n"
         f"Should I place this {action} trade? CONFIRM or VETO?"
     )
 
@@ -257,18 +270,42 @@ async def run_pre_trade_research(
 
     source_parts: list[str] = []
 
-    # Layer 1: Tavily
+    # Layer 1: Tavily news + Screener/yfinance enrichment in parallel
+    from engine.stock_enricher import get_enriched_context
     research_note, sentiment, hard_veto = "", 0.0, False
+    enriched_ctx: dict = {}
+
     if tavily_ok:
-        research_note, sentiment, hard_veto = await _tavily_research(symbol)
-        source_parts.append("tavily")
+        # Run Tavily news AND multi-source enrichment concurrently
+        tavily_task   = _tavily_research(symbol)
+        enricher_task = get_enriched_context(symbol)
+        (research_note, sentiment, hard_veto), enriched_ctx = await asyncio.gather(
+            tavily_task, enricher_task
+        )
+        source_parts.append("tavily+screener")
+    else:
+        # No Tavily — still fetch Screener + yfinance context (free)
+        enriched_ctx = await get_enriched_context(symbol)
+        source_parts.append("screener")
+
+    # Promoter-pledging hard veto (independent of LLM — data-driven)
+    pledged = (enriched_ctx or {}).get("promoter_pledged") or 0.0
+    if pledged > 50:
+        result = _veto(
+            reason=f"High promoter pledging {pledged:.0f}% — elevated stock-crash risk",
+            note=f"Promoter pledging: {pledged:.0f}%",
+            source="+".join(source_parts),
+        )
+        _store_cache(symbol, result)
+        logger.warning(f"[pre_trade/{symbol}] HARD VETO (pledging {pledged:.0f}%)")
+        return result
 
     # Hard veto from web keywords — no need to ask LLM
     if hard_veto:
         result = _veto(
             reason=f"Red-flag keyword detected in latest web search for {symbol.replace('.NS','')}",
             note=research_note,
-            source="+".join(source_parts) or "tavily",
+            source="+".join(source_parts),
         )
         _store_cache(symbol, result)
         logger.warning(
@@ -276,12 +313,13 @@ async def run_pre_trade_research(
         )
         return result
 
-    # Layer 2: LLM verdict
+    # Layer 2: LLM verdict with full enriched context
     veto, reason = False, ""
     if llm_ok:
         veto, reason = await _llm_verdict(
             symbol, action, score, regime, entry, stop, t1,
             research_note, fund_grade,
+            enriched_ctx=enriched_ctx,
         )
         source_parts.append("llm")
 

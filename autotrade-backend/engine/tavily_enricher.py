@@ -226,54 +226,75 @@ async def research_stock_for_alert(
     t1: float,
     t2: float,
 ) -> str:
-    """Use Tavily Search to build a concise research note for a shortlist Telegram alert.
+    """Multi-source research note for shortlist Telegram alerts.
 
-    Returns a formatted 3–4 sentence analysis string.
-    Cost: 2 credits (advanced search).
+    Runs in parallel:
+      1. Tavily advanced search (news + analysis)         — 2 credits
+      2. Screener.in + yfinance enricher (pros/cons etc.) — 0 credits
+
+    Returns a formatted research note string.
     """
-    client = _client()
-    if client is None:
-        return ""
-
     bare = symbol.replace(".NS", "")
 
-    # Get full company name for a more precise query (avoids ticker ambiguity)
+    # Run Tavily search and Screener enricher concurrently
     loop = asyncio.get_running_loop()
     company_name = await loop.run_in_executor(None, lambda: _get_company_name(symbol))
-    search_term = company_name if company_name and len(company_name) > 4 else bare
-    query = f'"{search_term}" NSE India stock analysis news 2025 outlook buy sell'
 
-    try:
-        resp = await loop.run_in_executor(
-            None,
-            lambda: client.search(
-                query,
-                search_depth="advanced",
-                topic="finance",
-                max_results=4,
-                include_answer=True,
-                time_range="month",
-                country="india",
-                chunks_per_source=2,
-            ),
-        )
-        # Use the Tavily-generated answer if available
-        answer = (resp.get("answer") or "").strip()
-        if answer and len(answer) > 50:
-            sentences = re.split(r"(?<=[.!?])\s+", answer)
-            note = " ".join(sentences[:4])
-        else:
+    async def _tavily_part() -> str:
+        client = _client()
+        if client is None:
+            return ""
+        search_term = company_name if company_name and len(company_name) > 4 else bare
+        query = f'"{search_term}" NSE India stock analysis news 2026 outlook'
+        try:
+            resp = await loop.run_in_executor(
+                None,
+                lambda: client.search(
+                    query,
+                    search_depth="advanced",
+                    topic="finance",
+                    max_results=5,
+                    include_answer=True,
+                    time_range="month",
+                    country="india",
+                    chunks_per_source=2,
+                ),
+            )
+            answer  = (resp.get("answer") or "").strip()
             results = resp.get("results") or []
+            if answer and len(answer) > 50:
+                sentences = re.split(r"(?<=[.!?])\s+", answer)
+                return " ".join(sentences[:4])
             snippets = [r.get("content", "")[:200] for r in results[:3] if r.get("content")]
-            note = " | ".join(snippets)[:500]
+            return " | ".join(snippets)[:500]
+        except Exception as exc:
+            logger.debug(f"[tavily/research] {bare}: {exc}")
+            return ""
 
-        if note:
-            logger.debug(f"[tavily/research] {bare}: {len(note)} chars (query: {search_term})")
-        return note
+    async def _enricher_part() -> str:
+        try:
+            from engine.stock_enricher import get_enriched_context, format_for_llm
+            ctx = await get_enriched_context(symbol)
+            if not ctx:
+                return ""
+            return format_for_llm(ctx, symbol)
+        except Exception:
+            return ""
 
-    except Exception as exc:
-        logger.debug(f"[tavily/research] {bare}: {exc}")
-        return ""
+    tavily_note, screener_note = await asyncio.gather(
+        _tavily_part(), _enricher_part()
+    )
+
+    parts: list[str] = []
+    if screener_note:
+        parts.append(screener_note)
+    if tavily_note:
+        parts.append(f"News: {tavily_note}")
+
+    note = "\n".join(parts)
+    if note:
+        logger.debug(f"[tavily/research] {bare}: {len(note)} chars total")
+    return note
 
 
 # ── Tavily Extract / Crawl ────────────────────────────────────────────────────

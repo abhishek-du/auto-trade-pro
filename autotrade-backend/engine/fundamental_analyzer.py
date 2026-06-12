@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import FundamentalData
@@ -488,12 +489,24 @@ async def run_fundamental_update(session: AsyncSession) -> None:
     """
     from utils.config import settings
 
-    symbols = settings.nse_symbols + settings.nse_mid_symbols
+    # Primary: hub universe (all top-traded NSE stocks the agent actually scores).
+    # Fallback: watchlist large + mid caps when hub_universe table is empty.
+    try:
+        from sqlalchemy import text as _text
+        r = await session.execute(_text("SELECT symbol FROM hub_universe ORDER BY rank LIMIT 800"))
+        hub_syms = [row[0] for row in r.fetchall()]
+    except Exception:
+        hub_syms = []
+
+    if hub_syms:
+        symbols = hub_syms  # already have .NS suffix
+    else:
+        symbols = settings.nse_symbols + settings.nse_mid_symbols
     loop    = asyncio.get_event_loop()
 
     logger.info(f"[fundamental_update] Starting for {len(symbols)} symbols")
 
-    for symbol in symbols:
+    for idx, symbol in enumerate(symbols, start=1):
         bare = symbol.replace(".NS", "")
 
         # ── Fetch yfinance (sync → executor) ─────────────────────────────────
@@ -519,58 +532,60 @@ async def run_fundamental_update(session: AsyncSession) -> None:
             continue
 
         score = calculate_fundamental_score(merged)
-
-        # ── Upsert FundamentalData ─────────────────────────────────────────────
-        existing = (await session.execute(
-            select(FundamentalData).where(FundamentalData.symbol == symbol)
-        )).scalar_one_or_none()
-
         now = datetime.datetime.utcnow()
-        if existing:
-            existing.company_name        = merged.get("company_name", existing.company_name)
-            existing.pe_ratio            = merged.get("pe_ratio",            existing.pe_ratio)
-            existing.pb_ratio            = merged.get("pb_ratio",            existing.pb_ratio)
-            existing.roe                 = merged.get("roe",                 existing.roe)
-            existing.roce                = merged.get("roce",                existing.roce)
-            existing.debt_to_equity      = merged.get("debt_to_equity",      existing.debt_to_equity)
-            existing.current_ratio       = merged.get("current_ratio",       existing.current_ratio)
-            existing.revenue_growth_3yr  = merged.get("revenue_growth_3yr",  existing.revenue_growth_3yr)
-            existing.profit_growth_3yr   = merged.get("profit_growth_3yr",   existing.profit_growth_3yr)
-            existing.promoter_holding    = merged.get("promoter_holding",    existing.promoter_holding)
-            existing.fii_holding         = merged.get("fii_holding",         existing.fii_holding)
-            existing.pledged_pct         = merged.get("pledged_pct",         existing.pledged_pct)
-            existing.market_cap_cr       = merged.get("market_cap_cr",       existing.market_cap_cr)
-            existing.dividend_yield      = merged.get("dividend_yield",      existing.dividend_yield)
-            existing.fundamental_score   = score
-            existing.last_updated        = now
-        else:
-            session.add(FundamentalData(
-                symbol=symbol,
-                company_name=merged.get("company_name", ""),
-                pe_ratio=merged.get("pe_ratio"),
-                pb_ratio=merged.get("pb_ratio"),
-                roe=merged.get("roe"),
-                roce=merged.get("roce"),
-                debt_to_equity=merged.get("debt_to_equity"),
-                current_ratio=merged.get("current_ratio"),
-                revenue_growth_3yr=merged.get("revenue_growth_3yr"),
-                profit_growth_3yr=merged.get("profit_growth_3yr"),
-                promoter_holding=merged.get("promoter_holding"),
-                fii_holding=merged.get("fii_holding"),
-                pledged_pct=merged.get("pledged_pct"),
-                market_cap_cr=merged.get("market_cap_cr"),
-                dividend_yield=merged.get("dividend_yield"),
-                fundamental_score=score,
-                last_updated=now,
-            ))
 
-        await session.flush()
+        # ── True upsert — safe to re-run without duplicate key errors ──────────
+        stmt = pg_insert(FundamentalData).values(
+            symbol=symbol,
+            company_name=merged.get("company_name", ""),
+            pe_ratio=merged.get("pe_ratio"),
+            pb_ratio=merged.get("pb_ratio"),
+            roe=merged.get("roe"),
+            roce=merged.get("roce"),
+            debt_to_equity=merged.get("debt_to_equity"),
+            current_ratio=merged.get("current_ratio"),
+            revenue_growth_3yr=merged.get("revenue_growth_3yr"),
+            profit_growth_3yr=merged.get("profit_growth_3yr"),
+            promoter_holding=merged.get("promoter_holding"),
+            fii_holding=merged.get("fii_holding"),
+            pledged_pct=merged.get("pledged_pct"),
+            market_cap_cr=merged.get("market_cap_cr"),
+            dividend_yield=merged.get("dividend_yield"),
+            fundamental_score=score,
+            last_updated=now,
+        ).on_conflict_do_update(
+            index_elements=["symbol"],
+            set_={
+                "company_name":       merged.get("company_name", ""),
+                "pe_ratio":           merged.get("pe_ratio"),
+                "pb_ratio":           merged.get("pb_ratio"),
+                "roe":                merged.get("roe"),
+                "roce":               merged.get("roce"),
+                "debt_to_equity":     merged.get("debt_to_equity"),
+                "current_ratio":      merged.get("current_ratio"),
+                "revenue_growth_3yr": merged.get("revenue_growth_3yr"),
+                "profit_growth_3yr":  merged.get("profit_growth_3yr"),
+                "promoter_holding":   merged.get("promoter_holding"),
+                "fii_holding":        merged.get("fii_holding"),
+                "pledged_pct":        merged.get("pledged_pct"),
+                "market_cap_cr":      merged.get("market_cap_cr"),
+                "dividend_yield":     merged.get("dividend_yield"),
+                "fundamental_score":  score,
+                "last_updated":       now,
+            },
+        )
+        await session.execute(stmt)
         logger.info(
-            f"[fundamental_update] {symbol} ({merged.get('company_name', '')[:30]})  "
+            f"[fundamental_update] [{idx}/{len(symbols)}] {symbol} ({merged.get('company_name', '')[:30]})  "
             f"score={score:.1f}  pe={merged.get('pe_ratio')}  "
             f"roe={merged.get('roe')}%  roce={merged.get('roce')}%  "
             f"promoter={merged.get('promoter_holding')}%  pledged={merged.get('pledged_pct')}%"
         )
+
+        # Commit every 50 symbols so progress survives a timeout or crash
+        if idx % 50 == 0:
+            await session.commit()
+            logger.info(f"[fundamental_update] checkpoint committed ({idx}/{len(symbols)})")
 
     logger.info("[fundamental_update] Complete")
 

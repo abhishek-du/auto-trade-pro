@@ -493,7 +493,7 @@ async def _india_trade_loop():
                 risk_reward_ratio=2.0,
                 patterns_detected=[],
                 reasoning_points=[why],
-                regime=c["hub_subscores"].get("regime", "UNKNOWN") if c.get("hub_subscores") else "UNKNOWN",
+                regime=c["hub_subscores"].get("regime", "") if c.get("hub_subscores") else "",
                 timeframe="1d",
                 hub_subscores=c.get("hub_subscores", {}),
             ))
@@ -555,7 +555,7 @@ async def _india_trade_loop():
                         hub=hub_dict or None,
                         reasoning=raw_reason,
                         strategy=getattr(signal, "strategy", "HUB_SIGNAL"),
-                        regime=getattr(signal, "regime", "UNKNOWN"),
+                        regime=getattr(signal, "regime", "") or hub_dict.get("regime", ""),
                     )
                     signal.reasoning_points = [expert]
                 except Exception:
@@ -590,11 +590,11 @@ async def _india_trade_loop():
                         symbol=sig.symbol,
                         action=sig.action,
                         score=sig.final_score,
-                        regime=getattr(sig, "regime", "UNKNOWN"),
+                        regime=getattr(sig, "regime", "") or (getattr(sig, "hub_subscores", {}) or {}).get("regime", ""),
                         entry=sig.entry_price,
                         stop=sig.stop_loss or 0.0,
                         t1=sig.take_profit or 0.0,
-                        fund_grade=str(getattr(sig, "fundamental_grade", "UNKNOWN")),
+                        fund_grade=str(getattr(sig, "fundamental_grade", "") or ""),
                     ),
                     timeout=8.0,
                 )
@@ -1452,6 +1452,34 @@ def fetch_earnings_transcripts_task():
 
     asyncio.run(_run())
     return {"status": "done"}
+
+
+@celery_app.task(name="tasks.zerodha_token_refresh")
+def zerodha_token_refresh_task():
+    """Auto-refresh Zerodha access token daily at 08:00 IST (02:30 UTC).
+
+    Drives the full OAuth flow headlessly: password login → TOTP → request_token
+    → access_token exchange. On success, ZERODHA_ENABLED flips to True in
+    memory so the ticker start task that fires at 09:15 IST will start live feeds.
+    """
+    try:
+        from scripts.refresh_zerodha_token import main as _refresh
+        _refresh(backend="http://localhost:8000")
+        logger.info("[zerodha_token_refresh] Token refreshed successfully")
+        # If market is already open (e.g. task ran late), kick the ticker now
+        # rather than waiting for the 09:15 beat slot.
+        from crawler.india_price_feed import is_nse_market_open
+        from crawler.zerodha_ticker import is_ticker_running, start_kite_ticker
+        if is_nse_market_open() and not is_ticker_running():
+            start_kite_ticker()
+            logger.info("[zerodha_token_refresh] Ticker started immediately after token refresh")
+        return {"status": "ok"}
+    except SystemExit as exc:
+        logger.error(f"[zerodha_token_refresh] Token refresh failed (exit {exc.code})")
+        return {"status": "failed", "error": str(exc)}
+    except Exception as exc:
+        logger.error(f"[zerodha_token_refresh] Unexpected error: {exc}")
+        return {"status": "error", "error": str(exc)}
 
 
 @celery_app.task(name="tasks.kite_start_ticker")

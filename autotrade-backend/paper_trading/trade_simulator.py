@@ -471,11 +471,14 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                       else "STOP_LOSS" if hit_sl else "TAKE_PROFIT")
             closed_trade = await close_paper_trade(pos, price, reason, session)
             auto_closed.append({
-                "trade_id":   closed_trade.id,
-                "symbol":     closed_trade.symbol,
-                "reason":     reason,
-                "exit_price": price,
-                "pnl":        closed_trade.pnl,
+                "trade_id":    closed_trade.id,
+                "symbol":      closed_trade.symbol,
+                "reason":      reason,
+                "exit_price":  price,
+                "pnl":         closed_trade.pnl,
+                "entry_price": closed_trade.entry_price,
+                "size_units":  closed_trade.size_units,
+                "direction":   pos.direction.value,
             })
             continue
 
