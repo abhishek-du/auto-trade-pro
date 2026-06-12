@@ -552,6 +552,56 @@ async def _india_trade_loop():
             await _send_loop_shortlist_alert(sig)
             _alerted_count += 1
 
+        # Step 4d: pre-trade research gate — run Tavily web search + LLM verdict
+        # concurrently for all BUY signals in the pool, then remove any vetoed ones.
+        # 8-second hard timeout per symbol; failures default to ALLOW so research
+        # never blocks trade execution.
+        buy_signals = [s for s in level_pool if s.action == "BUY"]
+        if buy_signals:
+            from engine.pre_trade_research import run_pre_trade_research
+            research_tasks = [
+                asyncio.wait_for(
+                    run_pre_trade_research(
+                        symbol=sig.symbol,
+                        action=sig.action,
+                        score=sig.final_score,
+                        regime=getattr(sig, "regime", "UNKNOWN"),
+                        entry=sig.entry_price,
+                        stop=sig.stop_loss or 0.0,
+                        t1=sig.take_profit or 0.0,
+                        fund_grade=str(getattr(sig, "fundamental_grade", "UNKNOWN")),
+                    ),
+                    timeout=8.0,
+                )
+                for sig in buy_signals
+            ]
+            research_results = await asyncio.gather(*research_tasks, return_exceptions=True)
+            vetoed_syms: list[str] = []
+            for sig, res in zip(buy_signals, research_results):
+                if isinstance(res, Exception):
+                    logger.debug(f"[india_trade_loop] pre_trade research error for {sig.symbol}: {res}")
+                    continue
+                if res.get("veto"):
+                    vetoed_syms.append(sig.symbol)
+                    logger.warning(
+                        f"[india_trade_loop] PRE-TRADE VETO {sig.symbol}: {res['veto_reason']}"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, sig.symbol, sig,
+                        rejected=True,
+                        reject_reason=f"[pre-trade research] {res['veto_reason']}",
+                    )
+                else:
+                    note = res.get("research_note", "")
+                    if note:
+                        sig.reasoning_points.append(f"[web] {note[:300]}")
+            if vetoed_syms:
+                level_pool = [s for s in level_pool if s.symbol not in vetoed_syms]
+                logger.info(
+                    f"[india_trade_loop] {len(vetoed_syms)} signal(s) vetoed by research gate: "
+                    + ", ".join(vetoed_syms)
+                )
+
         # Step 5: current wallet state
         summary        = await VirtualWallet.get_summary(session)
         balance        = summary["balance"]
