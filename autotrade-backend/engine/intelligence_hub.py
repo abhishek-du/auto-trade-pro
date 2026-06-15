@@ -133,6 +133,29 @@ class PortfolioContext:
 
 
 @dataclass
+class EventContext:
+    """Upcoming market calendar events that affect agent risk decisions."""
+    # Symbols with earnings results due within 5 trading days → pre-earnings caution
+    earnings_in_5d:   dict = field(default_factory=dict)   # symbol → days_until
+    # True when RBI MPC / Union Budget is within 7 calendar days
+    macro_event_7d:   bool = False
+    macro_event_name: str  = ""
+    # True when current week has F&O expiry (Thursday)
+    fo_expiry_this_week: bool = False
+    # Sectors with active IPOs this week (liquidity drain risk)
+    ipo_drain_sectors: list = field(default_factory=list)
+
+
+@dataclass
+class MFFlowContext:
+    """Sector-level institutional flow signal derived from MF NAV trends."""
+    # sector → bias: +1 = MF inflow (bullish), -1 = MF outflow (bearish), 0 = neutral
+    sector_bias: dict = field(default_factory=dict)
+    # sector → 5-day NAV change % for reasoning display
+    sector_nav_change: dict = field(default_factory=dict)
+
+
+@dataclass
 class MasterContext:
     built_at:  str
     bar_time:  str
@@ -142,6 +165,8 @@ class MasterContext:
     earnings:  EarningsContext
     options:   OptionsContext
     portfolio: PortfolioContext
+    events:    EventContext    = field(default_factory=EventContext)
+    mf_flows:  MFFlowContext   = field(default_factory=MFFlowContext)
     # symbol → fundamental_score (0–100), pre-loaded once from FundamentalData
     # so scoring 500 symbols needs ZERO live fundamental API calls.
     fundamentals_by_symbol: dict = field(default_factory=dict)
@@ -438,6 +463,137 @@ async def build_portfolio_context(agent_portfolio, session: AsyncSession) -> Por
     )
 
 
+async def build_event_context(session: AsyncSession) -> EventContext:
+    """Read upcoming market_events for next 7 days and build caution signals."""
+    from datetime import date as _date, timedelta as _td
+    from db.models import MarketEvent
+    from sqlalchemy import and_
+
+    today   = _date.today()
+    in_7d   = today + _td(days=7)
+    in_5d   = today + _td(days=5)
+
+    try:
+        rows = (await session.execute(
+            select(MarketEvent).where(
+                and_(MarketEvent.event_date >= today, MarketEvent.event_date <= in_7d)
+            ).order_by(MarketEvent.event_date)
+        )).scalars().all()
+    except Exception as exc:
+        logger.debug(f"[hub/events] query failed: {exc}")
+        return EventContext()
+
+    earnings_in_5d: dict[str, int] = {}
+    macro_event_7d = False
+    macro_event_name = ""
+    fo_expiry_this_week = False
+    ipo_drain_sectors: list[str] = []
+
+    _MACRO_EVENT_TYPES = {"RBI_MPC", "BUDGET", "ECONOMIC_REVIEW", "FED_MEETING"}
+    _SECTOR_MAP = {
+        "bank": "Banking", "banking": "Banking",
+        "tech": "IT", "software": "IT", "infosys": "IT",
+        "pharma": "Pharma", "health": "Pharma",
+        "fmcg": "FMCG", "consumer": "FMCG",
+        "auto": "Auto", "automobile": "Auto",
+        "energy": "Energy", "oil": "Energy", "power": "Energy",
+        "metal": "Metals", "steel": "Metals",
+        "infra": "Infra", "realty": "Infra",
+    }
+
+    for ev in rows:
+        etype = (ev.event_type or "").upper()
+        sym   = (ev.symbol or "").upper().replace(".NS", "")
+        days_until = (ev.event_date - today).days
+
+        if etype == "EARNINGS" and sym and days_until <= 5:
+            ns_sym = f"{sym}.NS"
+            earnings_in_5d[ns_sym] = min(earnings_in_5d.get(ns_sym, 99), days_until)
+
+        elif etype in _MACRO_EVENT_TYPES and not macro_event_7d:
+            macro_event_7d   = True
+            macro_event_name = ev.title or etype
+
+        elif etype in ("FO_EXPIRY", "DERIVATIVES_EXPIRY"):
+            fo_expiry_this_week = True
+
+        elif etype == "IPO":
+            meta  = ev.event_metadata or {}
+            name  = (ev.title or "").lower() + " " + (meta.get("sector", "")).lower()
+            for kw, sector in _SECTOR_MAP.items():
+                if kw in name and sector not in ipo_drain_sectors:
+                    ipo_drain_sectors.append(sector)
+
+    logger.debug(
+        f"[hub/events] earnings_5d={len(earnings_in_5d)} macro={macro_event_7d} "
+        f"fo_expiry={fo_expiry_this_week} ipo_sectors={ipo_drain_sectors}"
+    )
+    return EventContext(
+        earnings_in_5d=earnings_in_5d,
+        macro_event_7d=macro_event_7d,
+        macro_event_name=macro_event_name,
+        fo_expiry_this_week=fo_expiry_this_week,
+        ipo_drain_sectors=ipo_drain_sectors,
+    )
+
+
+async def build_mf_flow_context(session: AsyncSession) -> MFFlowContext:
+    """Compute sector-level MF flow signal from recent NAV changes.
+
+    Maps MF scheme categories to equity sectors and returns a bias score
+    per sector based on 5-day NAV momentum. Rising NAVs = institutional
+    retail money flowing in = bullish for that sector.
+    """
+    from db.models import MutualFundNAV
+    from sqlalchemy import func as _func
+
+    _CAT_SECTOR: dict[str, str] = {
+        "banking":        "Banking",   "bank":           "Banking",
+        "financial":      "Banking",   "psu bank":       "Banking",
+        "technology":     "IT",        "tech":           "IT",
+        "information":    "IT",
+        "pharma":         "Pharma",    "healthcare":     "Pharma",
+        "fmcg":           "FMCG",      "consumption":    "FMCG",
+        "auto":           "Auto",      "automobile":     "Auto",
+        "infrastructure": "Infra",     "realty":         "Infra",
+        "energy":         "Energy",    "power":          "Energy",
+        "metal":          "Metals",    "commodities":    "Metals",
+    }
+
+    try:
+        # Get latest NAV and its 5-day change% per scheme, grouped by category
+        rows = (await session.execute(
+            select(
+                MutualFundNAV.category,
+                _func.avg(MutualFundNAV.change_pct).label("avg_change_pct"),
+                _func.count().label("n"),
+            )
+            .where(MutualFundNAV.change_pct != 0.0)
+            .group_by(MutualFundNAV.category)
+        )).all()
+    except Exception as exc:
+        logger.debug(f"[hub/mf_flows] query failed: {exc}")
+        return MFFlowContext()
+
+    sector_changes: dict[str, list[float]] = {}
+    for cat, avg_pct, n in rows:
+        cat_lower = (cat or "").lower()
+        for kw, sector in _CAT_SECTOR.items():
+            if kw in cat_lower:
+                sector_changes.setdefault(sector, []).append(float(avg_pct or 0.0))
+                break
+
+    sector_bias: dict[str, int] = {}
+    sector_nav_change: dict[str, float] = {}
+    for sector, changes in sector_changes.items():
+        avg = sum(changes) / len(changes)
+        sector_nav_change[sector] = round(avg, 3)
+        sector_bias[sector] = 1 if avg > 0.3 else (-1 if avg < -0.3 else 0)
+
+    logger.debug(f"[hub/mf_flows] sector_bias={sector_bias}")
+    return MFFlowContext(sector_bias=sector_bias, sector_nav_change=sector_nav_change)
+
+
 async def build_master_context(
     agent_portfolio,
     session: AsyncSession,
@@ -450,6 +606,8 @@ async def build_master_context(
     earnings  = await build_earnings_context(session)
     options   = await build_options_context(session)
     portfolio = await build_portfolio_context(agent_portfolio, session)
+    events    = await build_event_context(session)
+    mf_flows  = await build_mf_flow_context(session)
     sectors   = build_sector_context()  # sync, cache-only
 
     # Tavily: inject real-time news for small-cap hub symbols with no RSS/DB
@@ -485,6 +643,7 @@ async def build_master_context(
     ctx = MasterContext(
         built_at=now, bar_time=now, macro=macro, sectors=sectors,
         news=news, earnings=earnings, options=options, portfolio=portfolio,
+        events=events, mf_flows=mf_flows,
         fundamentals_by_symbol=fundamentals_by_symbol,
         growth_by_symbol=growth_by_symbol,
     )
@@ -581,15 +740,19 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
 
     # 3. Sector (15%) — GENERAL/unmapped falls back to market breadth bias so
     # every hub symbol always carries a sector signal rather than being zeroed.
+    # MF flow bias augments sector score: sustained NAV inflows to a sector MF
+    # signal institutional retail money moving into that sector (+/- 10 pts).
     sector = _get_sector_for_symbol(symbol)
     if sector in ctx.sectors.sector_biases:
         sector_bias = ctx.sectors.sector_biases[sector]
     else:
         sector_bias = ctx.macro.breadth_bias  # market-wide proxy for unclassified stocks
-    sector_score = max(-50, min(50, sector_bias * 25))
+    mf_sector_adj = ctx.mf_flows.sector_bias.get(sector, 0) * 10  # ±10 from MF flows
+    sector_score = max(-50, min(50, sector_bias * 25 + mf_sector_adj))
 
-    # 4. Macro (10%)
-    macro_score = max(-50, min(50, ctx.macro.total_macro_bias * 12))
+    # 4. Macro (10%) — apply caution if RBI/Budget event within 7 days
+    _macro_caution = -6 if ctx.events.macro_event_7d else 0
+    macro_score = max(-50, min(50, ctx.macro.total_macro_bias * 12 + _macro_caution))
 
     # 5. Earnings (10%) — primary: EarningsCallSummary transcript NLP tone.
     # Fallback: derive tone from FundamentalData 3-year profit/revenue growth so
@@ -685,6 +848,24 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     if symbol in dc.get("losers_to_exit", []):
         is_blocked, blocked_reason = True, "DOCTOR_FLAGGED_PERSISTENT_LOSER"
 
+    # Pre-earnings caution: results due in ≤5 days → score penalty + flag.
+    # We don't hard-block (open positions still need SELL signals), but we
+    # reduce BUY conviction so fresh entries avoid earnings gap risk.
+    _pre_earnings_days: int | None = ctx.events.earnings_in_5d.get(symbol)
+    if _pre_earnings_days is not None:
+        _penalty = 15 if _pre_earnings_days <= 2 else 8
+        master_score -= _penalty
+        if not blocked_reason and _pre_earnings_days <= 2:
+            blocked_reason = f"EARNINGS_DUE_IN_{_pre_earnings_days}D"
+
+    # F&O expiry week: elevated intraday volatility → modest score haircut
+    if ctx.events.fo_expiry_this_week:
+        master_score -= 5
+
+    # IPO sector drain: active IPO in same sector can pull liquidity → minor penalty
+    if sector in ctx.events.ipo_drain_sectors:
+        master_score -= 5
+
     if master_score >= 60:    signal = "STRONG_BUY"
     elif master_score >= 25:  signal = "BUY"
     elif master_score >= -25: signal = "NEUTRAL"
@@ -766,6 +947,17 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         },
         "options_detail": {
             "nifty_bias":   ctx.options.nifty_bias,
+        },
+        "event_detail": {
+            "pre_earnings_days":  _pre_earnings_days,
+            "macro_event_7d":     ctx.events.macro_event_7d,
+            "macro_event_name":   ctx.events.macro_event_name,
+            "fo_expiry_week":     ctx.events.fo_expiry_this_week,
+            "ipo_drain_sector":   sector in ctx.events.ipo_drain_sectors,
+        },
+        "mf_flow_detail": {
+            "sector_bias":       ctx.mf_flows.sector_bias.get(sector, 0),
+            "sector_nav_change": ctx.mf_flows.sector_nav_change.get(sector, 0.0),
         },
     }
 
