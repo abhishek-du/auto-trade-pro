@@ -74,24 +74,19 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
 
     capital_deployed = sum(float(t.qty) * float(t.entry_price) for t in latest.values())
 
-    # Candle prices for unrealised P&L
-    open_syms = list(latest.keys())
+    # Live prices from PRICE_CACHE (refreshed every 15 s) for unrealised P&L.
+    from crawler.live_prices import PRICE_CACHE
     unrealised_pnl = 0.0
-    if open_syms:
-        lq = (
-            select(Candle.symbol, sqlfunc.max(Candle.timestamp).label("max_ts"))
-            .where(Candle.symbol.in_(open_syms)).group_by(Candle.symbol).subquery()
-        )
-        for sym, close in (await db.execute(
-            select(Candle.symbol, Candle.close).join(
-                lq, (Candle.symbol == lq.c.symbol) & (Candle.timestamp == lq.c.max_ts)
-            )
-        )).fetchall():
-            t = latest[sym]
-            if t.side == "BUY":
-                unrealised_pnl += (float(close) - float(t.entry_price)) * float(t.qty)
-            else:
-                unrealised_pnl += (float(t.entry_price) - float(close)) * float(t.qty)
+    for sym, trade in latest.items():
+        cached = PRICE_CACHE.get(sym, {})
+        lp = cached.get("price") or cached.get("ltp")
+        if not lp:
+            continue
+        cur = float(lp)
+        if trade.side == "BUY":
+            unrealised_pnl += (cur - float(trade.entry_price)) * float(trade.qty)
+        else:
+            unrealised_pnl += (float(trade.entry_price) - cur) * float(trade.qty)
 
     db_equity = START_CAPITAL + realised_pnl + unrealised_pnl
     db_cash   = max(0.0, START_CAPITAL + realised_pnl - capital_deployed)
@@ -231,24 +226,22 @@ async def get_trades(
         q = q.where(AgentTrade.exit_ts == None)
     rows = (await db.execute(q)).scalars().all()
 
-    # Batch-fetch latest candle close for all open trades so the UI can
-    # display live P&L without waiting for the agent in-memory portfolio to hydrate.
-    open_syms = list({r.symbol for r in rows if r.exit_price is None})
+    # Use PRICE_CACHE (refreshed every 15 s by live price loop) for unrealised P&L.
+    # Candle DB is stale between bars — PRICE_CACHE always has the latest tick.
+    from crawler.live_prices import PRICE_CACHE, get_price
+
+    open_syms = {r.symbol for r in rows if r.exit_price is None}
     price_map: dict[str, float] = {}
-    if open_syms:
-        from sqlalchemy import func as sqlfunc
-        latest_q = (
-            select(Candle.symbol, sqlfunc.max(Candle.timestamp).label("max_ts"))
-            .where(Candle.symbol.in_(open_syms))
-            .group_by(Candle.symbol)
-            .subquery()
-        )
-        candle_q = select(Candle.symbol, Candle.close).join(
-            latest_q,
-            (Candle.symbol == latest_q.c.symbol) & (Candle.timestamp == latest_q.c.max_ts),
-        )
-        for sym, close in (await db.execute(candle_q)).fetchall():
-            price_map[sym] = close
+    for sym in open_syms:
+        cached = PRICE_CACHE.get(sym, {})
+        lp = cached.get("price") or cached.get("ltp")
+        if lp:
+            price_map[sym] = float(lp)
+        else:
+            # Fallback: hit yfinance fast_info (once per symbol, only if cache miss)
+            live = await get_price(sym)
+            if live:
+                price_map[sym] = float(live)
 
     out = []
     for r in rows:
