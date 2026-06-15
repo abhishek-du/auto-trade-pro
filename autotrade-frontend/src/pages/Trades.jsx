@@ -293,7 +293,7 @@ function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
   // Sum live unrealised P&L directly from positions (updated every 15 s from OpenPosition).
   // agentPortfolio.unrealised_pnl can lag when PRICE_CACHE hasn't refreshed yet.
   const liveUnrealisedPnl = positions.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0);
-  const unrealisedPnl  = liveUnrealisedPnl || agentPortfolio?.unrealised_pnl ?? wallet?.unrealised_pnl ?? 0;
+  const unrealisedPnl  = liveUnrealisedPnl || (agentPortfolio?.unrealised_pnl ?? wallet?.unrealised_pnl ?? 0);
   const totalPnl       = realisedPnl + unrealisedPnl;
   // Use actual equity from the API; fall back to wallet equity so the number is
   // always live and never depends on a hardcoded starting constant.
