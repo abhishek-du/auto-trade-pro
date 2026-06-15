@@ -5,7 +5,7 @@ import {
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale,
+  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale, Layers,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
@@ -26,6 +26,7 @@ export const SECTIONS = [
       { to: '/discover/scanner', label: 'Market Scanner', Icon: Zap },
       { to: '/india',            label: 'India Overview', Icon: Globe },
       { to: '/india/signals',    label: 'NSE Signals',    Icon: Target },
+      { to: '/fno',              label: 'Futures & Options', Icon: Layers },
       { to: '/fundamentals',     label: 'Screener',       Icon: LineChart },
       { to: '/sector-heatmap',   label: 'Sector Heatmap', Icon: LayoutGrid, badge: 'sectorHeatmap' },
       { to: '/mutual-funds',     label: 'Mutual Funds',   Icon: Wallet },

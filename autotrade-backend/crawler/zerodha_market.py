@@ -21,6 +21,7 @@ import httpx
 
 from crawler.zerodha_client import get_kite_client
 from db.models import KiteInstrument
+from utils.config import settings
 from utils.logger import logger
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -119,65 +120,83 @@ def _symbol_to_kite(symbol: str) -> str:
 # ── Instrument token refresh ──────────────────────────────────────────────────
 
 async def refresh_instrument_tokens(session: AsyncSession) -> int:
-    """Download NSE instrument master from Kite and upsert into kite_instruments.
+    """Download the instrument master from Kite and upsert into kite_instruments.
+
+    Syncs NSE (equity), BSE (equity), and NFO (F&O futures + options) segments so
+    the agent can resolve both cash and derivative contracts. The KiteInstrument
+    table already carries expiry/strike/lot_size/instrument_type/segment columns.
 
     Scheduled daily at 08:00 IST so tokens are fresh before market open.
-    Returns number of instruments saved.
+    Returns total number of instruments saved across all exchanges.
     """
     kite = get_kite_client()
     if not kite.access_token:
         logger.warning("[zerodha_market] No access token — skipping instrument refresh")
         return 0
 
-    try:
-        rows = await kite.get_instruments("NSE")
-    except Exception as exc:
-        logger.error(f"[zerodha_market] Instrument download failed: {exc}", exc_info=True)
-        return 0
-
-    # Clear existing NSE rows, then bulk-insert
-    await session.execute(
-        delete(KiteInstrument).where(KiteInstrument.exchange == "NSE")
-    )
+    # NFO is gated behind the F&O master flag so we don't download ~50k F&O rows
+    # unless derivatives are actually enabled.
+    exchanges = ["NSE", "BSE"]
+    if getattr(settings, "ENABLE_FNO", False):
+        exchanges.append("NFO")
 
     now = datetime.datetime.utcnow()
-    batch: list[KiteInstrument] = []
-    for r in rows:
+    total_saved = 0
+
+    for exch in exchanges:
         try:
-            token = int(r.get("instrument_token") or 0)
-            if not token:
-                continue
-            batch.append(KiteInstrument(
-                instrument_token = token,
-                exchange_token   = int(r.get("exchange_token") or 0),
-                tradingsymbol    = str(r.get("tradingsymbol") or ""),
-                name             = str(r.get("name") or ""),
-                last_price       = float(r.get("last_price") or 0.0),
-                expiry           = str(r.get("expiry") or ""),
-                strike           = float(r.get("strike") or 0.0),
-                tick_size        = float(r.get("tick_size") or 0.05),
-                lot_size         = int(float(r.get("lot_size") or 1)),
-                instrument_type  = str(r.get("instrument_type") or "EQ"),
-                segment          = str(r.get("segment") or "NSE"),
-                exchange         = "NSE",
-                refreshed_at     = now,
-            ))
-        except (ValueError, TypeError):
+            rows = await kite.get_instruments(exch)
+        except Exception as exc:
+            logger.error(f"[zerodha_market] {exch} instrument download failed: {exc}", exc_info=True)
             continue
 
-    if batch:
-        session.add_all(batch)
-        await session.flush()
+        # Clear existing rows for this exchange, then bulk-insert
+        await session.execute(
+            delete(KiteInstrument).where(KiteInstrument.exchange == exch)
+        )
 
-        # Update in-memory NSE_TOKENS for EQ instruments
-        for inst in batch:
-            if inst.instrument_type == "EQ":
-                sym = f"{inst.tradingsymbol}.NS"
-                NSE_TOKENS[sym] = inst.instrument_token
-                _TOKEN_TO_SYMBOL[inst.instrument_token] = sym
+        batch: list[KiteInstrument] = []
+        for r in rows:
+            try:
+                token = int(r.get("instrument_token") or 0)
+                if not token:
+                    continue
+                batch.append(KiteInstrument(
+                    instrument_token = token,
+                    exchange_token   = int(r.get("exchange_token") or 0),
+                    tradingsymbol    = str(r.get("tradingsymbol") or ""),
+                    name             = str(r.get("name") or ""),
+                    last_price       = float(r.get("last_price") or 0.0),
+                    expiry           = str(r.get("expiry") or ""),
+                    strike           = float(r.get("strike") or 0.0),
+                    tick_size        = float(r.get("tick_size") or 0.05),
+                    lot_size         = int(float(r.get("lot_size") or 1)),
+                    instrument_type  = str(r.get("instrument_type") or "EQ"),
+                    segment          = str(r.get("segment") or exch),
+                    exchange         = exch,
+                    refreshed_at     = now,
+                ))
+            except (ValueError, TypeError):
+                continue
 
-    logger.info(f"[zerodha_market] Instrument tokens refreshed: {len(batch)} NSE rows")
-    return len(batch)
+        if batch:
+            session.add_all(batch)
+            await session.flush()
+
+            # Update in-memory NSE_TOKENS for cash equity instruments only
+            if exch == "NSE":
+                for inst in batch:
+                    if inst.instrument_type == "EQ":
+                        sym = f"{inst.tradingsymbol}.NS"
+                        NSE_TOKENS[sym] = inst.instrument_token
+                        _TOKEN_TO_SYMBOL[inst.instrument_token] = sym
+
+        total_saved += len(batch)
+        logger.info(f"[zerodha_market] {exch} instruments refreshed: {len(batch)} rows")
+
+    logger.info(f"[zerodha_market] Instrument tokens refreshed: {total_saved} total rows "
+                f"across {exchanges}")
+    return total_saved
 
 
 async def hydrate_tokens_from_db(session: AsyncSession) -> int:

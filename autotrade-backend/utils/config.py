@@ -34,6 +34,22 @@ class Settings(BaseSettings):
         "PIDILITIND", "VOLTAS", "MUTHOOTFIN", "PERSISTENT", "COFORGE",
         "LTTS", "TATAELXSI", "METROPOLIS", "LALPATHLAB", "ASTRAL",
     ]
+    # ── BSE / Sensex watchlists ───────────────────────────────────────────────
+    WATCHLIST_BSE_LARGE_CAP: list[str] = [
+        # Sensex 30 core
+        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR",
+        "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK", "LT", "AXISBANK",
+        "BAJFINANCE", "MARUTI", "TITAN", "SUNPHARMA", "WIPRO", "HCLTECH",
+        "ULTRACEMCO", "NESTLEIND", "M&M", "POWERGRID", "NTPC", "TECHM",
+        "JSWSTEEL", "INDUSINDBK", "TATAMOTORS", "BAJAJFINSV", "TATASTEEL",
+        "ASIANPAINT",
+    ]
+    WATCHLIST_BSE_MID_CAP: list[str] = [
+        # BSE-listed mid/small-caps with good liquidity
+        "CDSL", "BSE", "CAMS", "MFSL", "MOTILALOFS", "HDFCAMC",
+        "ANGELONE", "ICICIGI", "SBICARD", "MANAPPURAM",
+        "FINPIPE", "ELGIEQUIP", "SUPRAJIT", "GREENPANEL", "ORIENTELEC",
+    ]
     WATCHLIST_NIFTY_INDICES: list[str] = ["^NSEI", "^BSESN", "^NSEBANK"]
     WATCHLIST_INDIAN_FOREX: list[str] = ["USDINR=X", "EURINR=X", "GBPINR=X"]
     WATCHLIST_COMMODITIES: list[str] = ["GC=F", "SI=F", "CL=F"]
@@ -148,9 +164,41 @@ class Settings(BaseSettings):
     # F&O shorts come later; this flag is equity cash only.
     EQUITY_SHORT_ENABLED:       bool  = False
 
+    # ── Futures & Options (F&O) ───────────────────────────────────────────────
+    # Master kill-switches. ENABLE_FNO gates NFO instrument sync + analytics.
+    # ENABLE_OPTIONS / ENABLE_FUTURES gate the agent actually paper-trading them.
+    ENABLE_FNO:                 bool  = False
+    ENABLE_OPTIONS:             bool  = False
+    ENABLE_FUTURES:             bool  = False
+    # Index underlyings the F&O engine analyses/trades (comma-separated).
+    FNO_INDEX_UNIVERSE:         str   = "NIFTY,BANKNIFTY,FINNIFTY"
+    # Annualised risk-free rate for Black-Scholes Greeks/IV (India ~6.5%).
+    RISK_FREE_RATE:             float = 0.065
+    # Preferred days-to-expiry when selecting a contract for a directional signal.
+    FNO_DEFAULT_DTE:            int   = 21
+    # Lot cap per single trade (sanity ceiling on paper sizing).
+    FNO_MAX_LOTS_PER_TRADE:     int   = 10
+    # Standard NSE index lot sizes (2026 revision). Used in PAPER mode so the
+    # agent can build contracts from the live NSE chain WITHOUT the Kite
+    # instrument master (which needs the broker login). "SYM:lot,SYM:lot".
+    FNO_INDEX_LOT_SIZES:        str   = "NIFTY:75,BANKNIFTY:35,FINNIFTY:65,MIDCPNIFTY:120,SENSEX:20"
+    # Approximate paper-margin model (NOT exchange-exact SPAN). Used in Phase 4.
+    FNO_SPAN_PCT_INDEX:         float = 0.12   # SPAN ≈ 12% of notional for index
+    FNO_EXPOSURE_PCT:           float = 0.03   # +3% exposure margin
+    FNO_MARGIN_BUFFER:          float = 0.20   # +20% safety buffer on blocked margin
+    # Portfolio hedging: buy index PUTs when the market turns bearish to protect
+    # the equity book. Sized to a fraction of open equity exposure.
+    FNO_HEDGE_ENABLED:          bool  = False
+    FNO_HEDGE_RATIO:            float = 0.50   # hedge 50% of open equity notional
+    # Volatility strategies (long straddle when IV-Rank is low). Defined-risk.
+    FNO_VOL_ENABLED:            bool  = False
+
     # Risk limits — Varsity Module 9
     AGENT_MAX_RISK_PER_TRADE:   float = 0.01
-    AGENT_MAX_OPEN_RISK:        float = 0.06
+    # Portfolio open-risk cap. With ≤1% risk/trade this allows ~15 concurrent
+    # positions (15 × 1% = 15%), so the capital-utilization model can deploy the
+    # full equity instead of being starved at the old 6% (≈6 positions).
+    AGENT_MAX_OPEN_RISK:        float = 0.15
     AGENT_MAX_POSITIONS:        int   = 15   # hard cap on concurrent open positions
     AGENT_DAILY_DD_STOP:        float = 0.03
     AGENT_WEEKLY_DD_STOP:       float = 0.05
@@ -300,6 +348,24 @@ class Settings(BaseSettings):
         return [s.strip() for s in self.WATCHLIST_FOREX.split(",") if s.strip()]
 
     @property
+    def fno_index_symbols(self) -> list[str]:
+        """Index underlyings the F&O engine analyses/trades (e.g. NIFTY, BANKNIFTY)."""
+        return [s.strip().upper() for s in self.FNO_INDEX_UNIVERSE.split(",") if s.strip()]
+
+    @property
+    def fno_lot_sizes(self) -> dict[str, int]:
+        """Map of index underlying → standard lot size (paper-mode fallback)."""
+        out: dict[str, int] = {}
+        for pair in self.FNO_INDEX_LOT_SIZES.split(","):
+            if ":" in pair:
+                sym, lot = pair.split(":", 1)
+                try:
+                    out[sym.strip().upper()] = int(lot)
+                except ValueError:
+                    continue
+        return out
+
+    @property
     def stock_symbols(self) -> list[str]:
         return [s.strip() for s in self.WATCHLIST_STOCKS.split(",") if s.strip()]
 
@@ -312,10 +378,20 @@ class Settings(BaseSettings):
         return [f"{s}.NS" for s in self.WATCHLIST_NSE_MID_CAP]
 
     @property
+    def bse_symbols(self) -> list[str]:
+        return [f"{s}.BO" for s in self.WATCHLIST_BSE_LARGE_CAP]
+
+    @property
+    def bse_mid_symbols(self) -> list[str]:
+        return [f"{s}.BO" for s in self.WATCHLIST_BSE_MID_CAP]
+
+    @property
     def all_indian_symbols(self) -> list[str]:
         return (
             self.nse_symbols
             + self.nse_mid_symbols
+            + self.bse_symbols
+            + self.bse_mid_symbols
             + self.WATCHLIST_NIFTY_INDICES
             + self.WATCHLIST_INDIAN_FOREX
         )

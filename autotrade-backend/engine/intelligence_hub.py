@@ -116,6 +116,32 @@ class OptionsContext:
     nifty_max_pain: float = 0.0
     nifty_bias:     int = 0
     bank_nifty_pcr: float = 1.0
+    # Per-symbol option analytics (keyed by bare symbol, e.g. "RELIANCE").
+    # Populated for any underlying with OptionContractSnapshot/IVHistory data —
+    # indices always, single stocks when ENABLE_FNO. Empty → fall back to index.
+    symbol_pcr:     dict = field(default_factory=dict)   # bare → PCR
+    symbol_iv_rank: dict = field(default_factory=dict)   # bare → 0..100
+    symbol_skew:    dict = field(default_factory=dict)   # bare → PE_IV - CE_IV (atm), pts
+    symbol_bias:    dict = field(default_factory=dict)   # bare → -1/0/+1
+
+    def score_for(self, bare: str) -> tuple[float, dict]:
+        """Symbol-aware options score (≈[-20,+20]) + detail dict.
+
+        Uses this symbol's own PCR/skew when available, else the index-wide
+        nifty bias as a light market-level nudge (legacy behaviour).
+        """
+        if bare in self.symbol_bias:
+            base = self.symbol_bias[bare] * 15
+            skew = max(-5.0, min(5.0, self.symbol_skew.get(bare, 0.0) * 100))  # IV pts → score
+            score = max(-20.0, min(20.0, base + skew))
+            return score, {
+                "source":  "symbol",
+                "pcr":     round(self.symbol_pcr.get(bare, 0.0), 2),
+                "iv_rank": round(self.symbol_iv_rank.get(bare, 0.0), 1),
+                "skew":    round(self.symbol_skew.get(bare, 0.0), 4),
+                "bias":    self.symbol_bias[bare],
+            }
+        return float(self.nifty_bias * 15), {"source": "index", "nifty_bias": self.nifty_bias}
 
 
 @dataclass
@@ -409,10 +435,79 @@ async def build_options_context(session: AsyncSession) -> OptionsContext:
     n_mp  = float(nifty.max_pain) if nifty else 0.0
     b_pcr = float(bank.pcr) if bank else 1.0
 
-    return OptionsContext(
+    octx = OptionsContext(
         nifty_pcr=round(n_pcr, 2), nifty_max_pain=n_mp,
         nifty_bias=_bias_from_pcr(n_pcr), bank_nifty_pcr=round(b_pcr, 2),
     )
+
+    # Per-symbol analytics from OptionContractSnapshot + IVHistory (Phase 2).
+    # Best-effort: any failure leaves the maps empty → index-wide fallback.
+    try:
+        await _populate_symbol_options(octx, _bias_from_pcr, session)
+    except Exception as exc:
+        logger.debug(f"[hub/options] per-symbol enrichment skipped: {exc}")
+
+    return octx
+
+
+async def _populate_symbol_options(octx: "OptionsContext", bias_fn, session: AsyncSession) -> None:
+    """Fill per-symbol PCR / IV-rank / skew / bias from the F&O analytics tables."""
+    from db.models import OptionContractSnapshot, IVHistory
+    from sqlalchemy import func as _f
+
+    # Underlyings with a recent per-strike snapshot (last 2 days).
+    cutoff = datetime.utcnow() - timedelta(days=2)
+    unders = (await session.execute(
+        select(OptionContractSnapshot.underlying)
+        .where(OptionContractSnapshot.snapshot_at >= cutoff)
+        .distinct()
+    )).scalars().all()
+    if not unders:
+        return
+
+    for under in unders:
+        bare = under.replace(".NS", "").upper()
+        # Latest snapshot batch for this underlying = max snapshot_at.
+        last_at = (await session.execute(
+            select(_f.max(OptionContractSnapshot.snapshot_at))
+            .where(OptionContractSnapshot.underlying == under)
+        )).scalar()
+        if last_at is None:
+            continue
+        rows = (await session.execute(
+            select(OptionContractSnapshot).where(
+                OptionContractSnapshot.underlying == under,
+                OptionContractSnapshot.snapshot_at == last_at,
+            )
+        )).scalars().all()
+        if not rows:
+            continue
+
+        call_oi = sum(r.oi for r in rows if r.option_type == "CE")
+        put_oi  = sum(r.oi for r in rows if r.option_type == "PE")
+        pcr = round(put_oi / call_oi, 3) if call_oi > 0 else 0.0
+
+        # ATM skew = PE_IV - CE_IV at the strike nearest spot.
+        spot = rows[0].spot or 0.0
+        atm = min({r.strike for r in rows}, key=lambda k: abs(k - spot), default=0.0)
+        ce_iv = next((r.iv for r in rows if r.strike == atm and r.option_type == "CE" and r.iv), None)
+        pe_iv = next((r.iv for r in rows if r.strike == atm and r.option_type == "PE" and r.iv), None)
+        skew = round((pe_iv - ce_iv), 4) if (ce_iv and pe_iv) else 0.0
+        atm_iv = round(((ce_iv or 0) + (pe_iv or 0)) / (int(bool(ce_iv)) + int(bool(pe_iv)) or 1), 4)
+
+        # IV rank over trailing IVHistory (need ≥5 points to be meaningful).
+        hist = (await session.execute(
+            select(IVHistory.atm_iv).where(IVHistory.underlying == under)
+        )).scalars().all()
+        iv_rank = 50.0
+        if len(hist) >= 5 and atm_iv > 0:
+            lo, hi = min(hist), max(hist)
+            iv_rank = round(100 * (atm_iv - lo) / (hi - lo), 1) if hi > lo else 50.0
+
+        octx.symbol_pcr[bare]     = pcr
+        octx.symbol_iv_rank[bare] = iv_rank
+        octx.symbol_skew[bare]    = skew
+        octx.symbol_bias[bare]    = bias_fn(pcr)
 
 
 async def build_portfolio_context(agent_portfolio, session: AsyncSession) -> PortfolioContext:
@@ -794,8 +889,9 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     )
     fundamental_score = (fund_score - 50) * 1.0
 
-    # 7. Options (5%) — index-wide bias applied lightly to every name
-    options_score = ctx.options.nifty_bias * 15
+    # 7. Options (5%) — symbol-aware when this name has its own F&O analytics
+    # (PCR/IV-rank/skew); otherwise falls back to the index-wide nifty bias.
+    options_score, _options_detail = ctx.options.score_for(bare)
 
     # Renormalize: factors with no real data get 0 weight so missing factors
     # don't dilute the ones that have a genuine signal.
@@ -945,9 +1041,7 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
             "fund_grade":   fund_grade,
             "has_data":     bare in ctx.fundamentals_by_symbol,
         },
-        "options_detail": {
-            "nifty_bias":   ctx.options.nifty_bias,
-        },
+        "options_detail": _options_detail,
         "event_detail": {
             "pre_earnings_days":  _pre_earnings_days,
             "macro_event_7d":     ctx.events.macro_event_7d,
