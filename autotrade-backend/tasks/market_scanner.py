@@ -77,7 +77,10 @@ async def _run_market_scanner(force: bool = False):
                 MasterIntelligenceScore.is_blocked,
             )
             .distinct(MasterIntelligenceScore.symbol)
-            .where(MasterIntelligenceScore.symbol.like("%.NS"))
+            .where(
+                MasterIntelligenceScore.symbol.like("%.NS") |
+                MasterIntelligenceScore.symbol.like("%.BO")
+            )
             .order_by(MasterIntelligenceScore.symbol, MasterIntelligenceScore.scored_at.desc())
         ).subquery()
         hub_rows = (await session.execute(select(hub_subq))).all()
@@ -91,7 +94,7 @@ async def _run_market_scanner(force: bool = False):
             scan_syms = list(hub_map.keys())
         else:
             res = await session.execute(
-                text("SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND symbol LIKE '%.NS'")
+                text("SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')")
             )
             scan_syms = [r.symbol for r in res.all()]
         logger.info(
@@ -124,7 +127,7 @@ async def _run_market_scanner(force: bool = False):
             for ns_sym, bars in grouped.items():
                 if len(bars) < 15:
                     continue
-                base = ns_sym.replace(".NS", "")
+                base = ns_sym.replace(".NS", "").replace(".BO", "")
                 bars = list(reversed(bars))
                 df = pd.DataFrame([{
                     "open": float(b.open), "high": float(b.high), "low": float(b.low),

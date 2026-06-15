@@ -26,14 +26,17 @@ class AgentExecutionManager:
         return await self._live_execute(decision, session)
 
     async def _paper_execute(self, decision, session: AsyncSession) -> str:
-        from db.models import AgentDecision, AgentTrade
+        from db.models import (
+            AgentDecision, AgentTrade, PaperTrade, OpenPosition,
+            TradeDirection, TradeStatus,
+        )
         from paper_trading.virtual_wallet import VirtualWallet
 
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
         trade_value = round(decision.qty * decision.entry, 2)
+        now = datetime.utcnow()
 
-        # Deduct full trade value from the shared VirtualWallet (same ₹5L pool as scanner).
-        # Block the trade if wallet has insufficient funds.
+        # Deduct full trade value from the shared VirtualWallet (unified ₹20L pool).
         ok, msg = await VirtualWallet.deduct_margin(session, trade_value, decision.symbol)
         if not ok:
             logger.warning(
@@ -42,50 +45,73 @@ class AgentExecutionManager:
             )
             return ""
 
+        # ── Canonical records the status API, Trades page, and hydration read ──
+        # PaperTrade + OpenPosition are the single source of truth. Writing them
+        # here keeps the wallet, agent status, and UI all in agreement.
+        direction = TradeDirection.BUY if decision.action == "BUY" else TradeDirection.SELL
+        ptrade = PaperTrade(
+            symbol=decision.symbol.replace(".NS", ""),
+            direction=direction,
+            status=TradeStatus.OPEN,
+            entry_price=decision.entry,
+            stop_loss=decision.stop,
+            take_profit=decision.target,
+            size_units=decision.qty,
+            size_usd=trade_value,
+            instrument_type="EQUITY",
+            lot_size=1,
+            signal_confidence=decision.confidence,
+            pattern_name=decision.strategy[:80],
+            ai_reason="\n".join(decision.reasons) if decision.reasons else "",
+            opened_at=now,
+        )
+        session.add(ptrade)
+        await session.flush()
+
+        position = OpenPosition(
+            symbol=decision.symbol.replace(".NS", ""),
+            direction=direction,
+            entry_price=decision.entry,
+            current_price=decision.entry,
+            stop_loss=decision.stop,
+            take_profit=decision.target,
+            size_units=decision.qty,
+            size_usd=trade_value,
+            instrument_type="EQUITY",
+            lot_size=1,
+            unrealised_pnl=0.0,
+            unrealised_pct=0.0,
+            trade_id=ptrade.id,
+            opened_at=now,
+        )
+        session.add(position)
+
+        # ── Decision + trade audit log (agent tables) ─────────────────────────
         db_dec = AgentDecision(
-            symbol=decision.symbol,
-            action=decision.action,
-            confidence=decision.confidence,
-            regime=decision.regime,
-            strategy=decision.strategy,
-            entry=decision.entry,
-            stop=decision.stop,
-            target=decision.target,
-            qty=decision.qty,
-            risk_pct=decision.risk_pct,
-            reasons=decision.reasons,
-            macro_bias=decision.macro_bias,
+            symbol=decision.symbol, action=decision.action,
+            confidence=decision.confidence, regime=decision.regime,
+            strategy=decision.strategy, entry=decision.entry, stop=decision.stop,
+            target=decision.target, qty=decision.qty, risk_pct=decision.risk_pct,
+            reasons=decision.reasons, macro_bias=decision.macro_bias,
             fund_score=decision.fund_score,
             master_score=getattr(decision, "master_score", None),
             confidence_factors=getattr(decision, "confidence_factors", None),
-            is_paper=True,
-            order_id=order_id,
+            is_paper=True, order_id=order_id,
         )
         session.add(db_dec)
-
-        trade = AgentTrade(
-            decision_id=db_dec.id,
-            symbol=decision.symbol,
-            side=decision.action,
-            qty=decision.qty,
-            product=getattr(decision, "product", "CNC"),
-            entry_price=decision.entry,
-            stop_price=decision.stop,
-            target_price=decision.target,
-            entry_ts=datetime.utcnow(),
-            strategy=decision.strategy,
-            regime=decision.regime,
-            is_paper=True,
-        )
-        session.add(trade)
+        session.add(AgentTrade(
+            decision_id=db_dec.id, symbol=decision.symbol, side=decision.action,
+            qty=decision.qty, product=getattr(decision, "product", "CNC"),
+            entry_price=decision.entry, stop_price=decision.stop,
+            target_price=decision.target, entry_ts=now,
+            strategy=decision.strategy, regime=decision.regime, is_paper=True,
+        ))
         await session.commit()
 
         logger.info(
             f"[PAPER] {decision.action} {decision.qty} {decision.symbol} "
-            f"@ ₹{decision.entry:.2f} | stop=₹{decision.stop:.2f} "
-            f"target=₹{decision.target:.2f} | conf={decision.confidence}% "
-            f"RR={decision.risk_reward} | {decision.strategy} "
-            f"| wallet deducted ₹{trade_value:,.0f}"
+            f"@ ₹{decision.entry:.2f} | size ₹{trade_value:,.0f} | "
+            f"conf={decision.confidence}% RR={decision.risk_reward} | {decision.strategy}"
         )
         return order_id
 

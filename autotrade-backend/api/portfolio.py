@@ -203,11 +203,10 @@ async def get_capital_model(
     """
     from db.models import AgentCapitalSnapshot, PortfolioPolicy
     from engine.portfolio_analytics import (
-        compute_performance_metrics,
         compute_rebalance_trades,
-        get_position_weights,
         get_sector_weights,
     )
+    from engine.agent.performance_engine import compute_metrics as _compute_metrics_v2
 
     # ── Policy ────────────────────────────────────────────────────────────────
     policy = (await db.execute(select(PortfolioPolicy).limit(1))).scalar_one_or_none()
@@ -221,13 +220,19 @@ async def get_capital_model(
         "risk_free_rate":           policy.risk_free_rate        if policy else 7.1,
     }
 
-    # ── Current weights ───────────────────────────────────────────────────────
-    pos_weights    = await get_position_weights(db)
+    # ── Current weights (from real open_positions, not the empty agent_positions) ──
+    from db.models import OpenPosition as _OpenPos
+    _pos_rows = (await db.execute(select(_OpenPos))).scalars().all()
+    _total_val = sum(float(p.size_usd or 0) for p in _pos_rows) or 1.0
+    pos_weights = {
+        (p.underlying_symbol or p.symbol): round(float(p.size_usd or 0) / _total_val * 100, 2)
+        for p in _pos_rows
+    }
     sector_weights = await get_sector_weights(db, pos_weights)
 
-    # ── Performance metrics ───────────────────────────────────────────────────
-    metrics = await compute_performance_metrics(db, days=days, risk_free_rate_pct=policy_data["risk_free_rate"])
-    metrics.pop("daily_returns", None)  # strip raw data; not needed by UI
+    # ── Performance metrics (Tier 1 engine — real data, regression beta) ──────
+    metrics = await _compute_metrics_v2(db)
+    metrics.pop("symbol_betas", None)  # keep the response compact for this view
 
     # ── Rebalance signals ─────────────────────────────────────────────────────
     rebalance = await compute_rebalance_trades(db)

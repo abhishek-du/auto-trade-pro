@@ -165,7 +165,17 @@ def fetch_nse_candles(
             logger.warning(f"yfinance NSE: empty response for {symbol} ({interval})")
             return []
 
-        df = _to_utc_naive(df)
+        if interval in ("1d", "1wk", "1mo"):
+            # A daily/weekly bar is a calendar date, not a moment in time. Applying
+            # an intraday IST→UTC shift pushes midnight-IST bars onto the previous
+            # day (Fridays land on the weekend), corrupting date alignment. Strip
+            # tz and floor to the date so every daily bar keeps its true date.
+            df = df.copy()
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            df.index = df.index.normalize()
+        else:
+            df = _to_utc_naive(df)
 
         rows: list[dict] = []
         for row in df.itertuples():
@@ -554,8 +564,8 @@ async def run_india_price_crawl(
     from sqlalchemy import select as _sel, text as _text
     from db.models import MarketShortlist, KiteInstrument
 
-    # 1. Mandatory: indices + VIX (needed for macro/VIX scoring in hub)
-    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES)
+    # 1. Mandatory: indices + VIX + BSE watchlist (always crawled regardless of shortlist)
+    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES) + settings.bse_symbols + settings.bse_mid_symbols
 
     # 2. Dynamic equity universe from market_shortlist
     sl_result = await session.execute(
@@ -567,8 +577,8 @@ async def run_india_price_crawl(
         equity_syms = shortlist_syms
         source = f"market_shortlist ({len(equity_syms)} symbols)"
     else:
-        # Cold start: top 50 NSE EQ from kite_instruments alphabetically
-        ki_result = await session.execute(
+        # Cold start: top 50 NSE EQ + top 30 BSE EQ from kite_instruments
+        ki_nse = await session.execute(
             _sel(KiteInstrument.tradingsymbol)
             .where(
                 KiteInstrument.instrument_type == "EQ",
@@ -578,8 +588,21 @@ async def run_india_price_crawl(
             .order_by(KiteInstrument.tradingsymbol)
             .limit(50)
         )
-        equity_syms = [f"{r.tradingsymbol}.NS" for r in ki_result.all()]
-        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols)"
+        ki_bse = await session.execute(
+            _sel(KiteInstrument.tradingsymbol)
+            .where(
+                KiteInstrument.instrument_type == "EQ",
+                KiteInstrument.segment == "BSE",
+                KiteInstrument.name != "",
+            )
+            .order_by(KiteInstrument.tradingsymbol)
+            .limit(30)
+        )
+        equity_syms = (
+            [f"{r.tradingsymbol}.NS" for r in ki_nse.all()] +
+            [f"{r.tradingsymbol}.BO" for r in ki_bse.all()]
+        )
+        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols, NSE+BSE)"
 
     # 3. User watchlist additions
     from db.models import UserWatchlist

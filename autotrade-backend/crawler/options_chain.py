@@ -25,15 +25,21 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.fii_dii_crawler import BROWSER_HEADERS
-from db.models import OptionsChainSnapshot
+from db.models import OptionsChainSnapshot, OptionContractSnapshot, IVHistory
+from engine.fno import options_pricing as _bs
+from utils.config import settings
 from utils.logger import logger
 
 # ── NSE endpoints ─────────────────────────────────────────────────────────────
 
 _NSE_HOME = "https://www.nseindia.com"
-_CHAIN_URL = "https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
+_NSE_OC_PAGE = "https://www.nseindia.com/option-chain"
+# Current NSE API (v3). The old /api/option-chain-indices was retired → 404.
+# v3 requires an explicit expiry; expiries come from contract-info.
+_CONTRACT_INFO = "https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}"
+_CHAIN_V3 = "https://www.nseindia.com/api/option-chain-v3?type={otype}&symbol={symbol}&expiry={expiry}"
 
-SUPPORTED_SYMBOLS = ("NIFTY", "BANKNIFTY")
+SUPPORTED_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY")
 
 # Circuit breaker: track last NSE failure time to avoid hammering a blocked endpoint
 import time as _time
@@ -110,8 +116,9 @@ def _parse_chain_payload(payload: dict) -> tuple[list[dict], float, int, int, da
         or records.get("underlyingValue")
     )
 
-    # Parse strike-by-strike rows from the nearest-expiry filtered data
-    raw_rows = filtered.get("data") or []
+    # Strike rows: v3 endpoint puts them under records.data (already expiry-filtered);
+    # the legacy endpoint used filtered.data. Support both.
+    raw_rows = filtered.get("data") or records.get("data") or []
     options_data: list[dict] = []
     first_expiry = None
 
@@ -158,59 +165,76 @@ def _parse_chain_payload(payload: dict) -> tuple[list[dict], float, int, int, da
 # 1. Fetch
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def fetch_options_chain(symbol: str = "NIFTY") -> dict:
-    """Fetch the NSE options chain for NIFTY or BANKNIFTY.
+def _fetch_nse_chain_sync(normalized: str, equity: bool) -> dict:
+    """Blocking NSE fetch via curl_cffi (Chrome TLS impersonation).
 
-    Two-step NSE session pattern (required):
-      1. GET the NSE homepage — this sets the session cookie NSE expects.
-      2. GET the options-chain API URL within the same client session.
+    NSE/Akamai fingerprints the TLS handshake, so plain httpx/requests get a
+    404 bot-block. curl_cffi impersonates Chrome's JA3 and clears it. Uses the
+    current v3 endpoint (the old option-chain-indices was retired → 404).
 
-    Returns
-    -------
-    dict with keys:
-        symbol, expiry_date, spot_price, options_data (list),
-        total_call_oi, total_put_oi
-
-    Raises
-    ------
-    ValueError — if the symbol is not supported or NSE returns a non-200.
-    httpx.HTTPError — on network failure (let the caller decide to retry or log).
+    Sequence: homepage + option-chain page (Akamai cookies) → contract-info
+    (expiry list) → option-chain-v3 for the nearest expiry.
     """
-    normalized = symbol.upper().replace(" ", "").replace("-", "")
-    if normalized not in SUPPORTED_SYMBOLS:
-        raise ValueError(
-            f"Unsupported symbol '{symbol}'. Supported: {SUPPORTED_SYMBOLS}"
-        )
+    from curl_cffi import requests as creq
 
-    url = _CHAIN_URL.format(symbol=normalized)
+    otype = "Equity" if equity else "Indices"
+    headers = {
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "referer": _NSE_OC_PAGE,
+    }
+    s = creq.Session(impersonate="chrome120")
+    # Warm-up: collect Akamai cookies from real pages.
+    s.get(_NSE_HOME, timeout=15)
+    _time.sleep(1.0)
+    s.get(_NSE_OC_PAGE, timeout=15)
+    _time.sleep(1.0)
+
+    # Expiry list.
+    ci = s.get(_CONTRACT_INFO.format(symbol=normalized), headers=headers, timeout=20)
+    if ci.status_code != 200:
+        raise ValueError(f"NSE contract-info HTTP {ci.status_code} for {normalized}")
+    expiries = (ci.json() or {}).get("expiryDates") or []
+    if not expiries:
+        raise ValueError(f"NSE returned no expiries for {normalized}")
+    nearest = expiries[0]
+
+    # Chain for the nearest expiry.
+    import urllib.parse
+    url = _CHAIN_V3.format(otype=otype, symbol=normalized, expiry=urllib.parse.quote(nearest))
+    r = s.get(url, headers=headers, timeout=20)
+    if r.status_code != 200:
+        raise ValueError(f"NSE option-chain-v3 HTTP {r.status_code} for {normalized}")
+    payload = r.json()
+    if not payload or not (payload.get("records") or {}).get("data"):
+        raise ValueError(f"NSE returned empty chain for {normalized} (market closed?)")
+    return payload
+
+
+async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False) -> dict:
+    """Fetch the live NSE option chain for an index or single stock.
+
+    Uses curl_cffi (Chrome TLS impersonation) + the current v3 API. The blocking
+    fetch runs in a thread executor so the async caller isn't blocked.
+
+    Returns dict: symbol, expiry_date, spot_price, options_data, total_call_oi,
+    total_put_oi. Raises ValueError on bot-block / empty / closed-market.
+    """
+    normalized = symbol.upper().replace(" ", "").replace("-", "").replace(".NS", "")
+    if not equity and normalized not in SUPPORTED_SYMBOLS:
+        raise ValueError(f"Unsupported index symbol '{symbol}'. Supported: {SUPPORTED_SYMBOLS}")
 
     global _last_nse_failure
     if _last_nse_failure and (_time.time() - _last_nse_failure) < _NSE_BACKOFF_SECS:
         wait_min = int((_NSE_BACKOFF_SECS - (_time.time() - _last_nse_failure)) / 60) + 1
-        raise ValueError(
-            f"NSE options chain blocked (Akamai 404) — backing off for {wait_min} more min"
-        )
+        raise ValueError(f"NSE options chain backing off for {wait_min} more min")
 
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        # Step 1 — get session cookie from NSE homepage
-        await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
-        await asyncio.sleep(2)   # NSE bot-detection requires a pause after homepage hit
-
-        # Step 2 — call the options-chain JSON API
-        response = await client.get(url, headers=BROWSER_HEADERS)
-
-    if response.status_code != 200:
+    loop = asyncio.get_event_loop()
+    try:
+        payload = await loop.run_in_executor(None, _fetch_nse_chain_sync, normalized, equity)
+    except Exception as exc:
         _last_nse_failure = _time.time()
-        raise ValueError(
-            f"NSE options chain returned HTTP {response.status_code} for {normalized}"
-        )
-
-    payload = response.json()
-    if not payload:
-        raise ValueError(
-            f"NSE options chain returned empty response for {normalized} "
-            f"(market likely closed — stale snapshot will be used)"
-        )
+        raise ValueError(str(exc))
 
     options_data, spot, total_call_oi, total_put_oi, expiry_date = _parse_chain_payload(payload)
 
@@ -382,6 +406,91 @@ def calculate_options_score(pcr: float, max_pain: float, spot: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 5b. Greeks / IV per strike
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def compute_and_persist_greeks(
+    underlying: str,
+    chain: dict,
+    session: AsyncSession,
+) -> float | None:
+    """Compute IV + Greeks for every strike and persist OptionContractSnapshot rows.
+
+    Returns the ATM implied volatility (avg of ATM call/put IV) for IV-history,
+    or None when it can't be derived. Best-effort: never raises.
+    """
+    options_data = chain.get("options_data") or []
+    spot         = float(chain.get("spot_price") or 0.0)
+    expiry_date  = chain.get("expiry_date")
+    if not options_data or spot <= 0 or expiry_date is None:
+        return None
+
+    dte = (expiry_date - datetime.date.today()).days
+    T = _bs.years_to_expiry(dte)
+    if T <= 0:
+        return None
+    r = settings.RISK_FREE_RATE
+
+    atm_strike = min(
+        (row["strike_price"] for row in options_data if row["strike_price"]),
+        key=lambda k: abs(k - spot), default=spot,
+    )
+    atm_call_iv = atm_put_iv = None
+    rows_added = 0
+
+    for row in options_data:
+        strike = float(row.get("strike_price") or 0.0)
+        if strike <= 0:
+            continue
+        for opt_type, ltp_key, oi_key, oic_key, flag in (
+            ("CE", "call_ltp", "call_oi", "call_oi_change", "c"),
+            ("PE", "put_ltp",  "put_oi",  "put_oi_change",  "p"),
+        ):
+            ltp = float(row.get(ltp_key) or 0.0)
+            g = _bs.greeks_from_price(ltp, spot, strike, T, r, flag) if ltp > 0 else None
+            session.add(OptionContractSnapshot(
+                underlying=underlying.upper(), expiry_date=expiry_date,
+                strike=strike, option_type=opt_type, spot=spot, ltp=ltp,
+                oi=int(row.get(oi_key) or 0), oi_change=int(row.get(oic_key) or 0),
+                volume=0,
+                iv=round(g.iv, 4) if g else None,
+                delta=g.delta if g else None, gamma=g.gamma if g else None,
+                theta=g.theta if g else None, vega=g.vega if g else None,
+                rho=g.rho if g else None,
+            ))
+            rows_added += 1
+            if strike == atm_strike and g:
+                if opt_type == "CE": atm_call_iv = g.iv
+                else:                atm_put_iv = g.iv
+
+    if rows_added:
+        await session.flush()
+
+    ivs = [v for v in (atm_call_iv, atm_put_iv) if v is not None]
+    atm_iv = round(sum(ivs) / len(ivs), 4) if ivs else None
+    if atm_iv is not None:
+        await _upsert_iv_history(underlying, atm_iv, session)
+    return atm_iv
+
+
+async def _upsert_iv_history(underlying: str, atm_iv: float, session: AsyncSession) -> None:
+    """Record (or update) today's ATM IV for IV-Rank / IV-Percentile history."""
+    from sqlalchemy import select as _sel
+    today = datetime.date.today()
+    existing = (await session.execute(
+        _sel(IVHistory).where(
+            IVHistory.underlying == underlying.upper(),
+            IVHistory.trade_date == today,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        existing.atm_iv = atm_iv
+    else:
+        session.add(IVHistory(underlying=underlying.upper(), trade_date=today, atm_iv=atm_iv))
+    await session.flush()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 6. Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -449,6 +558,14 @@ async def run_options_analysis(session: AsyncSession) -> dict:
             session.add(snapshot)
             await session.flush()
 
+            # Per-strike IV + Greeks (gated behind the F&O flag — extra compute).
+            atm_iv = None
+            if getattr(settings, "ENABLE_FNO", False):
+                try:
+                    atm_iv = await compute_and_persist_greeks(symbol, chain, session)
+                except Exception as gex:
+                    logger.debug(f"[options] {symbol} greeks compute failed: {gex}")
+
             results[symbol] = {
                 "spot":              spot,
                 "expiry_date":       chain["expiry_date"],
@@ -460,6 +577,7 @@ async def run_options_analysis(session: AsyncSession) -> dict:
                 "support_levels":    levels["support"],
                 "resistance_levels": levels["resistance"],
                 "options_score":     score,
+                "atm_iv":            atm_iv,
             }
 
             logger.info(
@@ -468,6 +586,7 @@ async def run_options_analysis(session: AsyncSession) -> dict:
                 f"Spot: {spot:,.2f}  │  "
                 f"ATM: {atm_strike:,.0f}  │  "
                 f"Score: {score:+.0f}"
+                + (f"  │  ATM IV: {atm_iv:.1%}" if atm_iv else "")
             )
 
         except Exception as exc:
