@@ -287,12 +287,13 @@ function TradeDetailPanel({ trade }) {
 
 // ── Investment Summary Banner ─────────────────────────────────────────────────
 
-function InvestmentSummary({ wallet, agentStatus, trades }) {
-  // Agent is sole trader — use agent stats as primary source for KPI cards.
-  // VirtualWallet (wallet) tracks the SCAN legacy positions (now closed).
+function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
   const agentPortfolio = agentStatus?.portfolio ?? null;
-  const realisedPnl    = agentPortfolio?.realised_pnl    ?? wallet?.realised_pnl   ?? 0;
-  const unrealisedPnl  = agentPortfolio?.unrealised_pnl  ?? wallet?.unrealised_pnl ?? 0;
+  const realisedPnl    = agentPortfolio?.realised_pnl ?? wallet?.realised_pnl ?? 0;
+  // Sum live unrealised P&L directly from positions (updated every 15 s from OpenPosition).
+  // agentPortfolio.unrealised_pnl can lag when PRICE_CACHE hasn't refreshed yet.
+  const liveUnrealisedPnl = positions.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0);
+  const unrealisedPnl  = liveUnrealisedPnl || agentPortfolio?.unrealised_pnl ?? wallet?.unrealised_pnl ?? 0;
   const totalPnl       = realisedPnl + unrealisedPnl;
   // Use actual equity from the API; fall back to wallet equity so the number is
   // always live and never depends on a hardcoded starting constant.
@@ -518,10 +519,15 @@ export default function Trades() {
     return () => clearInterval(id);
   }, []);
 
-  /* build trade_id → position map for fast lookup */
-  const positionByTradeId = useMemo(() => {
+  /* build symbol → position map for fast lookup.
+     Agent trades use id="agent_N" which never matches OpenPosition.trade_id
+     (which links to PaperTrade). Symbol lookup works for both sources. */
+  const positionBySymbol = useMemo(() => {
     const m = {};
-    positions.forEach((p) => { if (p.trade_id) m[p.trade_id] = p; });
+    positions.forEach((p) => {
+      const sym = (p.symbol ?? '').replace('.NS', '').toUpperCase();
+      if (sym) m[sym] = p;
+    });
     return m;
   }, [positions]);
 
@@ -546,10 +552,24 @@ export default function Trades() {
   const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const closed     = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'CLOSED');
+  // For open trades, use live unrealised P&L from position map (or trade record)
+  const openTrades = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
+  const openPnls   = openTrades.map((t) => {
+    const sym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
+    const pos = positionBySymbol[sym];
+    return pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0;
+  });
+  const allPnls    = [
+    ...closed.map((t) => t.pnl ?? 0),
+    ...openPnls,
+  ];
   const wins       = closed.filter((t) => (t.pnl ?? 0) > 0);
-  const winRate    = closed.length ? (wins.length / closed.length) * 100 : 0;
-  const bestTrade  = closed.reduce((b, t) => Math.max(b, t.pnl ?? 0), 0);
-  const worstTrade = closed.reduce((b, t) => Math.min(b, t.pnl ?? 0), 0);
+  const openWins   = openPnls.filter((p) => p > 0);
+  const totalWins  = wins.length + openWins.length;
+  const totalTrades = allPnls.length;
+  const winRate    = totalTrades ? (totalWins / totalTrades) * 100 : 0;
+  const bestTrade  = allPnls.length ? Math.max(...allPnls) : 0;
+  const worstTrade = allPnls.length ? Math.min(...allPnls) : 0;
 
   if (loading) return <LoadingSpinner />;
 
@@ -557,7 +577,7 @@ export default function Trades() {
     <div className="space-y-6">
 
       {/* ── Investment summary ── */}
-      <InvestmentSummary wallet={wallet} agentStatus={agentStatus} trades={trades} />
+      <InvestmentSummary wallet={wallet} agentStatus={agentStatus} trades={trades} positions={positions} />
 
       {/* ── Open positions (live) ── */}
       <OpenPositionsSection positions={positions} />
@@ -662,7 +682,8 @@ export default function Trades() {
               ) : (
                 pageRows.map((t, i) => {
                   const isOpen     = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
-                  const pos        = isOpen ? positionByTradeId[t.id] : null;
+                  const tradeSym   = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
+                  const pos        = isOpen ? (positionBySymbol[tradeSym] ?? null) : null;
                   const isExpanded = expandedId === (t.id ?? i);
 
                   /* P&L: open → live pos (paper) OR candle-based (agent), closed → recorded pnl */
