@@ -125,6 +125,176 @@ function AgentActivityPanel() {
   )
 }
 
+/* Full paper portfolio detail — equity/cash/P&L + ALL open positions with live
+   P&L. This is the user's actual portfolio (the agent manages it). */
+function PaperPortfolioPanel() {
+  const { status } = useAgent()
+  const [positions, setPositions] = useState([])
+
+  useEffect(() => {
+    const load = () => apiFetch('/api/v1/portfolio/positions').then(setPositions).catch(() => {})
+    load()
+    const id = setInterval(load, 10000)
+    return () => clearInterval(id)
+  }, [])
+
+  const p          = status?.portfolio
+  if (!p) return null
+  const equity     = Number(p.equity ?? 0)
+  const cash       = Number(p.cash ?? 0)
+  const deployed   = equity - cash
+  const realised   = Number(p.realised_pnl ?? 0)
+  const unrealised = positions.reduce((s, x) => s + (x.unrealised_pnl ?? 0), 0) || Number(p.unrealised_pnl ?? 0)
+  const totalPnl   = realised + unrealised
+  const start      = Number(p.start_capital ?? 2000000)
+  const roi        = start > 0 ? ((equity - start) / start) * 100 : 0
+  const fmt = (n) => formatINR(n ?? 0)
+
+  const cards = [
+    { label: 'Portfolio Value', value: fmt(equity), color: 'text-cyan' },
+    { label: 'Free Cash',       value: fmt(cash),   sub: `${(cash / equity * 100).toFixed(0)}% buffer` },
+    { label: 'Deployed',        value: fmt(deployed), sub: `${positions.length} positions` },
+    { label: 'Total P&L',       value: `${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)}`, color: totalPnl >= 0 ? 'text-profit' : 'text-loss', sub: `realised ${fmt(realised)} · unreal ${fmt(unrealised)}` },
+    { label: 'Return',          value: `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%`, color: roi >= 0 ? 'text-profit' : 'text-loss' },
+  ]
+
+  return (
+    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Briefcase size={16} className="text-cyan" />
+        <h3 className="text-slate-100 font-semibold text-sm">My Portfolio</h3>
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 uppercase">Paper</span>
+        <span className="text-[10px] text-muted">agent-managed · live P&amp;L</span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {cards.map((c) => (
+          <div key={c.label} className="bg-white/[0.03] border border-border rounded-lg px-3 py-2">
+            <div className="text-muted text-[10px] uppercase tracking-wider">{c.label}</div>
+            <div className={`text-sm font-bold tabular-nums ${c.color ?? 'text-slate-100'}`}>{c.value}</div>
+            {c.sub && <div className="text-[9px] text-muted truncate">{c.sub}</div>}
+          </div>
+        ))}
+      </div>
+
+      {positions.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-muted uppercase tracking-wider border-b border-border">
+                {['Symbol', 'Qty', 'Entry', 'Current', 'Invested', 'P&L', 'P&L %'].map((h) => (
+                  <th key={h} className="text-left px-2 py-2 font-semibold whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((x, i) => {
+                const pnl = x.unrealised_pnl ?? 0
+                const gain = pnl >= 0
+                const sym = (x.symbol ?? '').replace('.NS', '')
+                return (
+                  <tr key={i} className="border-b border-border/40 hover:bg-surface/30">
+                    <td className="px-2 py-1.5 font-medium text-slate-200">{sym}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-300">{Number(x.size_units ?? 0).toFixed(x.size_units % 1 ? 1 : 0)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-400">{fmt(x.entry_price)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-100">{fmt(x.current_price)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-muted">{fmt(x.size_usd)}</td>
+                    <td className={`px-2 py-1.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>{gain ? '+' : ''}{fmt(pnl)}</td>
+                    <td className={`px-2 py-1.5 tabular-nums ${gain ? 'text-profit' : 'text-loss'}`}>{gain ? '+' : ''}{Number(x.unrealised_pct ?? 0).toFixed(2)}%</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* Agent watchlist — add/remove stocks the agent scans & may paper-trade. */
+function AgentWatchlistPanel() {
+  const [list, setList]     = useState([])
+  const [query, setQuery]   = useState('')
+  const [results, setResults] = useState([])
+  const [busy, setBusy]     = useState(false)
+
+  const loadList = () => apiFetch('/api/v1/india/user-watchlist')
+    .then((d) => setList(Array.isArray(d) ? d : (d?.symbols ?? d?.watchlist ?? [])))
+    .catch(() => {})
+  useEffect(() => { loadList() }, [])
+
+  useEffect(() => {
+    if (query.trim().length < 2) { setResults([]); return }
+    const t = setTimeout(() => {
+      apiFetch(`/api/v1/portfolios/search/stocks?q=${encodeURIComponent(query.trim())}`)
+        .then((r) => setResults(Array.isArray(r) ? r.slice(0, 6) : [])).catch(() => setResults([]))
+    }, 300)
+    return () => clearTimeout(t)
+  }, [query])
+
+  const add = async (sym) => {
+    setBusy(true)
+    try {
+      await apiFetch(`/api/v1/india/user-watchlist/${sym}`, { method: 'POST' })
+      toast.success(`${sym} added — agent will scan it`)
+      setQuery(''); setResults([]); loadList()
+    } catch { toast.error('Add failed') } finally { setBusy(false) }
+  }
+  const remove = async (sym) => {
+    try {
+      await apiFetch(`/api/v1/india/user-watchlist/${sym.replace('.NS', '')}`, { method: 'DELETE' })
+      toast.success(`${sym} removed`); loadList()
+    } catch { toast.error('Remove failed') }
+  }
+
+  return (
+    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Plus size={15} className="text-accent" />
+        <h3 className="text-slate-100 font-semibold text-sm">Agent Watchlist</h3>
+        <span className="text-[10px] text-muted">stocks the agent scans &amp; may paper-trade</span>
+      </div>
+
+      <div className="relative">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search NSE/BSE stock to add (e.g. RELIANCE)…"
+          className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
+        />
+        {results.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full bg-panel border border-border rounded-lg shadow-xl overflow-hidden">
+            {results.map((r) => (
+              <button key={r.symbol} disabled={busy} onClick={() => add(r.ticker || r.symbol.replace('.NS', ''))}
+                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-surface/60 text-sm">
+                <span className="text-slate-200">{r.ticker || r.symbol} <span className="text-muted text-xs">{r.name}</span></span>
+                <span className="text-[10px] text-accent">+ add</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {list.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {list.map((w, i) => {
+            const sym = typeof w === 'string' ? w : (w.symbol ?? '')
+            return (
+              <span key={i} className="inline-flex items-center gap-1.5 bg-surface/60 border border-border rounded-full pl-2.5 pr-1.5 py-1 text-xs text-slate-200">
+                {sym.replace('.NS', '')}
+                <button onClick={() => remove(sym)} className="text-muted hover:text-loss text-sm leading-none">×</button>
+              </span>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="text-xs text-muted">No custom stocks yet — search above to add. The agent already scans the top NSE universe by default.</p>
+      )}
+    </div>
+  )
+}
+
 function TaxQuickView({ portfolioId }) {
   const [status,  setStatus]  = useState(null)
   const [loading, setLoading] = useState(true)
@@ -466,7 +636,13 @@ export default function PortfolioTracker() {
             <SummaryCards summary={summary} />
           )}
 
-          {/* Agent activity — paper-trading positions / decisions inline */}
+          {/* Full paper portfolio detail — all positions with live P&L */}
+          <PaperPortfolioPanel />
+
+          {/* Agent watchlist — add stocks the agent scans & may paper-trade */}
+          <AgentWatchlistPanel />
+
+          {/* Agent activity — recent decisions inline */}
           <AgentActivityPanel />
 
           {/* Tab bar */}
