@@ -224,14 +224,34 @@ async def open_option_paper_trade(
 
 # ── Mark-to-market ───────────────────────────────────────────────────────────
 
+async def _kite_ltp_nfo(tradingsymbol: str) -> float | None:
+    """Live last-traded price for an NFO contract via Kite (real-time)."""
+    try:
+        from crawler.zerodha_client import get_kite_client
+        kite = get_kite_client()
+        if not kite.access_token:
+            return None
+        raw = await kite.get_ltp([f"NFO:{tradingsymbol}"])
+        d = (raw or {}).get(f"NFO:{tradingsymbol}")
+        if d and d.get("last_price", 0) > 0:
+            return float(d["last_price"])
+    except Exception:
+        return None
+    return None
+
+
 async def current_option_premium(pos: OpenPosition, session: AsyncSession) -> float | None:
     """Current premium for an open option position.
 
-    Prefers the latest snapshot premium; falls back to repricing via Black-Scholes
-    from the current underlying spot + the position's entry IV (approximate).
+    Order: live Kite LTP (real-time) → latest snapshot premium → Black-Scholes
+    reprice from current spot + entry IV (approximate).
     """
     if not pos.underlying_symbol or not pos.strike_price or not pos.expiry_date:
         return None
+    # 1. Live Kite LTP for the exact contract.
+    live = await _kite_ltp_nfo(pos.symbol)
+    if live is not None:
+        return live
     prem = await _latest_premium(
         pos.underlying_symbol, pos.strike_price, pos.option_type, pos.expiry_date, session
     )

@@ -48,9 +48,11 @@ class AgentExecutionManager:
         # ── Canonical records the status API, Trades page, and hydration read ──
         # PaperTrade + OpenPosition are the single source of truth. Writing them
         # here keeps the wallet, agent status, and UI all in agreement.
+        # Keep the FULL symbol (e.g. NMDC.NS) so the candle/price-cache mark-to-
+        # market lookups match — storing a bare symbol leaves P&L frozen at entry.
         direction = TradeDirection.BUY if decision.action == "BUY" else TradeDirection.SELL
         ptrade = PaperTrade(
-            symbol=decision.symbol.replace(".NS", ""),
+            symbol=decision.symbol,
             direction=direction,
             status=TradeStatus.OPEN,
             entry_price=decision.entry,
@@ -69,7 +71,7 @@ class AgentExecutionManager:
         await session.flush()
 
         position = OpenPosition(
-            symbol=decision.symbol.replace(".NS", ""),
+            symbol=decision.symbol,
             direction=direction,
             entry_price=decision.entry,
             current_price=decision.entry,

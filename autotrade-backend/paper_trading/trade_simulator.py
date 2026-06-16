@@ -398,22 +398,60 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
     )
     positions = list(result.scalars().all())
 
+    # ── Prefetch LIVE Kite LTP for all equity positions (real-time, not the
+    # stale 1h candle). One batched LTP call per cycle. Falls back to candle
+    # per-symbol if Kite has no quote. This is what makes prices/P&L/Telegram live.
+    live_px: dict[str, float] = {}
+    eq_syms = [p.symbol for p in positions
+               if getattr(p, "instrument_type", "EQUITY") == "EQUITY"]
+    if eq_syms:
+        try:
+            from crawler.zerodha_market import get_live_prices
+            quotes = await get_live_prices(eq_syms)
+            for sym, q in (quotes or {}).items():
+                px = q.get("price") or q.get("last_price")
+                if px and px > 0:
+                    live_px[sym] = float(px)
+        except Exception as exc:
+            logger.debug(f"update_positions: live Kite LTP prefetch failed: {exc}")
+
     auto_closed: list[dict] = []
 
     for pos in positions:
-        # ── Fetch latest candle price ─────────────────────────────────────────
-        candle_row = await session.execute(
-            select(Candle)
-            .where(Candle.symbol == pos.symbol, Candle.timeframe == "1h")
-            .order_by(Candle.timestamp.desc())
-            .limit(1)
-        )
-        candle = candle_row.scalar_one_or_none()
-        if candle is None:
-            logger.debug(f"update_positions: no candle data for {pos.symbol} — skipping")
+        # ── F&O positions: mark to live option/future price (not candles) ──────
+        if getattr(pos, "instrument_type", "EQUITY") in ("CE", "PE", "FUTURE"):
+            try:
+                if pos.instrument_type == "FUTURE":
+                    from engine.fno.futures import current_future_price, future_pnl
+                    cur = await current_future_price(pos, session)
+                    if cur:
+                        pos.current_price = cur
+                        pos.unrealised_pnl, pos.unrealised_pct = future_pnl(pos, cur)
+                else:
+                    from engine.fno.selection import current_option_premium, option_pnl
+                    cur = await current_option_premium(pos, session)
+                    if cur:
+                        pos.current_price = cur
+                        pos.unrealised_pnl, pos.unrealised_pct = option_pnl(pos, cur)
+            except Exception as exc:
+                logger.debug(f"update_positions: F&O mark failed for {pos.symbol}: {exc}")
             continue
 
-        price = candle.close
+        # Prefer the LIVE Kite price; fall back to the latest 1h candle.
+        price = live_px.get(pos.symbol)
+        if price is None:
+            candle_row = await session.execute(
+                select(Candle)
+                .where(Candle.symbol == pos.symbol, Candle.timeframe == "1h")
+                .order_by(Candle.timestamp.desc())
+                .limit(1)
+            )
+            candle = candle_row.scalar_one_or_none()
+            if candle is None:
+                logger.debug(f"update_positions: no price for {pos.symbol} — skipping")
+                continue
+            price = candle.close
+
         is_buy = pos.direction == TradeDirection.BUY
 
         # ── Trailing stop after Target 1 ──────────────────────────────────────
