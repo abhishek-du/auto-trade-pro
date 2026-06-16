@@ -2816,9 +2816,8 @@ async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
     # 4. AI commentary (LLM) — concise, grounded in the numbers above
     ai_text = None
     try:
-        # User-facing → use Groq directly (fast ~1-2s). Ollama qwen2.5:7b on CPU
-        # is too slow (>60s) for a live UI panel.
-        from utils.llm import call_groq_chat
+        # User-facing → unified LLM chain (Gemini primary ~2s, Groq secondary).
+        from utils.llm import call_llm_chat
         sug = (signal.get("suggestion") or {}) if isinstance(signal, dict) else {}
         prompt = (
             f"You are an Indian F&O desk analyst. In 4-5 sentences, give a clear trading view on {und}.\n"
@@ -2832,11 +2831,11 @@ async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
             f"Be specific and decisive. No disclaimers."
         )
         ai_text = await asyncio.wait_for(
-            call_groq_chat(
+            call_llm_chat(
                 [{"role": "user", "content": prompt}],
                 max_tokens=300, temperature=0.4,
             ),
-            timeout=15.0,   # never hang the request
+            timeout=20.0,   # never hang the request
         )
     except (asyncio.TimeoutError, Exception):
         ai_text = None
