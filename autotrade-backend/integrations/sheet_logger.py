@@ -588,6 +588,40 @@ def _setup_trades_sheet(sh, ws):
     sh.batch_update({"requests": reqs})
 
 
+def _write_daily_report(sh, daily_rows: list[dict]):
+    """Create/refresh the '📅 Daily Report' sheet — one row per trading day.
+
+    Columns: Date, Trades Opened, Trades Closed, Wins, Losses, Win %,
+    Realised P&L, Best Trade, Worst Trade, Cumulative P&L.
+    """
+    from gspread.exceptions import WorksheetNotFound
+    title = "📅 Daily Report"
+    try:
+        ws = sh.worksheet(title)
+        ws.clear()
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=400, cols=10)
+
+    headers = ["Date", "Opened", "Closed", "Wins", "Losses", "Win %",
+               "Realised P&L", "Best Trade", "Worst Trade", "Cumulative P&L"]
+    matrix = [headers]
+    cum = 0.0
+    for d in daily_rows:
+        cum += d["realised"]
+        matrix.append([
+            d["date"], d["opened"], d["closed"], d["wins"], d["losses"],
+            f'{d["win_rate"]:.0f}%',
+            round(d["realised"], 2), round(d["best"], 2), round(d["worst"], 2),
+            round(cum, 2),
+        ])
+    ws.update(matrix, "A1")
+    try:
+        ws.format("A1:J1", {"textFormat": {"bold": True},
+                            "backgroundColor": {"red": 0.15, "green": 0.18, "blue": 0.28}})
+    except Exception:
+        pass
+
+
 def _add_summary_sheet(sh, trades_ws_title="Trades"):
     """Create/refresh the 📊 Summary dashboard sheet."""
     try:
@@ -1129,25 +1163,37 @@ class GoogleSheetsSink:
         if self._ws is not None:
             return self._ws, self._sh
         import gspread
+        from gspread.exceptions import WorksheetNotFound
         gc = gspread.authorize(self._get_credentials())
         sh = gc.open_by_key(settings.GOOGLE_SHEETS_ID)
         title = settings.GOOGLE_SHEETS_WORKSHEET
+
+        # 1. Get-or-create the worksheet. Only create on WorksheetNotFound — a
+        #    broad except here caused transient Google 503s during row_values()/
+        #    update() to be mistaken for "sheet missing" → addSheet → "already
+        #    exists" 400. Header maintenance is done in its own guarded block.
         try:
             ws = sh.worksheet(title)
+        except WorksheetNotFound:
+            ws = sh.add_worksheet(title=title, rows=2000, cols=len(KEYS) + 4)
+            ws.update([HEADERS], "A1")
+            self._formatted = False
+            self._ws, self._sh = ws, sh
+            return ws, sh
+
+        # 2. Header maintenance (best-effort — never re-creates the sheet).
+        try:
             existing = ws.row_values(1) if ws.row_count > 0 else []
             if not existing:
-                # Empty sheet — write header
                 ws.update([HEADERS], "A1")
                 self._formatted = False
             elif existing != HEADERS:
-                # Schema changed — clear and re-write header
                 ws.clear()
                 ws.update([HEADERS], "A1")
                 self._formatted = False
-        except Exception:
-            ws = sh.add_worksheet(title=title, rows=2000, cols=len(KEYS)+4)
-            ws.update([HEADERS], "A1")
-            self._formatted = False
+        except Exception as exc:
+            logger.debug(f"[sheet_logger] header check skipped (transient): {exc}")
+
         self._ws, self._sh = ws, sh
         return ws, sh
 
@@ -1347,6 +1393,48 @@ def _rebuild_summary(agent_rows, pos_map, hub_map):
     sink.write_summary_sheet(open_trades, closed_trades)
 
 
+async def _compute_daily_report(session: AsyncSession) -> list[dict]:
+    """Per-day aggregates from paper_trades: opened/closed/wins/losses/realised/best/worst."""
+    from sqlalchemy import text as _text
+    rows = (await session.execute(_text("""
+        WITH opened AS (
+            SELECT opened_at::date AS d, COUNT(*) AS n
+            FROM paper_trades GROUP BY 1
+        ),
+        closed AS (
+            SELECT closed_at::date AS d,
+                   COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE pnl > 0) AS wins,
+                   COUNT(*) FILTER (WHERE pnl < 0) AS losses,
+                   COALESCE(SUM(pnl), 0) AS realised,
+                   COALESCE(MAX(pnl), 0) AS best,
+                   COALESCE(MIN(pnl), 0) AS worst
+            FROM paper_trades WHERE closed_at IS NOT NULL AND pnl IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT COALESCE(o.d, c.d) AS day,
+               COALESCE(o.n, 0) AS opened,
+               COALESCE(c.n, 0) AS closed,
+               COALESCE(c.wins, 0) AS wins,
+               COALESCE(c.losses, 0) AS losses,
+               COALESCE(c.realised, 0) AS realised,
+               COALESCE(c.best, 0) AS best,
+               COALESCE(c.worst, 0) AS worst
+        FROM opened o FULL OUTER JOIN closed c ON o.d = c.d
+        ORDER BY day
+    """))).all()
+    out = []
+    for r in rows:
+        wl = (r.wins or 0) + (r.losses or 0)
+        out.append({
+            "date": str(r.day), "opened": r.opened, "closed": r.closed,
+            "wins": r.wins, "losses": r.losses,
+            "win_rate": (r.wins / wl * 100) if wl else 0.0,
+            "realised": float(r.realised), "best": float(r.best), "worst": float(r.worst),
+        })
+    return out
+
+
 async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
     """Idempotently reconcile the spreadsheet with both PaperTrade and AgentTrade tables."""
     if not getattr(settings, "SHEET_LOG_ENABLED", False):
@@ -1478,6 +1566,14 @@ async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
                 await asyncio.to_thread(_rebuild_summary, agent_rows, pos_map, hub_map)
             except Exception as exc:
                 logger.warning(f"[sheet_logger] summary sheet failed (non-fatal): {exc}")
+
+        # ── Per-day report (both backends) ───────────────────────────────────
+        try:
+            daily_rows = await _compute_daily_report(session)
+            if daily_rows and getattr(settings, "SHEET_LOG_BACKEND", "local") == "google":
+                await asyncio.to_thread(_write_daily_report, sink._sh, daily_rows)
+        except Exception as exc:
+            logger.warning(f"[sheet_logger] daily report failed (non-fatal): {exc}")
 
         return {"enabled": True, "appended": appended, "updated": updated,
                 "agent_trades": len(agent_rows), "paper_trades": len(paper_rows)}
