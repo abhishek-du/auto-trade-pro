@@ -39,6 +39,12 @@ async def get_portfolio(db: AsyncSession = Depends(get_db)):
 async def get_open_positions(db: AsyncSession = Depends(get_db)):
     positions = await PositionTracker.get_open_positions(db)
 
+    # Compute LIVE price + P&L on read so brand-new positions show real-time P&L
+    # immediately (not ₹0 until the next periodic mark-to-market task). Falls back
+    # to stored values per-position if a live price can't be resolved.
+    from paper_trading.trade_simulator import compute_live_pnl
+    live = await compute_live_pnl(positions, db)
+
     # Pull trade-management state (targets, ATR, trailing flag) from the linked
     # PaperTrade.indicator_snapshot so the UI can show trailing-stop status.
     from db.models import PaperTrade
@@ -57,18 +63,19 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
     out = []
     for p in positions:
         tm = mgmt_by_trade.get(p.trade_id, {})
+        cur_px, upnl, upct = live.get(p.id, (p.current_price, p.unrealised_pnl, p.unrealised_pct))
         out.append(OpenPositionOut(
             id=p.id,
             symbol=p.symbol,
             direction=p.direction.value,
             entry_price=p.entry_price,
-            current_price=p.current_price,
+            current_price=cur_px,
             stop_loss=p.stop_loss,
             take_profit=p.take_profit,
             size_units=p.size_units,
             size_usd=p.size_usd,
-            unrealised_pnl=p.unrealised_pnl,
-            unrealised_pct=p.unrealised_pct,
+            unrealised_pnl=upnl,
+            unrealised_pct=upct,
             trade_id=p.trade_id,
             opened_at=p.opened_at,
             last_updated=p.last_updated,
@@ -141,6 +148,13 @@ async def get_paper_trades(
             "closed_at":        r.closed_at.isoformat() if r.closed_at else None,
             "exit_reason":      None,
             "source":           "paper",
+            # ── F&O fields so the UI can show strike / type / expiry / premium ──
+            "instrument_type":  getattr(r, "instrument_type", "EQUITY"),
+            "underlying_symbol": getattr(r, "underlying_symbol", None),
+            "strike_price":     getattr(r, "strike_price", None),
+            "option_type":      getattr(r, "option_type", None),
+            "expiry_date":      r.expiry_date.isoformat() if getattr(r, "expiry_date", None) else None,
+            "lot_size":         getattr(r, "lot_size", 1),
         })
     return out
 
