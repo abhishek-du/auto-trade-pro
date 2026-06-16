@@ -109,6 +109,12 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=14, minute=30),
     },
 
+    # Daily 10:15 UTC = 3:45 PM IST (after NSE close): settle expired F&O positions
+    "fno-expiry-sweep-daily": {
+        "task":     "tasks.fno_expiry_sweep",
+        "schedule": crontab(hour=10, minute=15, day_of_week="1-5"),
+    },
+
     # Weekly Sunday 18:30 UTC: fundamental data refresh (PE, ROE, promoter holding…)
     "india-fundamentals-weekly": {
         "task":     "tasks.india_fundamental_update",

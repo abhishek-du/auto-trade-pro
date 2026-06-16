@@ -2533,3 +2533,268 @@ async def trigger_market_scanner(db: AsyncSession = Depends(get_db)):
         result = await _run_market_scanner(force=True)
         return {"status": "ran_inline", "result": result}
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# F&O — chain with Greeks, IV-rank, and derivative positions (Phase 7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/fno/chain/{underlying}", summary="Latest option chain with IV + Greeks")
+async def get_fno_chain(underlying: str, db: AsyncSession = Depends(get_db)):
+    """Per-strike chain (IV, delta, gamma, theta, vega, OI) for an underlying.
+
+    Reads the most recent OptionContractSnapshot batch. Empty until the options
+    task has run with ENABLE_FNO=true.
+    """
+    from db.models import OptionContractSnapshot
+    from sqlalchemy import func as _f
+
+    und = underlying.upper().replace(".NS", "")
+    last_at = (await db.execute(
+        select(_f.max(OptionContractSnapshot.snapshot_at))
+        .where(OptionContractSnapshot.underlying == und)
+    )).scalar()
+    if last_at is None:
+        return {"underlying": und, "strikes": [], "snapshot_at": None}
+
+    rows = (await db.execute(
+        select(OptionContractSnapshot).where(
+            OptionContractSnapshot.underlying == und,
+            OptionContractSnapshot.snapshot_at == last_at,
+        ).order_by(OptionContractSnapshot.strike)
+    )).scalars().all()
+
+    # Merge CE/PE per strike into one row.
+    by_strike: dict[float, dict] = {}
+    spot = rows[0].spot if rows else 0.0
+    for r in rows:
+        s = by_strike.setdefault(r.strike, {"strike": r.strike})
+        side = "ce" if r.option_type == "CE" else "pe"
+        s[f"{side}_ltp"]   = r.ltp
+        s[f"{side}_oi"]    = r.oi
+        s[f"{side}_iv"]    = round(r.iv, 4) if r.iv else None
+        s[f"{side}_delta"] = r.delta
+        s[f"{side}_theta"] = r.theta
+        s[f"{side}_vega"]  = r.vega
+
+    return {
+        "underlying":  und,
+        "spot":        spot,
+        "expiry":      rows[0].expiry_date.isoformat() if rows else None,
+        "snapshot_at": last_at.isoformat(),
+        "strikes":     [by_strike[k] for k in sorted(by_strike)],
+    }
+
+
+@router.get("/fno/iv-rank/{underlying}", summary="ATM IV + IV-rank from history")
+async def get_fno_iv_rank(underlying: str, db: AsyncSession = Depends(get_db)):
+    from db.models import IVHistory
+    und = underlying.upper().replace(".NS", "")
+    hist = (await db.execute(
+        select(IVHistory.trade_date, IVHistory.atm_iv)
+        .where(IVHistory.underlying == und)
+        .order_by(IVHistory.trade_date)
+    )).all()
+    if not hist:
+        return {"underlying": und, "atm_iv": None, "iv_rank": None, "history": []}
+    ivs = [float(h.atm_iv) for h in hist]
+    cur = ivs[-1]
+    lo, hi = min(ivs), max(ivs)
+    rank = round(100 * (cur - lo) / (hi - lo), 1) if hi > lo else 50.0
+    return {
+        "underlying": und, "atm_iv": round(cur, 4), "iv_rank": rank,
+        "history": [{"date": h.trade_date.isoformat(), "iv": round(float(h.atm_iv), 4)} for h in hist],
+    }
+
+
+@router.get("/fno/positions", summary="Open F&O derivative positions (options + futures)")
+async def get_fno_positions(db: AsyncSession = Depends(get_db)):
+    """Open option/future positions with live premium + P&L for the F&O dashboard."""
+    from db.models import OpenPosition
+    from engine.fno.selection import current_option_premium, option_pnl
+    from engine.fno.futures import current_future_price, future_pnl
+
+    rows = (await db.execute(
+        select(OpenPosition).where(OpenPosition.instrument_type.in_(["CE", "PE", "FUTURE"]))
+    )).scalars().all()
+
+    out = []
+    total_pnl = 0.0
+    total_margin = 0.0
+    for pos in rows:
+        if pos.instrument_type == "FUTURE":
+            cur = await current_future_price(pos, db)
+            pnl, pct = future_pnl(pos, cur) if cur else (0.0, 0.0)
+        else:
+            cur = await current_option_premium(pos, db)
+            pnl, pct = option_pnl(pos, cur) if cur else (0.0, 0.0)
+        total_pnl += pnl
+        total_margin += float(pos.margin_blocked or 0.0)
+        out.append({
+            "symbol":          pos.symbol,
+            "instrument_type": pos.instrument_type,
+            "underlying":      pos.underlying_symbol,
+            "strike":          pos.strike_price,
+            "option_type":     pos.option_type,
+            "expiry":          pos.expiry_date.isoformat() if pos.expiry_date else None,
+            "direction":       pos.direction.value if hasattr(pos.direction, "value") else pos.direction,
+            "lots":            int(pos.size_units / pos.lot_size) if pos.lot_size else None,
+            "qty":             pos.size_units,
+            "entry":           pos.entry_price,
+            "current":         cur,
+            "pnl":             pnl,
+            "pnl_pct":         pct,
+            "margin":          pos.margin_blocked,
+            "opened_at":       pos.opened_at.isoformat() if pos.opened_at else None,
+            "last_updated":    pos.last_updated.isoformat() if pos.last_updated else None,
+        })
+    return {
+        "positions":    out,
+        "count":        len(out),
+        "total_pnl":    round(total_pnl, 2),
+        "total_margin": round(total_margin, 2),
+    }
+
+
+@router.get("/fno/signals", summary="F&O Buy-CE/Buy-PE signals + predictions per index")
+async def get_fno_signals(db: AsyncSession = Depends(get_db)):
+    """Directional option signals for the F&O index universe.
+
+    Per index: trend direction, confidence, PCR/Max-Pain positioning, IV-rank,
+    the option the agent would buy, and a plain-English recommendation.
+    """
+    from engine.fno.selection import fno_signal_preview
+    out = []
+    for under in settings.fno_index_symbols:
+        try:
+            sig = await fno_signal_preview(under, db)
+            if sig:
+                out.append(sig)
+        except Exception as exc:
+            out.append({"underlying": under, "error": str(exc)[:120]})
+    return {"signals": out, "count": len(out)}
+
+
+@router.get("/fno/analysis/{underlying}", summary="Full F&O analysis: signal + sentiment + AI + news")
+async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
+    """One-call deep analysis for an index: directional signal, market sentiment
+    (VIX, breadth, FII/DII, PCR), an AI-written commentary, and relevant news.
+    """
+    from engine.fno.selection import fno_signal_preview
+    from crawler.live_prices import get_market_summary, PRICE_CACHE
+    from db.models import NewsItem, FIIDIIFlow
+    from sqlalchemy import desc as _desc
+
+    und = underlying.upper().replace(".NS", "")
+
+    # 1. Signal (direction, suggestion, PCR, max-pain, IV-rank)
+    try:
+        signal = await fno_signal_preview(und, db)
+    except Exception as exc:
+        signal = {"underlying": und, "error": str(exc)[:120]}
+
+    # 2. Market sentiment bundle — VIX (live fetch) + breadth (cache)
+    vix = None
+    try:
+        from crawler.india_price_feed import fetch_india_vix
+        vix = await asyncio.get_event_loop().run_in_executor(None, fetch_india_vix)
+        vix = round(float(vix), 2) if vix else None
+    except Exception:
+        vix = None
+    vix_regime = None
+    if vix is not None and vix > 0:
+        vix_regime = "CALM" if vix < 13 else "ELEVATED" if vix < 18 else "FEARFUL"
+
+    advances = declines = None
+    breadth_mood = "NEUTRAL"
+    try:
+        from crawler.market_breadth import get_breadth_cache
+        nse = (get_breadth_cache() or {}).get("nse", {})
+        advances = nse.get("advances"); declines = nse.get("declines")
+        breadth_mood = nse.get("market_mood") or (
+            "BULLISH" if (advances or 0) > (declines or 0) * 1.2 else
+            "BEARISH" if (declines or 0) > (advances or 0) * 1.2 else "NEUTRAL"
+        )
+    except Exception:
+        pass
+
+    # FII/DII latest
+    fii_dii = None
+    try:
+        row = (await db.execute(select(FIIDIIFlow).order_by(_desc(FIIDIIFlow.date)).limit(1))).scalar_one_or_none()
+        if row:
+            fii_dii = {
+                "date": row.date.isoformat() if row.date else None,
+                "fii_net": getattr(row, "fii_net_buy", None),
+                "dii_net": getattr(row, "dii_net_buy", None),
+            }
+    except Exception:
+        pass
+
+    sentiment = {
+        "india_vix": vix, "vix_regime": vix_regime,
+        "advances": advances, "declines": declines, "breadth_mood": breadth_mood,
+        "pcr": signal.get("pcr") if isinstance(signal, dict) else None,
+        "pcr_bias": signal.get("pcr_bias") if isinstance(signal, dict) else None,
+        "max_pain": signal.get("max_pain") if isinstance(signal, dict) else None,
+        "iv_rank": signal.get("iv_rank") if isinstance(signal, dict) else None,
+        "fii_dii": fii_dii,
+    }
+
+    # 3. Relevant news (market-wide + any mentioning the index)
+    news_rows = (await db.execute(
+        select(NewsItem).order_by(_desc(NewsItem.crawled_at)).limit(40)
+    )).scalars().all()
+    news = []
+    for n in news_rows:
+        tickers = n.tickers_affected or []
+        relevant = (und in [str(t).upper() for t in tickers]) or len(news) < 12
+        if relevant:
+            news.append({
+                "headline": n.headline, "source": n.source, "url": n.url,
+                "sentiment": n.sentiment, "score": round(n.score or 0.0, 3),
+                "published_at": n.published_at.isoformat() if n.published_at else None,
+            })
+        if len(news) >= 12:
+            break
+    pos = sum(1 for x in news if x["sentiment"] == "positive")
+    neg = sum(1 for x in news if x["sentiment"] == "negative")
+    news_mood = "POSITIVE" if pos > neg else "NEGATIVE" if neg > pos else "MIXED"
+
+    # 4. AI commentary (LLM) — concise, grounded in the numbers above
+    ai_text = None
+    try:
+        # User-facing → use Groq directly (fast ~1-2s). Ollama qwen2.5:7b on CPU
+        # is too slow (>60s) for a live UI panel.
+        from utils.llm import call_groq_chat
+        sug = (signal.get("suggestion") or {}) if isinstance(signal, dict) else {}
+        prompt = (
+            f"You are an Indian F&O desk analyst. In 4-5 sentences, give a clear trading view on {und}.\n"
+            f"Data: spot={signal.get('spot')}, direction={signal.get('direction')}, "
+            f"confidence={signal.get('confidence')}, PCR={sentiment['pcr']} ({sentiment['pcr_bias']}), "
+            f"max_pain={sentiment['max_pain']}, IV_rank={sentiment['iv_rank']}, "
+            f"India_VIX={vix} ({vix_regime}), market_breadth={breadth_mood} "
+            f"(adv {advances}/dec {declines}), news_mood={news_mood}.\n"
+            f"Suggested trade: {sug.get('action')} {sug.get('strike')} @ {sug.get('premium')}.\n"
+            f"Cover: bias, what the options data implies, key risk, and whether the suggested trade makes sense. "
+            f"Be specific and decisive. No disclaimers."
+        )
+        ai_text = await asyncio.wait_for(
+            call_groq_chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=300, temperature=0.4,
+            ),
+            timeout=15.0,   # never hang the request
+        )
+    except (asyncio.TimeoutError, Exception):
+        ai_text = None
+
+    return {
+        "underlying": und,
+        "signal": signal,
+        "sentiment": sentiment,
+        "ai_analysis": ai_text,
+        "news": news,
+        "news_mood": news_mood,
+        "generated_at": __import__("datetime").datetime.utcnow().isoformat(),
+    }

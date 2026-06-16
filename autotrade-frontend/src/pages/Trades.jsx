@@ -298,7 +298,7 @@ function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
   // Use actual equity from the API; fall back to wallet equity so the number is
   // always live and never depends on a hardcoded starting constant.
   const portfolioValue = agentPortfolio?.equity ?? wallet?.equity ?? 100_000;
-  const START_CAPITAL  = wallet?.peak_balance   ?? 100_000;
+  const START_CAPITAL  = agentPortfolio?.start_capital ?? wallet?.peak_balance ?? (portfolioValue - totalPnl) ?? 100_000;
   const openPositions  = agentPortfolio?.open_positions_count ?? 0;
   const agentCash      = agentPortfolio?.cash ?? null;
   const roiPct         = START_CAPITAL > 0 ? ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100 : 0;

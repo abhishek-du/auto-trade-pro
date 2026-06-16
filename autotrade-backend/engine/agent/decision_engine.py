@@ -34,7 +34,7 @@ class AgentDecisionOutput:
     qty:                int
     risk_pct:           float
     risk_reward:        float
-    product:            str   = "CNC"   # CNC=delivery positional | MIS=intraday (short allowed)
+    product:            str   = "CNC"   # CNC=delivery positional | MIS=intraday | NRML=F&O
     reasons:            list  = field(default_factory=list)
     macro_bias:         int   = 0
     fund_score:         int   = 0
@@ -42,6 +42,16 @@ class AgentDecisionOutput:
     ts:                 str   = ""
     master_score:       float | None = None   # raw hub score before confidence calc
     confidence_factors: dict  | None = None   # breakdown for audit log
+    # ── F&O fields (EQUITY for cash trades; populated for FUTURE/CE/PE) ────────
+    instrument_type:    str   = "EQUITY"        # EQUITY | FUTURE | CE | PE
+    underlying_symbol:  str   | None = None     # e.g. "NIFTY" for a NIFTY option
+    tradingsymbol:      str   | None = None      # broker NFO symbol, e.g. NIFTY26JAN24500CE
+    strike_price:       float | None = None
+    option_type:        str   | None = None     # CE | PE
+    expiry_date:        str   | None = None     # ISO date string
+    lot_size:           int   = 1
+    contract_multiplier: float = 1.0
+    exchange:           str   = "NSE"           # NSE | NFO
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -72,18 +82,23 @@ class DecisionEngine:
             logger.debug(f"[agent/decision] {symbol} SELL blocked — EQUITY_SHORT_ENABLED=False")
             return None, "EQUITY_SHORT_ENABLED=False"
 
-        from engine.agent.risk_manager import position_size
+        from engine.agent.risk_manager import capital_utilization_size
 
         # Apply regime-based position size reduction flag (set by fetch_hub_candidate)
         size_factor = getattr(candidate, "size_factor", 1.0)
 
-        qty_full = position_size(
-            equity, settings.AGENT_MAX_RISK_PER_TRADE,
-            candidate.entry, candidate.stop,
+        # Capital-utilization sizing: deploy toward a conviction-weighted target
+        # (so the ₹20L is actually used) while keeping the per-trade risk guard,
+        # the 20% per-position cap, and the cash buffer. `deployed_notional` is
+        # passed by the caller so the cash-buffer room is respected portfolio-wide.
+        deployed_notional = getattr(candidate, "deployed_notional", 0.0)
+        conviction = abs(getattr(candidate, "master_score", None) or candidate.confidence)
+        qty, _size_reason = capital_utilization_size(
+            equity, conviction, candidate.entry, candidate.stop,
+            deployed_notional, size_factor=size_factor,
         )
-        qty = max(0, int(qty_full * size_factor))
         if qty <= 0:
-            return None, "qty_zero_after_sizing"
+            return None, f"qty_zero:{_size_reason}"
 
         risk_amt = qty * abs(candidate.entry - candidate.stop)
         risk_pct = risk_amt / max(equity, 1)

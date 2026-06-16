@@ -70,64 +70,43 @@ async def _hydrate_portfolio_from_db(
     if _portfolio_hydrated:
         return
 
-    from db.models import AgentTrade
+    from db.models import OpenPosition as OpenPos, PaperTrade
     from sqlalchemy import select as _sel
 
     try:
-        open_trades = (await session.execute(
-            _sel(AgentTrade)
-            .where(AgentTrade.exit_price == None)
-            .order_by(AgentTrade.entry_ts.asc())
+        # Hydrate from open_positions table (source of truth — agent writes here via trade_simulator)
+        open_pos_rows = (await session.execute(
+            _sel(OpenPos).order_by(OpenPos.opened_at.asc())
         )).scalars().all()
 
-        # Keep only the most recent open trade per symbol
-        latest: dict[str, AgentTrade] = {}
-        for trade in open_trades:
-            latest[trade.symbol] = trade  # ascending order → last write = most recent
-
-        # Close older duplicates in DB
-        for trade in open_trades:
-            if latest[trade.symbol].id != trade.id:
-                trade.exit_price  = trade.entry_price
-                trade.exit_ts     = datetime.utcnow()
-                trade.exit_reason = "DUPLICATE_CLEANUP"
-                trade.pnl         = 0.0
-                trade.pnl_pct     = 0.0
-                session.add(trade)
-
-        if open_trades:
-            await session.commit()
-
-        # Hydrate in-memory portfolio with the unique open positions
         capital_locked = 0.0
-        for sym, trade in latest.items():
-            if sym not in portfolio.open_positions:
-                risk = abs(trade.entry_price - trade.stop_price)
-                portfolio.open_positions[sym] = {
-                    "side":          trade.side,
-                    "entry":         trade.entry_price,
-                    "stop":          trade.stop_price,
-                    "target":        trade.target_price,
-                    "qty":           trade.qty,
-                    "strategy":      trade.strategy,
-                    "target1":       round(trade.entry_price + risk, 2),
-                    "target2":       round(trade.entry_price + 2 * risk, 2),
-                    "partial_done":  False,
-                    "trailing_sl":   None,
-                    "entry_ts":      trade.entry_ts.isoformat() if trade.entry_ts else None,
-                    "product":       trade.product,
+        for pos in open_pos_rows:
+            sym = pos.symbol.replace(".NS", "").replace(".BO", "") if pos.symbol else ""
+            # Use the full yfinance symbol as key (e.g. RELIANCE.NS)
+            sym_key = pos.symbol or sym
+            if sym_key not in portfolio.open_positions:
+                risk = abs(pos.entry_price - pos.stop_loss) if pos.stop_loss else pos.entry_price * 0.05
+                portfolio.open_positions[sym_key] = {
+                    "side":         pos.direction or "BUY",
+                    "entry":        float(pos.entry_price),
+                    "stop":         float(pos.stop_loss) if pos.stop_loss else 0.0,
+                    "target":       float(pos.take_profit) if pos.take_profit else 0.0,
+                    "qty":          float(pos.size_units),
+                    "strategy":     "HUB_SIGNAL",
+                    "target1":      round(float(pos.entry_price) + risk, 2),
+                    "target2":      round(float(pos.entry_price) + 2 * risk, 2),
+                    "partial_done": False,
+                    "trailing_sl":  None,
+                    "entry_ts":     pos.opened_at.isoformat() if pos.opened_at else None,
+                    "product":      "CNC",
                 }
-                capital_locked += trade.qty * trade.entry_price
+                capital_locked += float(pos.size_usd)
 
-        # Set cash to reflect what's actually been deployed from the virtual account.
-        # If positions already over-used the equity (old bug), cap cash at 0.
         portfolio.cash = max(0.0, portfolio.equity - capital_locked)
 
-        dupes_closed = len(open_trades) - len(latest)
         logger.info(
-            f"[agent] portfolio hydrated from DB: {len(latest)} open positions, "
+            f"[agent] portfolio hydrated from open_positions: {len(open_pos_rows)} positions, "
             f"capital locked ₹{capital_locked:,.0f}, cash remaining ₹{portfolio.cash:,.0f}"
-            + (f", {dupes_closed} duplicate(s) cleaned up" if dupes_closed else "")
         )
     except Exception as exc:
         logger.warning(f"[agent] portfolio hydration failed: {exc}")
@@ -244,12 +223,44 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             logger.warning(f"[agent] cycle error on {symbol}: {exc}")
             skipped += 1
 
+    # ── F&O passes (additive; gated by ENABLE_OPTIONS / ENABLE_FUTURES) ───────
+    fno_opened: list[dict] = []
+    if getattr(settings, "ENABLE_OPTIONS", False):
+        try:
+            from engine.fno.selection import evaluate_index_options
+            fno_opened += await evaluate_index_options(session, portfolio.equity)
+        except Exception as exc:
+            logger.warning(f"[agent] F&O option pass failed: {exc}")
+    if getattr(settings, "ENABLE_FUTURES", False):
+        try:
+            from engine.fno.futures import evaluate_index_futures
+            fno_opened += await evaluate_index_futures(session, portfolio.equity)
+        except Exception as exc:
+            logger.warning(f"[agent] F&O futures pass failed: {exc}")
+    if getattr(settings, "FNO_HEDGE_ENABLED", False):
+        try:
+            from engine.fno.selection import evaluate_portfolio_hedge
+            hedge = await evaluate_portfolio_hedge(session, portfolio.equity)
+            if hedge:
+                fno_opened.append(hedge)
+        except Exception as exc:
+            logger.warning(f"[agent] F&O hedge pass failed: {exc}")
+    if getattr(settings, "FNO_VOL_ENABLED", False):
+        try:
+            from engine.fno.strategies_vol import evaluate_volatility
+            fno_opened += await evaluate_volatility(session, portfolio.equity)
+        except Exception as exc:
+            logger.warning(f"[agent] F&O volatility pass failed: {exc}")
+    if fno_opened:
+        logger.info(f"[agent] F&O passes opened {len(fno_opened)} derivative position(s)")
+
     return {
         "status":           "ok",
         "cycle_ts":         datetime.utcnow().isoformat(),
         "paper_mode":       settings.AGENT_PAPER_MODE,
         "symbols_scanned":  len(universe),
         "decisions":        len(results),
+        "fno_opened":       len(fno_opened),
         "skipped":          skipped,
         "portfolio": {
             "equity":             portfolio.equity,
@@ -361,6 +372,9 @@ async def _process_symbol(
             )
 
     # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
+    # Tell the sizer how much capital is already deployed so it respects the
+    # portfolio-wide cash buffer when sizing toward the deployment target.
+    candidate.deployed_notional = max(0.0, portfolio.equity - portfolio.cash)
     decision, reject_reason = _decision.fuse(
         symbol=symbol,
         candidate=candidate,

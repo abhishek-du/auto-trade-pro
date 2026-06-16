@@ -332,9 +332,45 @@ export default function PortfolioAnalytics() {
             value={m.jensens_alpha != null ? `${Number(m.jensens_alpha).toFixed(3)}%` : '—'}
             highlight={alphaColor}
             icon={TrendingUp}
-            tooltip={`Jensen's α = Rp − [Rf + β(Rm − Rf)]. CAPM excess return. α > 0 means outperformance.\nCAPM expected: ${fmtPct(m.capm_expected_return)}`}
+            tooltip={`Jensen's α = Rp − [Rf + β(Rm − Rf)]. CAPM excess return. α > 0 means outperformance.\nCAPM expected: ${fmtPct(m.capm_expected ?? m.capm_expected_return)}`}
+          />
+          <StatCard
+            label="Max Drawdown"
+            value={m.max_drawdown != null ? `${Number(m.max_drawdown).toFixed(2)}%` : '—'}
+            highlight={m.max_drawdown > 15 ? 'text-red-400' : m.max_drawdown > 7 ? 'text-amber-400' : 'text-emerald-400'}
+            icon={Activity}
+            tooltip="Largest peak-to-trough decline in the equity curve. Lower is safer."
+          />
+          <StatCard
+            label="Win Rate"
+            value={m.win_rate != null ? `${Number(m.win_rate).toFixed(1)}%` : '—'}
+            icon={Target}
+            tooltip={`Share of closed trades that were profitable (${m.closed_trades ?? 0} closed).`}
+          />
+          <StatCard
+            label="Profit Factor"
+            value={fmtNum(m.profit_factor)}
+            highlight={m.profit_factor >= 1.5 ? 'text-emerald-400' : m.profit_factor >= 1 ? 'text-amber-400' : 'text-red-400'}
+            icon={ArrowRightLeft}
+            tooltip="Gross profit / gross loss. > 1 means net profitable; > 1.5 is healthy."
           />
         </div>
+
+        {/* Verdict banner */}
+        {m.verdict && (
+          <div className={`mt-4 rounded-lg px-4 py-3 text-sm border ${
+            m.verdict === 'STRONG' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+            : m.verdict === 'DECENT' ? 'border-cyan/30 bg-cyan/10 text-cyan'
+            : m.verdict === 'MARGINAL' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+            : m.verdict === 'UNDERPERFORMING' ? 'border-red-500/30 bg-red-500/10 text-red-300'
+            : 'border-border bg-surface/40 text-muted'
+          }`}>
+            <span className="font-semibold">Verdict: {m.verdict.replace(/_/g, ' ')}</span>
+            {m.verdict === 'INSUFFICIENT_DATA'
+              ? ` — need ≥10 closed trades for a reliable risk-adjusted read (currently ${m.closed_trades ?? 0}).`
+              : ` — Sharpe ${fmtNum(m.sharpe_ratio)}, Jensen α ${m.jensens_alpha}%, beta ${fmtNum(m.portfolio_beta)}.`}
+          </div>
+        )}
       </div>
 
       {/* Charts row: historical metrics + portfolio vs benchmark */}

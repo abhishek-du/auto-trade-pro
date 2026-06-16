@@ -69,7 +69,7 @@ class PaperTrade(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    symbol:    Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    symbol:    Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     direction: Mapped[TradeDirection] = mapped_column(Enum(TradeDirection), nullable=False)
     status:    Mapped[TradeStatus]    = mapped_column(
         Enum(TradeStatus), default=TradeStatus.OPEN, nullable=False, index=True
@@ -81,6 +81,16 @@ class PaperTrade(Base):
     take_profit: Mapped[float] = mapped_column(Float, nullable=False)
     size_units:  Mapped[float] = mapped_column(Float, nullable=False)
     size_usd:    Mapped[float] = mapped_column(Float, nullable=False)
+
+    # ── F&O fields (EQUITY for cash; populated for FUTURE/CE/PE) ──────────────
+    instrument_type:     Mapped[str]          = mapped_column(String(10), nullable=False, default="EQUITY")
+    underlying_symbol:   Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    strike_price:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_type:         Mapped[str | None]   = mapped_column(String(2),  nullable=True)  # CE | PE
+    expiry_date:         Mapped[date | None]  = mapped_column(Date, nullable=True)
+    lot_size:            Mapped[int]          = mapped_column(Integer, nullable=False, default=1)
+    contract_multiplier: Mapped[float]        = mapped_column(Float, nullable=False, default=1.0)
+    margin_blocked:      Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
 
     pnl:         Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -114,7 +124,7 @@ class OpenPosition(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    symbol:        Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    symbol:        Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     direction:     Mapped[TradeDirection] = mapped_column(Enum(TradeDirection), nullable=False)
     entry_price:   Mapped[float] = mapped_column(Float, nullable=False)
     current_price: Mapped[float] = mapped_column(Float, nullable=False)
@@ -122,6 +132,16 @@ class OpenPosition(Base):
     take_profit:   Mapped[float] = mapped_column(Float, nullable=False)
     size_units:    Mapped[float] = mapped_column(Float, nullable=False)
     size_usd:      Mapped[float] = mapped_column(Float, nullable=False)
+
+    # ── F&O fields ────────────────────────────────────────────────────────────
+    instrument_type:     Mapped[str]          = mapped_column(String(10), nullable=False, default="EQUITY")
+    underlying_symbol:   Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    strike_price:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_type:         Mapped[str | None]   = mapped_column(String(2),  nullable=True)
+    expiry_date:         Mapped[date | None]  = mapped_column(Date, nullable=True)
+    lot_size:            Mapped[int]          = mapped_column(Integer, nullable=False, default=1)
+    contract_multiplier: Mapped[float]        = mapped_column(Float, nullable=False, default=1.0)
+    margin_blocked:      Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
 
     unrealised_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     unrealised_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -291,6 +311,70 @@ class OptionsChainSnapshot(Base):
         )
 
 
+# ── 8b. OptionContractSnapshot — per-strike with Greeks/IV ────────────────────
+
+class OptionContractSnapshot(Base):
+    """Per-strike option snapshot with computed IV + Greeks (Black-Scholes).
+
+    Append-only: one row per strike per option_type per analysis tick. Powers the
+    symbol-aware options factor, the chain viewer, and volatility strategies.
+    """
+    __tablename__ = "option_contract_snapshots"
+    __table_args__ = (
+        Index("ix_option_contract_under_expiry", "underlying", "expiry_date"),
+        Index("ix_option_contract_snapshot_at", "snapshot_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    underlying:   Mapped[str]   = mapped_column(String(30), nullable=False)   # "NIFTY", "RELIANCE"
+    expiry_date:  Mapped[date]  = mapped_column(Date, nullable=False)
+    strike:       Mapped[float] = mapped_column(Float, nullable=False)
+    option_type:  Mapped[str]   = mapped_column(String(2), nullable=False)    # "CE" | "PE"
+    spot:         Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    ltp:          Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    oi:           Mapped[int]   = mapped_column(BigInteger, nullable=False, default=0)
+    oi_change:    Mapped[int]   = mapped_column(BigInteger, nullable=False, default=0)
+    volume:       Mapped[int]   = mapped_column(BigInteger, nullable=False, default=0)
+    iv:           Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    gamma:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    theta:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    vega:         Mapped[float | None] = mapped_column(Float, nullable=True)
+    rho:          Mapped[float | None] = mapped_column(Float, nullable=True)
+    snapshot_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<OptionContractSnapshot {self.underlying} {self.strike}{self.option_type} "
+            f"exp={self.expiry_date} iv={self.iv} delta={self.delta}>"
+        )
+
+
+# ── 8c. IVHistory — daily ATM IV for IV-Rank / IV-Percentile ──────────────────
+
+class IVHistory(Base):
+    """Daily ATM implied-volatility per underlying, for IV-Rank / IV-Percentile.
+
+    One row per underlying per trading day (the latest tick of the day wins).
+    """
+    __tablename__ = "iv_history"
+    __table_args__ = (
+        UniqueConstraint("underlying", "trade_date", name="uq_iv_history_under_date"),
+        Index("ix_iv_history_under", "underlying"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    underlying:  Mapped[str]   = mapped_column(String(30), nullable=False)
+    trade_date:  Mapped[date]  = mapped_column(Date, nullable=False)
+    atm_iv:      Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    updated_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(),
+                                                  onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<IVHistory {self.underlying} {self.trade_date} atm_iv={self.atm_iv:.3f}>"
+
+
 # ── 9. SimulationLog ──────────────────────────────────────────────────────────
 
 class SimulationLog(Base):
@@ -302,7 +386,7 @@ class SimulationLog(Base):
 
     id:         Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_type: Mapped[str]          = mapped_column(String(30), nullable=False, index=True)
-    symbol:     Mapped[str]          = mapped_column(String(20), nullable=False)
+    symbol:     Mapped[str]          = mapped_column(String(50), nullable=False)
     message:    Mapped[str]          = mapped_column(Text,       nullable=False)
     data:       Mapped[dict | None]  = mapped_column(JSON,       nullable=True)
     timestamp:  Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -916,6 +1000,13 @@ class AgentDecision(Base):
     target:      Mapped[float | None] = mapped_column(Float, nullable=True)
     qty:         Mapped[int | None]   = mapped_column(Integer, nullable=True)
     risk_pct:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    # ── F&O fields ────────────────────────────────────────────────────────────
+    instrument_type:   Mapped[str]          = mapped_column(String(10), nullable=False, default="EQUITY")
+    underlying_symbol: Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    strike_price:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_type:       Mapped[str | None]   = mapped_column(String(2),  nullable=True)
+    expiry_date:       Mapped[date | None]  = mapped_column(Date, nullable=True)
+    lot_size:          Mapped[int]          = mapped_column(Integer, nullable=False, default=1)
     reasons:     Mapped[list]         = mapped_column(JSON,  nullable=False, default=list)
     macro_bias:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
     fund_score:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
@@ -947,6 +1038,15 @@ class AgentTrade(Base):
     # CNC = delivery (long only, T+1 settlement); MIS = intraday (short selling allowed,
     # must square off by 3:20 PM IST); NRML = overnight F&O
     product:       Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
+    # ── F&O fields ────────────────────────────────────────────────────────────
+    instrument_type:     Mapped[str]          = mapped_column(String(10), nullable=False, default="EQUITY")
+    underlying_symbol:   Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    strike_price:        Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_type:         Mapped[str | None]   = mapped_column(String(2),  nullable=True)
+    expiry_date:         Mapped[date | None]  = mapped_column(Date, nullable=True)
+    lot_size:            Mapped[int]          = mapped_column(Integer, nullable=False, default=1)
+    contract_multiplier: Mapped[float]        = mapped_column(Float, nullable=False, default=1.0)
+    margin_blocked:      Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
     entry_price:   Mapped[float]        = mapped_column(Float,       nullable=False)
     exit_price:    Mapped[float | None] = mapped_column(Float,       nullable=True)
     stop_price:    Mapped[float]        = mapped_column(Float,       nullable=False)
