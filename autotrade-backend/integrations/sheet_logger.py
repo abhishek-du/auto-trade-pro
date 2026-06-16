@@ -1452,13 +1452,11 @@ async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
         )).scalars().all()
 
         # ── Agent trades ──────────────────────────────────────────────────────
-        agent_rows = (await session.execute(
-            select(AgentTrade)
-            .where(or_(AgentTrade.exit_reason.is_(None),
-                       AgentTrade.exit_reason != "DUPLICATE_CLEANUP"))
-            .order_by(AgentTrade.entry_ts.desc())
-            .limit(limit)
-        )).scalars().all()
+        # The agent executor now writes every trade to paper_trades too (the
+        # canonical table), so logging agent_trades here as well would DOUBLE
+        # each trade in the sheet (PaperTrade.id is int, AgentTrade.id is uuid →
+        # the dedup set never matches them). Log paper_trades only.
+        agent_rows = []
 
         # Batch-fetch Hub scores for all symbols that need a new row
         need_hub_syms: set[str] = set()
