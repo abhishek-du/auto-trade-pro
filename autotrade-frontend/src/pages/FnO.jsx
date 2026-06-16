@@ -34,16 +34,105 @@ function StatCard({ label, value, sub, color = 'text-slate-100', Icon }) {
   );
 }
 
-// ── F&O Positions ─────────────────────────────────────────────────────────────
+// ── F&O Positions (detailed, expandable) ──────────────────────────────────────
+function Field({ label, value, color = 'text-slate-200', sub }) {
+  return (
+    <div className="bg-surface/40 rounded-lg px-3 py-2">
+      <p className="text-[9px] text-muted uppercase tracking-wider">{label}</p>
+      <p className={`text-sm font-semibold tabular-nums ${color}`}>{value}</p>
+      {sub && <p className="text-[9px] text-muted">{sub}</p>}
+    </div>
+  );
+}
+
+function FnOPositionRow({ p }) {
+  const [open, setOpen] = useState(false);
+  const gain = (p.pnl ?? 0) >= 0;
+  const buy = (p.direction ?? '').toUpperCase() === 'BUY';
+  const isOpt = p.option_type === 'CE' || p.option_type === 'PE';
+  const g = p.greeks || {};
+  return (
+    <>
+      <tr onClick={() => setOpen(!open)} className="border-b border-border/50 hover:bg-surface/40 cursor-pointer">
+        <td className="px-4 py-2.5 text-muted text-xs tabular-nums whitespace-nowrap">{fmtDateTime(p.opened_at)}</td>
+        <td className="px-4 py-2.5 font-medium text-slate-200">{p.underlying}</td>
+        <td className="px-4 py-2.5">
+          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${buy ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{buy ? 'BUY' : 'SELL'}</span>
+        </td>
+        <td className="px-4 py-2.5">
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${p.instrument_type === 'FUTURE' ? 'bg-blue-500/20 text-blue-300' : p.option_type === 'CE' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
+            {p.instrument_type === 'FUTURE' ? 'FUT' : p.option_type}
+          </span>
+        </td>
+        <td className="px-4 py-2.5 text-slate-300 text-xs tabular-nums">
+          {p.strike ? `${num(p.strike, 0)} · ` : ''}{p.expiry?.slice(5) ?? '—'}
+          {p.moneyness && <span className={`ml-1 ${p.moneyness === 'ITM' ? 'text-profit' : 'text-muted'}`}>{p.moneyness}</span>}
+        </td>
+        <td className="px-4 py-2.5 tabular-nums text-slate-300">{p.lots ?? '—'}</td>
+        <td className="px-4 py-2.5 tabular-nums text-slate-300">{num(p.entry)}</td>
+        <td className="px-4 py-2.5 tabular-nums text-slate-100">{num(p.current)}</td>
+        <td className={`px-4 py-2.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>
+          {gain ? '+' : ''}{fmt(p.pnl)} <span className="text-[10px] opacity-70">({num(p.pnl_pct, 1)}%)</span>
+        </td>
+        <td className="px-4 py-2.5 tabular-nums text-muted text-xs">{fmt(p.margin)}</td>
+      </tr>
+      {open && (
+        <tr className="bg-[#080e1c]">
+          <td colSpan={10} className="px-5 py-4">
+            <div className="space-y-3">
+              {/* Contract line */}
+              <p className="text-sm text-slate-200 font-semibold">
+                {p.underlying} {p.strike ? num(p.strike, 0) : ''} {p.instrument_type === 'FUTURE' ? 'FUT' : p.option_type}
+                <span className="text-muted font-normal text-xs"> · expiry {p.expiry?.slice(0, 10)} · {p.dte ?? '?'} days to expiry · lot {p.lot_size}</span>
+              </p>
+              {/* Premium / position */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                <Field label={isOpt ? 'Entry Premium' : 'Entry'} value={`₹${num(p.entry)}`} />
+                <Field label={isOpt ? 'Current Premium' : 'Current'} value={`₹${num(p.current)}`} color={gain ? 'text-profit' : 'text-loss'} />
+                <Field label="Lots × Size" value={`${p.lots} × ${p.lot_size}`} sub={`${num(p.qty, 0)} qty`} />
+                <Field label={isOpt ? 'Premium Paid' : 'Notional'} value={fmt(p.premium_paid)} sub={isOpt ? '= max loss' : ''} />
+                <Field label="Current Value" value={fmt(p.current_value)} />
+                <Field label="P&L" value={`${gain ? '+' : ''}${fmt(p.pnl)}`} color={gain ? 'text-profit' : 'text-loss'} sub={`${num(p.pnl_pct, 2)}%`} />
+              </div>
+              {/* Levels */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                <Field label="Stop Loss" value={`₹${num(p.stop_loss)}`} color="text-loss" />
+                <Field label="Target" value={`₹${num(p.take_profit)}`} color="text-profit" />
+                {p.breakeven != null && <Field label="Breakeven" value={num(p.breakeven, 0)} sub="underlying" />}
+                {p.spot != null && <Field label="Underlying Spot" value={num(p.spot, 0)} />}
+                <Field label="Margin Blocked" value={fmt(p.margin)} />
+                <Field label="Opened" value={fmtDateTime(p.opened_at)} />
+              </div>
+              {/* Greeks */}
+              {isOpt && (g.delta != null || g.iv != null) && (
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted mb-1.5">Option Greeks (live)</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                    <Field label="IV" value={g.iv != null ? `${num(g.iv, 1)}%` : '—'} color="text-amber-400" />
+                    <Field label="Delta (Δ)" value={g.delta != null ? num(g.delta, 3) : '—'} />
+                    <Field label="Gamma (Γ)" value={g.gamma != null ? num(g.gamma, 4) : '—'} />
+                    <Field label="Theta (Θ)" value={g.theta != null ? num(g.theta, 1) : '—'} color="text-loss" sub="₹/day decay" />
+                    <Field label="Vega (ν)" value={g.vega != null ? num(g.vega, 1) : '—'} sub="per 1% IV" />
+                  </div>
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 function PositionsPanel({ data }) {
   if (!data || data.count === 0) {
     return (
       <div className="bg-panel border border-border rounded-xl p-6 text-center text-muted text-sm space-y-1">
-        <p>No open F&O positions yet.</p>
+        <p>No open F&O positions right now.</p>
         <p className="text-xs">
-          F&O trading is <span className="text-profit font-semibold">enabled</span>. The agent opens
-          positions once the Zerodha&nbsp;Kite <span className="text-slate-300">NFO instrument master</span> is
-          connected (needed for live contracts). Analytics, signals &amp; predictions below are fully live.
+          F&O trading is <span className="text-profit font-semibold">enabled</span> and Zerodha&nbsp;Kite
+          is <span className="text-profit font-semibold">connected</span>. The agent opens an index
+          option position when its multi-factor signal triggers (see Signals &amp; Predictions below).
         </p>
       </div>
     );
@@ -53,7 +142,7 @@ function PositionsPanel({ data }) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
           <Layers size={15} className="text-cyan" /> F&O Positions
-          <span className="text-xs text-muted">{data.count} open</span>
+          <span className="text-xs text-muted">{data.count} open · click a row for full detail</span>
         </h2>
         <div className="flex items-center gap-4 text-xs">
           <span className="text-muted">Margin: <span className="text-slate-300">{fmt(data.total_margin)}</span></span>
@@ -72,39 +161,7 @@ function PositionsPanel({ data }) {
             </tr>
           </thead>
           <tbody>
-            {data.positions.map((p, i) => {
-              const gain = (p.pnl ?? 0) >= 0;
-              const buy = (p.direction ?? '').toUpperCase() === 'BUY';
-              return (
-                <tr key={i} className="border-b border-border/50 hover:bg-surface/40">
-                  <td className="px-4 py-2.5 text-muted text-xs tabular-nums whitespace-nowrap">{fmtDateTime(p.opened_at)}</td>
-                  <td className="px-4 py-2.5 font-medium text-slate-200">{p.underlying}</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${buy ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
-                      {buy ? 'BUY' : 'SELL'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                      p.instrument_type === 'FUTURE' ? 'bg-blue-500/20 text-blue-300'
-                      : p.option_type === 'CE' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                    }`}>
-                      {p.instrument_type === 'FUTURE' ? 'FUT' : p.option_type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-slate-300 text-xs tabular-nums">
-                    {p.strike ? `${num(p.strike, 0)} · ` : ''}{p.expiry?.slice(5) ?? '—'}
-                  </td>
-                  <td className="px-4 py-2.5 tabular-nums text-slate-300">{p.lots ?? '—'}</td>
-                  <td className="px-4 py-2.5 tabular-nums text-slate-300">{num(p.entry)}</td>
-                  <td className="px-4 py-2.5 tabular-nums text-slate-100">{num(p.current)}</td>
-                  <td className={`px-4 py-2.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>
-                    {gain ? '+' : ''}{fmt(p.pnl)} <span className="text-[10px] opacity-70">({num(p.pnl_pct, 1)}%)</span>
-                  </td>
-                  <td className="px-4 py-2.5 tabular-nums text-muted text-xs">{fmt(p.margin)}</td>
-                </tr>
-              );
-            })}
+            {data.positions.map((p, i) => <FnOPositionRow key={i} p={p} />)}
           </tbody>
         </table>
       </div>
