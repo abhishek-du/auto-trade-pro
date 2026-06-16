@@ -78,9 +78,10 @@ NSE_TOKENS: dict[str, int] = {
 }
 
 INDEX_TOKENS: dict[str, int] = {
-    "^NSEI":    256265,   # NIFTY 50
-    "^BSESN":   274441,   # SENSEX
-    "^NSEBANK": 260105,   # BANK NIFTY
+    "^NSEI":     256265,   # NIFTY 50
+    "^BSESN":    265,      # SENSEX (BSE) — was 274441 (wrong instrument, ~64.5k)
+    "^NSEBANK":  260105,   # BANK NIFTY
+    "^INDIAVIX": 264969,   # India VIX
 }
 
 # Reverse lookup: instrument_token → symbol
