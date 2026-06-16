@@ -38,6 +38,11 @@ SCHEMA: list[tuple[str, str]] = [
     ("trade_id",      "#"),
     ("opened_at",     "Bought (IST)"),
     ("symbol",        "Symbol"),
+    # ── F&O detail (EQUITY for cash; populated for options/futures) ─────────
+    ("instrument",    "Instrument"),
+    ("strike",        "Strike"),
+    ("opt_type",      "CE/PE"),
+    ("expiry",        "Expiry"),
     ("direction",     "Dir"),
     ("qty",           "Qty"),
     # ── Levels ─────────────────────────────────────────────────────────────
@@ -243,10 +248,17 @@ def _open_row(trade: PaperTrade, hub) -> dict:
     hub_note   = {k.replace("hub_", ""): v for k, v in hub_scores.items()} if hub_scores else None
     note = build_expert_note(trade.symbol, direction, entry, stop, t1, t2,
                              trade.signal_confidence, hub_note, trade.ai_reason)
+    itype = getattr(trade, "instrument_type", "EQUITY") or "EQUITY"
+    is_fno = itype in ("CE", "PE", "FUTURE")
     row = {
         "trade_id":    trade.id,
         "opened_at":   _ist(trade.opened_at),
-        "symbol":      trade.symbol.replace(".NS", ""),
+        "symbol":      (getattr(trade, "underlying_symbol", None) or trade.symbol.replace(".NS", "")) if is_fno else trade.symbol.replace(".NS", ""),
+        # F&O detail
+        "instrument":  "FUT" if itype == "FUTURE" else (itype if itype in ("CE", "PE") else "EQUITY"),
+        "strike":      round(getattr(trade, "strike_price", 0) or 0, 0) if getattr(trade, "strike_price", None) else "",
+        "opt_type":    getattr(trade, "option_type", "") or "",
+        "expiry":      trade.expiry_date.strftime("%d-%b-%Y") if getattr(trade, "expiry_date", None) else "",
         "direction":   direction,
         "qty":         int(round(units)),
         "entry":       round(entry, 2),
