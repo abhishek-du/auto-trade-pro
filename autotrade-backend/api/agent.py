@@ -68,10 +68,22 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
     )).scalar()
     realised_pnl = float(realised_row or 0.0)
 
-    # Open positions: read from open_positions table (unrealised_pnl already live-updated)
+    # Open positions: read from open_positions, but compute LIVE unrealised P&L
+    # on read (not the stored value) so the equity/unrealised numbers are always
+    # real-time, including brand-new positions.
     open_pos_rows = (await db.execute(select(OpenPos))).scalars().all()
-    capital_deployed = sum(float(p.size_usd) for p in open_pos_rows)
-    unrealised_pnl   = sum(float(p.unrealised_pnl) for p in open_pos_rows)
+    # Capital deployed = equity notional + F&O MARGIN (not F&O notional). Futures
+    # block only ~18% margin, so counting their full notional would wrongly zero
+    # out cash. Options block the premium (= margin_blocked).
+    capital_deployed = sum(
+        float(p.margin_blocked or 0.0)
+        if getattr(p, "instrument_type", "EQUITY") in ("CE", "PE", "FUTURE")
+        else float(p.size_usd)
+        for p in open_pos_rows
+    )
+    from paper_trading.trade_simulator import compute_live_pnl
+    _live = await compute_live_pnl(open_pos_rows, db)
+    unrealised_pnl = sum(_live.get(p.id, (0, p.unrealised_pnl, 0))[1] for p in open_pos_rows)
 
     db_equity = START_CAPITAL + realised_pnl + unrealised_pnl
     db_cash   = max(0.0, START_CAPITAL + realised_pnl - capital_deployed)

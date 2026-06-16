@@ -35,11 +35,30 @@ async def blocked_margin(session: AsyncSession) -> float:
     return float(total or 0.0)
 
 
+async def total_capital_used(session: AsyncSession) -> float:
+    """All capital currently committed: equity notional + F&O margin.
+
+    Equity positions tie up their full notional (size_usd); F&O ties up only its
+    margin (margin_blocked). Counting both prevents the F&O passes from
+    over-deploying on top of the equity book.
+    """
+    eq = (await session.execute(
+        select(sqlfunc.coalesce(sqlfunc.sum(OpenPosition.size_usd), 0.0))
+        .where(OpenPosition.instrument_type == "EQUITY")
+    )).scalar()
+    fno = await blocked_margin(session)
+    return float(eq or 0.0) + fno
+
+
 async def available_margin(equity: float, session: AsyncSession) -> float:
-    """Deployable margin = equity − already-blocked margin − min cash buffer."""
-    blocked = await blocked_margin(session)
-    buffer  = equity * settings.AGENT_CASH_BUFFER_MIN
-    return max(0.0, equity - blocked - buffer)
+    """Deployable capital = equity − ALL capital already used − min cash buffer.
+
+    Counts the equity book's notional too (not just F&O margin), so F&O can't
+    over-deploy past the cash buffer.
+    """
+    used   = await total_capital_used(session)
+    buffer = equity * settings.AGENT_CASH_BUFFER_MIN
+    return max(0.0, equity - used - buffer)
 
 
 async def can_block_margin(required: float, equity: float, session: AsyncSession) -> tuple[bool, str]:
