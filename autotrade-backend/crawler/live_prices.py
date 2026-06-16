@@ -409,10 +409,12 @@ def get_market_summary() -> dict:
         default=None,
     )
     return {
-        "nifty50":        PRICE_CACHE.get("^NSEI"),
-        "bank_nifty":     PRICE_CACHE.get("^NSEBANK"),
-        "sensex":         PRICE_CACHE.get("^BSESN"),
-        "india_vix":      PRICE_CACHE.get("^INDIAVIX"),
+        # get_price() resolves live ticks → cache → yfinance fallback, so an index
+        # never shows None just because it isn't in PRICE_CACHE yet.
+        "nifty50":        get_price("^NSEI"),
+        "bank_nifty":     get_price("^NSEBANK"),
+        "sensex":         get_price("^BSESN"),
+        "india_vix":      get_price("^INDIAVIX"),
         "market_status":  _get_market_status(),
         "ist_time":       now_ist.strftime("%H:%M:%S"),
         "ist_date":       now_ist.strftime("%A, %d %B %Y"),
