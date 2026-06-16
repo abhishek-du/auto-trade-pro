@@ -284,6 +284,11 @@ def fmt_entry(decision, qty: float | None = None) -> str:
     if opts_detail.get("nifty_bias") is not None:
         lines.append(f"  Nifty OI bias: {opts_detail['nifty_bias']:+d}")
 
+    # Live web research (Tavily) done in the pre-trade gate — was previously
+    # extracted but never shown. (Headlines already render under factor 2 above.)
+    if web_note:
+        lines += [f"", f"<b>🌐 Web Research (live):</b>", f"<i>{web_note[:400]}</i>"]
+
     if expert_note:
         lines += [f"", f"<b>🤖 AI Note:</b>", f"<i>{expert_note[:500]}</i>"]
 

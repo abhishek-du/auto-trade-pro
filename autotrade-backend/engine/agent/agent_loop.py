@@ -344,6 +344,27 @@ async def _process_symbol(
         if candidate is not None:
             candidate.regime = features.regime
 
+    # 4b-2. LIVE entry price — the candidate's entry comes from the latest candle
+    # close (can be minutes old). With Zerodha connected, snap it to the live Kite
+    # LTP and shift stop/targets by the same delta so R:R is preserved. This makes
+    # the entry (and the Telegram alert) reflect the real fill price.
+    if candidate is not None:
+        try:
+            from crawler.live_prices import get_price
+            lp = get_price(symbol)
+            live_px = float(lp["price"]) if lp and lp.get("price") else None
+            if live_px and candidate.entry and abs(live_px - candidate.entry) / candidate.entry < 0.05:
+                delta = live_px - candidate.entry
+                candidate.entry = round(live_px, 2)
+                if getattr(candidate, "stop", None):
+                    candidate.stop = round(candidate.stop + delta, 2)
+                for attr in ("target", "target_1", "target_2"):
+                    v = getattr(candidate, attr, None)
+                    if v:
+                        setattr(candidate, attr, round(v + delta, 2))
+        except Exception as exc:
+            logger.debug(f"[agent] live entry-price snap failed for {symbol}: {exc}")
+
     # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
     #     candidate regardless of whether execution ultimately proceeds.
     #     Threshold: any Hub BUY signal with |master_score| >= 40 OR signal is
