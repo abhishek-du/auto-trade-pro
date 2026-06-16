@@ -257,9 +257,11 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_sync_candles",
         "schedule": crontab(hour=10, minute=0),
     },
+    # Instruments need a FRESH token → run at 02:45 UTC, AFTER the 02:30 token
+    # refresh (otherwise the daily download uses the previous day's expired token).
     "kite-refresh-instruments-daily": {
         "task":     "tasks.kite_refresh_instruments",
-        "schedule": crontab(hour=2, minute=30),
+        "schedule": crontab(hour=2, minute=45),
     },
     "kite-check-token-daily": {
         "task":     "tasks.kite_check_token",
@@ -268,9 +270,11 @@ celery_app.conf.beat_schedule = {
     # Daily 02:30 UTC = 08:00 IST: auto-refresh access token before market open.
     # Uses ZERODHA_USER_ID + ZERODHA_PASSWORD + ZERODHA_TOTP_SECRET from .env.
     # On success ZERODHA_ENABLED flips to True in-memory so the ticker can start.
+    # Runs every day (not just weekdays) so the token is fresh for after-hours
+    # data tasks too; the OAuth flow works regardless of market session.
     "kite-token-refresh-daily": {
         "task":     "tasks.zerodha_token_refresh",
-        "schedule": crontab(hour=2, minute=30, day_of_week="1-5"),
+        "schedule": crontab(hour=2, minute=30),
     },
     "kite-start-ticker-on-open": {
         "task":     "tasks.kite_start_ticker",
