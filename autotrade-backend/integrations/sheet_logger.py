@@ -1523,7 +1523,12 @@ async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
         for t in paper_rows:
             if t.id not in existing:
                 hub = hub_map.get(f"{t.symbol.split('.')[0]}.NS")
-                open_rows.append(_open_row(t, hub))
+                row = _open_row(t, hub)
+                # If the trade is ALREADY closed when first logged (e.g. after a
+                # sheet rebuild), merge the close fields in so it isn't stuck OPEN.
+                if t.status != TradeStatus.OPEN or t.exit_price is not None:
+                    row.update(_close_partial(t))
+                open_rows.append(row)
             else:
                 row_number, sheet_status = existing[t.id]
                 if "OPEN" in str(sheet_status) and t.status != TradeStatus.OPEN:
