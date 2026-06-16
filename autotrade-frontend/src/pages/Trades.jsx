@@ -709,11 +709,28 @@ export default function Trades() {
                         {fmtDate(t.closed_at ?? t.opened_at)}
                       </td>
 
-                      {/* Symbol */}
+                      {/* Symbol — F&O shows underlying + strike + type + expiry */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5">
                           {isOpen && <Zap size={11} className="text-profit shrink-0" />}
-                          <span className="text-slate-200 font-medium">{t.symbol ?? t.ticker ?? '—'}</span>
+                          {(t.option_type === 'CE' || t.option_type === 'PE') ? (
+                            <div className="flex flex-col">
+                              <span className="text-slate-200 font-medium">
+                                {t.underlying_symbol} {t.strike_price != null ? Number(t.strike_price).toFixed(0) : ''}{' '}
+                                <span className={t.option_type === 'CE' ? 'text-profit' : 'text-loss'}>{t.option_type}</span>
+                              </span>
+                              <span className="text-[10px] text-muted">
+                                Exp {t.expiry_date?.slice(0, 10) ?? '—'} · option premium
+                              </span>
+                            </div>
+                          ) : t.instrument_type === 'FUTURE' ? (
+                            <div className="flex flex-col">
+                              <span className="text-slate-200 font-medium">{t.underlying_symbol} <span className="text-blue-300">FUT</span></span>
+                              <span className="text-[10px] text-muted">Exp {t.expiry_date?.slice(0, 10) ?? '—'} · index level</span>
+                            </div>
+                          ) : (
+                            <span className="text-slate-200 font-medium">{t.symbol ?? t.ticker ?? '—'}</span>
+                          )}
                         </div>
                       </td>
 

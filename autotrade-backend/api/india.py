@@ -2618,6 +2618,10 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
         select(OpenPosition).where(OpenPosition.instrument_type.in_(["CE", "PE", "FUTURE"]))
     )).scalars().all()
 
+    from db.models import OptionContractSnapshot
+    from sqlalchemy import desc as _desc
+    import datetime as _dt
+
     out = []
     total_pnl = 0.0
     total_margin = 0.0
@@ -2630,6 +2634,43 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
             pnl, pct = option_pnl(pos, cur) if cur else (0.0, 0.0)
         total_pnl += pnl
         total_margin += float(pos.margin_blocked or 0.0)
+
+        lots = int(pos.size_units / pos.lot_size) if pos.lot_size else None
+        qty = pos.size_units
+        entry = pos.entry_price
+        dte = (pos.expiry_date - _dt.date.today()).days if pos.expiry_date else None
+
+        # Greeks + IV + underlying spot from the latest snapshot for this strike.
+        greeks = {}
+        spot = None
+        if pos.instrument_type in ("CE", "PE"):
+            g = (await db.execute(
+                select(OptionContractSnapshot).where(
+                    OptionContractSnapshot.underlying == pos.underlying_symbol,
+                    OptionContractSnapshot.strike == pos.strike_price,
+                    OptionContractSnapshot.option_type == pos.option_type,
+                ).order_by(_desc(OptionContractSnapshot.snapshot_at)).limit(1)
+            )).scalar_one_or_none()
+            if g:
+                spot = g.spot
+                greeks = {
+                    "iv":    round(g.iv * 100, 1) if g.iv else None,   # %
+                    "delta": g.delta, "gamma": g.gamma,
+                    "theta": g.theta, "vega": g.vega,
+                }
+
+        # Derived analytics.
+        premium_paid = round((entry or 0) * (qty or 0), 2)       # = max loss for long option
+        cur_value    = round((cur or entry or 0) * (qty or 0), 2)
+        breakeven = None
+        moneyness = None
+        if pos.instrument_type == "CE" and pos.strike_price:
+            breakeven = round(pos.strike_price + entry, 2)
+            if spot: moneyness = "ITM" if spot > pos.strike_price else "OTM" if spot < pos.strike_price else "ATM"
+        elif pos.instrument_type == "PE" and pos.strike_price:
+            breakeven = round(pos.strike_price - entry, 2)
+            if spot: moneyness = "ITM" if spot < pos.strike_price else "OTM" if spot > pos.strike_price else "ATM"
+
         out.append({
             "symbol":          pos.symbol,
             "instrument_type": pos.instrument_type,
@@ -2637,14 +2678,25 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
             "strike":          pos.strike_price,
             "option_type":     pos.option_type,
             "expiry":          pos.expiry_date.isoformat() if pos.expiry_date else None,
+            "dte":             dte,
             "direction":       pos.direction.value if hasattr(pos.direction, "value") else pos.direction,
-            "lots":            int(pos.size_units / pos.lot_size) if pos.lot_size else None,
-            "qty":             pos.size_units,
-            "entry":           pos.entry_price,
+            "lots":            lots,
+            "lot_size":        pos.lot_size,
+            "qty":             qty,
+            "entry":           entry,
             "current":         cur,
             "pnl":             pnl,
             "pnl_pct":         pct,
             "margin":          pos.margin_blocked,
+            "stop_loss":       pos.stop_loss,
+            "take_profit":     pos.take_profit,
+            "premium_paid":    premium_paid,
+            "current_value":   cur_value,
+            "max_loss":        premium_paid if pos.instrument_type in ("CE", "PE") else None,
+            "breakeven":       breakeven,
+            "moneyness":       moneyness,
+            "spot":            spot,
+            "greeks":          greeks,
             "opened_at":       pos.opened_at.isoformat() if pos.opened_at else None,
             "last_updated":    pos.last_updated.isoformat() if pos.last_updated else None,
         })

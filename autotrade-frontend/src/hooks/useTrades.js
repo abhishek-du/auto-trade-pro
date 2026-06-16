@@ -39,15 +39,13 @@ export function useTrades(pollInterval = 15000) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [agentRaw, paperRaw] = await Promise.all([
-        apiFetch('/api/v1/agent/trades?limit=500').catch(() => []),
-        apiFetch('/api/v1/portfolio/trades?limit=500').catch(() => []),
-      ]);
-      const agent = (Array.isArray(agentRaw) ? agentRaw : []).map(normalizeAgentTrade);
+      // paper_trades is the single source of truth — the agent executor now
+      // writes there too, so fetching /agent/trades as well would double-list
+      // every agent trade. One source = no duplicates.
+      const paperRaw = await apiFetch('/api/v1/portfolio/trades?limit=500').catch(() => []);
       const paper = (Array.isArray(paperRaw) ? paperRaw : []);
-      const all   = [...agent, ...paper];
-      all.sort((a, b) => new Date(b.opened_at ?? 0) - new Date(a.opened_at ?? 0));
-      setTrades(all);
+      paper.sort((a, b) => new Date(b.opened_at ?? 0) - new Date(a.opened_at ?? 0));
+      setTrades(paper);
       setError(null);
     } catch (err) {
       setError(err);

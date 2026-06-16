@@ -375,6 +375,69 @@ async def close_paper_trade(
     return trade
 
 
+async def compute_live_pnl(
+    positions: list, session: AsyncSession,
+) -> dict[int, tuple[float, float, float]]:
+    """Compute LIVE current_price + unrealised P&L for each position, on demand.
+
+    Returns {position_id: (current_price, unrealised_pnl, unrealised_pct)} using:
+      • Equity  → live Kite LTP (batched), 1h candle fallback
+      • Options → live Kite option LTP → snapshot/Black-Scholes
+      • Futures → live Kite future LTP → index candle
+
+    Used by the read endpoints so a brand-new position shows live P&L immediately,
+    independent of the periodic mark-to-market task. Falls back to the stored
+    value only when no live price can be resolved.
+    """
+    from paper_trading.pnl_calculator import PnLCalculator
+
+    # Batch equity LTP in one Kite call.
+    eq_syms = [p.symbol for p in positions
+               if getattr(p, "instrument_type", "EQUITY") == "EQUITY"]
+    live_px: dict[str, float] = {}
+    if eq_syms:
+        try:
+            from crawler.zerodha_market import get_live_prices
+            quotes = await get_live_prices(eq_syms)
+            for sym, q in (quotes or {}).items():
+                px = q.get("price") or q.get("last_price")
+                if px and px > 0:
+                    live_px[sym] = float(px)
+        except Exception as exc:
+            logger.debug(f"compute_live_pnl: equity LTP failed: {exc}")
+
+    out: dict[int, tuple[float, float, float]] = {}
+    for p in positions:
+        cur = None
+        itype = getattr(p, "instrument_type", "EQUITY")
+        try:
+            if itype in ("CE", "PE"):
+                from engine.fno.selection import current_option_premium
+                cur = await current_option_premium(p, session)
+            elif itype == "FUTURE":
+                from engine.fno.futures import current_future_price
+                cur = await current_future_price(p, session)
+            else:
+                cur = live_px.get(p.symbol)
+                if cur is None:
+                    row = (await session.execute(
+                        select(Candle.close)
+                        .where(Candle.symbol == p.symbol, Candle.timeframe == "1h")
+                        .order_by(Candle.timestamp.desc()).limit(1)
+                    )).scalar_one_or_none()
+                    cur = float(row) if row else None
+        except Exception as exc:
+            logger.debug(f"compute_live_pnl: price failed for {p.symbol}: {exc}")
+
+        if cur and cur > 0:
+            pnl = PnLCalculator.unrealised_for_position(p, cur)
+            pct = PnLCalculator.unrealised_pct_for_position(p, cur)
+            out[p.id] = (round(cur, 4), round(pnl, 2), round(pct, 2))
+        else:
+            out[p.id] = (p.current_price, p.unrealised_pnl, p.unrealised_pct)
+    return out
+
+
 async def update_positions_with_current_prices(session: AsyncSession) -> list[dict]:
     """Refresh all open positions with the latest candle prices.
 
