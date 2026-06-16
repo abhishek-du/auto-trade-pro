@@ -142,6 +142,27 @@ def india_options_analysis():
     _run_async(_india_options_analysis())
 
 
+# ── 3b. fno_expiry_sweep — daily after close (settle expired F&O) ────────────
+
+async def _fno_expiry_sweep():
+    from engine.fno.expiry import settle_expired_positions
+    from tasks._db import celery_session
+    async with celery_session() as session:
+        settled = await settle_expired_positions(session)
+    logger.info(f"[fno_expiry] settled {len(settled)} expired F&O position(s)")
+    return {"settled": len(settled)}
+
+
+@celery_app.task(name="tasks.fno_expiry_sweep")
+def fno_expiry_sweep():
+    """Cash-settle + close any F&O paper position at/after its expiry. Daily."""
+    from utils.config import settings
+    if not getattr(settings, "ENABLE_FNO", False):
+        return {"status": "disabled"}
+    logger.info("[fno_expiry] Starting expiry sweep")
+    return _run_async(_fno_expiry_sweep())
+
+
 # ── 4. india_mutual_fund_nav — daily 14:30 UTC (20:00 IST) ───────────────────
 
 async def _india_mutual_fund_nav():

@@ -86,5 +86,32 @@ async def init_db() -> None:
             "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
             # product type: CNC=delivery, MIS=intraday (short selling), NRML=F&O overnight
             "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+            # ── F&O fields (Phase 3): EQUITY for cash; FUTURE/CE/PE for derivatives ──
+            *[
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
+                for tbl in ("paper_trades", "open_positions", "agent_trades", "agent_decisions")
+                for col in (
+                    "instrument_type VARCHAR(10) DEFAULT 'EQUITY'",
+                    "underlying_symbol VARCHAR(30)",
+                    "strike_price FLOAT",
+                    "option_type VARCHAR(2)",
+                    "expiry_date DATE",
+                    "lot_size INTEGER DEFAULT 1",
+                )
+            ],
+            # contract_multiplier + margin_blocked don't apply to agent_decisions
+            *[
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
+                for tbl in ("paper_trades", "open_positions", "agent_trades")
+                for col in (
+                    "contract_multiplier FLOAT DEFAULT 1.0",
+                    "margin_blocked FLOAT DEFAULT 0.0",
+                )
+            ],
+            # F&O tradingsymbols (e.g. BANKNIFTY26JUN3057200CE) exceed the old
+            # VARCHAR(20) equity symbol width — widen so paper F&O can persist.
+            "ALTER TABLE paper_trades   ALTER COLUMN symbol TYPE VARCHAR(50)",
+            "ALTER TABLE open_positions ALTER COLUMN symbol TYPE VARCHAR(50)",
+            "ALTER TABLE simulation_logs ALTER COLUMN symbol TYPE VARCHAR(50)",
         ):
             await conn.execute(text(stmt))

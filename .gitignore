@@ -1,0 +1,6 @@
+.claude/
+autotrade-backend/models/*.h5
+autotrade-backend/models/*.pkl
+autotrade-backend/data/
+__pycache__/
+*.pyc

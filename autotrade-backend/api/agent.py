@@ -53,46 +53,29 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
         )
     )).scalars().all()
 
-    # ── DB-authoritative equity/cash (in-memory portfolio has stale accounting) ──
-    START_CAPITAL = settings.AGENT_EQUITY  # ₹25L
+    # ── DB-authoritative equity/cash ─────────────────────────────────────────────
+    # Trades are written to paper_trades + open_positions (not agent_trades).
+    # Read from those tables so equity/cash always reflects reality.
+    START_CAPITAL = settings.AGENT_EQUITY
 
-    # Realised P&L from all closed agent trades
+    from db.models import PaperTrade, OpenPosition as OpenPos
+    from sqlalchemy import func as sqlfunc
+
+    # Realised P&L: closed paper_trades (exit_price set, pnl recorded)
     realised_row = (await db.execute(
-        select(sqlfunc.coalesce(sqlfunc.sum(AgentTrade.pnl), 0.0))
-        .where(AgentTrade.exit_price != None, AgentTrade.pnl != None)
+        select(sqlfunc.coalesce(sqlfunc.sum(PaperTrade.pnl), 0.0))
+        .where(PaperTrade.exit_price != None, PaperTrade.pnl != None)
     )).scalar()
     realised_pnl = float(realised_row or 0.0)
 
-    # Open trades — notional deployed + unrealised P&L from latest candles
-    open_trades = (await db.execute(
-        select(AgentTrade).where(AgentTrade.exit_price == None)
-    )).scalars().all()
-    # Deduplicate to latest per symbol
-    latest: dict[str, AgentTrade] = {}
-    for t in open_trades:
-        latest[t.symbol] = t
-
-    capital_deployed = sum(float(t.qty) * float(t.entry_price) for t in latest.values())
-
-    # Live prices from PRICE_CACHE (refreshed every 15 s) for unrealised P&L.
-    from crawler.live_prices import PRICE_CACHE
-    unrealised_pnl = 0.0
-    for sym, trade in latest.items():
-        cached = PRICE_CACHE.get(sym, {})
-        lp = cached.get("price") or cached.get("ltp")
-        if not lp:
-            continue
-        cur = float(lp)
-        if trade.side == "BUY":
-            unrealised_pnl += (cur - float(trade.entry_price)) * float(trade.qty)
-        else:
-            unrealised_pnl += (float(trade.entry_price) - cur) * float(trade.qty)
+    # Open positions: read from open_positions table (unrealised_pnl already live-updated)
+    open_pos_rows = (await db.execute(select(OpenPos))).scalars().all()
+    capital_deployed = sum(float(p.size_usd) for p in open_pos_rows)
+    unrealised_pnl   = sum(float(p.unrealised_pnl) for p in open_pos_rows)
 
     db_equity = START_CAPITAL + realised_pnl + unrealised_pnl
     db_cash   = max(0.0, START_CAPITAL + realised_pnl - capital_deployed)
     daily_pnl_pct = round(portfolio.daily_pnl_pct * 100, 2)
-
-    # Open risk % from in-memory portfolio (has SL data)
     open_risk_pct = round(portfolio.open_risk_pct * 100, 2)
 
     return {
@@ -102,11 +85,12 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
         "confidence_threshold": settings.AGENT_CONFIDENCE_THRESHOLD,
         "max_risk_per_trade":   settings.AGENT_MAX_RISK_PER_TRADE,
         "portfolio": {
+            "start_capital":        round(START_CAPITAL, 2),
             "equity":               round(db_equity, 2),
             "cash":                 round(db_cash, 2),
             "unrealised_pnl":       round(unrealised_pnl, 2),
             "realised_pnl":         round(realised_pnl, 2),
-            "open_positions_count": len(latest),
+            "open_positions_count": len(open_pos_rows),
             "open_positions":       portfolio.open_positions,
             "daily_pnl_pct":        daily_pnl_pct,
             "weekly_pnl_pct":       round(portfolio.weekly_pnl_pct * 100, 2),
@@ -549,3 +533,13 @@ async def get_rulebook():
              "action": "BLOCK_TRADE"},
         ]
     }
+
+
+@router.get("/performance-metrics", summary="Sharpe/Treynor/Jensen + beta + drawdown")
+async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
+    """Risk-adjusted performance scorecard for the agent — grounded in CAPM/
+    portfolio theory. Sharpe, Treynor, Jensen's alpha, regression beta, max
+    drawdown, win rate, profit factor, expectancy + a plain verdict.
+    """
+    from engine.agent.performance_engine import compute_metrics
+    return await compute_metrics(db)

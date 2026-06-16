@@ -34,14 +34,17 @@ async def rebuild_hub_universe(
 
     min_turnover = min_turnover_cr * 1e7  # ₹ Cr → ₹
 
+    # Include both NSE (.NS) and BSE (.BO); exclude bonds/SME/illiquid.
     _exclude = """
-        AND symbol LIKE '%.NS'
+        AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')
         AND symbol !~ '[0-9]'
         AND symbol NOT LIKE '%-SG.NS'
         AND symbol NOT LIKE '%-SM.NS'
         AND symbol NOT LIKE '%-ST.NS'
         AND symbol NOT LIKE '%-BE.NS'
         AND symbol NOT LIKE '%-BZ.NS'
+        AND symbol NOT LIKE '%-SG.BO'
+        AND symbol NOT LIKE '%-SM.BO'
     """
 
     # Primary: 1d candles (most accurate for daily turnover).
@@ -93,19 +96,20 @@ async def rebuild_hub_universe(
     summary = {
         "universe_size": len(rows),
         "min_turnover_cr": min_turnover_cr,
-        "top": [r.symbol.replace(".NS", "") for r in rows[:5]],
+        "top": [r.symbol.replace(".NS", "").replace(".BO", "") for r in rows[:5]],
     }
     logger.info(f"[hub_universe] rebuilt → {summary}")
     return summary
 
 
 async def get_hub_universe(session: AsyncSession) -> list[str]:
-    """Resolve the active Hub universe (list of '.NS' symbols)."""
+    """Resolve the active Hub universe (list of '.NS' / '.BO' symbols)."""
     # 1. Manual env override
     env_syms = (getattr(settings, "HUB_SYMBOLS", "") or "").strip()
     if env_syms:
         syms = [s.strip() for s in env_syms.split(",") if s.strip()]
-        return [s if s.endswith(".NS") else f"{s}.NS" for s in syms]
+        # Preserve explicit suffix; default bare names to .NS
+        return [s if (s.endswith(".NS") or s.endswith(".BO")) else f"{s}.NS" for s in syms]
 
     # 2. hub_universe DB table (top-N by turnover)
     from db.models import HubUniverse
@@ -115,6 +119,6 @@ async def get_hub_universe(session: AsyncSession) -> list[str]:
     if rows:
         return list(rows)
 
-    # 3. Legacy fallback
-    logger.warning("[hub_universe] empty — falling back to settings.nse_symbols")
-    return settings.nse_symbols
+    # 3. Legacy fallback — include BSE watchlist alongside NSE
+    logger.warning("[hub_universe] empty — falling back to settings watchlists")
+    return settings.nse_symbols + settings.bse_symbols

@@ -58,6 +58,7 @@ import Settings         from './pages/Settings';
 import Documentation    from './pages/Documentation';
 import IndiaMarket      from './pages/IndiaMarket';
 import IndiaSignals     from './pages/IndiaSignals';
+import FnO              from './pages/FnO';
 import MutualFunds      from './pages/MutualFunds';
 import IndiaFundamentals from './pages/IndiaFundamentals';
 import Backtest          from './pages/Backtest';
@@ -122,6 +123,7 @@ export default function App() {
               <Route path="/documentation" element={<Documentation />}     />
               <Route path="/india"         element={<IndiaMarket />}       />
               <Route path="/india/signals" element={<IndiaSignals />}      />
+              <Route path="/fno"           element={<FnO />}               />
               <Route path="/mutual-funds"  element={<MutualFunds />}       />
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
               <Route path="/backtest"      element={<Backtest />}          />

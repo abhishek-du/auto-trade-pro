@@ -584,11 +584,13 @@ def _proper_case_name(raw: str) -> str:
 
 
 async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
-    """Search the full NSE equity universe via the kite_instruments table.
+    """Search NSE+BSE stocks.
 
-    Ranking: exact tradingsymbol > tradingsymbol prefix > name prefix > substring.
+    Priority:
+      1. kite_instruments table (full universe — if populated)
+      2. candles table (our actual crawl data — always available)
     """
-    from sqlalchemy import case, func, or_
+    from sqlalchemy import case, func, or_, text
     from db.models import KiteInstrument
 
     q = query.strip()
@@ -599,73 +601,135 @@ async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
     q_pattern = f"%{q_upper}%"
     q_prefix  = f"{q_upper}%"
 
-    stmt = (
-        select(KiteInstrument)
-        .where(
-            KiteInstrument.instrument_type == "EQ",
-            KiteInstrument.segment == "NSE",
-            # Exclude bonds / NCDs / SDLs / G-Secs which are also stored as EQ.
-            KiteInstrument.name != "",                       # bonds often have blank names
-            ~KiteInstrument.name.like(r"%\%%"),              # interest-rate bearing instruments
-            ~KiteInstrument.tradingsymbol.like("%-SG"),      # State Government securities
-            ~KiteInstrument.tradingsymbol.like("%-SK"),
-            ~KiteInstrument.tradingsymbol.like("%-TB"),      # GOI T-Bills
-            or_(
-                func.upper(KiteInstrument.tradingsymbol).like(q_pattern),
-                func.upper(KiteInstrument.name).like(q_pattern),
-            ),
-        )
-        .order_by(
-            case(
-                (func.upper(KiteInstrument.tradingsymbol) == q_upper, 1),
-                (func.upper(KiteInstrument.tradingsymbol).like(q_prefix), 2),
-                (func.upper(KiteInstrument.name).like(q_prefix), 3),
-                else_=4,
-            ),
-            KiteInstrument.tradingsymbol,
-        )
-        .limit(15)
-    )
-    rows = (await session.execute(stmt)).scalars().all()
+    # ── 1. kite_instruments (full exchange universe) ──────────────────────────
+    ki_count = (await session.execute(
+        select(func.count()).select_from(KiteInstrument)
+        .where(KiteInstrument.instrument_type == "EQ")
+    )).scalar() or 0
 
-    return [
-        {
-            "name":   _proper_case_name(r.name) or r.tradingsymbol,
-            "symbol": f"{r.tradingsymbol}.NS",
-            "ticker": r.tradingsymbol,
-            "sector": NSE_SECTOR_MAP.get(f"{r.tradingsymbol}.NS", "Other"),
-        }
-        for r in rows
-    ]
+    if ki_count > 0:
+        stmt = (
+            select(KiteInstrument)
+            .where(
+                KiteInstrument.instrument_type == "EQ",
+                KiteInstrument.segment.in_(["NSE", "BSE"]),
+                KiteInstrument.name != "",
+                ~KiteInstrument.name.like(r"%\%%"),
+                ~KiteInstrument.tradingsymbol.like("%-SG"),
+                ~KiteInstrument.tradingsymbol.like("%-SK"),
+                ~KiteInstrument.tradingsymbol.like("%-TB"),
+                or_(
+                    func.upper(KiteInstrument.tradingsymbol).like(q_pattern),
+                    func.upper(KiteInstrument.name).like(q_pattern),
+                ),
+            )
+            .order_by(
+                case(
+                    (func.upper(KiteInstrument.tradingsymbol) == q_upper, 1),
+                    (func.upper(KiteInstrument.tradingsymbol).like(q_prefix), 2),
+                    (func.upper(KiteInstrument.name).like(q_prefix), 3),
+                    else_=4,
+                ),
+                case((KiteInstrument.segment == "NSE", 1), else_=2),
+                KiteInstrument.tradingsymbol,
+            )
+            .limit(20)
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+
+        seen: set[str] = set()
+        results = []
+        for r in rows:
+            if r.tradingsymbol in seen:
+                continue
+            seen.add(r.tradingsymbol)
+            suffix = ".NS" if r.segment == "NSE" else ".BO"
+            symbol = f"{r.tradingsymbol}{suffix}"
+            results.append({
+                "name":     _proper_case_name(r.name) or r.tradingsymbol,
+                "symbol":   symbol,
+                "ticker":   r.tradingsymbol,
+                "exchange": r.segment,
+                "sector":   NSE_SECTOR_MAP.get(f"{r.tradingsymbol}.NS", "Other"),
+            })
+        if results:
+            return results[:15]
+
+    # ── 2. Fallback: search candles table (our live crawl data, always populated) ──
+    # Strip suffix from query so "RELIANCE.NS" and "RELIANCE" both match.
+    bare = q_upper.replace(".NS", "").replace(".BO", "")
+    candle_sql = text("""
+        SELECT symbol FROM (
+            SELECT DISTINCT symbol,
+                CASE WHEN upper(replace(replace(symbol,'.NS',''),'.BO','')) = :bare THEN 1
+                     WHEN symbol LIKE '%.NS' THEN 2
+                     ELSE 3 END AS rank_
+            FROM candles
+            WHERE (
+                upper(symbol) LIKE :prefix
+                OR upper(replace(replace(symbol, '.NS', ''), '.BO', '')) LIKE :prefix
+            )
+            AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')
+            AND symbol !~ '[0-9]{4,}'
+        ) sub
+        ORDER BY rank_, symbol
+        LIMIT 20
+    """)
+    rows_candle = (await session.execute(candle_sql, {"prefix": f"{bare}%", "bare": bare})).all()
+
+    seen2: set[str] = set()
+    results2 = []
+    for r in rows_candle:
+        sym = r.symbol
+        ticker = sym.replace(".NS", "").replace(".BO", "")
+        if ticker in seen2:
+            continue
+        seen2.add(ticker)
+        exchange = "BSE" if sym.endswith(".BO") else "NSE"
+        results2.append({
+            "name":     _proper_case_name(ticker) or ticker,
+            "symbol":   sym,
+            "ticker":   ticker,
+            "exchange": exchange,
+            "sector":   NSE_SECTOR_MAP.get(f"{ticker}.NS", "Other"),
+        })
+    return results2[:15]
 
 
 def search_stocks_live(query: str) -> list[dict]:
-    """Direct yfinance lookup for any NSE ticker not in the hardcoded dict.
+    """Direct yfinance lookup for any ticker not in kite_instruments.
 
-    Tries '{QUERY}.NS' and returns one result if the ticker has a valid price.
+    Tries '{QUERY}.NS' first, then '{QUERY}.BO' as fallback.
     Blocking — must be called via run_in_executor from async context.
     """
     ticker_str = query.strip().upper()
     if not ticker_str:
         return []
-    symbol = ticker_str + ".NS"
-    try:
-        t = yf.Ticker(symbol)
-        fast = t.fast_info
-        price = getattr(fast, "last_price", None) or getattr(fast, "regularMarketPrice", None)
-        if not price or float(price) <= 0:
-            return []
-        # Try to get long name / sector from .info (may be slow; tolerate failure)
+
+    results = []
+    for suffix, exchange in [(".NS", "NSE"), (".BO", "BSE")]:
+        symbol = ticker_str + suffix
         try:
-            info   = t.info
-            name   = info.get("longName") or info.get("shortName") or ticker_str
-            sector = info.get("sector") or "Other"
+            t = yf.Ticker(symbol)
+            fast = t.fast_info
+            price = getattr(fast, "last_price", None) or getattr(fast, "regularMarketPrice", None)
+            if not price or float(price) <= 0:
+                continue
+            try:
+                info   = t.info
+                name   = info.get("longName") or info.get("shortName") or ticker_str
+                sector = info.get("sector") or "Other"
+            except Exception:
+                name   = ticker_str
+                sector = "Other"
+            results.append({
+                "name": name, "symbol": symbol,
+                "ticker": ticker_str, "exchange": exchange, "sector": sector,
+            })
+            break  # found on NSE — no need to check BSE for same ticker
         except Exception:
-            name   = ticker_str
-            sector = "Other"
-        return [{"name": name, "symbol": symbol, "ticker": ticker_str, "sector": sector}]
-    except Exception:
-        return []
+            continue
+    return results
 
 
 # ── Serializers ───────────────────────────────────────────────────────────────
