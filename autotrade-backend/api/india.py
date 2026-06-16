@@ -471,34 +471,42 @@ async def get_candle_indicators(
 # ── Sync helpers (run in executor) ────────────────────────────────────────────
 
 def _fetch_index_prices() -> dict[str, dict]:
-    """Fetch NIFTY / BANKNIFTY / SENSEX prices via yfinance."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        neutral = {"price": None, "change": None, "change_pct": None}
-        return {"nifty": neutral, "bank_nifty": neutral, "sensex": neutral}
+    """NIFTY / BANKNIFTY / SENSEX prices — live Kite (ticks→cache) → yfinance.
+
+    Uses the unified get_price() resolver so the Dashboard shows the same live
+    Zerodha prices as everywhere else (correct SENSEX token, live ticks during
+    market hours). Falls back to yfinance only if the resolver has nothing.
+    """
+    from crawler.live_prices import get_price
+    import yfinance as yf
 
     result: dict[str, dict] = {}
     for key, ticker in [("nifty", "^NSEI"), ("bank_nifty", "^NSEBANK"), ("sensex", "^BSESN")]:
+        out = {"price": None, "change": None, "change_pct": None}
         try:
-            fi     = yf.Ticker(ticker).fast_info
-            price  = getattr(fi, "last_price", None)
-            prev   = getattr(fi, "previous_close", None)
-            if price and prev and prev > 0:
-                result[key] = {
-                    "price":      round(float(price), 2),
-                    "change":     round(float(price - prev), 2),
-                    "change_pct": round(float((price - prev) / prev * 100), 2),
+            p = get_price(ticker)
+            if p and p.get("price"):
+                out = {
+                    "price":      round(float(p["price"]), 2),
+                    "change":     round(float(p.get("change", 0) or 0), 2),
+                    "change_pct": round(float(p.get("change_pct", 0) or 0), 2),
                 }
             else:
-                result[key] = {
-                    "price":      round(float(price), 2) if price else None,
-                    "change":     None,
-                    "change_pct": None,
-                }
+                # Fallback: yfinance fast_info
+                fi    = yf.Ticker(ticker).fast_info
+                price = getattr(fi, "last_price", None)
+                prev  = getattr(fi, "previous_close", None)
+                if price and prev and prev > 0:
+                    out = {
+                        "price":      round(float(price), 2),
+                        "change":     round(float(price - prev), 2),
+                        "change_pct": round(float((price - prev) / prev * 100), 2),
+                    }
+                elif price:
+                    out = {"price": round(float(price), 2), "change": None, "change_pct": None}
         except Exception as exc:
             logger.debug(f"_fetch_index_prices {ticker}: {exc}")
-            result[key] = {"price": None, "change": None, "change_pct": None}
+        result[key] = out
     return result
 
 

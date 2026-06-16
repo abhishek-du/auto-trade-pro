@@ -408,6 +408,15 @@ def get_market_summary() -> dict:
         (v.get("last_updated", "") for v in PRICE_CACHE.values()),
         default=None,
     )
+    # market_open + data_mode let the UI render a 🟢 LIVE vs ● CLOSED badge and
+    # decide how fast to poll. LIVE = streaming during market hours; CLOSED =
+    # showing the last close (no ticks happen when the market is shut).
+    try:
+        from crawler.india_price_feed import is_nse_market_open
+        market_open = is_nse_market_open()
+    except Exception:
+        market_open = False
+
     return {
         # get_price() resolves live ticks → cache → yfinance fallback, so an index
         # never shows None just because it isn't in PRICE_CACHE yet.
@@ -416,6 +425,8 @@ def get_market_summary() -> dict:
         "sensex":         get_price("^BSESN"),
         "india_vix":      get_price("^INDIAVIX"),
         "market_status":  _get_market_status(),
+        "market_open":    market_open,
+        "data_mode":      "LIVE" if market_open else "CLOSED",
         "ist_time":       now_ist.strftime("%H:%M:%S"),
         "ist_date":       now_ist.strftime("%A, %d %B %Y"),
         "advances":       advances,
