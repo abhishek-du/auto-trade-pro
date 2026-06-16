@@ -1487,6 +1487,24 @@ def zerodha_token_refresh_task():
         from scripts.refresh_zerodha_token import main as _refresh
         _refresh(backend="http://localhost:8000")
         logger.info("[zerodha_token_refresh] Token refreshed successfully")
+
+        # The OAuth exchange happens in the BACKEND process (via the callback), so
+        # only the backend's Kite singleton + .env get the new token. This task
+        # runs in the CELERY process, whose singleton is still stale. Re-read the
+        # fresh token from .env and apply it locally so Celery's mark-to-market /
+        # journal / live-price tasks use the new token too.
+        try:
+            from dotenv import dotenv_values
+            from pathlib import Path
+            env = dotenv_values(Path(__file__).resolve().parent.parent / ".env")
+            new_token = (env or {}).get("ZERODHA_ACCESS_TOKEN", "")
+            if new_token:
+                from crawler.zerodha_client import update_kite_token
+                update_kite_token(new_token)
+                logger.info("[zerodha_token_refresh] Celery singleton updated with fresh token")
+        except Exception as exc:
+            logger.warning(f"[zerodha_token_refresh] local token reload failed: {exc}")
+
         # If market is already open (e.g. task ran late), kick the ticker now
         # rather than waiting for the 09:15 beat slot.
         from crawler.india_price_feed import is_nse_market_open
