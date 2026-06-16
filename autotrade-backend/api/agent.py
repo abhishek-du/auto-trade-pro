@@ -222,10 +222,12 @@ async def get_trades(
         if lp:
             price_map[sym] = float(lp)
         else:
-            # Fallback: hit yfinance fast_info (once per symbol, only if cache miss)
-            live = await get_price(sym)
-            if live:
-                price_map[sym] = float(live)
+            # Fallback: get_price is SYNC and returns a dict|None (live ticks →
+            # cache). Extract the price; never await it.
+            live = get_price(sym)
+            px = (live or {}).get("price") or (live or {}).get("last_price")
+            if px:
+                price_map[sym] = float(px)
 
     out = []
     for r in rows:

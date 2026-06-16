@@ -155,7 +155,19 @@ async def open_future_paper_trade(
 
 
 async def current_future_price(pos: OpenPosition, session: AsyncSession) -> float | None:
-    """Latest index price for a futures position (≈ spot; basis ignored in paper)."""
+    """Live futures price — Kite LTP (real-time) → index candle fallback."""
+    # 1. Live Kite LTP for the exact futures contract.
+    try:
+        from crawler.zerodha_client import get_kite_client
+        kite = get_kite_client()
+        if kite.access_token:
+            raw = await kite.get_ltp([f"NFO:{pos.symbol}"])
+            d = (raw or {}).get(f"NFO:{pos.symbol}")
+            if d and d.get("last_price", 0) > 0:
+                return float(d["last_price"])
+    except Exception:
+        pass
+    # 2. Fallback: latest index candle (≈ spot; basis ignored in paper).
     csym = _INDEX_CANDLE.get((pos.underlying_symbol or "").upper())
     if not csym:
         return None
