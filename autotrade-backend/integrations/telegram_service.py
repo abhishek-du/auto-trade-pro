@@ -36,23 +36,29 @@ async def _post(text: str) -> None:
     if not token or not chat_id:
         logger.warning("[telegram] missing token or chat_id")
         return
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(
-                _API_URL.format(token=token),
-                json={
-                    "chat_id":                  chat_id,
-                    "text":                     text,
-                    "parse_mode":               "HTML",
-                    "disable_web_page_preview": True,
-                },
-            )
+    # api.telegram.org can be slow on this network — generous timeout + retries
+    # so alerts (equity AND F&O) aren't silently dropped on a transient delay.
+    import asyncio as _aio
+    payload = {
+        "chat_id":                  chat_id,
+        "text":                     text,
+        "parse_mode":               "HTML",
+        "disable_web_page_preview": True,
+    }
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(_API_URL.format(token=token), json=payload)
             if r.status_code == 200:
                 logger.info(f"[telegram] ✓ sent to {chat_id}")
+                return
+            logger.warning(f"[telegram] {r.status_code}: {r.text[:200]}")
+            return  # non-200 (e.g. bad chat) — don't retry
+        except Exception as exc:
+            if attempt == 2:
+                logger.warning(f"[telegram] send failed after retries: {exc}")
             else:
-                logger.warning(f"[telegram] {r.status_code}: {r.text[:200]}")
-    except Exception as exc:
-        logger.warning(f"[telegram] send failed: {exc}")
+                await _aio.sleep(2)
 
 
 async def send(text: str) -> None:
