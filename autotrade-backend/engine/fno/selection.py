@@ -219,6 +219,24 @@ async def open_option_paper_trade(
         f"[PAPER-FNO] BUY {label} | {spec.lots} lot(s) ({spec.qty} qty) @ ₹{spec.premium} "
         f"| SL ₹{spec.stop} TP ₹{spec.target} | debit ₹{spec.notional:,.0f} | {spec.dte}d to expiry"
     )
+
+    # ── Telegram alert (F&O option buy) ───────────────────────────────────────
+    try:
+        if settings.telegram_available:
+            from integrations.telegram_service import send
+            be = (spec.strike + spec.premium) if spec.option_type == "CE" else (spec.strike - spec.premium)
+            await send(
+                f"🎯 <b>F&O OPTION BUY</b>\n"
+                f"<b>{spec.underlying} {spec.strike:.0f} {spec.option_type}</b>\n"
+                f"Premium: <b>₹{spec.premium}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
+                f"Expiry: {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
+                f"SL ₹{spec.stop}  ·  TP ₹{spec.target}  ·  Breakeven {be:,.0f}\n"
+                f"Premium paid (max loss): ₹{spec.notional:,.0f}\n"
+                f"Conviction: {confidence:.0f}%"
+            )
+    except Exception as exc:
+        logger.debug(f"[fno/exec] telegram alert failed: {exc}")
+
     return trade
 
 

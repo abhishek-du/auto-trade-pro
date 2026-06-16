@@ -151,6 +151,22 @@ async def open_future_paper_trade(
         f"[PAPER-FNO] {spec.direction} {label} | {spec.lots} lot(s) ({spec.qty} qty) @ ₹{spec.entry:,.0f} "
         f"| SL ₹{spec.stop:,.0f} TP ₹{spec.target:,.0f} | margin ₹{spec.margin:,.0f} | {spec.dte}d"
     )
+
+    # ── Telegram alert (F&O futures) ──────────────────────────────────────────
+    try:
+        if settings.telegram_available:
+            from integrations.telegram_service import send
+            await send(
+                f"📈 <b>F&O FUTURES {spec.direction}</b>\n"
+                f"<b>{spec.underlying} FUT</b>  ·  {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
+                f"Entry: <b>{spec.entry:,.0f}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
+                f"SL {spec.stop:,.0f}  ·  TP {spec.target:,.0f}\n"
+                f"Margin: ₹{spec.margin:,.0f}  |  Notional: ₹{spec.notional:,.0f}\n"
+                f"Conviction: {confidence:.0f}%"
+            )
+    except Exception as exc:
+        logger.debug(f"[fno/fut] telegram alert failed: {exc}")
+
     return trade
 
 
