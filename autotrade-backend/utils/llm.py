@@ -198,7 +198,85 @@ async def call_groq_chat(
     return None
 
 
-# ── Unified entry point (Ollama → Groq) ──────────────────────────────────────
+# ── Gemini (PRIMARY) ─────────────────────────────────────────────────────────
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_gemini_blocked_until: float = 0.0
+
+
+def _to_gemini_contents(messages: list[dict]) -> tuple[list[dict], dict | None]:
+    """Convert OpenAI-style messages → Gemini contents + optional systemInstruction."""
+    system_txt = "\n".join(m["content"] for m in messages if m.get("role") == "system")
+    contents = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        contents.append({
+            "role": "model" if role == "assistant" else "user",
+            "parts": [{"text": m.get("content", "")}],
+        })
+    sys_inst = {"parts": [{"text": system_txt}]} if system_txt else None
+    return contents, sys_inst
+
+
+async def call_gemini_chat(
+    messages: list[dict],
+    *,
+    max_tokens: int = 600,
+    temperature: float = 0.3,
+    timeout: float = 30.0,
+    model: str | None = None,
+) -> str | None:
+    """Google Gemini inference (primary). Returns None on any failure so the
+    caller can fall back to Groq/Ollama."""
+    global _gemini_blocked_until
+    if not getattr(settings, "gemini_available", False):
+        return None
+    if _time.monotonic() < _gemini_blocked_until:
+        return None
+
+    import httpx
+    mdl = model or settings.GEMINI_MODEL
+    contents, sys_inst = _to_gemini_contents(messages)
+    body: dict = {
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+            # gemini-2.5-flash is a thinking model; thinking tokens eat the output
+            # budget and add latency. Disable it so we get a direct answer.
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    if sys_inst:
+        body["systemInstruction"] = sys_inst
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                GEMINI_URL.format(model=mdl),
+                params={"key": settings.GEMINI_API_KEY},
+                headers={"Content-Type": "application/json"},
+                json=body,
+            )
+            if resp.status_code == 429:
+                _gemini_blocked_until = _time.monotonic() + 60
+                logger.warning("[llm.gemini] 429 rate limit — backing off 60s")
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+        cands = data.get("candidates") or []
+        if not cands:
+            return None
+        parts = (cands[0].get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts)
+        return text.strip() or None
+    except Exception as exc:
+        logger.warning(f"[llm.gemini] failed: {exc}")
+        return None
+
+
+# ── Unified entry point (Gemini → Groq → Ollama) ─────────────────────────────
 
 async def call_llm_chat(
     messages: list[dict],
@@ -209,31 +287,34 @@ async def call_llm_chat(
     model: str | None = None,
     groq_fallback: bool = True,
 ) -> str | None:
-    """Try Ollama first (local, no quota); fall back to Groq on failure.
+    """Primary Gemini → secondary Groq → tertiary local Ollama.
 
-    Pass groq_fallback=False for background/batch tasks to protect the
-    Groq daily quota for user-facing requests.
+    `groq_fallback=False` (background/batch) skips the cloud providers entirely
+    after Gemini and only allows the local Ollama path, to protect cloud quotas.
     """
-    result = await call_ollama_chat(
-        messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=timeout,
-        model=model,
+    # 1. Gemini (primary, cloud)
+    result = await call_gemini_chat(
+        messages, max_tokens=max_tokens, temperature=temperature,
+        timeout=timeout or 30.0,
     )
     if result:
         return result
 
-    if not groq_fallback:
-        logger.debug("[llm] Ollama unavailable — groq_fallback=False, skipping Groq")
-        return None
+    # 2. Groq (secondary, cloud) — only when cloud fallback is allowed
+    if groq_fallback:
+        logger.info("[llm] Gemini unavailable — falling back to Groq")
+        result = await call_groq_chat(
+            messages, max_tokens=max_tokens, temperature=temperature,
+            timeout=timeout or 20.0,
+        )
+        if result:
+            return result
 
-    logger.info("[llm] Ollama unavailable/timeout — falling back to Groq")
-    return await call_groq_chat(
-        messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=timeout or 20.0,
+    # 3. Ollama (tertiary, local — no quota)
+    logger.info("[llm] falling back to local Ollama")
+    return await call_ollama_chat(
+        messages, max_tokens=max_tokens, temperature=temperature,
+        timeout=timeout, model=model if model and ":" in (model or "") else None,
     )
 
 

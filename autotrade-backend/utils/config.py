@@ -104,7 +104,10 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL:    str = "qwen2.5:3b"
     OLLAMA_TIMEOUT:  float = 120.0
-    # Groq: cloud fast inference (fallback when Ollama unavailable)
+    # Gemini: cloud (PRIMARY) — Google Generative Language API
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL:   str = "gemini-2.5-flash"
+    # Groq: cloud fast inference (SECONDARY — fallback when Gemini unavailable)
     GROQ_API_KEY:   str = ""
     GROQ_MODEL:     str = "llama-3.3-70b-versatile"
     # Claude: detailed explanations — strategy breakdowns, deeper reasoning
@@ -314,6 +317,10 @@ class Settings(BaseSettings):
     @property
     def tavily_available(self) -> bool:
         return bool(self.TAVILY_API_KEY)
+
+    @property
+    def gemini_available(self) -> bool:
+        return bool(self.GEMINI_API_KEY)
 
     @property
     def groq_available(self) -> bool:
