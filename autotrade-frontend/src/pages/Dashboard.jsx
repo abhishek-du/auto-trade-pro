@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   IndianRupee, TrendingUp, TrendingDown, Activity, Zap, ArrowUpRight,
@@ -42,6 +42,29 @@ function usePolledFetch(path, interval = 30000, transform = (x) => x) {
     const id = setInterval(fetchIt, interval);
     return () => clearInterval(id);
   }, [fetchIt, interval]);
+  return data;
+}
+
+/* Adaptive poll: fast cadence while a condition (e.g. market open) holds,
+   slow cadence otherwise. The `isFast` reader runs against the latest data. */
+function useAdaptiveFetch(path, fastMs, slowMs, isFast, transform = (x) => x) {
+  const [data, setData] = useState(null);
+  const dataRef = useRef(null);
+  const fetchIt = useCallback(async () => {
+    try { const d = transform(await apiFetch(path)); dataRef.current = d; setData(d); }
+    catch { /* keep last */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path]);
+  useEffect(() => {
+    let timer;
+    const tick = async () => {
+      await fetchIt();
+      const ms = isFast(dataRef.current) ? fastMs : slowMs;
+      timer = setTimeout(tick, ms);
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [fetchIt, fastMs, slowMs, isFast]);
   return data;
 }
 
@@ -106,15 +129,25 @@ function IndexTile({ name, sub, value, change, changePct, vix }) {
 }
 
 function IndexStrip() {
-  const mkt = usePolledFetch('/api/v1/india/market-status', 20000);
+  // Adaptive: poll every 3s while the market is open (live ticks), 30s when closed.
+  const mkt = useAdaptiveFetch(
+    '/api/v1/india/market-status', 3000, 30000, (d) => !!d?.nse_open,
+  );
   const nseOpen = mkt?.nse_open;
   return (
     <div>
       <div className="flex items-center gap-2 mb-2 px-0.5">
         <span className={`w-2 h-2 rounded-full ${nseOpen ? 'bg-profit animate-pulse' : 'bg-loss'}`} />
+        {/* LIVE vs CLOSED data badge */}
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${nseOpen ? 'bg-profit/20 text-profit' : 'bg-slate-600/30 text-slate-400'}`}>
+          {nseOpen ? '🟢 LIVE' : '● CLOSED'}
+        </span>
         <span className="text-xs text-muted">
           NSE <span className={nseOpen ? 'text-profit font-semibold' : 'text-loss font-semibold'}>{nseOpen ? 'OPEN' : 'CLOSED'}</span>
           {mkt?.ist_time && <span className="text-muted/70"> · {mkt.ist_time.split(' ')[1]} IST</span>}
+          {nseOpen
+            ? <span className="text-muted/60"> · streaming from Zerodha</span>
+            : <span className="text-muted/60"> · showing last close</span>}
         </span>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
