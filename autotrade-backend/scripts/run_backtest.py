@@ -185,8 +185,11 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             }
 
     # ── PULLBACK_LONG ─────────────────────────────────────────────────────────
+    # Fix: require ADX >= 15 — pullback entries have no follow-through in
+    # directionless markets (ADX < 15 = no real trend to pull back into).
     if (regime == "BULL_TRENDING" and prev_row is not None
             and r["ema20"] > r["ema50"] and r["rsi14"] >= 40
+            and r["adx14"] >= 15
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
             and close > r["ema20"]):
         stop = float(prev_row["low"]) - 0.5 * atr
@@ -199,8 +202,14 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             }
 
     # ── RANGE_REVERSAL_LONG ───────────────────────────────────────────────────
+    # Fix: require EMA50 > EMA200 (medium-term not in downtrend) and ADX < 25
+    # (confirming genuine range, not a trending decline). Without these gates
+    # this strategy fires 36% of all trades with only 37% win rate — catching
+    # falling knives in bear trends.
     if (regime in ("RANGE", "HIGH_VOL_RANGE", "LOW_VOL_RANGE", "UNKNOWN")
-            and close <= r["bb_lower"] and r["rsi14"] <= 35):
+            and close <= r["bb_lower"] and r["rsi14"] <= 35
+            and r["ema50"] > r["ema200"]       # medium-term trend not down
+            and r["adx14"] < 25):              # confirmed range, not trending
         stop = r["low"] - 0.5 * atr
         risk = close - stop
         tgt  = r["bb_mid"]
@@ -212,8 +221,12 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             }
 
     # ── HUB_SIGNAL (catch-all) — EMA20 > EMA50 > EMA200 as proxy for BUY ────
+    # Fix: block in BEAR_TRENDING regime and in directionless chop (UNKNOWN +
+    # ADX < 15). These were the conditions causing losses in 2025-2026.
     if (r["ema20"] > r["ema50"] and r["st_dir"] == 1
-            and r["rsi14"] > 45 and regime != "BEAR_TRENDING"):
+            and r["rsi14"] > 45
+            and regime != "BEAR_TRENDING"
+            and not (regime == "UNKNOWN" and r["adx14"] < 15)):
         stop   = close - 2.0 * atr
         target = close + 4.0 * atr
         risk   = close - stop
@@ -267,13 +280,23 @@ def backtest_symbol(df: pd.DataFrame, symbol: str, equity: float = _EQUITY) -> d
 
         # ── Manage open position ──────────────────────────────────────────────
         if open_pos:
-            # Update peak for trailing stop (T1 trail — same as live system)
             if open_pos["side"] == "BUY":
                 peak_price = max(peak_price, bar_high)
-                t1 = open_pos.get("t1")
+                t1         = open_pos.get("t1")
                 trail_dist = open_pos.get("trail_dist", 0.0)
+                # T1 hit → partial scale-out: book 50%, trail rest to T2
                 if t1 and not open_pos.get("trailing") and bar_high >= t1:
                     open_pos["trailing"] = True
+                    if not open_pos.get("partial_done"):
+                        partial_qty = int(open_pos["qty"] * 0.5)
+                        if partial_qty > 0:
+                            partial_pnl = (t1 - open_pos["entry"]) * partial_qty
+                            open_pos["partial_done"]  = True
+                            open_pos["partial_qty"]   = partial_qty
+                            open_pos["partial_pnl"]   = partial_pnl
+                            open_pos["qty"]           -= partial_qty
+                            # Move stop to break-even
+                            open_pos["stop"] = max(open_pos["stop"], open_pos["entry"])
                 if open_pos.get("trailing") and trail_dist > 0:
                     new_stop = peak_price - trail_dist
                     if new_stop > open_pos["stop"]:
@@ -290,26 +313,33 @@ def backtest_symbol(df: pd.DataFrame, symbol: str, equity: float = _EQUITY) -> d
                     reason     = "TARGET_HIT"
 
             if exit_price is not None:
-                pnl = (exit_price - open_pos["entry"]) * open_pos["qty"]
-                cost = (estimate_cost(open_pos["qty"], open_pos["entry"], "BUY") +
-                        estimate_cost(open_pos["qty"], exit_price, "SELL"))
-                pnl -= cost
+                remaining_qty = open_pos["qty"]
+                partial_pnl   = open_pos.get("partial_pnl", 0.0)
+                partial_qty   = open_pos.get("partial_qty", 0)
+                total_qty     = remaining_qty + partial_qty  # original position size
+                final_pnl     = (exit_price - open_pos["entry"]) * remaining_qty
+                pnl           = final_pnl + partial_pnl
+                total_cost    = (estimate_cost(total_qty,     open_pos["entry"], "BUY") +
+                                 estimate_cost(remaining_qty, exit_price, "SELL") +
+                                 estimate_cost(partial_qty,   open_pos.get("t1", exit_price), "SELL"))
+                pnl -= total_cost
                 equity += pnl
                 trades.append({
-                    "symbol":   symbol,
-                    "side":     open_pos["side"],
-                    "entry":    open_pos["entry"],
-                    "exit":     exit_price,
-                    "stop":     open_pos["stop"],
-                    "target":   open_pos["target"],
-                    "qty":      open_pos["qty"],
-                    "pnl":      round(pnl, 2),
-                    "pnl_pct":  round((exit_price / open_pos["entry"] - 1) * 100, 2),
-                    "strategy": open_pos["strategy"],
-                    "regime":   open_pos["regime"],
-                    "ts":       open_pos["ts"],
-                    "ts_exit":  bar_ts,
+                    "symbol":      symbol,
+                    "side":        open_pos["side"],
+                    "entry":       open_pos["entry"],
+                    "exit":        exit_price,
+                    "stop":        open_pos["stop"],
+                    "target":      open_pos["target"],
+                    "qty":         total_qty,
+                    "pnl":         round(pnl, 2),
+                    "pnl_pct":     round(pnl / (open_pos["entry"] * total_qty) * 100, 2),
+                    "strategy":    open_pos["strategy"],
+                    "regime":      open_pos["regime"],
+                    "ts":          open_pos["ts"],
+                    "ts_exit":     bar_ts,
                     "close_reason": reason,
+                    "partial_qty": partial_qty,
                 })
                 open_pos   = None
                 peak_price = 0.0

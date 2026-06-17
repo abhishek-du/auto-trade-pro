@@ -12,6 +12,12 @@ class RangeReversalLong(Strategy):
         if f.regime not in ("RANGE", "HIGH_VOL_RANGE", "LOW_VOL_RANGE"): return None
         if f.close > f.bb_lower:  return None
         if f.rsi14 > 35:          return None
+        # Don't buy a reversal when the medium-term trend is already down —
+        # that's catching a falling knife. EMA50 < EMA200 = confirmed downtrend.
+        if f.ema50 < f.ema200:    return None
+        # ADX > 25 means the market is trending, not ranging; skip to avoid
+        # fighting a trend with a mean-reversion entry.
+        if f.adx14 > 25:          return None
 
         last = df.iloc[-1]
         o, c, h, lo = (float(last[x]) for x in ("open", "close", "high", "low"))
