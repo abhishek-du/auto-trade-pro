@@ -250,6 +250,32 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             },
         }
 
+    # Morning regime classification — one LLM call per trading day.
+    # WAIT:      no new entries (market downtrend / high fear)
+    # SELECTIVE: TREND_BREAKOUT candidates only (highest win-rate strategy)
+    # AGGRESSIVE: all strategies (normal operation)
+    from engine.agent.morning_regime import get_morning_regime
+    regime_mode = await get_morning_regime(session)
+    if regime_mode == "WAIT":
+        logger.info("[agent] Morning regime = WAIT — skipping new entry scan")
+        return {
+            "status":          "morning_regime_wait",
+            "cycle_ts":        datetime.utcnow().isoformat(),
+            "paper_mode":      settings.AGENT_PAPER_MODE,
+            "symbols_scanned": 0,
+            "decisions":       0,
+            "fno_opened":      0,
+            "skipped":         0,
+            "regime_mode":     regime_mode,
+            "portfolio": {
+                "equity":         portfolio.equity,
+                "cash":           round(portfolio.cash, 2),
+                "open_positions": len(portfolio.open_positions),
+                "daily_pnl_pct":  round(portfolio.daily_pnl_pct * 100, 2),
+                "weekly_pnl_pct": round(portfolio.weekly_pnl_pct * 100, 2),
+            },
+        }
+
     # Build scan universe from market shortlist (BUY-signaled stocks from the
     # full 9,600-symbol scanner) + the hardcoded large-cap fallback.
     # The shortlist is the right source because it already did the heavy work of
@@ -271,6 +297,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             result = await _process_symbol(
                 symbol, portfolio, session,
                 hub_info=hub_scores.get(symbol) or hub_scores.get(symbol.replace(".NS", "")),
+                regime_mode=regime_mode,
             )
             if result:
                 results.append(result)
@@ -315,6 +342,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
         "status":           "ok",
         "cycle_ts":         datetime.utcnow().isoformat(),
         "paper_mode":       settings.AGENT_PAPER_MODE,
+        "regime_mode":      regime_mode,
         "symbols_scanned":  len(universe),
         "decisions":        len(results),
         "fno_opened":       len(fno_opened),
@@ -335,6 +363,7 @@ async def _process_symbol(
     portfolio: AgentPortfolioContext,
     session: AsyncSession,
     hub_info: dict | None = None,
+    regime_mode: str = "AGGRESSIVE",
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
@@ -380,6 +409,13 @@ async def _process_symbol(
         features.hub_composite_score = None
         features.hub_signal          = "HOLD"
 
+    # Hub score gate — AI has formed a view but conviction is weak → skip.
+    # Fail-open when no hub_info (no AI view) so technical strategies still run.
+    if hub_info is not None:
+        _hub_abs = abs(hub_info.get("composite_score") or hub_info.get("master_score") or 0)
+        if _hub_abs < 50:
+            return None
+
     # 3. Macro and fundamentals (cached)
     macro_bias          = _macro.bias(symbol)
     fund_score, fund_grade = await _fund_agent.get_cached_grade(symbol)
@@ -421,6 +457,12 @@ async def _process_symbol(
                         setattr(candidate, attr, round(v + delta, 2))
         except Exception as exc:
             logger.debug(f"[agent] live entry-price snap failed for {symbol}: {exc}")
+
+    # SELECTIVE regime filter — only TREND_BREAKOUT_LONG proceeds (WR=58.8%).
+    # Other strategies are suppressed until the morning LLM upgrades to AGGRESSIVE.
+    if regime_mode == "SELECTIVE" and candidate is not None:
+        if getattr(candidate, "strategy", "") != "TREND_BREAKOUT_LONG":
+            return None
 
     # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
     #     candidate regardless of whether execution ultimately proceeds.
