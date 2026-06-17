@@ -36,6 +36,21 @@ class AgentExecutionManager:
         trade_value = round(decision.qty * decision.entry, 2)
         now = datetime.utcnow()
 
+        # ── Attribution snapshot at entry ─────────────────────────────────────
+        _itype   = getattr(decision, "instrument_type", "EQUITY")
+        _product = getattr(decision, "product", "CNC")
+        if _itype in ("CE", "PE"):
+            _segment = "OPT"
+        elif _itype == "FUTURE":
+            _segment = "FUT"
+        elif _product == "MIS":
+            _segment = "EQUITY_MIS"
+        else:
+            _segment = "EQUITY_CNC"
+        _initial_r   = round(abs(decision.entry - decision.stop) * decision.qty, 2)
+        _conf_bucket = str((decision.confidence // 10) * 10)
+        _entry_rsn   = (decision.reasons[0] if decision.reasons else "")[:40]
+
         # Deduct full trade value from the shared VirtualWallet (unified ₹20L pool).
         ok, msg = await VirtualWallet.deduct_margin(session, trade_value, decision.symbol)
         if not ok:
@@ -66,6 +81,15 @@ class AgentExecutionManager:
             pattern_name=decision.strategy[:80],
             ai_reason="\n".join(decision.reasons) if decision.reasons else "",
             opened_at=now,
+            # Attribution columns
+            strategy_name=decision.strategy[:40],
+            regime_at_entry=(decision.regime[:20] if decision.regime else None),
+            entry_reason=_entry_rsn,
+            confidence_bucket=_conf_bucket,
+            instrument_segment=_segment,
+            initial_risk_inr=_initial_r,
+            # Seed trade_mgmt with excursion trackers so update loop can read/write
+            indicator_snapshot={"trade_mgmt": {"peak_upnl": 0.0, "trough_upnl": 0.0}},
         )
         session.add(ptrade)
         await session.flush()

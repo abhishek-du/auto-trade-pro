@@ -182,7 +182,17 @@ async def open_paper_trade(
         "peak_price": round(actual_entry, 6),
         "level_source": next((p.split("[", 1)[1].split("]", 1)[0]
                               for p in signal.reasoning_points if p.startswith("Trade levels [")), "unknown"),
+        # MFE/MAE running trackers (updated every tick in update_positions_…)
+        "peak_upnl":   0.0,
+        "trough_upnl": 0.0,
     }
+
+    # ── Attribution values (already in signal, just not persisted until now) ─
+    _initial_r   = round(abs(actual_entry - signal.stop_loss) * units, 2)
+    _conf_bucket = str((int(signal.confidence) // 10) * 10)
+    _strategy    = getattr(signal, "strategy", getattr(signal, "strategy_name", None))
+    _regime_entr = getattr(signal, "regime", None)
+    _entry_rsn   = (signal.reasoning_points[0] if signal.reasoning_points else "")[:40]
 
     # ── Step 2a: Persist PaperTrade ───────────────────────────────────────────
     trade = PaperTrade(
@@ -207,6 +217,13 @@ async def open_paper_trade(
         news_sentiment_score=signal.sentiment_score / 100.0,
         slippage_applied=round(slippage_applied, 6),
         opened_at=now,
+        # Attribution
+        strategy_name=(_strategy[:40] if _strategy else None),
+        regime_at_entry=(_regime_entr[:20] if _regime_entr else None),
+        entry_reason=_entry_rsn,
+        confidence_bucket=_conf_bucket,
+        instrument_segment="EQUITY_CNC",
+        initial_risk_inr=_initial_r,
     )
     session.add(trade)
     await session.flush()                           # populate trade.id
@@ -332,6 +349,29 @@ async def close_paper_trade(
     trade.pnl_percent = round(pnl_percent, 4)
     trade.closed_at   = now
     trade.status      = TradeStatus.STOPPED if reason == "STOP_LOSS" else TradeStatus.CLOSED
+
+    # ── Exit attribution ──────────────────────────────────────────────────────
+    trade.exit_reason   = reason[:20]
+    trade.holding_hours = round(duration_hours, 2)
+
+    initial_r = float(trade.initial_risk_inr or 0)
+    trade.r_multiple = round(pnl / initial_r, 3) if initial_r > 0 else None
+
+    # Read MFE/MAE peak/trough from the running excursion tracker in trade_mgmt
+    _snap_d   = (trade.indicator_snapshot or {}) if trade.indicator_snapshot else {}
+    _tm_d     = (_snap_d.get("trade_mgmt") or {}) if isinstance(_snap_d, dict) else {}
+    peak_upnl  = float(_tm_d.get("peak_upnl",   0.0))
+    trough_upnl = float(_tm_d.get("trough_upnl", 0.0))
+
+    trade.mfe_abs       = round(peak_upnl, 2)
+    trade.mae_abs       = round(trough_upnl, 2)
+    trade.max_open_profit = round(peak_upnl, 2)
+    if notional > 0:
+        trade.mfe_pct = round(peak_upnl   / notional * 100, 2)
+        trade.mae_pct = round(trough_upnl / notional * 100, 2)
+    if initial_r > 0:
+        trade.mfe_r = round(peak_upnl   / initial_r, 3)
+        trade.mae_r = round(trough_upnl / initial_r, 3)
 
     # ── Step 3: Delete OpenPosition ───────────────────────────────────────────
     await session.execute(
@@ -462,6 +502,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         One entry per auto-closed position — useful for WebSocket broadcast.
         Each dict: {trade_id, symbol, reason, exit_price, pnl}
     """
+    now = datetime.utcnow()
     # Eager-load the linked PaperTrade so we can read/update its trade_mgmt JSON
     # (trailing-stop state) without triggering a lazy load in async context.
     result    = await session.execute(
@@ -657,6 +698,36 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         pos.current_price   = price
         pos.unrealised_pnl  = round(upnl, 4)
         pos.unrealised_pct  = round(upct, 4)
+
+        # ── MFE/MAE running tracker ────────────────────────────────────────────
+        # Update peak_upnl (best it's ever been) and trough_upnl (worst) in
+        # trade_mgmt JSON so close_paper_trade() can read them without a full
+        # per-tick DB scan. Uses a fresh read of indicator_snapshot in case the
+        # trailing-stop block above already mutated it this tick.
+        if pos.trade:
+            _snap_now = pos.trade.indicator_snapshot or {}
+            _tm_now   = (_snap_now.get("trade_mgmt") or {}) if isinstance(_snap_now, dict) else {}
+            _prev_peak   = float(_tm_now.get("peak_upnl",   upnl))
+            _prev_trough = float(_tm_now.get("trough_upnl", upnl))
+            _new_peak    = max(_prev_peak,   upnl)
+            _new_trough  = min(_prev_trough, upnl)
+            if _new_peak != _prev_peak or _new_trough != _prev_trough:
+                _tm_now = {**_tm_now,
+                           "peak_upnl":   round(_new_peak,   4),
+                           "trough_upnl": round(_new_trough, 4)}
+                pos.trade.indicator_snapshot = {**_snap_now, "trade_mgmt": _tm_now}
+
+            # Optional per-tick samples (exact MFE/MAE; disabled by default)
+            if getattr(settings, "ENABLE_EXCURSION_SAMPLES", False) and pos.trade_id:
+                from db.models import TradeExcursionSample
+                _init_r = float(pos.trade.initial_risk_inr or 0)
+                session.add(TradeExcursionSample(
+                    trade_id=pos.trade_id,
+                    ts=now,
+                    price=round(price, 4),
+                    unrealised_pnl=round(upnl, 4),
+                    unrealised_r=round(upnl / _init_r, 3) if _init_r > 0 else None,
+                ))
 
     await session.flush()
 
