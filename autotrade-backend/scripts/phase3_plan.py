@@ -103,6 +103,11 @@ def evaluate_gate(p2: dict) -> tuple[bool, bool, str]:
     reason_parts = []
     if oos_lo is None:
         reason_parts.append("OOS (2025-26) has insufficient data (no trades)")
+    elif oos_hi is not None and oos_hi < 0:
+        reason_parts.append(
+            f"OOS CI [{_f3(oos_lo)}, {_f3(oos_hi)}] fully negative — "
+            f"edge is statistically confirmed absent in 2025-26"
+        )
     elif oos_lo <= 0:
         reason_parts.append(
             f"OOS CI [{_f3(oos_lo)}, {_f3(oos_hi)}] straddles zero — edge not demonstrated"

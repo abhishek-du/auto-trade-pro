@@ -1,0 +1,74 @@
+{
+  "gate_passed": false,
+  "gate_reason": "OOS CI [-0.149, -0.021] fully negative \u2014 edge is statistically confirmed absent in 2025-26; OOS verdict is NEGATIVE",
+  "oos_mean_r": -0.0854,
+  "oos_ci_lo": -0.1495,
+  "oos_ci_hi": -0.0205,
+  "oos_verdict": "NEGATIVE",
+  "regime_only": false,
+  "improvements": [
+    {
+      "id": "R1",
+      "title": "Regime gating \u2014 size/enter by measured regime expectancy",
+      "tier": "LOW",
+      "trigger": "regime cross-tab CI: non-BULL regimes show negative/uncertain expectancy",
+      "evidence": "BULL_TRENDING mean_R\u22480.179, other regimes mean_R\u2248N/A.  Edge status: NO EDGE",
+      "expected_impact": "Eliminate non-BULL trades.  If non-BULL mean_R=N/A, removing them improves blended R.  CI of improvement requires a dedicated OOS split (not yet measured).",
+      "risk": "Reduced trade frequency; BULL regime may lag signal (enter too late); morning_regime already provides partial coverage \u2014 measure its hit rate first.",
+      "action": "1. Confirm morning_regime WAIT/SELECTIVE hit rate on the OOS period.  2. If hit rate < 60%, tune the NIFTYBEES EMA50 + VIX thresholds.  3. Only then scale non-BULL positions to 0.5\u00d7 (not zero \u2014 avoids over-concentration).",
+      "triggered": false
+    },
+    {
+      "id": "R2",
+      "title": "Confidence threshold raising \u2014 filter entries by score monotonicity",
+      "tier": "LOW",
+      "trigger": "confidence bucket analysis is monotonic (higher conf \u2192 higher mean_R)",
+      "evidence": "Confidence bucket analysis not available.",
+      "expected_impact": "Not triggered \u2014 monotonicity not confirmed or improvement < 0.05 R.",
+      "risk": "Reduced trade frequency; small bucket N inflates apparent mean_R; confidence is calculated on the entry path, not measured OOS.",
+      "action": "Do not change confidence threshold \u2014 evidence insufficient.",
+      "triggered": false
+    },
+    {
+      "id": "R3",
+      "title": "HUB_SIGNAL strategy inclusion/exclusion decision",
+      "tier": "LOW",
+      "trigger": "Hub un-shadowed OOS has statistically significant positive or negative mean_R",
+      "evidence": "HUB_SIGNAL un-shadowed: no trades generated (N=0).",
+      "expected_impact": "Not triggered \u2014 insufficient data or verdict uncertain.",
+      "risk": "HUB_SIGNAL proxy \u2260 real 7-factor score.  Excluding based on proxy may incorrectly penalize a strategy that works with real scores.  Real HUB_SIGNAL can only be validated on live paper-trade history (not backtest).",
+      "action": "Gather more paper-trade data on HUB_SIGNAL before deciding.",
+      "triggered": false
+    },
+    {
+      "id": "R4",
+      "title": "Exit policy change \u2014 replace current T1-partial + trail with measured winner",
+      "tier": "MEDIUM",
+      "trigger": "An exit variant beats current by > 0.05 R with OOS CI excluding zero",
+      "evidence": "Current exit mean_R=0.069.  Best alternative: partial_fixed mean_R=0.176 (\u0394=+0.107 R).  Exit comparison runs on a sample (N\u2264100 symbols) \u2014 re-run on full universe before acting.",
+      "expected_impact": "Switching to partial_fixed: \u0394\u2248+0.107 R per trade in backtest.  OOS CI for this delta: not yet computed \u2014 requires a dedicated split.",
+      "risk": "Exit policy comparison uses same entries \u2014 any entry-bias amplifies apparent exit gain.  Run on full universe (443 symbols) not sample before deciding.  Give-back and MFE metrics (Phase 1 data) are the ground truth for exit quality.",
+      "action": "1. Re-run exit comparison on full symbol set.  2. Check Phase 1 MFE/give-back by exit_reason in live paper trades.  3. If both confirm partial_fixed, switch via `exit_policy` config (no code change \u2014 gated by settings).",
+      "triggered": true
+    },
+    {
+      "id": "R5",
+      "title": "Position sizing \u2014 tie lot size to measured per-regime expectancy",
+      "tier": "LOW",
+      "trigger": "Regime cross-tab shows \u03c3(mean_R across regimes) > 0.15 R",
+      "evidence": "Insufficient regime cross-tab data (N<30 per cell).",
+      "expected_impact": "Scaling down non-BULL positions to 0.5\u00d7 (reducing risk in lower-expectancy regimes) improves blended expectancy but reduces trade frequency and absolute PnL.  Quantitative impact requires a dedicated backtest with the sizing rule active.",
+      "risk": "Regime mis-classification lags actual regime shifts (EMA50 is a slow signal).  Over-sizing in BULL only creates regime-concentrated drawdowns if BULL reversal is sharp.  Always maintain position-level stops regardless of sizing.",
+      "action": "1. Add a `regime_size_multiplier` config (default 1.0 \u2014 no change).  2. In run_agent_cycle() / _process_symbol(), multiply qty by multiplier based on    current morning_regime.  3. Re-run backtest with BULL=1.0, RANGE=0.5, BEAR=0.25.  4. Compare OOS expectancy (not just PnL) before enabling.",
+      "triggered": false
+    }
+  ],
+  "readiness_tier": "NONE",
+  "readiness_notes": [
+    "Phase 2 gate not passed.  No capital tier is reached.",
+    "Current honest status: system is NOT ready for real capital at any tier.",
+    "Phase 1 + Phase 2 must close measurement and validation gaps first."
+  ],
+  "capital_gates": [],
+  "final_statement": "Phase 3 gate NOT PASSED (OOS mean_R=-0.085, CI=[-0.149,-0.021]).  Triggered improvements: R4.  Recommended action order: R4 Exit policy change.  Capital readiness: NONE.  No optimization should be deployed until a dedicated OOS validation confirms improvement."
+}
