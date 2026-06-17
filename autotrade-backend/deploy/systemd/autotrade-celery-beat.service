@@ -1,0 +1,17 @@
+[Unit]
+Description=AutoTrade Pro — Celery beat (scheduler)
+After=network.target autotrade-celery-worker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/celery -A tasks.celery_app beat --loglevel=warning
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+StandardOutput=append:/tmp/celery_beat.log
+StandardError=append:/tmp/celery_beat.log
+
+[Install]
+WantedBy=default.target
