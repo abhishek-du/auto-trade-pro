@@ -66,11 +66,15 @@ async def init_db() -> None:
 
     Called at startup in main.py lifespan.  Non-fatal — the app starts even if
     the DB is temporarily unreachable (e.g. Supabase pooler still propagating).
+
+    Each ALTER TABLE runs in its own AUTOCOMMIT statement so a concurrent
+    backfill (which holds AccessShareLocks on candles) cannot deadlock the
+    entire batch. Idempotent: ADD COLUMN IF NOT EXISTS / ALTER TYPE IF NOT EXISTS.
     """
+    import asyncio as _asyncio
     from sqlalchemy import text
 
-    # ALTER TYPE ADD VALUE must run outside a transaction (autocommit).
-    # Safe to re-run — IF NOT EXISTS is idempotent.
+    # ALTER TYPE ADD VALUE must run in AUTOCOMMIT (PostgreSQL restriction).
     async with engine.connect() as conn:
         ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
         for value in ("STOPPED",):
@@ -78,40 +82,54 @@ async def init_db() -> None:
                 text(f"ALTER TYPE tradestatus ADD VALUE IF NOT EXISTS '{value}'")
             )
 
+    # CREATE TABLE (safe in a single transaction — no contention with backfill).
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Add columns introduced after initial table creation (idempotent).
-        for stmt in (
-            "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS upper_circuit_days INTEGER DEFAULT 0",
-            "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
-            # product type: CNC=delivery, MIS=intraday (short selling), NRML=F&O overnight
-            "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
-            # ── F&O fields (Phase 3): EQUITY for cash; FUTURE/CE/PE for derivatives ──
-            *[
-                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
-                for tbl in ("paper_trades", "open_positions", "agent_trades", "agent_decisions")
-                for col in (
-                    "instrument_type VARCHAR(10) DEFAULT 'EQUITY'",
-                    "underlying_symbol VARCHAR(30)",
-                    "strike_price FLOAT",
-                    "option_type VARCHAR(2)",
-                    "expiry_date DATE",
-                    "lot_size INTEGER DEFAULT 1",
-                )
-            ],
-            # contract_multiplier + margin_blocked don't apply to agent_decisions
-            *[
-                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
-                for tbl in ("paper_trades", "open_positions", "agent_trades")
-                for col in (
-                    "contract_multiplier FLOAT DEFAULT 1.0",
-                    "margin_blocked FLOAT DEFAULT 0.0",
-                )
-            ],
-            # F&O tradingsymbols (e.g. BANKNIFTY26JUN3057200CE) exceed the old
-            # VARCHAR(20) equity symbol width — widen so paper F&O can persist.
-            "ALTER TABLE paper_trades   ALTER COLUMN symbol TYPE VARCHAR(50)",
-            "ALTER TABLE open_positions ALTER COLUMN symbol TYPE VARCHAR(50)",
-            "ALTER TABLE simulation_logs ALTER COLUMN symbol TYPE VARCHAR(50)",
-        ):
-            await conn.execute(text(stmt))
+
+    # ALTER TABLE statements that can deadlock with concurrent inserts:
+    # run each one in AUTOCOMMIT so there is no cross-statement lock accumulation.
+    # If a single statement deadlocks (e.g. backfill holds a lock momentarily),
+    # retry it up to 3× with short backoff rather than failing the entire batch.
+    _alter_stmts = (
+        "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS upper_circuit_days INTEGER DEFAULT 0",
+        "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
+        "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+        *[
+            f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
+            for tbl in ("paper_trades", "open_positions", "agent_trades", "agent_decisions")
+            for col in (
+                "instrument_type VARCHAR(10) DEFAULT 'EQUITY'",
+                "underlying_symbol VARCHAR(30)",
+                "strike_price FLOAT",
+                "option_type VARCHAR(2)",
+                "expiry_date DATE",
+                "lot_size INTEGER DEFAULT 1",
+            )
+        ],
+        *[
+            f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
+            for tbl in ("paper_trades", "open_positions", "agent_trades")
+            for col in (
+                "contract_multiplier FLOAT DEFAULT 1.0",
+                "margin_blocked FLOAT DEFAULT 0.0",
+            )
+        ],
+        "ALTER TABLE paper_trades   ALTER COLUMN symbol TYPE VARCHAR(50)",
+        "ALTER TABLE open_positions ALTER COLUMN symbol TYPE VARCHAR(50)",
+        "ALTER TABLE simulation_logs ALTER COLUMN symbol TYPE VARCHAR(50)",
+    )
+
+    async with engine.connect() as conn:
+        ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        for stmt in _alter_stmts:
+            for attempt in range(3):
+                try:
+                    await ac.execute(text(stmt))
+                    break
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    if "deadlock" in msg and attempt < 2:
+                        await _asyncio.sleep(3 * (attempt + 1))
+                        continue
+                    # Column already exists or other benign error — move on.
+                    break
