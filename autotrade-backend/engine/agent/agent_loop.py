@@ -138,6 +138,32 @@ def _is_mis_squareoff_window() -> bool:
     return dtime(sq_h, sq_m) <= now <= dtime(end_h, end_m)
 
 
+async def _check_nifty_trend(session: AsyncSession) -> bool:
+    """Returns True if NIFTYBEES.NS is above its 50-day EMA (macro uptrend OK).
+
+    When False, the agent skips new BUY entries for this cycle. This is the
+    primary fix for 2025 losses: the strategy was entering individual-stock
+    longs while Nifty was in a macro downtrend (Jan-Feb and Jul-Aug 2025).
+    Fails open (returns True) if data is unavailable — never silently blocks trading.
+    """
+    try:
+        from sqlalchemy import text as _text
+        rows = (await session.execute(_text("""
+            SELECT close FROM candles
+            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
+            ORDER BY timestamp DESC LIMIT 60
+        """))).scalars().all()
+        if not rows or len(rows) < 50:
+            return True  # insufficient history — fail open
+        closes = pd.Series(list(reversed(rows)), dtype=float)  # oldest → newest
+        ema50  = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+        latest = closes.iloc[-1]
+        return float(latest) > float(ema50)
+    except Exception as exc:
+        logger.warning(f"[agent] Nifty trend check failed — failing open: {exc}")
+        return True
+
+
 async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     """Top-level entry point called by the Celery task.
 
@@ -192,6 +218,33 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
                     logger.info(
                         f"[agent] MIS squared off {sym} @ ₹{price:.2f} | pnl=₹{pnl:,.2f}"
                     )
+
+    # Nifty macro trend gate — block new BUY entries when NIFTYBEES.NS is below
+    # its 50-day EMA. Root cause of Jan-Feb and Jul-Aug 2025 backtest losses:
+    # individual stocks show BULL_TRENDING on their own EMAs while the index is
+    # in a macro downtrend, so entries fail against the macro headwind.
+    nifty_ok = await _check_nifty_trend(session)
+    if not nifty_ok:
+        logger.info(
+            "[agent] Nifty macro gate ACTIVE — NIFTYBEES below EMA50 — "
+            "skipping new entry scan (existing positions still managed above)"
+        )
+        return {
+            "status":          "nifty_downtrend_gate",
+            "cycle_ts":        datetime.utcnow().isoformat(),
+            "paper_mode":      settings.AGENT_PAPER_MODE,
+            "symbols_scanned": 0,
+            "decisions":       0,
+            "fno_opened":      0,
+            "skipped":         0,
+            "portfolio": {
+                "equity":         portfolio.equity,
+                "cash":           round(portfolio.cash, 2),
+                "open_positions": len(portfolio.open_positions),
+                "daily_pnl_pct":  round(portfolio.daily_pnl_pct * 100, 2),
+                "weekly_pnl_pct": round(portfolio.weekly_pnl_pct * 100, 2),
+            },
+        }
 
     # Build scan universe from market shortlist (BUY-signaled stocks from the
     # full 9,600-symbol scanner) + the hardcoded large-cap fallback.

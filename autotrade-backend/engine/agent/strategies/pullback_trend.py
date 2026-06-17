@@ -20,7 +20,7 @@ class PullbackTrendLong(Strategy):
         if not touched:                   return None
         # Last bar closed back above EMA
         if float(last["close"]) <= f.ema20: return None
-        if f.rsi14 < 40:                  return None
+        if f.rsi14 < 45:                  return None
         if not (f.ema20 > f.ema50):       return None
         # Require some actual momentum — ADX < 15 is directionless chop where
         # pullback entries have no follow-through.
