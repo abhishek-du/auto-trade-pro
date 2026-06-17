@@ -331,22 +331,27 @@ def backtest_symbol(
                                  estimate_cost(partial_qty,   open_pos.get("t1", exit_price), "SELL"))
                 pnl -= total_cost
                 equity += pnl
+                _init_risk = abs(open_pos["entry"] - open_pos["initial_stop"]) * total_qty
                 trades.append({
-                    "symbol":      symbol,
-                    "side":        open_pos["side"],
-                    "entry":       open_pos["entry"],
-                    "exit":        exit_price,
-                    "stop":        open_pos["stop"],
-                    "target":      open_pos["target"],
-                    "qty":         total_qty,
-                    "pnl":         round(pnl, 2),
-                    "pnl_pct":     round(pnl / (open_pos["entry"] * total_qty) * 100, 2),
-                    "strategy":    open_pos["strategy"],
-                    "regime":      open_pos["regime"],
-                    "ts":          open_pos["ts"],
-                    "ts_exit":     bar_ts,
-                    "close_reason": reason,
-                    "partial_qty": partial_qty,
+                    "symbol":        symbol,
+                    "side":          open_pos["side"],
+                    "entry":         open_pos["entry"],
+                    "exit":          exit_price,
+                    "stop":          open_pos["stop"],
+                    "initial_stop":  open_pos["initial_stop"],
+                    "target":        open_pos["target"],
+                    "qty":           total_qty,
+                    "pnl":           round(pnl, 2),
+                    "pnl_pct":       round(pnl / (open_pos["entry"] * total_qty) * 100, 2),
+                    "r_multiple":    round(pnl / _init_risk, 3) if _init_risk > 0 else None,
+                    "initial_risk":  round(_init_risk, 2),
+                    "strategy":      open_pos["strategy"],
+                    "confidence":    open_pos.get("confidence", 60),
+                    "regime":        open_pos["regime"],
+                    "ts":            open_pos["ts"],
+                    "ts_exit":       bar_ts,
+                    "close_reason":  reason,
+                    "partial_qty":   partial_qty,
                 })
                 open_pos   = None
                 peak_price = 0.0
@@ -372,18 +377,20 @@ def backtest_symbol(
                     if qty > 0:
                         atr14 = float(row["atr14"])
                         open_pos = {
-                            "side":      sig["side"],
-                            "entry":     sig["entry"],
-                            "stop":      sig["stop"],
-                            "target":    sig["target"],
-                            "t1":        sig["entry"] + 2.0 * atr14,
-                            "trail_dist": atr14,  # 1× ATR — backtested as optimal for NSE
-                            "trailing":  False,
-                            "qty":       qty,
-                            "strategy":  sig["strategy"],
-                            "regime":    row.get("regime", "UNKNOWN"),
-                            "ts":        bar_ts,
-                            "entry_bar": i,
+                            "side":         sig["side"],
+                            "entry":        sig["entry"],
+                            "stop":         sig["stop"],
+                            "initial_stop": sig["stop"],  # persisted for R-multiple; never trails
+                            "target":       sig["target"],
+                            "t1":           sig["entry"] + 2.0 * atr14,
+                            "trail_dist":   atr14,  # 1× ATR — backtested as optimal for NSE
+                            "trailing":     False,
+                            "qty":          qty,
+                            "strategy":     sig["strategy"],
+                            "confidence":   sig.get("confidence", 60),
+                            "regime":       row.get("regime", "UNKNOWN"),
+                            "ts":           bar_ts,
+                            "entry_bar":    i,
                         }
                         peak_price = sig["entry"]
 
