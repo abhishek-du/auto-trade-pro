@@ -26,11 +26,19 @@ async def lifespan(app: FastAPI):
     logger.info(f"Max risk per trade    : {settings.MAX_RISK_PER_TRADE * 100:.1f}%")
     logger.info(f"Max open positions    : {settings.MAX_OPEN_POSITIONS}")
 
-    try:
-        await init_db()
-        logger.info("Database tables ready")
-    except Exception as exc:
-        logger.warning(f"DB init skipped — will retry on first request: {exc}")
+    import asyncio as _asyncio
+    for _attempt in range(5):
+        try:
+            await init_db()
+            logger.info("Database tables ready")
+            break
+        except Exception as exc:
+            if _attempt < 4:
+                _wait = 5 * (_attempt + 1)
+                logger.warning(f"DB init attempt {_attempt+1} failed ({type(exc).__name__}) — retrying in {_wait}s")
+                await _asyncio.sleep(_wait)
+            else:
+                logger.warning(f"DB init skipped after 5 attempts — will retry on first request: {exc}")
 
     # ── Preload NSE token map from kite_instruments ──────────────────────────
     # The hardcoded NSE_TOKENS dict only covers ~30 large-caps. If the daily
