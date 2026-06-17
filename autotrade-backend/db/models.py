@@ -105,6 +105,29 @@ class PaperTrade(Base):
     opened_at: Mapped[datetime]      = mapped_column(DateTime, server_default=func.now(), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # ── Trade attribution (Phase 1 — added 2026-06-17) ───────────────────────
+    # Entry snapshot — populated when the trade opens
+    strategy_name:      Mapped[str | None]   = mapped_column(String(40),  nullable=True)
+    regime_at_entry:    Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    entry_reason:       Mapped[str | None]   = mapped_column(String(40),  nullable=True)
+    confidence_bucket:  Mapped[str | None]   = mapped_column(String(8),   nullable=True)
+    instrument_segment: Mapped[str | None]   = mapped_column(String(12),  nullable=True)
+    initial_risk_inr:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Exit snapshot — populated when the trade closes
+    exit_reason:        Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    regime_at_exit:     Mapped[str | None]   = mapped_column(String(20),  nullable=True)
+    r_multiple:         Mapped[float | None] = mapped_column(Float, nullable=True)
+    holding_bars:       Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    holding_hours:      Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Excursion summary — populated at close from running peak/trough in trade_mgmt
+    mfe_abs:            Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_pct:            Mapped[float | None] = mapped_column(Float, nullable=True)
+    mfe_r:              Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_abs:            Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_pct:            Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae_r:              Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_open_profit:    Mapped[float | None] = mapped_column(Float, nullable=True)
+
     open_position: Mapped["OpenPosition | None"] = relationship(
         "OpenPosition", back_populates="trade", uselist=False
     )
@@ -1351,4 +1374,35 @@ class AgentCapitalSnapshot(Base):
             f"<AgentCapitalSnapshot {self.snapshot_date} "
             f"equity={self.equity:.0f} sharpe={self.sharpe_ratio} "
             f"alpha={self.jensens_alpha}>"
+        )
+
+
+# ── Trade Excursion Samples ───────────────────────────────────────────────────
+
+class TradeExcursionSample(Base):
+    """Append-only per-tick unrealised P&L samples for MFE/MAE calculation.
+
+    One row per mark-to-market update per open trade.  After the trade closes
+    the running peak/trough is summarised into paper_trades.mfe_*/mae_* and
+    these rows can be pruned.  Gated by ENABLE_EXCURSION_SAMPLES (default off)
+    to avoid write amplification in high-frequency cycles.
+    """
+    __tablename__ = "trade_excursion_samples"
+    __table_args__ = (
+        Index("ix_excursion_trade_ts", "trade_id", "ts"),
+    )
+
+    id:             Mapped[int]          = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id:       Mapped[int]          = mapped_column(
+        ForeignKey("paper_trades.id", ondelete="CASCADE"), nullable=False
+    )
+    ts:             Mapped[datetime]     = mapped_column(DateTime, nullable=False)
+    price:          Mapped[float]        = mapped_column(Float, nullable=False)
+    unrealised_pnl: Mapped[float]        = mapped_column(Float, nullable=False)
+    unrealised_r:   Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TradeExcursionSample trade={self.trade_id} "
+            f"@{self.ts} pnl={self.unrealised_pnl:+.2f} r={self.unrealised_r}>"
         )

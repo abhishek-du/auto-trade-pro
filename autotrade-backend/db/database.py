@@ -117,6 +117,33 @@ async def init_db() -> None:
         "ALTER TABLE paper_trades   ALTER COLUMN symbol TYPE VARCHAR(50)",
         "ALTER TABLE open_positions ALTER COLUMN symbol TYPE VARCHAR(50)",
         "ALTER TABLE simulation_logs ALTER COLUMN symbol TYPE VARCHAR(50)",
+        # Trade attribution columns (0003_trade_attribution) — entry snapshot
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(40)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS regime_at_entry VARCHAR(20)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS entry_reason VARCHAR(40)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS confidence_bucket VARCHAR(8)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS instrument_segment VARCHAR(12)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS initial_risk_inr FLOAT",
+        # Exit snapshot
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS exit_reason VARCHAR(20)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS regime_at_exit VARCHAR(20)",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS r_multiple FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS holding_bars INTEGER",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS holding_hours FLOAT",
+        # Excursion summary
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mfe_abs FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mfe_pct FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mfe_r FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mae_abs FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mae_pct FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mae_r FLOAT",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS max_open_profit FLOAT",
+        # Indexes for attribution filters
+        "CREATE INDEX IF NOT EXISTS ix_pt_strategy_name  ON paper_trades (strategy_name)",
+        "CREATE INDEX IF NOT EXISTS ix_pt_regime_entry   ON paper_trades (regime_at_entry)",
+        "CREATE INDEX IF NOT EXISTS ix_pt_conf_bucket    ON paper_trades (confidence_bucket)",
+        "CREATE INDEX IF NOT EXISTS ix_pt_instrument_seg ON paper_trades (instrument_segment)",
+        "CREATE INDEX IF NOT EXISTS ix_pt_exit_reason    ON paper_trades (exit_reason)",
     )
 
     async with engine.connect() as conn:
