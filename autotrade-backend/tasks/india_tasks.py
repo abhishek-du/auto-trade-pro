@@ -15,6 +15,7 @@ import asyncio
 import datetime
 from zoneinfo import ZoneInfo
 
+from celery.signals import worker_ready
 from tasks.celery_app import celery_app
 from utils.logger import logger
 
@@ -1484,6 +1485,15 @@ def zerodha_token_refresh_task():
     memory so the ticker start task that fires at 09:15 IST will start live feeds.
     """
     try:
+        # Ensure the backend root is importable regardless of the worker's cwd —
+        # a worker started from a different directory previously failed with
+        # "No module named 'scripts'", silently skipping the daily auto-login.
+        import sys as _sys
+        from pathlib import Path as _Path
+        _root = str(_Path(__file__).resolve().parent.parent)
+        if _root not in _sys.path:
+            _sys.path.insert(0, _root)
+
         from scripts.refresh_zerodha_token import main as _refresh
         _refresh(backend="http://localhost:8000")
         logger.info("[zerodha_token_refresh] Token refreshed successfully")
@@ -1519,6 +1529,41 @@ def zerodha_token_refresh_task():
     except Exception as exc:
         logger.error(f"[zerodha_token_refresh] Unexpected error: {exc}")
         return {"status": "error", "error": str(exc)}
+
+
+@celery_app.task(name="tasks.zerodha_ensure_token")
+def zerodha_ensure_token_task():
+    """Refresh the Zerodha token if it's missing/expired — a catch-up for when
+    the daily 08:00 IST schedule was missed because the machine was powered off
+    overnight. Runs on worker startup (see worker_ready below) so the token is
+    restored whenever the app comes online, not only at the fixed cron slot.
+    """
+    from utils.config import settings
+    if not (settings.ZERODHA_USER_ID and settings.ZERODHA_PASSWORD and settings.ZERODHA_TOTP_SECRET):
+        return {"skipped": "no_credentials"}
+    valid = False
+    try:
+        from crawler.zerodha_kite_lib import verify_token
+        valid = verify_token()
+    except Exception as exc:
+        logger.warning(f"[zerodha_ensure_token] verify failed (treating as expired): {exc}")
+    if valid:
+        logger.info("[zerodha_ensure_token] Token still valid — no refresh needed")
+        return {"valid": True, "refreshed": False}
+    logger.info("[zerodha_ensure_token] Token missing/expired — running auto-login now")
+    return zerodha_token_refresh_task()
+
+
+@worker_ready.connect
+def _on_worker_ready(**_kwargs):
+    """When the worker boots, schedule a token catch-up. Delayed so the backend
+    (which serves the OAuth callback the refresh depends on) has time to come up.
+    """
+    try:
+        zerodha_ensure_token_task.apply_async(countdown=45)
+        logger.info("[worker_ready] scheduled Zerodha token catch-up (+45s)")
+    except Exception as exc:
+        logger.warning(f"[worker_ready] could not schedule token catch-up: {exc}")
 
 
 @celery_app.task(name="tasks.kite_start_ticker")
