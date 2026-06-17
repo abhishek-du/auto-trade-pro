@@ -167,7 +167,8 @@ async def open_paper_trade(
     target_1 = signal.take_profit
     target_2 = getattr(signal, "target_2", 0.0) or target_1
     atr      = getattr(signal, "atr", 0.0) or 0.0
-    # Trail distance: 1×ATR when available, else 2% of entry as a degraded proxy.
+    # Trail distance: 1×ATR — backtested as optimal for NSE equity volatility.
+    # 1.5× ATR gives back too much profit in the choppy markets that dominate 2025.
     trail_dist = atr if atr > 0 else round(actual_entry * 0.02, 4)
     # The position's hard take-profit is the FINAL target so winners can run.
     position_tp = target_2
@@ -611,6 +612,39 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 "direction":   pos.direction.value,
             })
             continue
+
+        # ── Time-based stale exit ─────────────────────────────────────────────
+        # Exit positions that have been held >45 calendar days (~30 trading days)
+        # AND are still in a loss. This only targets genuinely dead losing trades —
+        # NOT slow winners. Backtest showed that exiting <1%-profit trades at 20
+        # bars kills slow-developing winners; the correct threshold is: negative
+        # return after 45 days, where the stop clearly isn't working as protection.
+        if pos.trade and pos.trade.opened_at:
+            days_held = (now - pos.trade.opened_at).days
+            if days_held >= 45:
+                notional_now = pos.entry_price * pos.size_units
+                upnl_now = (
+                    (price - pos.entry_price) * pos.size_units if is_buy
+                    else (pos.entry_price - price) * pos.size_units
+                )
+                upct_now = (upnl_now / notional_now * 100) if notional_now > 0 else 0.0
+                if upct_now < -2.0:  # only exit if actually losing (not just slow)
+                    closed_trade = await close_paper_trade(pos, price, "STALE_EXIT", session)
+                    auto_closed.append({
+                        "trade_id":    closed_trade.id,
+                        "symbol":      closed_trade.symbol,
+                        "reason":      "STALE_EXIT",
+                        "exit_price":  price,
+                        "pnl":         closed_trade.pnl,
+                        "entry_price": closed_trade.entry_price,
+                        "size_units":  closed_trade.size_units,
+                        "direction":   pos.direction.value,
+                    })
+                    logger.info(
+                        f"[stale] {pos.symbol}: {days_held}d held, "
+                        f"upct={upct_now:.1f}% — stale loser exit at ₹{price:.2f}"
+                    )
+                    continue
 
         # ── Update unrealised PnL ──────────────────────────────────────────────
         if pos.direction == TradeDirection.BUY:

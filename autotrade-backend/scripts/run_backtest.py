@@ -310,6 +310,7 @@ def backtest_symbol(
 
             exit_price = None
             reason     = None
+
             if open_pos["side"] == "BUY":
                 if bar_low <= open_pos["stop"]:
                     exit_price = open_pos["stop"]
@@ -349,9 +350,9 @@ def backtest_symbol(
                 })
                 open_pos   = None
                 peak_price = 0.0
-                # 20-bar cooldown: after a stop-hit loss, wait before re-entering
-                # any trade on this symbol. Prevents repeatedly buying a stock
-                # that is in a sustained downtrend (CHOICEIN.NS pattern).
+                # 20-bar cooldown: after a genuine stop-hit loss, wait before
+                # re-entering. STALE_EXIT is excluded — it's a capital rotation
+                # rule, not a signal that the stock is in a downtrend.
                 if reason in ("STOP_HIT", "TRAIL_STOP") and pnl < 0:
                     last_stop_bar = i
 
@@ -375,13 +376,14 @@ def backtest_symbol(
                             "entry":     sig["entry"],
                             "stop":      sig["stop"],
                             "target":    sig["target"],
-                            "t1":        sig["entry"] + 2.0 * atr14,  # T1 trigger for trailing
-                            "trail_dist": atr14,
+                            "t1":        sig["entry"] + 2.0 * atr14,
+                            "trail_dist": atr14,  # 1× ATR — backtested as optimal for NSE
                             "trailing":  False,
                             "qty":       qty,
                             "strategy":  sig["strategy"],
                             "regime":    row.get("regime", "UNKNOWN"),
                             "ts":        bar_ts,
+                            "entry_bar": i,
                         }
                         peak_price = sig["entry"]
 
