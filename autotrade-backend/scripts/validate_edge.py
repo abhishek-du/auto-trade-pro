@@ -119,7 +119,7 @@ def backtest_corrected(
     equity: float = _EQUITY,
     nifty_ok: dict[str, bool] | None = None,
     hub_only: bool = False,          # if True: run HUB_SIGNAL as the sole strategy
-    exit_policy: str = "current",    # current | full_trail | partial_fixed | be_after_1r
+    exit_policy: str = "partial_fixed",  # partial_fixed | current | full_trail | be_after_1r
     trail_atr_mult: float = 1.0,     # for exit_policy variants
 ) -> dict:
     """Backtest using REAL Strategy classes via the precomputed-features bridge.
@@ -492,9 +492,9 @@ def confidence_buckets(all_trades: list[dict]) -> dict:
 
 EXIT_POLICIES = ["current", "full_trail", "partial_fixed", "be_after_1r", "trail_150", "trail_075"]
 EXIT_LABELS = {
-    "current":       "Current (T1 partial + 1×ATR trail + 45d stale)",
+    "partial_fixed": "★ Active (T1 partial + fixed T2, no trail)  ← deployed",
+    "current":       "Old (T1 partial + 1×ATR trail)",
     "full_trail":    "Full trail, no partial (1×ATR from entry)",
-    "partial_fixed": "Partial at T1, fixed T2 exit (no trail)",
     "be_after_1r":   "Break-even stop once +1R reached",
     "trail_150":     "T1 partial + 1.5×ATR trail",
     "trail_075":     "T1 partial + 0.75×ATR trail",

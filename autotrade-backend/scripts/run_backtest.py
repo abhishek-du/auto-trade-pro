@@ -290,26 +290,16 @@ def backtest_symbol(
         # ── Manage open position ──────────────────────────────────────────────
         if open_pos:
             if open_pos["side"] == "BUY":
-                peak_price = max(peak_price, bar_high)
-                t1         = open_pos.get("t1")
-                trail_dist = open_pos.get("trail_dist", 0.0)
-                # T1 hit → partial scale-out: book 50%, trail rest to T2
-                if t1 and not open_pos.get("trailing") and bar_high >= t1:
-                    open_pos["trailing"] = True
-                    if not open_pos.get("partial_done"):
-                        partial_qty = int(open_pos["qty"] * 0.5)
-                        if partial_qty > 0:
-                            partial_pnl = (t1 - open_pos["entry"]) * partial_qty
-                            open_pos["partial_done"]  = True
-                            open_pos["partial_qty"]   = partial_qty
-                            open_pos["partial_pnl"]   = partial_pnl
-                            open_pos["qty"]           -= partial_qty
-                            # Move stop to break-even
-                            open_pos["stop"] = max(open_pos["stop"], open_pos["entry"])
-                if open_pos.get("trailing") and trail_dist > 0:
-                    new_stop = peak_price - trail_dist
-                    if new_stop > open_pos["stop"]:
-                        open_pos["stop"] = new_stop
+                # T1 hit → book 50%, move stop to break-even, hold rest to fixed T2
+                t1 = open_pos.get("t1")
+                if t1 and not open_pos.get("partial_done") and bar_high >= t1:
+                    partial_qty = int(open_pos["qty"] * 0.5)
+                    if partial_qty > 0:
+                        open_pos["partial_pnl"]  = (t1 - open_pos["entry"]) * partial_qty
+                        open_pos["partial_qty"]  = partial_qty
+                        open_pos["partial_done"] = True
+                        open_pos["qty"]         -= partial_qty
+                        open_pos["stop"]         = max(open_pos["stop"], open_pos["entry"])
 
             exit_price = None
             reason     = None
@@ -317,7 +307,7 @@ def backtest_symbol(
             if open_pos["side"] == "BUY":
                 if bar_low <= open_pos["stop"]:
                     exit_price = open_pos["stop"]
-                    reason     = "TRAIL_STOP" if open_pos.get("trailing") else "STOP_HIT"
+                    reason     = "STOP_HIT"
                 elif bar_high >= open_pos["target"]:
                     exit_price = open_pos["target"]
                     reason     = "TARGET_HIT"
