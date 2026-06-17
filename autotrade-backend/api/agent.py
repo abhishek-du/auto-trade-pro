@@ -398,9 +398,8 @@ async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
     process, so the previous in-memory lookup (_get_portfolio) always 404'd when
     served by uvicorn. This reads the OpenPosition/PaperTrade — the documented
     source of truth — and closes it via the canonical close_paper_trade path,
-    which is a SINGLE wallet return. It then marks the matching AgentTrade exited
-    (without returning margin again) so the agent's own exit path cannot
-    double-return the margin. Celery re-hydrates its portfolio from the DB.
+    which is a SINGLE wallet return and also syncs the AgentTrade ledger row
+    (see close_paper_trade). Celery re-hydrates its portfolio from the DB.
     """
     from db.models import OpenPosition
     from paper_trading.trade_simulator import close_paper_trade
@@ -422,21 +421,9 @@ async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
     if price <= 0:
         raise HTTPException(422, f"No price available for {symbol}")
 
-    # Canonical close: updates PaperTrade, deletes OpenPosition, returns margin ONCE.
+    # Canonical close: updates PaperTrade, deletes OpenPosition, syncs the
+    # AgentTrade ledger, and returns margin ONCE (see close_paper_trade).
     trade = await close_paper_trade(pos, price, "MANUAL", db)
-
-    # Keep the agent ledger consistent — but do NOT return margin a second time.
-    agent_trade = (await db.execute(
-        select(AgentTrade).where(
-            AgentTrade.symbol == symbol, AgentTrade.exit_ts == None,
-        ).order_by(AgentTrade.entry_ts.desc()).limit(1)
-    )).scalars().first()
-    if agent_trade is not None:
-        agent_trade.exit_price  = price
-        agent_trade.exit_ts     = datetime.utcnow()
-        agent_trade.exit_reason = "MANUAL"
-        agent_trade.pnl         = trade.pnl
-
     await db.commit()
     return {
         "symbol":     symbol,
