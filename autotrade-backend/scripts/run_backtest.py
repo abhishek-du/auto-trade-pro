@@ -136,9 +136,12 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
     f["st_dir"] = st_dir
 
     # Regime: BULL_TRENDING / BEAR_TRENDING / RANGE / UNKNOWN
-    bull_ema  = (f["ema20"] > f["ema50"]) & (f["ema50"] > f["ema200"])
-    bear_ema  = (f["ema20"] < f["ema50"]) & (f["ema50"] < f["ema200"])
-    strong_trend = f["adx14"] > 20
+    # Threshold matches engine/agent/analyzer.py _classify_regime: ADX >= 25
+    # (was ADX > 20 — that was a bug causing weak-trend bars to be labelled BULL_TRENDING
+    # in the backtest while the live analyzer would classify them as RANGE)
+    bull_ema     = (f["ema20"] > f["ema50"]) & (f["ema50"] > f["ema200"])
+    bear_ema     = (f["ema20"] < f["ema50"]) & (f["ema50"] < f["ema200"])
+    strong_trend = f["adx14"] >= 25   # matches live analyzer (Wilder: 25 = trend threshold)
 
     regime = pd.Series("UNKNOWN", index=c.index)
     regime[bull_ema & strong_trend] = "BULL_TRENDING"
