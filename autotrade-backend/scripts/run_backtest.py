@@ -256,7 +256,12 @@ def estimate_cost(qty: int, price: float, side: str = "BUY") -> float:
 # Single-symbol backtest using pre-computed features
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def backtest_symbol(df: pd.DataFrame, symbol: str, equity: float = _EQUITY) -> dict:
+def backtest_symbol(
+    df: pd.DataFrame,
+    symbol: str,
+    equity: float = _EQUITY,
+    nifty_ok: dict[str, bool] | None = None,
+) -> dict:
     warmup = settings.AGENT_WARMUP_BARS
     if len(df) < warmup + 10:
         return {"error": "insufficient_data"}
@@ -266,9 +271,10 @@ def backtest_symbol(df: pd.DataFrame, symbol: str, equity: float = _EQUITY) -> d
     except Exception as exc:
         return {"error": str(exc)}
 
-    open_pos   = None
-    trades     = []
-    peak_price = 0.0
+    open_pos      = None
+    trades        = []
+    peak_price    = 0.0
+    last_stop_bar = -999  # bar index of last stop-hit loss; 20-bar cooldown after
 
     for i in range(warmup, len(f)):
         row      = f.iloc[i]
@@ -343,10 +349,21 @@ def backtest_symbol(df: pd.DataFrame, symbol: str, equity: float = _EQUITY) -> d
                 })
                 open_pos   = None
                 peak_price = 0.0
+                # 20-bar cooldown: after a stop-hit loss, wait before re-entering
+                # any trade on this symbol. Prevents repeatedly buying a stock
+                # that is in a sustained downtrend (CHOICEIN.NS pattern).
+                if reason in ("STOP_HIT", "TRAIL_STOP") and pnl < 0:
+                    last_stop_bar = i
 
         # ── Look for entry when flat ──────────────────────────────────────────
         if open_pos is None:
-            sig = _signal_at(row, prev_row)
+            # Nifty macro gate: skip new BUY entries when NIFTYBEES is below
+            # its EMA50. Root cause of Jan-Feb and Jul-Aug 2025 losses.
+            nifty_allow = nifty_ok.get(bar_ts, True) if nifty_ok else True
+            # Symbol cooldown: 20-bar blackout after a stop-hit loss to avoid
+            # repeatedly re-entering a weakening stock (e.g. CHOICEIN.NS pattern).
+            cooldown_ok = (i >= last_stop_bar + 20)
+            sig = _signal_at(row, prev_row) if (nifty_allow and cooldown_ok) else None
             if sig and sig["confidence"] >= _CONF_THRESH:
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
@@ -591,6 +608,25 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
         symbols = symbols[:symbol_limit]
     print(f"[backtest] {len(symbols)} symbols | from {from_date} | conf threshold {_CONF_THRESH}")
 
+    # Load Nifty index trend gate: NIFTYBEES.NS close vs EMA50 per date.
+    # When Nifty is below its EMA50, all new BUY entries are blocked (macro gate).
+    print("[backtest] Loading NIFTYBEES.NS for macro trend gate...")
+    nifty_ok_by_date: dict[str, bool] = {}
+    try:
+        nifty_df = await load_candles("NIFTYBEES.NS", from_dt)
+        if len(nifty_df) >= 55:
+            nifty_ema50 = nifty_df["close"].ewm(span=50, adjust=False).mean()
+            nifty_above = nifty_df["close"] > nifty_ema50
+            for ts, ok_flag in nifty_above.items():
+                nifty_ok_by_date[str(ts)[:10]] = bool(ok_flag)
+            pct_up = round(100 * sum(nifty_ok_by_date.values()) / len(nifty_ok_by_date), 1)
+            print(f"[backtest] Nifty gate: {sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
+                  f"days above EMA50 ({pct_up}% open)")
+        else:
+            print(f"[backtest] WARNING: only {len(nifty_df)} NIFTYBEES.NS bars — gate disabled")
+    except Exception as exc:
+        print(f"[backtest] WARNING: NIFTYBEES load failed ({exc}) — gate disabled")
+
     all_trades: list[dict] = []
     ok = skip = 0
 
@@ -605,7 +641,7 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
             skip += 1
             continue
 
-        result = backtest_symbol(df, symbol)
+        result = backtest_symbol(df, symbol, nifty_ok=nifty_ok_by_date or None)
         if "error" in result:
             skip += 1
             continue
