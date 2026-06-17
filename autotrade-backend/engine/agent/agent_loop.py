@@ -145,6 +145,10 @@ async def _check_nifty_trend(session: AsyncSession) -> bool:
     primary fix for 2025 losses: the strategy was entering individual-stock
     longs while Nifty was in a macro downtrend (Jan-Feb and Jul-Aug 2025).
     Fails open (returns True) if data is unavailable — never silently blocks trading.
+
+    Note: ADX gate on Nifty was tested and reverted — it blocked good individual
+    stock setups in "flat index, trending stock" environments (sector rotation),
+    making 2025 worse not better. EMA50 alone is the correct macro filter.
     """
     try:
         from sqlalchemy import text as _text
