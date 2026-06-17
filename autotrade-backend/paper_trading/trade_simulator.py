@@ -308,12 +308,19 @@ async def close_paper_trade(
     now   = datetime.utcnow()
 
     # ── Step 1: P&L ───────────────────────────────────────────────────────────
-    if position.direction == TradeDirection.BUY:
-        pnl = (close_price - trade.entry_price) * trade.size_units
-    else:
-        pnl = (trade.entry_price - close_price) * trade.size_units
+    # If a partial scale-out fired at T1, pos.size_units was reduced to the
+    # remaining half. Use position.size_units (remaining) for the final leg,
+    # then add the already-realised partial_pnl for the total trade P&L.
+    snap_data   = (trade.indicator_snapshot or {}) if trade.indicator_snapshot else {}
+    partial_pnl = float(snap_data.get("trade_mgmt", {}).get("partial_pnl", 0.0))
+    remaining   = position.size_units   # may be < trade.size_units after partial
 
-    notional    = trade.entry_price * trade.size_units
+    if position.direction == TradeDirection.BUY:
+        pnl = (close_price - trade.entry_price) * remaining + partial_pnl
+    else:
+        pnl = (trade.entry_price - close_price) * remaining + partial_pnl
+
+    notional    = trade.entry_price * trade.size_units   # original full notional
     pnl_percent = (pnl / notional * 100) if notional > 0 else 0.0
 
     # ── Step 2: Update PaperTrade ─────────────────────────────────────────────
@@ -534,6 +541,28 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 peak = max(peak, price)
                 if not trailing and t1 and price >= t1:
                     trailing = True
+                    # Partial scale-out: book 50% at T1, trail the rest to T2.
+                    # This locks in a guaranteed profit on half and lets the
+                    # other half ride — improving win:loss ratio without
+                    # cutting the full position at T1.
+                    if not tm.get("partial_done"):
+                        partial_qty = int(pos.size_units * 0.5)
+                        if partial_qty > 0:
+                            partial_pnl = round((price - pos.entry_price) * partial_qty, 4)
+                            tm["partial_done"]  = True
+                            tm["partial_qty"]   = partial_qty
+                            tm["partial_price"] = round(price, 4)
+                            tm["partial_pnl"]   = partial_pnl
+                            pos.size_units      = pos.size_units - partial_qty
+                            # Move stop to break-even so the trailing remainder
+                            # can never turn into a loss.
+                            pos.stop_loss = max(pos.stop_loss, pos.entry_price)
+                            trailed = True
+                            logger.info(
+                                f"[T1 partial] {pos.symbol}: booked {partial_qty} units "
+                                f"@ ₹{price:.2f} (pnl=₹{partial_pnl:.2f}), "
+                                f"trailing {int(pos.size_units)} units to T2"
+                            )
                 if trailing and trail_dist > 0:
                     new_stop = peak - trail_dist
                     if new_stop > pos.stop_loss:

@@ -49,6 +49,16 @@ class HubSignalStrategy(Strategy):
         if score_abs < self._MIN_SCORE:
             return None
 
+        # Regime gates: never enter a BUY in a confirmed bear trend or truly
+        # directionless chop (UNKNOWN + weak ADX). These are the conditions
+        # where HUB_SIGNAL fires most often but wins least often.
+        regime = getattr(features, "regime", "UNKNOWN")
+        adx    = getattr(features, "adx14", 0)
+        if side == "BUY" and regime == "BEAR_TRENDING":
+            return None
+        if side == "BUY" and regime == "UNKNOWN" and adx < 15:
+            return None
+
         # Derive entry/stop/target from recent price action
         entry = features.close
         atr   = features.atr14
