@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     # Volatility strategies (long straddle when IV-Rank is low). Defined-risk.
     FNO_VOL_ENABLED:            bool  = False
 
+    # Exit policy — validated OOS in Phase 2 backtest
+    # partial_fixed: book 50% at T1, hold remaining to fixed T2 target (no trailing)
+    # current:       book 50% at T1, trail remaining to T2 with 1×ATR trailing stop
+    AGENT_EXIT_POLICY: str = "partial_fixed"
+
     # Risk limits — Varsity Module 9
     AGENT_MAX_RISK_PER_TRADE:   float = 0.01
     # Portfolio open-risk cap. With ≤1% risk/trade this allows ~15 concurrent
@@ -228,10 +233,15 @@ class Settings(BaseSettings):
     HUB_UNIVERSE_MIN_TURNOVER_CR: float = 20.0  # min ₹ Cr/day to qualify
 
     # Universe / timing
-    # 5m gives the agent near-real-time price action (75 bars ≈ 1 trading day).
-    # Fallback chain in agent_loop: 5m → 1h → 1d so older symbols still score.
-    # Hub scoring stays on 1d (2000-symbol universe; 5m granularity unnecessary).
-    AGENT_TIMEFRAME:            str   = "5m"
+    # Daily bars: this is the basis the strategies were designed on and the ONLY
+    # basis validated by the backtest (scripts/run_backtest.py runs on 1d). ATR,
+    # regime, and all entry signals are computed on this timeframe, so it also
+    # sets the scale of every stop/target. Was "5m": once 5m candles backfilled
+    # (2026-06-09) the agent silently switched to intraday levels (~20× smaller
+    # stops/targets than daily) — an unvalidated scalping basis. Pinned back to
+    # "1d" to keep live behaviour consistent with the validated backtest.
+    # Intraday/scalping is a separate engine with its own backtest, not a default.
+    AGENT_TIMEFRAME:            str   = "1d"
     AGENT_WARMUP_BARS:          int   = 75
     # NSE regular session: 9:15 AM – 3:30 PM IST
     # MIS (intraday) auto-squareoff: 3:20 PM IST (Zerodha)

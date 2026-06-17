@@ -579,38 +579,39 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             trailing   = bool(tm.get("trailing"))
             peak       = tm.get("peak_price") or pos.entry_price
 
+            exit_policy = settings.AGENT_EXIT_POLICY  # "partial_fixed" | "current"
+
             if is_buy:
                 peak = max(peak, price)
-                if not trailing and t1 and price >= t1:
-                    trailing = True
-                    # Partial scale-out: book 50% at T1, trail the rest to T2.
-                    # This locks in a guaranteed profit on half and lets the
-                    # other half ride — improving win:loss ratio without
-                    # cutting the full position at T1.
-                    if not tm.get("partial_done"):
-                        partial_qty = int(pos.size_units * 0.5)
-                        if partial_qty > 0:
-                            partial_pnl = round((price - pos.entry_price) * partial_qty, 4)
-                            tm["partial_done"]  = True
-                            tm["partial_qty"]   = partial_qty
-                            tm["partial_price"] = round(price, 4)
-                            tm["partial_pnl"]   = partial_pnl
-                            pos.size_units      = pos.size_units - partial_qty
-                            # Move stop to break-even so the trailing remainder
-                            # can never turn into a loss.
-                            pos.stop_loss = max(pos.stop_loss, pos.entry_price)
-                            trailed = True
-                            logger.info(
-                                f"[T1 partial] {pos.symbol}: booked {partial_qty} units "
-                                f"@ ₹{price:.2f} (pnl=₹{partial_pnl:.2f}), "
-                                f"trailing {int(pos.size_units)} units to T2"
-                            )
-                if trailing and trail_dist > 0:
+                # T1 hit: always book 50% regardless of exit policy
+                if not tm.get("partial_done") and t1 and price >= t1:
+                    partial_qty = int(pos.size_units * 0.5)
+                    if partial_qty > 0:
+                        partial_pnl = round((price - pos.entry_price) * partial_qty, 4)
+                        tm["partial_done"]  = True
+                        tm["partial_qty"]   = partial_qty
+                        tm["partial_price"] = round(price, 4)
+                        tm["partial_pnl"]   = partial_pnl
+                        pos.size_units      = pos.size_units - partial_qty
+                        # Break-even stop: remaining half can never lose
+                        pos.stop_loss = max(pos.stop_loss, pos.entry_price)
+                        trailed = True
+                        logger.info(
+                            f"[T1 partial] {pos.symbol}: booked {partial_qty} units "
+                            f"@ ₹{price:.2f} (pnl=₹{partial_pnl:.2f}), "
+                            f"{'holding' if exit_policy == 'partial_fixed' else 'trailing'} "
+                            f"{int(pos.size_units)} units to T2"
+                        )
+                    # "current" policy: activate trailing stop after T1
+                    if exit_policy != "partial_fixed":
+                        trailing = True
+                # Trailing stop ratchet — only for "current" policy
+                if exit_policy != "partial_fixed" and trailing and trail_dist > 0:
                     new_stop = peak - trail_dist
                     if new_stop > pos.stop_loss:
                         pos.stop_loss = round(new_stop, 4)
                         trailed = True
-            else:  # SELL — best price is the lowest
+            else:  # SELL
                 peak = min(peak, price)
                 if not trailing and t1 and price <= t1:
                     trailing = True
