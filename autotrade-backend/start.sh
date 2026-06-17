@@ -5,45 +5,67 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_SITE="$SCRIPT_DIR/.venv/lib/python3.11/site-packages"
+# Always use the venv's OWN interpreter. The system python3 may be a newer
+# version (e.g. 3.14) whose ABI is incompatible with the 3.11-compiled
+# extensions in the venv (pydantic_core, etc.) — invoking bare `python3` then
+# loads those .so files under the wrong interpreter and crashes on import.
+PY="$SCRIPT_DIR/.venv/bin/python"
 
-if [ ! -d "$VENV_SITE" ]; then
-    echo "ERROR: Virtual environment not found at $VENV_SITE"
-    echo "Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+if [ ! -x "$PY" ]; then
+    echo "ERROR: venv interpreter not found at $PY"
+    echo "Run: python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt"
     exit 1
+fi
+
+# Celery is normally managed by the always-on systemd user services
+# (autotrade-celery-worker / autotrade-celery-beat) so it survives crashes and
+# reboots. If those are active we leave them alone and only (re)start uvicorn,
+# to avoid two competing celery instances fighting over the beat-schedule lock.
+SYSTEMD_CELERY=0
+if systemctl --user is-active --quiet autotrade-celery-worker 2>/dev/null; then
+    SYSTEMD_CELERY=1
 fi
 
 # Kill any stale processes from a previous run so port 8000 and the
 # celerybeat-schedule lock are always free before we start.
 echo "[startup] Stopping any previous AutoTrade Pro processes..."
 pkill -f "uvicorn main:app" 2>/dev/null || true
-pkill -f "celery.*autotrade_pro" 2>/dev/null || true
-pkill -f "celery.*tasks.celery_app" 2>/dev/null || true
-sleep 1
-rm -f "$SCRIPT_DIR/celerybeat-schedule" "$SCRIPT_DIR/celerybeat-schedule.db" 2>/dev/null || true
+if [ "$SYSTEMD_CELERY" -eq 0 ]; then
+    pkill -f "celery.*autotrade_pro" 2>/dev/null || true
+    pkill -f "celery.*tasks.celery_app" 2>/dev/null || true
+    sleep 1
+    rm -f "$SCRIPT_DIR/celerybeat-schedule" "$SCRIPT_DIR/celerybeat-schedule.db" 2>/dev/null || true
+fi
 
-export PYTHONPATH="$VENV_SITE${PYTHONPATH:+:$PYTHONPATH}"
 cd "$SCRIPT_DIR"
 
 echo "============================================================"
 echo "  AutoTrade Pro — PAPER TRADING MODE"
 echo "  ⚠  FAKE/VIRTUAL CURRENCY ONLY — No real money is used"
 echo "============================================================"
-echo "  Python path  : $(python3 -c 'import sys; print(sys.executable)')"
+echo "  Python path  : $("$PY" -c 'import sys; print(sys.executable)')"
+echo "  Python version: $("$PY" --version 2>&1)"
 echo "  Site-packages: $VENV_SITE"
 echo "============================================================"
 
-# Start Celery worker (background)
-echo "[celery] Starting worker..."
-python3 -m celery -A tasks.celery_app worker --loglevel=info --concurrency=2 &
-CELERY_WORKER_PID=$!
+if [ "$SYSTEMD_CELERY" -eq 1 ]; then
+    echo "[celery] Managed by systemd (autotrade-celery-worker/beat) — not starting a duplicate."
+    CELERY_WORKER_PID=""
+    CELERY_BEAT_PID=""
+else
+    # Start Celery worker (background)
+    echo "[celery] Starting worker..."
+    "$PY" -m celery -A tasks.celery_app worker --loglevel=info --concurrency=2 &
+    CELERY_WORKER_PID=$!
 
-# Start Celery beat (background)
-echo "[celery] Starting beat scheduler..."
-python3 -m celery -A tasks.celery_app beat --loglevel=info &
-CELERY_BEAT_PID=$!
+    # Start Celery beat (background)
+    echo "[celery] Starting beat scheduler..."
+    "$PY" -m celery -A tasks.celery_app beat --loglevel=info &
+    CELERY_BEAT_PID=$!
+fi
 
 # Trap Ctrl+C — kill background processes cleanly
 trap "echo ''; echo 'Shutting down...'; kill $CELERY_WORKER_PID $CELERY_BEAT_PID 2>/dev/null; exit 0" INT TERM
 
 echo "[uvicorn] Starting API server on http://0.0.0.0:8000 ..."
-python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+"$PY" -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
