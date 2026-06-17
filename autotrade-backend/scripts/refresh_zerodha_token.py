@@ -126,9 +126,14 @@ def _exchange_token(request_token: str, backend: str) -> bool:
         timeout=15,
         verify=False,
     )
-    # Callback returns HTML on success; check for known success text
+    # The callback returns HTTP 200 + the "Zerodha Connected" success page on
+    # success, and HTTP 400 (_html_error) on failure. Match the real success
+    # marker — the old check looked for "success"/"access_token", neither of
+    # which appears in the success HTML, so it ALWAYS reported failure even when
+    # the token was persisted correctly.
+    text = r.text.lower()
     success = r.status_code == 200 and (
-        "success" in r.text.lower() or "access_token" in r.text.lower()
+        "zerodha connected" in text or "prices are now active" in text
     )
     if not success:
         log.warning(f"Callback returned {r.status_code}: {r.text[:200]}")
