@@ -392,20 +392,58 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 
 @router.post("/positions/{symbol}/close")
 async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
-    from engine.agent.agent_loop import _get_portfolio, _executor
+    """Manually close an open position — DB-authoritative.
+
+    The agent's in-memory portfolio lives in the Celery worker, not this API
+    process, so the previous in-memory lookup (_get_portfolio) always 404'd when
+    served by uvicorn. This reads the OpenPosition/PaperTrade — the documented
+    source of truth — and closes it via the canonical close_paper_trade path,
+    which is a SINGLE wallet return. It then marks the matching AgentTrade exited
+    (without returning margin again) so the agent's own exit path cannot
+    double-return the margin. Celery re-hydrates its portfolio from the DB.
+    """
+    from db.models import OpenPosition
+    from paper_trading.trade_simulator import close_paper_trade
     from crawler.live_prices import PRICE_CACHE
 
-    portfolio = _get_portfolio()
-    if symbol not in portfolio.open_positions:
+    pos = (await db.execute(
+        select(OpenPosition).where(OpenPosition.symbol == symbol)
+    )).scalars().first()
+    if pos is None:
         raise HTTPException(404, f"{symbol} not in open positions")
 
+    # Price: live cache → newest candle close (so it works without the live feed).
     price = float(PRICE_CACHE.get(symbol, {}).get("price", 0) or 0)
     if price <= 0:
-        raise HTTPException(422, f"No live price for {symbol}")
+        price = float((await db.execute(
+            select(Candle.close).where(Candle.symbol == symbol)
+            .order_by(Candle.timestamp.desc()).limit(1)
+        )).scalar_one_or_none() or 0.0)
+    if price <= 0:
+        raise HTTPException(422, f"No price available for {symbol}")
 
-    pnl = portfolio.close_position(symbol, price)
-    await _executor._record_exit(symbol, price, "MANUAL", pnl, db)
-    return {"symbol": symbol, "exit_price": price, "pnl": round(pnl, 2)}
+    # Canonical close: updates PaperTrade, deletes OpenPosition, returns margin ONCE.
+    trade = await close_paper_trade(pos, price, "MANUAL", db)
+
+    # Keep the agent ledger consistent — but do NOT return margin a second time.
+    agent_trade = (await db.execute(
+        select(AgentTrade).where(
+            AgentTrade.symbol == symbol, AgentTrade.exit_ts == None,
+        ).order_by(AgentTrade.entry_ts.desc()).limit(1)
+    )).scalars().first()
+    if agent_trade is not None:
+        agent_trade.exit_price  = price
+        agent_trade.exit_ts     = datetime.utcnow()
+        agent_trade.exit_reason = "MANUAL"
+        agent_trade.pnl         = trade.pnl
+
+    await db.commit()
+    return {
+        "symbol":     symbol,
+        "exit_price": round(price, 4),
+        "pnl":        round(trade.pnl or 0.0, 2),
+        "status":     trade.status.value,
+    }
 
 
 # ── POST /signal/{symbol} ─────────────────────────────────────────────────────
