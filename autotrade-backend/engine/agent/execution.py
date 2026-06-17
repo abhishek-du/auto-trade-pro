@@ -31,6 +31,22 @@ class AgentExecutionManager:
             TradeDirection, TradeStatus,
         )
         from paper_trading.virtual_wallet import VirtualWallet
+        from sqlalchemy import select
+
+        # ── Idempotency guard — never double-open a symbol we already hold ────
+        # The agent's in-memory portfolio can lag across rapid cycles, so two
+        # cycles minutes apart proposed the same entry and opened it twice
+        # (double wallet deduction + duplicate PaperTrade/AgentTrade rows).
+        # OpenPosition is the source of truth; if one exists, skip this entry.
+        existing = (await session.execute(
+            select(OpenPosition.id).where(OpenPosition.symbol == decision.symbol).limit(1)
+        )).first()
+        if existing is not None:
+            logger.info(
+                f"[agent] PAPER BUY skipped for {decision.symbol}: already holding "
+                f"an open position (idempotency guard)"
+            )
+            return ""
 
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
         trade_value = round(decision.qty * decision.entry, 2)
