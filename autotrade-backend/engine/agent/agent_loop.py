@@ -367,19 +367,16 @@ async def _process_symbol(
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
-    # 1. Get candle data from DB — fallback chain: 5m → 1h → 1d
+    # 1. Get candle data from DB — single, deterministic timeframe.
+    # NO fallback cascade: a cascade let the agent's trading style (and the scale
+    # of every ATR-based stop/target) be decided by whatever candle data happened
+    # to exist per-symbol — so two stocks in the same scan could run on different
+    # timeframes. The timeframe is now a deliberate config choice (AGENT_TIMEFRAME),
+    # consistent for every symbol and matching the validated backtest basis.
     from crawler.price_feed import get_latest_candles
 
     _timeframe_used = settings.AGENT_TIMEFRAME
     candles = await get_latest_candles(symbol, settings.AGENT_TIMEFRAME, 300, session)
-    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and settings.AGENT_TIMEFRAME != "1h":
-        candles = await get_latest_candles(symbol, "1h", 300, session)
-        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
-            _timeframe_used = "1h"
-    if (not candles or len(candles) < settings.AGENT_WARMUP_BARS) and _timeframe_used != "1d":
-        candles = await get_latest_candles(symbol, "1d", 300, session)
-        if candles and len(candles) >= settings.AGENT_WARMUP_BARS:
-            _timeframe_used = "1d"
     if not candles or len(candles) < settings.AGENT_WARMUP_BARS:
         return None
 
