@@ -99,6 +99,18 @@ async def select_index_option(
     premium = await _latest_premium(
         underlying, contract.strike, option_type, contract.expiry, session
     )
+    if (premium is None or premium <= 0):
+        # Kite master may resolve a next-month expiry whose chain isn't in
+        # our snapshot yet — retry with the snapshot resolver (weekly expiry).
+        snap_contract = await _contracts.resolve_option_from_snapshot(
+            underlying, option_type, spot, session
+        )
+        if snap_contract and snap_contract.expiry != contract.expiry:
+            premium = await _latest_premium(
+                underlying, snap_contract.strike, option_type, snap_contract.expiry, session
+            )
+            if premium and premium > 0:
+                contract = snap_contract
     if premium is None or premium <= 0:
         logger.debug(f"[fno/select] {underlying} {contract.strike}{option_type}: no premium")
         return None
@@ -305,7 +317,11 @@ def option_pnl(pos: OpenPosition, cur_premium: float) -> tuple[float, float]:
 # ── Index directional signal + evaluation loop ───────────────────────────────
 
 # Underlying → index candle symbol (yfinance).
-_INDEX_CANDLE = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
+_INDEX_CANDLE = {
+    "NIFTY":     "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY":  "^NSEBANK",   # proxy — FINNIFTY is dominated by financial/bank stocks
+}
 
 
 def _index_signal(closes: list[float]) -> tuple[str, float, float] | None:
@@ -357,17 +373,17 @@ async def composite_index_signal(underlying: str, session: AsyncSession) -> dict
     if not candles or len(candles) < 25:
         return None
     closes = [float(c.close) for c in reversed(candles)]
-    spot = closes[-1]
+    candle_spot = closes[-1]
     factors: list[dict] = []
     score = 0.0
 
-    # 1. Price trend + momentum (35)
+    # 1. Price trend + momentum (35) — computed from proxy candle closes (normalised %)
     k = 2 / 21
     ema = closes[0]
     for c in closes[1:]:
         ema = c * k + ema * (1 - k)
-    trend = (spot - ema) / ema if ema else 0.0
-    mom = (spot - closes[-5]) / closes[-5] if closes[-5] else 0.0
+    trend = (candle_spot - ema) / ema if ema else 0.0
+    mom = (candle_spot - closes[-5]) / closes[-5] if closes[-5] else 0.0
     price_s = max(-1, min(1, trend * 40 + mom * 30)) * 35
     score += price_s
     factors.append({"factor": "price_trend", "score": round(price_s, 1),
@@ -386,6 +402,9 @@ async def composite_index_signal(underlying: str, session: AsyncSession) -> dict
                 OptionContractSnapshot.snapshot_at == last_at,
             )
         )).scalars().all()
+
+    # Actual underlying spot — from snapshot (correct even for FINNIFTY with proxy candle).
+    spot = float(rows[0].spot) if rows and rows[0].spot else candle_spot
 
     # 2. PCR contrarian (15)
     call_oi = sum(r.oi for r in rows if r.option_type == "CE")

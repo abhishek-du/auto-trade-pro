@@ -2585,9 +2585,11 @@ async def get_fno_chain(underlying: str, db: AsyncSession = Depends(get_db)):
         s[f"{side}_theta"] = r.theta
         s[f"{side}_vega"]  = r.vega
 
+    atm_strike = min(by_strike.keys(), key=lambda k: abs(k - spot)) if by_strike and spot else None
     return {
         "underlying":  und,
         "spot":        spot,
+        "atm_strike":  atm_strike,
         "expiry":      rows[0].expiry_date.isoformat() if rows else None,
         "snapshot_at": last_at.isoformat(),
         "strikes":     [by_strike[k] for k in sorted(by_strike)],
