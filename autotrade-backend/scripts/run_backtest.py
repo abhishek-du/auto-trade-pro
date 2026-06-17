@@ -188,7 +188,7 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
     # Fix: require ADX >= 15 — pullback entries have no follow-through in
     # directionless markets (ADX < 15 = no real trend to pull back into).
     if (regime == "BULL_TRENDING" and prev_row is not None
-            and r["ema20"] > r["ema50"] and r["rsi14"] >= 40
+            and r["ema20"] > r["ema50"] and r["rsi14"] >= 50
             and r["adx14"] >= 15
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
             and close > r["ema20"]):
