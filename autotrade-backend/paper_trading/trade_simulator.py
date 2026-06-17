@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from db.models import Candle, OpenPosition, PaperTrade, TradeDirection, TradeStatus
+from db.models import AgentTrade, Candle, OpenPosition, PaperTrade, TradeDirection, TradeStatus
 from paper_trading.simulation_logger import SimulationLogger
 from paper_trading.virtual_wallet import VirtualWallet
 from utils.config import settings
@@ -419,6 +419,28 @@ async def close_paper_trade(
             f"P&L: ${pnl:.2f} ({pnl_percent:.1f}%) │ "
             f"Reason: {reason} │ Balance: ${new_balance:.2f}"
         )
+
+    # ── Step 7: keep the agent ledger in sync (NO second wallet return) ────────
+    # close_paper_trade is the single close path for paper positions. The agent's
+    # AgentTrade ledger row must be closed here too — otherwise positions closed
+    # by the mark-to-market task leak as phantom-open rows in /agent/positions.
+    # Margin was already returned in Step 4, so this only sets the exit fields.
+    try:
+        agent_trade = (await session.execute(
+            select(AgentTrade).where(
+                AgentTrade.symbol == trade.symbol,
+                AgentTrade.exit_ts == None,
+                AgentTrade.is_paper == settings.AGENT_PAPER_MODE,
+            ).order_by(AgentTrade.entry_ts.desc()).limit(1)
+        )).scalar_one_or_none()
+        if agent_trade is not None:
+            agent_trade.exit_price  = round(close_price, 6)
+            agent_trade.exit_ts     = now
+            agent_trade.exit_reason = reason
+            agent_trade.pnl         = round(pnl, 4)
+            await session.flush()
+    except Exception as exc:
+        logger.debug(f"close_paper_trade: agent ledger sync skipped for {trade.symbol}: {exc}")
 
     return trade
 
