@@ -395,6 +395,19 @@ def _parse_growth_tables(soup: BeautifulSoup) -> dict:
     result: dict = {}
 
     def _extract_3yr(heading_pattern: str) -> float | None:
+        # Screener.in puts headings in <th> inside the table itself
+        for th in soup.find_all("th"):
+            if re.search(heading_pattern, th.get_text(strip=True), re.I):
+                table = th.find_parent("table")
+                if not table:
+                    continue
+                for tr in table.find_all("tr"):
+                    cells = tr.find_all("td")
+                    if len(cells) < 2:
+                        continue
+                    if re.search(r"3\s*year", cells[0].get_text(strip=True), re.I):
+                        return _to_float(cells[1].get_text(strip=True))
+        # Fallback: heading tags (h2/h3/h4/b) before the table
         for h in soup.find_all(["h2", "h3", "h4", "b"]):
             if re.search(heading_pattern, h.get_text(strip=True), re.I):
                 table = h.find_next("table")
