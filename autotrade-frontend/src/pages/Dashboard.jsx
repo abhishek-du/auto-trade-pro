@@ -20,7 +20,8 @@ const inr = (n, d = 2) =>
   : Number(n).toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
 
 function rupeeShort(n) {
-  const v = Number(n ?? 0); const a = Math.abs(v); const s = v < 0 ? '-' : '';
+  if (n == null || isNaN(n)) return '—';
+  const v = Number(n); const a = Math.abs(v); const s = v < 0 ? '-' : '';
   if (a >= 1e7) return `${s}₹${(a / 1e7).toFixed(2)} Cr`;
   if (a >= 1e5) return `${s}₹${(a / 1e5).toFixed(2)} L`;
   return `${s}₹${a.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -112,7 +113,7 @@ function IndexTile({ name, sub, value, change, changePct, vix }) {
           <p className="text-muted text-[10px] uppercase tracking-wide">{sub}</p>
         </div>
         <span className={`text-[11px] font-bold px-1.5 py-0.5 rounded ${pill} shrink-0`}>
-          {vix ? (value < 15 ? 'LOW' : value > 20 ? 'HIGH' : 'MOD') : `${up ? '▲' : '▼'} ${Math.abs(changePct ?? 0).toFixed(2)}%`}
+          {vix ? (value < 15 ? 'LOW' : value > 20 ? 'HIGH' : 'MOD') : `${up ? '▲' : '▼'} ${changePct == null || isNaN(changePct) ? '0.00' : Math.abs(changePct).toFixed(2)}%`}
         </span>
       </div>
       <p className={`tabular-nums font-extrabold text-xl leading-none ${accent}`}>

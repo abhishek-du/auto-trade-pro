@@ -283,9 +283,9 @@ export default function Navbar({ onSearchOpen }) {
 
       {/* Main row */}
       <div className="flex items-center justify-between gap-2 md:gap-3 px-4 md:px-6 py-3">
-        <div className="flex items-center gap-2 md:gap-3 shrink-0">
-          <h1 className="text-slate-100 font-bold text-base md:text-lg whitespace-nowrap">{title}</h1>
-          <TradeModeBadge />
+        <div className="flex items-center gap-2 md:gap-3 shrink min-w-0">
+          <h1 className="text-slate-100 font-bold text-base md:text-lg truncate">{title}</h1>
+          <div className="shrink-0"><TradeModeBadge /></div>
         </div>
 
         {/* ⌘K Search trigger (desktop) — shrinks before the title does */}

@@ -130,14 +130,14 @@ export default function TaxCalculator() {
       </div>
 
       {/* ── Tabs ── */}
-      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
         {TABS.map(t => {
           const Icon = t.icon
           return (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold transition-colors ${
+              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold shrink-0 whitespace-nowrap transition-colors ${
                 tab === t.id ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'
               }`}
             >

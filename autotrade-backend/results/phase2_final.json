@@ -300,7 +300,7 @@
     "Cost model: Varsity M7 (STT + exchange + SEBI + stamp + GST + brokerage)",
     "Slippage: 0.01\u20130.03% adverse on entry (live _SLIP_MIN/_SLIP_MAX matched)"
   ],
-  "elapsed_minutes": 11.0,
+  "elapsed_minutes": 11.2,
   "verdict": {
     "statement": "Out-of-sample, on the live decision path, the system shows mean expectancy of 0.165 R/trade (95% CI [0.126, 0.204]).  OOS (2025-26): -0.085 R (NEGATIVE).  Strategy TREND_BREAKOUT_LONG carries the edge; RANGE_REVERSAL_LONG is dilutive.",
     "edge_status": "NO EDGE",

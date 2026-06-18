@@ -124,6 +124,8 @@ async def open_paper_trade(
     signal,                     # TradingSignal (import deferred to avoid circular)
     position_size: dict,
     session: AsyncSession,
+    *,
+    product: str = "CNC",       # CNC=delivery | MIS=intraday | NRML=F&O overnight
 ) -> PaperTrade:
     """Open a virtual paper trade from a TradingSignal.
 
@@ -222,7 +224,7 @@ async def open_paper_trade(
         regime_at_entry=(_regime_entr[:20] if _regime_entr else None),
         entry_reason=_entry_rsn,
         confidence_bucket=_conf_bucket,
-        instrument_segment="EQUITY_CNC",
+        instrument_segment=f"EQUITY_{product}",
         initial_risk_inr=_initial_r,
     )
     session.add(trade)
@@ -242,6 +244,7 @@ async def open_paper_trade(
         unrealised_pct=0.0,
         trade_id=trade.id,
         opened_at=now,
+        product=product,
     )
     session.add(position)
     await session.flush()

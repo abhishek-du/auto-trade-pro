@@ -270,7 +270,7 @@ celery_app.conf.beat_schedule = {
     # The task itself re-checks the clock and skips outside 09:15–15:30 IST.
     "kite-live-1m-candles": {
         "task":     "tasks.kite_live_candles",
-        "schedule": crontab(minute="*", hour="3-10", day_of_week="1-5"),
+        "schedule": crontab(minute="*/3", hour="3-10", day_of_week="1-5"),
     },
     # Instruments need a FRESH token → run at 02:45 UTC, AFTER the 02:30 token
     # refresh (otherwise the daily download uses the previous day's expired token).
@@ -311,5 +311,18 @@ celery_app.conf.beat_schedule = {
     "agent-eod-reconcile": {
         "task":     "tasks.agent_eod_reconcile",
         "schedule": crontab(hour=9, minute=55, day_of_week="1-5"),
+    },
+
+    # ── Intraday MIS trading ──────────────────────────────────────────────────
+    # 09:30 IST = 04:00 UTC: open 2-3 equity + optionally 1 NIFTY/BN option as MIS.
+    # Uses top Hub BUY signals; separate budget from the positional CNC book.
+    "intraday-morning-entry": {
+        "task":     "tasks.intraday_entry",
+        "schedule": crontab(hour=4, minute=0, day_of_week="1-5"),
+    },
+    # 15:10 IST = 09:40 UTC: close all MIS positions (10 min before Zerodha 15:20 auto-SO).
+    "intraday-eod-squareoff": {
+        "task":     "tasks.intraday_squareoff",
+        "schedule": crontab(hour=9, minute=40, day_of_week="1-5"),
     },
 }

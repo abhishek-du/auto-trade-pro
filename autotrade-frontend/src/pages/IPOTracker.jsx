@@ -156,12 +156,12 @@ export default function IPOTracker() {
         {/* Left: list */}
         <div className="flex-1 min-w-0 space-y-4">
           {/* Tabs */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
             {TABS.map(t => (
               <button
                 key={t.id}
                 onClick={() => handleTabChange(t.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${activeTab === t.id ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'}`}
+                className={`flex items-center px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 whitespace-nowrap transition-colors ${activeTab === t.id ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'}`}
               >
                 {t.label}
                 {stats?.by_status?.[t.id] > 0 && (

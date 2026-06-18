@@ -12,7 +12,7 @@ import SignalBadge    from '../components/SignalBadge';
 import LoadingSpinner from '../components/LoadingSpinner';
 import {
   getIndiaMarketStatus, getIndiaVix, getIndiaFiiDii,
-  getIndiaSignals, getIndiaSectorPerf, getIndiaOptionsChain, apiFetch,
+  getIndiaSignals, getIndiaSectorPerf, getIndiaIndexOptionsChain, apiFetch,
 } from '../api/client';
 
 // Unified signal pill — same thresholds as the scanner / stock detail / agent.
@@ -91,7 +91,7 @@ export default function IndiaMarket() {
       getIndiaVix(),
       getIndiaFiiDii(),
       getIndiaSectorPerf(),
-      getIndiaOptionsChain('NIFTY'),
+      getIndiaIndexOptionsChain('NIFTY'),
     ]);
     if (ms.status  === 'fulfilled') setMarketStatus(ms.value);
     if (vx.status  === 'fulfilled') setVixData(vx.value);

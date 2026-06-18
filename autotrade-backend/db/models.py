@@ -166,6 +166,9 @@ class OpenPosition(Base):
     contract_multiplier: Mapped[float]        = mapped_column(Float, nullable=False, default=1.0)
     margin_blocked:      Mapped[float]        = mapped_column(Float, nullable=False, default=0.0)
 
+    # CNC = delivery positional; MIS = intraday (must squareoff by 15:20 IST)
+    product: Mapped[str] = mapped_column(String(10), nullable=False, default="CNC")
+
     unrealised_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     unrealised_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 

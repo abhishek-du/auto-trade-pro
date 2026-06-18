@@ -69,7 +69,7 @@ export default function TaxInputBar({
           <label className="text-muted text-[10px] uppercase tracking-widest">Annual Income (₹)</label>
           <Tooltip text="Your total annual income helps calculate surcharge. Capital gains rates are flat, but surcharge kicks in above ₹50L." />
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="relative">
             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted text-sm">₹</span>
             <input
@@ -81,7 +81,7 @@ export default function TaxInputBar({
               className="bg-surface border border-border rounded-lg pl-6 pr-3 py-2 text-sm text-slate-200 w-36 focus:outline-none focus:border-accent"
             />
           </div>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             {INCOME_PRESETS.map(p => (
               <button
                 key={p.value}

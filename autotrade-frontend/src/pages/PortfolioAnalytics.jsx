@@ -9,7 +9,7 @@ import {
 } from 'recharts'
 import {
   TrendingUp, TrendingDown, Scale, Target, ArrowRightLeft,
-  Sliders, RefreshCw, AlertTriangle, CheckCircle, Info,
+  Sliders, RefreshCw, AlertTriangle, CheckCircle, Info, Activity,
 } from 'lucide-react'
 import { apiFetch } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -27,8 +27,8 @@ const CHART_THEME = {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-const fmtPct = (n) => (n == null ? '—' : `${Number(n).toFixed(2)}%`)
-const fmtNum = (n) => (n == null ? '—' : Number(n).toFixed(3))
+const fmtPct = (n) => (n == null || isNaN(n) ? '—' : `${Number(n).toFixed(2)}%`)
+const fmtNum = (n) => (n == null || isNaN(n) ? '—' : Number(n).toFixed(3))
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '—'
 
 function StatCard({ label, value, sub, highlight, icon: Icon, tooltip }) {

@@ -792,7 +792,7 @@ async def fetch_fii_dii_now(db: AsyncSession = Depends(get_db)):
 # ═════════════════════════════════════════════════════════════════════════════
 
 @router.get(
-    "/options-chain/{symbol}",
+    "/options-chain-index/{symbol}",
     response_model=OptionsChainDetailOut,
     summary="Options chain snapshot for NIFTY or BANKNIFTY",
 )

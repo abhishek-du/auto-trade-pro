@@ -259,32 +259,43 @@ async def sync_live_1m_candles(
     session: AsyncSession,
     symbols: list[str] | None = None,
     *,
-    delay_sec: float = 0.35,
+    concurrency: int = 3,
+    delay_sec: float = 0.1,
 ) -> dict:
     """Fetch today's 1-minute candles from Kite for every watched symbol.
 
-    Designed to be called every 60 s while NSE is open.  Uses upsert so
-    repeated runs for the same bar are idempotent.  Symbols default to the
-    union of nse_symbols + nse_mid_symbols; the caller can override.
+    Designed to be called every 3 min while NSE is open. Uses upsert so
+    repeated runs for the same bar are idempotent. Fetches concurrently
+    (semaphore=3) to cover 500+ hub symbols in ~90 seconds.
+    Symbols default to the hub universe from DB; falls back to nse_symbols.
     """
     from zoneinfo import ZoneInfo
 
     _IST = ZoneInfo("Asia/Kolkata")
-    now_ist = _dt.datetime.now(_IST).replace(tzinfo=None)   # naive IST (Kite expects this)
+    now_ist = _dt.datetime.now(_IST).replace(tzinfo=None)
     from_dt = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
     to_dt   = now_ist
 
     if symbols is None:
         symbols = list(settings.nse_symbols) + list(getattr(settings, "nse_mid_symbols", []))
 
-    all_candles: list[dict] = []
+    sem = asyncio.Semaphore(concurrency)
     errors: list[str] = []
 
-    for sym in symbols:
-        result = await get_kite_candles_for_range(sym, from_dt, to_dt, interval="1m")
-        if result:
-            all_candles.extend(result)
-        await asyncio.sleep(delay_sec)
+    async def _fetch(sym: str) -> list[dict]:
+        async with sem:
+            result = await get_kite_candles_for_range(sym, from_dt, to_dt, interval="1m")
+            await asyncio.sleep(delay_sec)
+            return result or []
+
+    results = await asyncio.gather(*[_fetch(s) for s in symbols], return_exceptions=True)
+
+    all_candles: list[dict] = []
+    for sym, res in zip(symbols, results):
+        if isinstance(res, Exception):
+            errors.append(f"{sym}:{res}")
+        else:
+            all_candles.extend(res)
 
     saved = 0
     if all_candles:
@@ -298,7 +309,7 @@ async def sync_live_1m_candles(
         "symbols": len(symbols),
         "candles": len(all_candles),
         "saved":   saved,
-        "errors":  errors,
+        "errors":  len(errors),
     }
     logger.info(f"[live_1m] → {summary}")
     return summary

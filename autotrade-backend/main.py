@@ -54,6 +54,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.debug(f"[startup] kite token hydration skipped: {exc}")
 
+    # ── Refresh live instrument token cache from Kite ────────────────────────
+    # hydrate_tokens_from_db fills NSE_TOKENS (zerodha_market); this fills
+    # INSTRUMENT_CACHE (zerodha_instruments) used by zerodha_historical.
+    try:
+        from crawler.zerodha_instruments import refresh_instrument_cache
+        _n = await refresh_instrument_cache()
+        logger.info(f"[startup] Kite instrument cache loaded: {_n} symbols")
+    except Exception as exc:
+        logger.debug(f"[startup] Kite instrument cache skipped: {exc}")
+
     # ── Live price refresh background task ───────────────────────────────────
     import asyncio as _asyncio
     from crawler.india_price_feed import is_nse_market_open
