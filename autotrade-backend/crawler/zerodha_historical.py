@@ -286,7 +286,13 @@ async def sync_live_1m_candles(
             all_candles.extend(result)
         await asyncio.sleep(delay_sec)
 
-    saved = await save_candles_to_db(all_candles, session) if all_candles else 0
+    saved = 0
+    if all_candles:
+        saved = await save_candles_to_db(all_candles, session)
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
 
     summary = {
         "symbols": len(symbols),
