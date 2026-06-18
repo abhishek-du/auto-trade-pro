@@ -163,9 +163,14 @@ class Settings(BaseSettings):
 
     # Allow SELL (short) signals from the Hub 7-factor score.
     # NSE rule: equity short-selling is intraday-only (MIS product).
-    # Set True only when you want the agent to act on negative Hub scores.
-    # F&O shorts come later; this flag is equity cash only.
-    EQUITY_SHORT_ENABLED:       bool  = False
+    # Enabled: agent can act on MEAN_REVERSION_SHORT signals (RANGE regime only).
+    # Hub SELL signals also require NIFTY below EMA50 (checked in agent_loop).
+    EQUITY_SHORT_ENABLED:       bool  = True
+    # Extra guards for the short leg — applied even when EQUITY_SHORT_ENABLED=True.
+    # Hub SELL: only allowed when Nifty is at or below its EMA50 (macro downtrend).
+    # MeanReversionShort: allowed in RANGE/HIGH_VOL_RANGE regardless of Nifty trend.
+    SHORT_HUB_SELL_NIFTY_GATE:  bool  = True   # block Hub SELL when Nifty > EMA50
+    SHORT_MAX_VIX:              float = 28.0   # block ALL shorts when panic (VIX > 28)
 
     # ── Futures & Options (F&O) ───────────────────────────────────────────────
     # Master kill-switches. ENABLE_FNO gates NFO instrument sync + analytics.
