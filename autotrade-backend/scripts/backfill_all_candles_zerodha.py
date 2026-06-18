@@ -47,9 +47,18 @@ def _to_naive_utc(ts):
     return ts
 
 
-async def get_symbols(skip_fresh: bool, fresh_days: int):
-    """Return [(tradingsymbol, instrument_token)] for NSE EQ, optionally skipping
-    symbols that already have a recent daily candle."""
+async def get_symbols(skip_fresh: bool, fresh_days: int,
+                      history_from: dt.date | None = None):
+    """Return [(tradingsymbol, instrument_token)] for NSE EQ.
+
+    Two skip modes:
+      - history_from set (deep backfill): skip symbols that ALREADY reach back to
+        history_from (their earliest 1d candle is on/before that date) — the
+        inverse of the incremental test, because every symbol already has recent
+        data and the incremental skip would skip them all.
+      - otherwise (incremental refresh): skip symbols with a candle newer than
+        `fresh_days`.
+    """
     async with AsyncSessionLocal() as s:
         rows = (await s.execute(text("""
             SELECT tradingsymbol, instrument_token
@@ -63,6 +72,17 @@ async def get_symbols(skip_fresh: bool, fresh_days: int):
         if not skip_fresh:
             return all_syms
 
+        if history_from is not None:
+            # symbols whose earliest candle already reaches the target start
+            done = {r.symbol for r in (await s.execute(text("""
+                SELECT symbol FROM candles WHERE timeframe='1d'
+                GROUP BY symbol HAVING MIN(timestamp) <= :h
+            """), {"h": dt.datetime(history_from.year, history_from.month, history_from.day)})).all()}
+            todo = [(sym, tok) for sym, tok in all_syms if f"{sym}.NS" not in done]
+            print(f"[backfill] NSE EQ: {len(all_syms)} | already have history <= {history_from}: "
+                  f"{len(done)} | to backfill: {len(todo)}")
+            return todo
+
         cutoff = dt.datetime.utcnow() - dt.timedelta(days=fresh_days)
         fresh = {r.symbol for r in (await s.execute(text(
             "SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND timestamp >= :c"
@@ -73,28 +93,52 @@ async def get_symbols(skip_fresh: bool, fresh_days: int):
     return todo
 
 
+# Kite caps the `day` interval at 2000 candles per request; chunk under that.
+_MAX_DAYS_PER_REQ = 1900
+
+
+def _date_chunks(from_date: dt.date, to_date: dt.date, span: int = _MAX_DAYS_PER_REQ):
+    """Yield (start, end) windows of <= `span` calendar days covering the range."""
+    cur = from_date
+    while cur <= to_date:
+        end = min(cur + dt.timedelta(days=span), to_date)
+        yield cur, end
+        cur = end + dt.timedelta(days=1)
+
+
 def fetch_one(kite, token, from_date, to_date, retries=3):
-    """Sync Kite historical_data call with retry/backoff. Returns raw candle list."""
-    for attempt in range(retries):
-        try:
-            return kite.historical_data(
-                instrument_token=token,
-                from_date=from_date,
-                to_date=to_date,
-                interval="day",
-            )
-        except Exception as exc:
-            msg = str(exc).lower()
-            if "too many requests" in msg or "rate" in msg or "timed out" in msg or "connection" in msg:
-                time.sleep(1.5 * (attempt + 1))  # backoff on rate/network
-                continue
-            # token-not-permitted / delisted / bad-token → don't retry
-            return []
-    return []
+    """Sync Kite historical_data call with retry/backoff. Returns raw candle list.
+
+    Automatically splits ranges longer than Kite's 2000-day daily limit into
+    multiple requests and concatenates the result.
+    """
+    chunks = list(_date_chunks(from_date, to_date))
+    out = []
+    for cstart, cend in chunks:
+        for attempt in range(retries):
+            try:
+                out.extend(kite.historical_data(
+                    instrument_token=token,
+                    from_date=cstart,
+                    to_date=cend,
+                    interval="day",
+                ))
+                break
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "too many requests" in msg or "rate" in msg or "timed out" in msg or "connection" in msg:
+                    time.sleep(1.5 * (attempt + 1))  # backoff on rate/network
+                    continue
+                # token-not-permitted / delisted / bad-token → skip this chunk
+                break
+        if len(chunks) > 1:
+            time.sleep(0.4)  # pace multi-chunk symbols within the 3 req/s cap
+    return out
 
 
 async def backfill(trading_days: int, delay: float, skip_fresh: bool,
-                   fresh_days: int, max_symbols: int | None):
+                   fresh_days: int, max_symbols: int | None,
+                   from_override: dt.date | None = None):
     kite = get_kite()
     # Sanity: confirm historical access works before the long run
     try:
@@ -104,14 +148,19 @@ async def backfill(trading_days: int, delay: float, skip_fresh: bool,
         print("           Re-login at /zerodha/connect, then re-run.")
         return
 
-    symbols = await get_symbols(skip_fresh, fresh_days)
+    symbols = await get_symbols(skip_fresh, fresh_days, history_from=from_override)
     if max_symbols:
         symbols = symbols[:max_symbols]
         print(f"[backfill] capped to {max_symbols} for test run")
 
-    # 200 trading days ≈ 290 calendar days (weekends + holidays)
-    to_date   = dt.date.today()
-    from_date = to_date - dt.timedelta(days=int(trading_days * 1.45) + 10)
+    to_date = dt.date.today()
+    if from_override is not None:
+        from_date = from_override                       # explicit deep-history start
+    else:
+        # 200 trading days ≈ 290 calendar days (weekends + holidays)
+        from_date = to_date - dt.timedelta(days=int(trading_days * 1.45) + 10)
+    print(f"[backfill] fetching {from_date} → {to_date} "
+          f"({len(list(_date_chunks(from_date, to_date)))} chunk(s)/symbol)")
 
     total = len(symbols)
     saved_total = fetched_total = ok = empty = errors = 0
@@ -190,8 +239,10 @@ async def backfill(trading_days: int, delay: float, skip_fresh: bool,
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Backfill NSE daily candles via Zerodha Kite")
     p.add_argument("--days",       type=int,   default=200,  help="Trading days of history (default 200)")
+    p.add_argument("--from",       dest="from_date", type=dt.date.fromisoformat, default=None,
+                   help="Explicit start date YYYY-MM-DD for deep backfill (e.g. 2016-01-01); overrides --days")
     p.add_argument("--delay",      type=float, default=0.5,  help="Seconds between requests (default 0.5 ≈ 2 req/s)")
-    p.add_argument("--no-skip",    action="store_true",      help="Re-fetch even symbols with fresh candles")
+    p.add_argument("--no-skip",    action="store_true",      help="Re-fetch even symbols that already have the history")
     p.add_argument("--fresh-days", type=int,   default=7,    help="Skip symbols with a candle newer than N days")
     p.add_argument("--max",        type=int,   default=None, help="Cap symbol count (testing)")
     args = p.parse_args()
@@ -202,4 +253,5 @@ if __name__ == "__main__":
         skip_fresh=not args.no_skip,
         fresh_days=args.fresh_days,
         max_symbols=args.max,
+        from_override=args.from_date,
     ))
