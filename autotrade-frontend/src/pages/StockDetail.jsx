@@ -411,6 +411,7 @@ export default function StockDetail() {
   const [optionsResearch, setOptionsResearch] = useState(null);
   const [optionsResearchLoading, setOptionsResearchLoading] = useState(false);
   const [fnoStatus,     setFnoStatus]     = useState(null);  // authoritative NFO-master F&O eligibility
+  const [optionsChain,  setOptionsChain]  = useState(null);  // live Kite-sourced per-stock chain
   const [fundLoading,   setFundLoading]   = useState(true);
   const [deepSettled,   setDeepSettled]   = useState(false);
   const [loading,       setLoading]       = useState(true);
@@ -471,6 +472,11 @@ export default function StockDetail() {
       // Authoritative F&O eligibility from the NFO instrument master (not mkt-cap)
       apiFetch(`/api/v1/india/fno-status/${encodeURIComponent(display)}`)
         .then(d => setFnoStatus(d)).catch(() => {});
+
+      // Live per-stock option chain via Kite — reliable PCR/max-pain/IV (and it
+      // persists, feeding the hub's per-stock options score for this symbol).
+      apiFetch(`/api/v1/india/options-chain/${encodeURIComponent(display)}`)
+        .then(d => setOptionsChain(d)).catch(() => {});
 
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
@@ -2121,7 +2127,53 @@ export default function StockDetail() {
               )}
             </div>
 
-            {/* Agent-driven options research */}
+            {/* Live option chain (Kite) — reliable structured data */}
+            {optionsChain?.available && (
+              <div className="bg-card border border-cyan/20 rounded-lg p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-slate-200 text-sm font-semibold">Live Option Chain</div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan/10 border border-cyan/20 text-cyan">
+                    Kite · {optionsChain.expiry_date}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-surface rounded border border-border p-3 text-center">
+                    <div className="text-muted text-[10px] uppercase tracking-wider">PCR</div>
+                    <div className={`font-mono text-base font-bold mt-1 ${optionsChain.pcr > 1.2 ? 'text-profit' : optionsChain.pcr < 0.8 ? 'text-loss' : 'text-amber-400'}`}>
+                      {optionsChain.pcr}
+                    </div>
+                    <div className="text-muted text-[9px] mt-0.5">
+                      {optionsChain.pcr > 1.3 ? 'Bullish (heavy hedging)' : optionsChain.pcr < 0.7 ? 'Bearish (complacency)' : 'Neutral'}
+                    </div>
+                  </div>
+                  <div className="bg-surface rounded border border-border p-3 text-center">
+                    <div className="text-muted text-[10px] uppercase tracking-wider">Max Pain</div>
+                    <div className="font-mono text-base font-bold mt-1 text-slate-200">₹{optionsChain.max_pain?.toLocaleString('en-IN')}</div>
+                    <div className="text-muted text-[9px] mt-0.5">Spot ₹{optionsChain.spot?.toLocaleString('en-IN')}</div>
+                  </div>
+                  <div className="bg-surface rounded border border-border p-3 text-center">
+                    <div className="text-muted text-[10px] uppercase tracking-wider">ATM IV</div>
+                    <div className={`font-mono text-base font-bold mt-1 ${optionsChain.iv > 40 ? 'text-loss' : 'text-amber-400'}`}>
+                      {optionsChain.iv != null ? `${optionsChain.iv}%` : '—'}
+                    </div>
+                    <div className="text-muted text-[9px] mt-0.5">{optionsChain.iv > 40 ? 'Elevated' : 'Normal'}</div>
+                  </div>
+                </div>
+                {(optionsChain.support?.length > 0 || optionsChain.resistance?.length > 0) && (
+                  <div className="flex flex-wrap gap-2">
+                    {optionsChain.resistance?.map((s, i) => (
+                      <span key={`r${i}`} className="text-[11px] font-mono px-2.5 py-1 rounded border text-loss bg-loss/10 border-loss/20">R ₹{s?.toLocaleString('en-IN')}</span>
+                    ))}
+                    {optionsChain.support?.map((s, i) => (
+                      <span key={`s${i}`} className="text-[11px] font-mono px-2.5 py-1 rounded border text-profit bg-profit/10 border-profit/20">S ₹{s?.toLocaleString('en-IN')}</span>
+                    ))}
+                  </div>
+                )}
+                <p className="text-muted text-[10px] leading-relaxed">Near-ATM open interest from the live NSE chain. This data also feeds the Hub's per-stock options score.</p>
+              </div>
+            )}
+
+            {/* Agent-driven options research (web narrative) */}
             <div className="bg-card border border-border rounded-lg p-4 space-y-4">
               <div className="flex items-center justify-between">
                 <div className="text-slate-200 text-sm font-semibold">🤖 Agent Options Research</div>
@@ -2231,7 +2283,8 @@ export default function StockDetail() {
                       web-research miss on a stock that IS in F&O. Prefer the
                       authoritative NFO master; fall back to the mcap heuristic. */}
                   {!optionsResearch.pcr && !optionsResearch.max_pain && !optionsResearch.iv &&
-                   !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (() => {
+                   !optionsResearch.key_strikes?.length && !optionsResearch.agent_note &&
+                   !optionsChain?.available && (() => {
                     const mcap = fund?.market_cap_cr ?? (companyProfile?.market_cap != null ? companyProfile.market_cap / 1e7 : null);
                     const fnoEligible = fnoStatus?.is_fno != null
                       ? fnoStatus.is_fno
