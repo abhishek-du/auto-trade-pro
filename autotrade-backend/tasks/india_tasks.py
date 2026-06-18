@@ -143,6 +143,40 @@ def india_options_analysis():
     _run_async(_india_options_analysis())
 
 
+# ── 3a. india_equity_options_enrich — 2×/day (per-stock hub options) ──────────
+
+async def _india_equity_options_enrich():
+    from crawler.india_price_feed import is_nse_market_open
+    from crawler.equity_options import enrich_equity_options
+    from engine.hub_universe import get_hub_universe
+    from tasks._db import celery_session
+
+    if not is_nse_market_open():
+        logger.info("[hub_options] NSE closed — skipping")
+        return {"status": "market_closed"}
+
+    async with celery_session() as session:
+        symbols = await get_hub_universe(session)
+        result = await enrich_equity_options(session, symbols)
+        await session.commit()
+
+    logger.info(
+        f"[hub_options] done: enriched={result.get('enriched')} "
+        f"targets={result.get('targets')} status={result.get('status')}"
+    )
+    return result
+
+
+@celery_app.task(name="tasks.india_equity_options_enrich")
+def india_equity_options_enrich():
+    """Per-stock options enrichment for the hub (F&O ∩ hub universe). 2×/day."""
+    from utils.config import settings
+    if not getattr(settings, "ENABLE_HUB_OPTIONS", False):
+        return {"status": "disabled"}
+    logger.info("[hub_options] Starting equity options enrichment")
+    return _run_async(_india_equity_options_enrich())
+
+
 # ── 3b. fno_expiry_sweep — daily after close (settle expired F&O) ────────────
 
 async def _fno_expiry_sweep():

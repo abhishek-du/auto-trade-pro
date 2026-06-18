@@ -138,7 +138,7 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
     # NFO is gated behind the F&O master flag so we don't download ~50k F&O rows
     # unless derivatives are actually enabled.
     exchanges = ["NSE", "BSE"]
-    if getattr(settings, "ENABLE_FNO", False):
+    if getattr(settings, "ENABLE_FNO", False) or getattr(settings, "ENABLE_HUB_OPTIONS", False):
         exchanges.append("NFO")
 
     now = datetime.datetime.utcnow()

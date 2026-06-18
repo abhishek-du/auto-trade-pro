@@ -2213,17 +2213,25 @@ export default function StockDetail() {
                     </div>
                   )}
 
-                  {/* No structured data found — non-F&O or no coverage */}
+                  {/* No structured data found — distinguish "not in F&O" from a
+                      web-research miss on a stock that IS F&O-eligible. */}
                   {!optionsResearch.pcr && !optionsResearch.max_pain && !optionsResearch.iv &&
-                   !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (
+                   !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (() => {
+                    const mcap = fund?.market_cap_cr ?? (companyProfile?.market_cap != null ? companyProfile.market_cap / 1e7 : null);
+                    const fnoEligible = mcap != null ? mcap > 5000 : null;
+                    return (
                     <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                       <ShieldAlert size={14} className="text-amber-400 shrink-0 mt-0.5" />
                       <div>
-                        <div className="text-amber-400 text-sm font-semibold">Not in F&O Segment</div>
+                        <div className="text-amber-400 text-sm font-semibold">
+                          {fnoEligible === false ? 'Not in F&O Segment' : 'Live Options Data Unavailable'}
+                        </div>
                         <div className="text-muted text-xs mt-1 leading-relaxed">
-                          {display} does not appear to have equity derivatives (Futures &amp; Options) traded on NSE.
-                          F&amp;O eligibility requires market cap &gt; ₹5,000 Cr and minimum average daily turnover.
-                          The agent searched the web but found no options chain data for this symbol.
+                          {fnoEligible === false
+                            ? <>{display} does not appear to have equity derivatives (Futures &amp; Options) traded on NSE. F&amp;O eligibility requires market cap &gt; ₹5,000 Cr and minimum average daily turnover.</>
+                            : fnoEligible === true
+                            ? <>{display} is F&amp;O-eligible (market cap ₹{fmt(mcap, 0)} Cr), but the web research agent couldn't retrieve a live options chain for it right now. This does not affect the Hub options score, which uses the stock's own PCR/IV when the F&amp;O enrichment job has data (else the index-wide NIFTY PCR).</>
+                            : <>The web research agent couldn't retrieve a live options chain for {display} right now. This does not affect the Hub options score, which uses the stock's own PCR/IV when the F&amp;O enrichment job has data (else the index-wide NIFTY PCR).</>}
                         </div>
                         {optionsResearch.headlines?.length > 0 && (
                           <ul className="mt-2 space-y-1">
@@ -2234,7 +2242,8 @@ export default function StockDetail() {
                         )}
                       </div>
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               ) : optionsResearchLoading ? (
                 <div className="text-muted text-xs animate-pulse">
