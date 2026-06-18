@@ -1280,6 +1280,57 @@ async def get_options_research(symbol: str):
 
 
 @router.get(
+    "/fno-status/{symbol}",
+    summary="Authoritative F&O eligibility from the NFO instrument master (not a market-cap guess)",
+)
+async def get_fno_status(symbol: str, db: AsyncSession = Depends(get_db)):
+    """Whether a symbol is genuinely in the NSE F&O segment.
+
+    Source of truth is the synced KiteInstrument NFO master — NOT a market-cap
+    heuristic (many ₹5,000 Cr+ stocks are not F&O). Also reports whether the hub
+    has recent per-stock options data for it.
+
+    Returns is_fno=None when the NFO master is empty (F&O sync disabled), so the
+    caller can fall back to its own heuristic rather than show a false negative.
+    """
+    from datetime import datetime, timedelta
+    from db.models import KiteInstrument, OptionContractSnapshot
+
+    bare = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
+
+    master_n = (await db.execute(
+        select(func.count()).select_from(KiteInstrument).where(
+            KiteInstrument.exchange == "NFO",
+            KiteInstrument.instrument_type.in_(("CE", "PE")),
+        )
+    )).scalar() or 0
+    if master_n == 0:
+        return {"symbol": bare, "is_fno": None, "has_options_data": False,
+                "source": "master_unavailable"}
+
+    is_fno = (await db.execute(
+        select(func.count()).select_from(KiteInstrument).where(
+            KiteInstrument.exchange == "NFO",
+            KiteInstrument.name == bare,
+            KiteInstrument.instrument_type.in_(("CE", "PE")),
+        )
+    )).scalar() > 0
+
+    has_data = False
+    if is_fno:
+        cutoff = datetime.utcnow() - timedelta(days=2)
+        has_data = (await db.execute(
+            select(func.count()).select_from(OptionContractSnapshot).where(
+                OptionContractSnapshot.underlying == bare,
+                OptionContractSnapshot.snapshot_at >= cutoff,
+            )
+        )).scalar() > 0
+
+    return {"symbol": bare, "is_fno": is_fno, "has_options_data": has_data,
+            "source": "nfo_master"}
+
+
+@router.get(
     "/screener-deep/{symbol}",
     summary="Full Screener.in data: quarterly P&L, balance sheet, cash flow, shareholding, pros/cons",
 )

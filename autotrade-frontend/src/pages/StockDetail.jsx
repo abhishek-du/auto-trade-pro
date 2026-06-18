@@ -410,6 +410,7 @@ export default function StockDetail() {
   const [screenerLoading,setScreenerLoading] = useState(false);
   const [optionsResearch, setOptionsResearch] = useState(null);
   const [optionsResearchLoading, setOptionsResearchLoading] = useState(false);
+  const [fnoStatus,     setFnoStatus]     = useState(null);  // authoritative NFO-master F&O eligibility
   const [fundLoading,   setFundLoading]   = useState(true);
   const [deepSettled,   setDeepSettled]   = useState(false);
   const [loading,       setLoading]       = useState(true);
@@ -466,6 +467,10 @@ export default function StockDetail() {
         .then(d => setOptionsResearch(d))
         .catch(() => {})
         .finally(() => setOptionsResearchLoading(false));
+
+      // Authoritative F&O eligibility from the NFO instrument master (not mkt-cap)
+      apiFetch(`/api/v1/india/fno-status/${encodeURIComponent(display)}`)
+        .then(d => setFnoStatus(d)).catch(() => {});
 
       // Check if symbol is in user watchlist (non-blocking)
       apiFetch('/api/v1/india/user-watchlist')
@@ -2059,23 +2064,32 @@ export default function StockDetail() {
         {/* Options */}
         <DeepTab label="Options & F&O" subtitle="PCR · Max Pain · F&O eligibility · Hub options score" icon={PieChart}>
           <div className="space-y-4">
-            {/* F&O Eligibility Status */}
+            {/* F&O Eligibility Status — authoritative (NFO instrument master),
+                with a market-cap heuristic only when the master is unavailable. */}
             {(() => {
               const mcap = fund?.market_cap_cr ?? (companyProfile?.market_cap != null ? companyProfile.market_cap / 1e7 : null);
-              const eligible = mcap != null ? mcap > 5000 : null;
+              // is_fno from the NFO master is truth; null = master unavailable → fall back to mcap.
+              const eligible = fnoStatus?.is_fno != null
+                ? fnoStatus.is_fno
+                : (mcap != null ? mcap > 5000 : null);
+              const authoritative = fnoStatus?.is_fno != null;
               return (
                 <div className={`flex items-start gap-3 p-3 rounded-lg border ${eligible === true ? 'bg-profit/5 border-profit/20' : eligible === false ? 'bg-amber-500/5 border-amber-500/20' : 'bg-white/[0.02] border-border'}`}>
                   <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${eligible === true ? 'bg-profit' : eligible === false ? 'bg-amber-400' : 'bg-slate-500'}`} />
                   <div className="flex-1 min-w-0">
                     <div className={`text-sm font-semibold ${eligible === true ? 'text-profit' : eligible === false ? 'text-amber-400' : 'text-slate-300'}`}>
-                      {eligible === true ? `${display} is F&O Eligible` : eligible === false ? `${display} may not be F&O Eligible` : `${display} F&O Status`}
+                      {eligible === true ? `${display} is in NSE F&O` : eligible === false ? `${display} is NOT in NSE F&O` : `${display} F&O Status`}
                     </div>
                     <div className="text-muted text-xs mt-1 leading-relaxed">
                       {eligible === true
-                        ? `Market cap ₹${fmt(mcap, 0)} Cr — above the ₹5,000 Cr NSE threshold. ${display} equity derivatives (Futures + Options) are actively traded on NSE. View live chain on NSE India or Sensibull.`
+                        ? (authoritative
+                            ? `${display} has listed equity derivatives (Futures + Options) on NSE. View live chain on NSE India or Sensibull.`
+                            : `Market cap ₹${fmt(mcap, 0)} Cr clears the ₹5,000 Cr threshold (heuristic — F&O list unavailable). Verify on NSE India.`)
                         : eligible === false
-                        ? `Market cap ₹${fmt(mcap, 0)} Cr — below the ₹5,000 Cr threshold. NSE F&O eligibility also requires minimum liquidity. Verify on NSE India.`
-                        : 'NSE F&O eligibility requires market cap > ₹5,000 Cr and sufficient liquidity. Load company data to check eligibility.'}
+                        ? (authoritative
+                            ? `${display} has no equity derivatives on NSE${mcap != null ? ` (market cap ₹${fmt(mcap, 0)} Cr)` : ''} — F&O eligibility needs sustained liquidity/turnover, not just market cap, so the hub uses the index-wide NIFTY PCR for it.`
+                            : `Market cap ₹${fmt(mcap, 0)} Cr is below the ₹5,000 Cr threshold. Verify on NSE India.`)
+                        : 'Checking the NSE F&O instrument master…'}
                     </div>
                   </div>
                 </div>
@@ -2086,8 +2100,8 @@ export default function StockDetail() {
             <div>
               <div className="text-muted text-[10px] uppercase tracking-wider mb-2">How the Hub Uses Options Data</div>
               <p className="text-slate-300 text-xs leading-relaxed mb-3">
-                The Hub's options factor (5% weight) uses the <strong className="text-slate-200">NIFTY Put-Call Ratio (PCR)</strong> as a market-wide fear/greed indicator.
-                It does not use individual stock options chains — that data is not yet integrated.
+                The Hub's options factor (5% weight) uses each stock's <strong className="text-slate-200">own Put-Call Ratio &amp; IV-skew</strong> when the per-stock F&amp;O enrichment job has recent data for it
+                {fnoStatus?.is_fno === false ? <> — but {display} isn't in NSE F&amp;O, so it</> : !fnoStatus?.has_options_data ? <> — none is loaded for {display} yet, so it</> : ', otherwise it'} falls back to the market-wide <strong className="text-slate-200">NIFTY PCR</strong>.
                 PCR &gt; 1.3 = heavy hedging = contrarian bullish. PCR &lt; 0.7 = complacency = caution.
               </p>
               {comp.options != null && (
@@ -2214,11 +2228,14 @@ export default function StockDetail() {
                   )}
 
                   {/* No structured data found — distinguish "not in F&O" from a
-                      web-research miss on a stock that IS F&O-eligible. */}
+                      web-research miss on a stock that IS in F&O. Prefer the
+                      authoritative NFO master; fall back to the mcap heuristic. */}
                   {!optionsResearch.pcr && !optionsResearch.max_pain && !optionsResearch.iv &&
                    !optionsResearch.key_strikes?.length && !optionsResearch.agent_note && (() => {
                     const mcap = fund?.market_cap_cr ?? (companyProfile?.market_cap != null ? companyProfile.market_cap / 1e7 : null);
-                    const fnoEligible = mcap != null ? mcap > 5000 : null;
+                    const fnoEligible = fnoStatus?.is_fno != null
+                      ? fnoStatus.is_fno
+                      : (mcap != null ? mcap > 5000 : null);
                     return (
                     <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                       <ShieldAlert size={14} className="text-amber-400 shrink-0 mt-0.5" />
@@ -2230,7 +2247,7 @@ export default function StockDetail() {
                           {fnoEligible === false
                             ? <>{display} does not appear to have equity derivatives (Futures &amp; Options) traded on NSE. F&amp;O eligibility requires market cap &gt; ₹5,000 Cr and minimum average daily turnover.</>
                             : fnoEligible === true
-                            ? <>{display} is F&amp;O-eligible (market cap ₹{fmt(mcap, 0)} Cr), but the web research agent couldn't retrieve a live options chain for it right now. This does not affect the Hub options score, which uses the stock's own PCR/IV when the F&amp;O enrichment job has data (else the index-wide NIFTY PCR).</>
+                            ? <>{display} is in NSE F&amp;O{mcap != null ? ` (market cap ₹${fmt(mcap, 0)} Cr)` : ''}, but the web research agent couldn't retrieve a live options chain for it right now. This does not affect the Hub options score, which uses the stock's own PCR/IV when the F&amp;O enrichment job has data (else the index-wide NIFTY PCR).</>
                             : <>The web research agent couldn't retrieve a live options chain for {display} right now. This does not affect the Hub options score, which uses the stock's own PCR/IV when the F&amp;O enrichment job has data (else the index-wide NIFTY PCR).</>}
                         </div>
                         {optionsResearch.headlines?.length > 0 && (
