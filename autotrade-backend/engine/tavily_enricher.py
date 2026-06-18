@@ -124,7 +124,6 @@ async def fetch_news_score(symbol: str, company_name: str = "") -> tuple[float, 
                 max_results=5,
                 include_answer=False,
                 time_range="week",
-                country="india",
             ),
         )
         results = resp.get("results") or []
@@ -256,7 +255,6 @@ async def research_stock_for_alert(
                     max_results=5,
                     include_answer=True,
                     time_range="month",
-                    country="india",
                     chunks_per_source=2,
                 ),
             )
@@ -394,7 +392,6 @@ async def search_and_crawl(
                 max_results=max_search_results,
                 include_answer=True,
                 time_range="week",
-                country="india",
             ),
         )
     except Exception as exc:
@@ -474,8 +471,6 @@ async def research_options_chain(symbol: str) -> dict:
                 topic="finance",
                 max_results=5,
                 include_answer=True,
-                time_range="week",
-                country="india",
                 chunks_per_source=2,
             )),
             loop.run_in_executor(None, lambda: client.search(
@@ -484,8 +479,6 @@ async def research_options_chain(symbol: str) -> dict:
                 topic="finance",
                 max_results=4,
                 include_answer=False,
-                time_range="week",
-                country="india",
             )),
             return_exceptions=True,
         )
