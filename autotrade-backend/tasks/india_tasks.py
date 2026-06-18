@@ -309,13 +309,11 @@ async def _india_trade_loop():
 
     now_ist   = datetime.datetime.now(_IST)
     is_window = _is_india_trading_window()
-    is_paper  = getattr(_cfg, "PAPER_MODE", True)
     logger.info(
         f"[india_trade_loop] NSE market status: {'OPEN' if is_window else 'CLOSED'} "
         f"— IST time: {now_ist.strftime('%H:%M:%S')}"
-        + (" [paper mode — running outside hours]" if not is_window and is_paper else "")
     )
-    if not is_window and not is_paper:
+    if not is_window:
         return
 
     async with celery_session() as session:
