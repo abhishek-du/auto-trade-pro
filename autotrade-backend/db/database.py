@@ -94,6 +94,8 @@ async def init_db() -> None:
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS upper_circuit_days INTEGER DEFAULT 0",
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
         "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         *[
             f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col}"
             for tbl in ("paper_trades", "open_positions", "agent_trades", "agent_decisions")

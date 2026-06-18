@@ -14,7 +14,7 @@ from utils.logger import logger
 # ── Hardcoded fallback tokens (verified against Zerodha NSE master) ──────────
 
 HARDCODED_TOKENS: dict[str, int] = {
-    # Large-cap NSE equities
+    # Large-cap NSE equities (refreshed 2026-06-18)
     "RELIANCE":    738561,
     "TCS":        2953217,
     "HDFCBANK":    341249,
@@ -29,7 +29,7 @@ HARDCODED_TOKENS: dict[str, int] = {
     "AXISBANK":   1510401,
     "ASIANPAINT":   60417,
     "MARUTI":     2815745,
-    "BAJFINANCE": 4268801,
+    "BAJFINANCE":   81153,
     "WIPRO":       969473,
     "HCLTECH":    1850625,
     "ULTRACEMCO": 2952193,
@@ -38,16 +38,16 @@ HARDCODED_TOKENS: dict[str, int] = {
     "SUNPHARMA":   857857,
     "DRREDDY":     225537,
     # Mid-cap
-    "PIDILITIND": 2765825,
+    "PIDILITIND":  681985,
     "VOLTAS":      951809,
-    "MUTHOOTFIN": 3400705,
-    "PERSISTENT": 4701186,
-    "COFORGE":     635649,
-    "LTTS":       4561409,
-    "TATAELXSI":  2420225,
-    "METROPOLIS": 1054993,
+    "MUTHOOTFIN": 6054401,
+    "PERSISTENT": 4701441,
+    "COFORGE":    2955009,
+    "LTTS":       4752385,
+    "TATAELXSI":   873217,
+    "METROPOLIS": 2452737,
     "LALPATHLAB": 2983425,
-    "ASTRAL":      438273,
+    "ASTRAL":     3691009,
     # Energy / utilities (extras)
     "NTPC":       2977281,
     "COALINDIA":  5215745,

@@ -516,30 +516,40 @@ async def research_options_chain(symbol: str) -> dict:
     # Build a clean summary
     summary = answer or (snippets[0][:400] if snippets else "")
 
-    # Optional LLM synthesis
+    # Optional LLM synthesis — only when we have real numeric data or meaningful text.
+    # SPA pages return "Loading..." which causes the LLM to hallucinate an
+    # "unavailable" explanation instead of a genuine options insight.
+    _has_real_data = (
+        pcr is not None
+        or max_pain is not None
+        or iv_val is not None
+        or len(key_strikes) > 0
+        or len(crawled_text.strip()) > 100
+    )
     agent_note = ""
-    try:
-        from utils.config import settings as _s
-        if _s.ollama_available or _s.groq_available:
-            from utils.llm import call_llm_chat
-            prompt_text = (
-                f"Stock: {bare} (NSE India)\n"
-                f"Options research from the web:\n{all_text[:1500]}\n\n"
-                f"In 2-3 sentences, summarise the current F&O sentiment, "
-                f"key support/resistance strikes, and whether options flow is "
-                f"bullish or bearish. Be specific with numbers if available."
-            )
-            agent_note = await asyncio.wait_for(
-                call_llm_chat(
-                    [{"role": "user", "content": prompt_text}],
-                    max_tokens=150,
-                    temperature=0.2,
-                    groq_fallback=False,  # background — protect Groq quota
-                ),
-                timeout=8.0,
-            ) or ""
-    except Exception:
-        pass
+    if _has_real_data:
+        try:
+            from utils.config import settings as _s
+            if _s.ollama_available or _s.groq_available:
+                from utils.llm import call_llm_chat
+                prompt_text = (
+                    f"Stock: {bare} (NSE India)\n"
+                    f"Options research from the web:\n{all_text[:1500]}\n\n"
+                    f"In 2-3 sentences, summarise the current F&O sentiment, "
+                    f"key support/resistance strikes, and whether options flow is "
+                    f"bullish or bearish. Be specific with numbers if available."
+                )
+                agent_note = await asyncio.wait_for(
+                    call_llm_chat(
+                        [{"role": "user", "content": prompt_text}],
+                        max_tokens=150,
+                        temperature=0.2,
+                        groq_fallback=False,
+                    ),
+                    timeout=8.0,
+                ) or ""
+        except Exception:
+            pass
 
     return {
         "summary":      summary[:600],

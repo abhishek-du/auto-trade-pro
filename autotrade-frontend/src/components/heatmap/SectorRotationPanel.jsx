@@ -24,7 +24,7 @@ export default function SectorRotationPanel({ rotation }) {
         </span>
       </div>
 
-      <div className="grid grid-cols-2 divide-x divide-border">
+      <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-border">
         {/* Outperforming */}
         <div className="p-4">
           <div className="text-profit text-[10px] font-semibold uppercase tracking-wider mb-3">

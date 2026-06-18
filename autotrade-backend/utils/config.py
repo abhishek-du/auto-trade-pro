@@ -267,6 +267,17 @@ class Settings(BaseSettings):
     # Strategies: MEAN_REVERSION_SHORT → always MIS; everything else → DEFAULT_PRODUCT
     AGENT_DEFAULT_PRODUCT:      str   = "CNC"
 
+    # ── Intraday (MIS) daily trading ──────────────────────────────────────────
+    # Morning burst: top Hub signals placed as MIS at 09:30 IST; auto-squareoff at 15:10 IST.
+    # These positions are budgeted SEPARATELY from the positional CNC book.
+    INTRADAY_ENABLED:              bool  = True
+    INTRADAY_MAX_TRADES_PER_DAY:   int   = 3       # equity MIS slots per day
+    INTRADAY_POSITION_SIZE_INR:    float = 150_000.0  # ₹1.5L per equity intraday trade
+    INTRADAY_SL_PCT:               float = 0.005      # 0.5% stop-loss (tight intraday)
+    INTRADAY_TP_PCT:               float = 0.010      # 1.0% take-profit (quick scalp)
+    INTRADAY_CONFIDENCE_MIN:       float = 40.0       # min Hub score for intraday entry
+    INTRADAY_FNO_LOTS:             int   = 1          # lots per NIFTY/BANKNIFTY option trade
+
     # ── Paper trading parameters ──────────────────────────────────────────────
     # Default ₹25,00,000 — matches AGENT_EQUITY so the simulator wallet and the
     # AI Trading Agent equity start from the same base.

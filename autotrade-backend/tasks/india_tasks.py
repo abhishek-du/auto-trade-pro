@@ -684,7 +684,11 @@ async def _india_trade_loop():
         # Step 5: current wallet state
         summary        = await VirtualWallet.get_summary(session)
         balance        = summary["balance"]
-        pos_result     = await session.execute(select(OpenPosition))
+        # Exclude intraday MIS positions from the positional CNC count so that
+        # open MIS trades don't consume slots from the delivery position budget.
+        pos_result     = await session.execute(
+            select(OpenPosition).where(OpenPosition.product != "MIS")
+        )
         open_positions = list(pos_result.scalars().all())
 
         # Step 6: work down the ranked pool, opening until the risk budget / cash
@@ -717,7 +721,9 @@ async def _india_trade_loop():
                 continue
             balance -= pos_size["usd_value"]
             opened  += 1
-            pos_result     = await session.execute(select(OpenPosition))
+            pos_result     = await session.execute(
+                select(OpenPosition).where(OpenPosition.product != "MIS")
+            )
             open_positions = list(pos_result.scalars().all())
 
             explanation  = await generate_trade_explanation(signal)
@@ -762,6 +768,521 @@ def india_trade_loop():
     """
     logger.info("[india_trade_loop] Starting cycle")
     _run_async(_india_trade_loop())
+
+
+# ── 7. Intraday MIS burst: morning entry + EOD squareoff ─────────────────────
+#
+# Goals:
+#   ① Generate 3-5 trades/day (equity MIS + optionally 1 NIFTY/BANKNIFTY option)
+#   ② Test agent decision quality on intraday timeframe
+#   ③ Keep positions separate from the positional CNC book (own budget + own limit)
+#
+# Schedule (UTC): entry 04:00 (09:30 IST), squareoff 09:40 (15:10 IST Mon-Fri)
+# Positions tagged product='MIS'; excluded from CNC position count in trade_loop.
+
+async def _intraday_entry_task():
+    """Full-pipeline intraday entry at ~09:30 IST.
+
+    Pipeline (mirrors _india_trade_loop exactly):
+      1. Read latest Hub 7-factor scores from DB (recomputed at 09:29 IST)
+      2. Fetch live price from PRICE_CACHE → fallback to last 1m candle
+      3. Compute REAL dynamic SL/TP from 1m + 1d candles via compute_indicators
+      4. Concurrent Tavily web research + LLM veto for all candidates
+      5. Veto failed symbols; log rejection reason
+      6. Place surviving signals as MIS trades
+      7. Optionally add 1 NIFTY/BN option trade (if ENABLE_FNO=True)
+      8. Telegram summary with all 7-factor subscores + entry/SL/TP
+    """
+    import pandas as pd
+    from sqlalchemy import select, func as _func, and_
+
+    from db.models import MasterIntelligenceScore, OpenPosition
+    from paper_trading.trade_simulator import open_paper_trade
+    from paper_trading.virtual_wallet import VirtualWallet
+    from paper_trading.simulation_logger import SimLogger
+    from tasks._db import celery_session
+    from crawler.live_prices import PRICE_CACHE
+    from crawler.price_feed import get_latest_candles
+    from engine.signal_generator import TradingSignal as _TS
+    from engine.indicators import compute_indicators
+    from engine.risk_manager import compute_trade_levels
+    from utils.config import settings as _cfg
+
+    if not getattr(_cfg, "INTRADAY_ENABLED", True):
+        return
+
+    now_ist = datetime.datetime.now(_IST)
+    if not _is_india_trading_window():
+        return
+    # Only run in the first 90 minutes of the session
+    if not (9 <= now_ist.hour < 11):
+        logger.info(f"[intraday_entry] Outside entry window ({now_ist.strftime('%H:%M')} IST)")
+        return
+
+    async with celery_session() as session:
+        # ── Guard: count MIS positions already opened today ────────────────────
+        today_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        mis_today = (await session.execute(
+            select(OpenPosition)
+            .where(OpenPosition.product == "MIS")
+            .where(OpenPosition.opened_at >= today_utc)
+        )).scalars().all()
+
+        max_intraday = int(getattr(_cfg, "INTRADAY_MAX_TRADES_PER_DAY", 3))
+        if len(mis_today) >= max_intraday:
+            logger.info(f"[intraday_entry] Already {len(mis_today)}/{max_intraday} MIS trades today — skip")
+            return
+
+        slots    = max_intraday - len(mis_today)
+        conf_min = float(getattr(_cfg, "INTRADAY_CONFIDENCE_MIN", 40.0))
+        size_inr = float(getattr(_cfg, "INTRADAY_POSITION_SIZE_INR", 150_000.0))
+
+        # ── Step 1: top Hub BUY signals (latest batch only) ───────────────────
+        _latest_subq = (
+            select(
+                MasterIntelligenceScore.symbol.label("sym"),
+                _func.max(MasterIntelligenceScore.scored_at).label("max_at"),
+            )
+            .where(MasterIntelligenceScore.symbol.like("%.NS"))
+            .group_by(MasterIntelligenceScore.symbol)
+        ).subquery()
+
+        # Fetch extras (×3) to cover price-cache misses + post-veto drops
+        hub_rows = (await session.execute(
+            select(MasterIntelligenceScore)
+            .join(
+                _latest_subq,
+                and_(
+                    MasterIntelligenceScore.symbol == _latest_subq.c.sym,
+                    MasterIntelligenceScore.scored_at == _latest_subq.c.max_at,
+                ),
+            )
+            .where(MasterIntelligenceScore.is_blocked == False)
+            .where(MasterIntelligenceScore.signal.in_(["BUY", "STRONG_BUY"]))
+            .where(MasterIntelligenceScore.master_score >= conf_min)
+            .order_by(MasterIntelligenceScore.master_score.desc())
+            .limit(max(slots * 3, 12))
+        )).scalars().all()
+
+        logger.info(f"[intraday_entry] Hub BUY candidates: {len(hub_rows)} (threshold={conf_min:.0f})")
+
+        if not hub_rows:
+            logger.warning("[intraday_entry] No Hub BUY signals above threshold — skip")
+            return
+
+        # ── Step 2: build TradingSignal objects with live price ───────────────
+        signals: list[_TS] = []
+        for row in hub_rows:
+            sym_base = row.symbol.replace(".NS", "")
+            cached = PRICE_CACHE.get(row.symbol) or PRICE_CACHE.get(sym_base)
+            if isinstance(cached, dict):
+                price = float(cached.get("price", 0) or 0)
+            else:
+                price = float(getattr(cached, "price", 0) or 0) if cached else 0.0
+            if price <= 0:
+                try:
+                    last = await get_latest_candles(row.symbol, "1m", 1, session)
+                    price = float(last[-1].close) if last else 0.0
+                except Exception:
+                    price = 0.0
+            if price <= 0:
+                logger.debug(f"[intraday_entry] {row.symbol}: no live price, skip")
+                continue
+
+            hub_sub = {
+                "technical":   float(row.technical_score),
+                "news":        float(row.news_score),
+                "sector":      float(row.sector_score),
+                "macro":       float(row.macro_score),
+                "earnings":    float(row.earnings_score),
+                "fundamental": float(row.fundamental_score),
+                "options":     float(row.options_score),
+                "signal":      row.signal,
+                "regime":      row.regime or "",
+                "scored_at":   row.scored_at.isoformat() if row.scored_at else "",
+            }
+            signals.append(_TS(
+                symbol=row.symbol,
+                action="BUY",
+                confidence=float(row.master_score),
+                final_score=float(row.master_score),
+                pattern_score=0.0,
+                indicator_score=float(row.master_score),
+                sentiment_score=0.0,
+                entry_price=price,
+                stop_loss=round(price * 0.995, 2),      # placeholder; overwritten below
+                take_profit=round(price * 1.010, 2),    # placeholder; overwritten below
+                risk_reward_ratio=2.0,
+                patterns_detected=[],
+                reasoning_points=[
+                    f"Hub {row.signal} score={row.master_score:+.0f} "
+                    f"[T={row.technical_score:+.0f} N={row.news_score:+.0f} "
+                    f"F={row.fundamental_score:+.0f} E={row.earnings_score:+.0f} "
+                    f"S={row.sector_score:+.0f} M={row.macro_score:+.0f} "
+                    f"O={row.options_score:+.0f}]"
+                ],
+                regime=row.regime or "",
+                timeframe="1m",
+                hub_subscores=hub_sub,
+            ))
+
+        if not signals:
+            logger.warning("[intraday_entry] No signals with valid price — abort")
+            return
+
+        # ── Step 3: compute REAL dynamic SL/TP from 1m + 1d candles ──────────
+        # Uses same compute_indicators → compute_trade_levels path as trade_loop.
+        # Tries 1m first (intraday ATR), falls back to 1d if insufficient bars.
+        for sig in signals:
+            try:
+                # Try 1m candles first (at least 20 bars needed for ATR)
+                candles_1m = await get_latest_candles(sig.symbol, "1m", 60, session)
+                df = None
+                if len(candles_1m) >= 20:
+                    df = pd.DataFrame([{
+                        "open": c.open, "high": c.high, "low": c.low,
+                        "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
+                    } for c in candles_1m])
+                if df is None or df.empty:
+                    # Fall back to daily candles
+                    candles_1d = await get_latest_candles(sig.symbol, "1d", 60, session)
+                    if len(candles_1d) >= 20:
+                        df = pd.DataFrame([{
+                            "open": c.open, "high": c.high, "low": c.low,
+                            "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
+                        } for c in candles_1d])
+
+                sig_ind = compute_indicators(df) if df is not None and not df.empty else None
+                lv = compute_trade_levels("BUY", sig.entry_price, sig=sig_ind)
+                sig.stop_loss    = lv["stop_loss"]
+                sig.take_profit  = lv["target_1"]
+                sig.target_2     = lv["target_2"]
+                sig.atr          = lv["atr"]
+                risk = abs(sig.entry_price - lv["stop_loss"])
+                sig.risk_reward_ratio = round(
+                    abs(lv["target_2"] - sig.entry_price) / risk, 2
+                ) if risk > 0 else 2.0
+
+                # Build expert note (same as trade_loop)
+                try:
+                    from integrations.trade_explainer import build_expert_note
+                    expert = build_expert_note(
+                        symbol=sig.symbol,
+                        direction="BUY",
+                        entry=sig.entry_price,
+                        stop=lv["stop_loss"],
+                        target_1=lv["target_1"],
+                        target_2=lv["target_2"],
+                        confidence=sig.confidence,
+                        hub=sig.hub_subscores or None,
+                        reasoning=sig.reasoning_points[0] if sig.reasoning_points else "",
+                        strategy="INTRADAY_MIS",
+                        regime=sig.regime or "",
+                    )
+                    sig.reasoning_points = [expert]
+                except Exception:
+                    sig.reasoning_points.append(
+                        f"Trade levels [{lv['source']}]: SL ₹{lv['stop_loss']} "
+                        f"· T1 ₹{lv['target_1']} · T2 ₹{lv['target_2']}"
+                    )
+            except Exception as exc:
+                logger.debug(f"[intraday_entry] {sig.symbol} level calc failed: {exc}")
+
+        # ── Step 4: concurrent Tavily web research + LLM veto ─────────────────
+        # Same 8-second timeout per symbol as the main trade loop.
+        # Failures default to ALLOW so research never blocks execution.
+        from engine.pre_trade_research import run_pre_trade_research
+        research_tasks = [
+            asyncio.wait_for(
+                run_pre_trade_research(
+                    symbol=sig.symbol,
+                    action=sig.action,
+                    score=sig.final_score,
+                    regime=getattr(sig, "regime", "") or "",
+                    entry=sig.entry_price,
+                    stop=sig.stop_loss or 0.0,
+                    t1=sig.take_profit or 0.0,
+                    fund_grade=str(getattr(sig, "fundamental_grade", "") or ""),
+                ),
+                timeout=8.0,
+            )
+            for sig in signals
+        ]
+        research_results = await asyncio.gather(*research_tasks, return_exceptions=True)
+
+        vetoed: set[str] = set()
+        for sig, res in zip(signals, research_results):
+            if isinstance(res, Exception):
+                logger.debug(f"[intraday_entry] research error {sig.symbol}: {res}")
+                continue
+            if res.get("veto"):
+                vetoed.add(sig.symbol)
+                logger.warning(
+                    f"[intraday_entry] VETO {sig.symbol}: {res['veto_reason']}"
+                )
+                await SimLogger.log_analysis_cycle(
+                    session, sig.symbol, sig,
+                    rejected=True,
+                    reject_reason=f"[intraday/web-veto] {res['veto_reason']}",
+                )
+            else:
+                note = res.get("research_note", "")
+                if note:
+                    sig.reasoning_points.append(f"[web] {note[:300]}")
+
+        surviving = [s for s in signals if s.symbol not in vetoed]
+        logger.info(
+            f"[intraday_entry] {len(signals)} candidates → "
+            f"{len(vetoed)} vetoed → {len(surviving)} approved"
+        )
+
+        if not surviving:
+            logger.warning("[intraday_entry] All candidates vetoed — no trades placed")
+            await session.commit()
+            return
+
+        # ── Step 5: place MIS trades for approved signals ─────────────────────
+        wallet  = await VirtualWallet.get_summary(session)
+        balance = wallet["balance"]
+        opened  = 0
+        opened_details: list[dict] = []
+
+        for sig in surviving:
+            if opened >= slots:
+                break
+            units = max(1, int(size_inr / sig.entry_price))
+            cost  = sig.entry_price * units
+            if cost > balance * 0.95:
+                logger.debug(f"[intraday_entry] {sig.symbol}: insufficient cash (₹{balance:.0f})")
+                continue
+
+            try:
+                await open_paper_trade(
+                    sig, {"units": units, "usd_value": cost}, session, product="MIS"
+                )
+                balance -= cost
+                opened  += 1
+                opened_details.append({
+                    "symbol": sig.symbol.replace(".NS", ""),
+                    "price":  sig.entry_price,
+                    "sl":     sig.stop_loss,
+                    "tp":     sig.take_profit,
+                    "score":  sig.final_score,
+                    "units":  units,
+                })
+                logger.info(
+                    f"[intraday_entry] ✓ MIS BUY {sig.symbol} ×{units} "
+                    f"@₹{sig.entry_price:.2f} SL=₹{sig.stop_loss:.2f} TP=₹{sig.take_profit:.2f} "
+                    f"score={sig.final_score:+.1f}"
+                )
+            except Exception as exc:
+                logger.warning(f"[intraday_entry] {sig.symbol} open failed: {exc}")
+
+        # ── Step 6: 1 NIFTY/BN option trade (if F&O gating is ON) ────────────
+        sl_pct = float(getattr(_cfg, "INTRADAY_SL_PCT", 0.005))
+        tp_pct = float(getattr(_cfg, "INTRADAY_TP_PCT", 0.010))
+        if getattr(_cfg, "ENABLE_FNO", False) and getattr(_cfg, "ENABLE_OPTIONS", False):
+            try:
+                syms_placed = [d["symbol"] for d in opened_details]
+                placed = await _open_index_option_mis(session, balance, sl_pct, tp_pct, syms_placed)
+                if placed:
+                    opened += 1
+                    opened_details.append({"symbol": syms_placed[-1], "price": 0, "sl": 0, "tp": 0, "score": 0, "units": 75})
+            except Exception as exc:
+                logger.debug(f"[intraday_entry] index option skipped: {exc}")
+
+        await VirtualWallet.take_daily_snapshot(session)
+        await session.commit()
+
+        logger.info(
+            f"[intraday_entry] done — {opened} MIS trade(s) placed, "
+            f"{len(vetoed)} vetoed by web research"
+        )
+
+        # ── Step 7: Telegram summary with full breakdown ───────────────────────
+        if opened and _cfg.telegram_available:
+            from integrations.telegram_service import send
+            lines = [
+                f"🌅 *Intraday MIS Entry — {now_ist.strftime('%d %b %H:%M')} IST*",
+                f"Placed: {opened} trade(s)  |  Vetoed: {len(vetoed)}",
+                "",
+            ]
+            for d in opened_details:
+                lines.append(
+                    f"• *{d['symbol']}*  score={d['score']:+.0f}  "
+                    f"×{d['units']} @₹{d['price']:.2f}  "
+                    f"SL ₹{d['sl']:.2f} → TP ₹{d['tp']:.2f}"
+                )
+            if vetoed:
+                lines.append(f"\n_Vetoed: {', '.join(s.replace('.NS','') for s in vetoed)}_")
+            await send("\n".join(lines))
+
+
+async def _open_index_option_mis(
+    session, balance: float, sl_pct: float, tp_pct: float, opened_syms: list
+) -> bool:
+    """Buy 1 lot NIFTY ATM CE or PE as MIS based on Hub macro direction.
+
+    Returns True if a trade was placed, False otherwise.
+    """
+    from sqlalchemy import select, func as _func, and_, text as _text
+    from db.models import MasterIntelligenceScore
+    from paper_trading.trade_simulator import open_paper_trade
+    from engine.signal_generator import TradingSignal as _TS
+
+    # Determine market direction from Hub scores (use latest batch, up to 2 h old)
+    _latest_subq = (
+        select(_func.max(MasterIntelligenceScore.scored_at))
+        .where(MasterIntelligenceScore.symbol.like("%.NS"))
+        .scalar_subquery()
+    )
+    agg = (await session.execute(
+        select(_func.avg(MasterIntelligenceScore.master_score).label("avg_score"))
+        .where(MasterIntelligenceScore.scored_at >= _latest_subq - datetime.timedelta(hours=2))
+    )).one()
+    avg_score = float(agg.avg_score or 0)
+    if abs(avg_score) < 10:
+        return False   # market too ambiguous for directional option
+
+    option_type = "CE" if avg_score > 0 else "PE"
+
+    # Get latest NIFTY spot + ATM option LTP from option_contract_snapshots
+    row = (await session.execute(_text("""
+        SELECT strike, ltp, spot, expiry_date
+        FROM option_contract_snapshots
+        WHERE underlying = 'NIFTY'
+          AND option_type = :ot
+          AND ltp > 0
+          AND ABS(strike - spot) = (
+              SELECT MIN(ABS(strike - spot))
+              FROM option_contract_snapshots
+              WHERE underlying = 'NIFTY' AND option_type = :ot AND ltp > 0
+          )
+        ORDER BY id DESC LIMIT 1
+    """), {"ot": option_type})).one_or_none()
+
+    if row is None or row.ltp <= 0:
+        return False
+
+    ltp       = float(row.ltp)
+    strike    = float(row.strike)
+    expiry    = row.expiry_date
+    lot_size  = 75   # NIFTY lot size
+    cost      = ltp * lot_size
+    if cost > balance * 0.5:
+        return False   # option too expensive relative to remaining cash
+
+    stop_loss   = round(ltp * (1 - sl_pct * 5), 2)  # 2.5% SL on premium
+    take_profit = round(ltp * (1 + tp_pct * 5), 2)  # 5% TP on premium
+
+    symbol = f"NIFTY{expiry.strftime('%d%b%y').upper()}{int(strike)}{option_type}"
+
+    signal = _TS(
+        symbol=f"NIFTY.NS",
+        action="BUY",
+        confidence=abs(avg_score),
+        final_score=avg_score,
+        pattern_score=0.0,
+        indicator_score=abs(avg_score),
+        sentiment_score=0.0,
+        entry_price=ltp,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_reward_ratio=tp_pct * 5 / (sl_pct * 5),
+        patterns_detected=[],
+        reasoning_points=[
+            f"Trade levels [intraday-fno]: SL ₹{stop_loss} · T1 ₹{take_profit}",
+            f"NIFTY {option_type} {int(strike)} exp {expiry} · Hub avg {avg_score:+.0f} · 1 lot MIS",
+        ],
+        regime="INTRADAY_FNO",
+        timeframe="1m",
+    )
+    pos_size = {"units": lot_size, "usd_value": cost}
+    await open_paper_trade(signal, pos_size, session, product="MIS")
+    opened_syms.append(f"NIFTY-{option_type}")
+    logger.info(f"[intraday_entry] ✓ MIS {option_type} {symbol} @₹{ltp:.2f} (1 lot)")
+    return True
+
+
+async def _intraday_squareoff_task():
+    """Close all open MIS positions at 15:10 IST before Zerodha auto-squareoff at 15:20."""
+    from sqlalchemy import select
+
+    from db.models import OpenPosition
+    from paper_trading.trade_simulator import close_paper_trade
+    from paper_trading.virtual_wallet import VirtualWallet
+    from tasks._db import celery_session
+    from crawler.live_prices import PRICE_CACHE
+    from utils.config import settings as _cfg
+
+    if not getattr(_cfg, "INTRADAY_ENABLED", True):
+        return
+
+    async with celery_session() as session:
+        mis_positions = (await session.execute(
+            select(OpenPosition).where(OpenPosition.product == "MIS")
+        )).scalars().all()
+
+        if not mis_positions:
+            logger.info("[intraday_squareoff] No MIS positions to close")
+            return
+
+        closed = 0
+        total_pnl = 0.0
+        details: list[str] = []
+
+        for pos in mis_positions:
+            sym_base = pos.symbol.replace(".NS", "")
+            cached = PRICE_CACHE.get(pos.symbol) or PRICE_CACHE.get(sym_base)
+            if isinstance(cached, dict):
+                close_price = float(cached.get("price", 0) or pos.current_price)
+            else:
+                close_price = float(getattr(cached, "price", 0) or pos.current_price) if cached else pos.current_price
+            if close_price <= 0:
+                close_price = pos.current_price
+
+            try:
+                trade = await close_paper_trade(pos, close_price, "MIS_SQUAREOFF", session)
+                pnl = float(trade.pnl or 0)
+                total_pnl += pnl
+                closed += 1
+                sign = "+" if pnl >= 0 else ""
+                details.append(f"{sym_base} {sign}₹{pnl:,.0f}")
+                logger.info(f"[intraday_squareoff] ✓ Closed {pos.symbol} @₹{close_price:.2f} pnl={sign}₹{pnl:,.0f}")
+            except Exception as exc:
+                logger.warning(f"[intraday_squareoff] {pos.symbol} close failed: {exc}")
+
+        await VirtualWallet.take_daily_snapshot(session)
+        await session.commit()
+
+        sign = "+" if total_pnl >= 0 else ""
+        logger.info(f"[intraday_squareoff] closed {closed} MIS position(s), P&L ₹{sign}{total_pnl:,.0f}")
+
+        if closed and _cfg.telegram_available:
+            from integrations.telegram_service import send
+            detail_str = " · ".join(details) if details else ""
+            msg = (
+                f"📊 *Intraday Squareoff Complete*\n"
+                f"Closed: {closed} MIS position(s)\n"
+                f"Total P&L: ₹{sign}{total_pnl:,.0f}\n"
+            )
+            if detail_str:
+                msg += f"Detail: {detail_str}"
+            await send(msg)
+
+
+@celery_app.task(name="tasks.intraday_entry")
+def intraday_entry():
+    """09:30 IST: open intraday MIS trades from top Hub signals."""
+    logger.info("[intraday_entry] Starting intraday morning burst")
+    _run_async(_intraday_entry_task())
+
+
+@celery_app.task(name="tasks.intraday_squareoff")
+def intraday_squareoff():
+    """15:10 IST: squareoff all MIS positions before Zerodha 15:20 auto-SO."""
+    logger.info("[intraday_squareoff] Starting MIS squareoff sweep")
+    _run_async(_intraday_squareoff_task())
 
 
 # ── Trade journal sync — keeps the spreadsheet up to date out-of-band ─────────
@@ -847,6 +1368,14 @@ async def _refresh_zerodha_instruments():
         count = await refresh_instrument_tokens(session)
         await session.commit()
         logger.info(f"[zerodha] Instrument tokens refreshed: {count} rows")
+
+    # Also refresh the in-memory INSTRUMENT_CACHE used by zerodha_historical
+    try:
+        from crawler.zerodha_instruments import refresh_instrument_cache
+        cached = await refresh_instrument_cache()
+        logger.info(f"[zerodha] INSTRUMENT_CACHE refreshed: {cached} symbols")
+    except Exception as exc:
+        logger.debug(f"[zerodha] INSTRUMENT_CACHE refresh skipped: {exc}")
 
 
 @celery_app.task(name="tasks.india_tasks.refresh_zerodha_instruments")
@@ -1173,11 +1702,10 @@ def kite_sync_holdings_task():
 
 @celery_app.task(name="tasks.kite_live_candles")
 def kite_live_candles_task():
-    """Fetch 1-minute candles from Kite every 60 s while NSE market is open.
+    """Fetch 1-minute candles from Kite every 3 min while NSE market is open.
 
-    Runs 09:15–15:30 IST Mon–Fri via beat.  Uses upsert so repeated calls
-    for the same minute bar are idempotent.  Silently skips when the market
-    is closed or ZERODHA_ENABLED is false.
+    Covers the full hub universe (~500 symbols) via concurrent fetching
+    (semaphore=3). Runs 09:15–15:30 IST Mon–Fri via beat. Upsert-safe.
     """
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
@@ -1192,8 +1720,15 @@ def kite_live_candles_task():
     async def _run():
         from tasks._db import celery_session
         from crawler.zerodha_historical import sync_live_1m_candles
+        from crawler.zerodha_instruments import refresh_instrument_cache
+        from engine.hub_universe import get_hub_universe
+
+        await refresh_instrument_cache()
         async with celery_session() as session:
-            return await sync_live_1m_candles(session)
+            hub_syms = await get_hub_universe(session)
+            # Strip .NS/.BO — get_kite_candles_for_range handles both forms
+            symbols = [s.replace(".NS", "").replace(".BO", "") for s in hub_syms]
+            return await sync_live_1m_candles(session, symbols=symbols)
 
     result = _run_async(_run())
     logger.info(f"[kite_live_candles] {result}")

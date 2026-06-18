@@ -184,11 +184,7 @@ export default function SectorHeatmap({ sectors = [], onSectorClick, viewMode = 
 
   // Grid view (default)
   return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: 'repeat(4, 1fr)',
-      gap: '10px',
-    }}>
+    <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2.5">
       {sectors.map(sector => (
         <SectorTile
           key={sector.sector_key}

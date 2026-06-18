@@ -1,0 +1,313 @@
+{
+  "period": "2022-01-01 \u2192 2026-06-17",
+  "symbols_tested": 443,
+  "total_trades": 7045,
+  "overall": {
+    "label": "overall",
+    "n": 7045,
+    "win_rate": 0.5339,
+    "profit_factor": 1.137,
+    "avg_win": 5307.2,
+    "avg_loss": 5346.55,
+    "net_pnl": 2402297.01,
+    "mean_r": 0.0681,
+    "ci_lo_r": 0.0422,
+    "ci_hi_r": 0.0939,
+    "r_verdict": "POSITIVE",
+    "sufficient": true
+  },
+  "by_strategy": {
+    "PULLBACK_LONG": {
+      "label": "PULLBACK_LONG",
+      "n": 4493,
+      "win_rate": 0.503,
+      "profit_factor": 1.131,
+      "avg_win": 6015.13,
+      "avg_loss": 5384.25,
+      "net_pnl": 1571164.85,
+      "mean_r": 0.0704,
+      "ci_lo_r": 0.0356,
+      "ci_hi_r": 0.1052,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "TREND_BREAKOUT_LONG": {
+      "label": "TREND_BREAKOUT_LONG",
+      "n": 2550,
+      "win_rate": 0.5886,
+      "profit_factor": 1.152,
+      "avg_win": 4241.28,
+      "avg_loss": 5266.12,
+      "net_pnl": 842011.06,
+      "mean_r": 0.0651,
+      "ci_lo_r": 0.0282,
+      "ci_hi_r": 0.1029,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "RANGE_REVERSAL_LONG": {
+      "label": "RANGE_REVERSAL_LONG",
+      "n": 2,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "avg_win": 0,
+      "avg_loss": 5439.45,
+      "net_pnl": -10878.9,
+      "mean_r": -1.118,
+      "ci_lo_r": -1.138,
+      "ci_hi_r": -1.098,
+      "r_verdict": "NEGATIVE",
+      "sufficient": false
+    }
+  },
+  "year_regimes": {
+    "2022": "bear/correction",
+    "2023": "bull_trend",
+    "2024": "mixed",
+    "2025": "chop/decline",
+    "2026": "chop/decline"
+  },
+  "walk_forward": {
+    "split1_train2022_23_val2024": {
+      "train": {
+        "label": "train(split1_train2022_23_val2024)",
+        "n": 2611,
+        "win_rate": 0.6319,
+        "profit_factor": 1.617,
+        "avg_win": 4994.36,
+        "avg_loss": 5302.45,
+        "net_pnl": 3145043.98,
+        "mean_r": 0.2393,
+        "ci_lo_r": 0.1992,
+        "ci_hi_r": 0.2797,
+        "r_verdict": "POSITIVE",
+        "sufficient": true
+      },
+      "val": {
+        "label": "val(split1_train2022_23_val2024)",
+        "n": 2188,
+        "win_rate": 0.5265,
+        "profit_factor": 1.066,
+        "avg_win": 5108.84,
+        "avg_loss": 5327.68,
+        "net_pnl": 365909.99,
+        "mean_r": 0.0334,
+        "ci_lo_r": -0.0107,
+        "ci_hi_r": 0.0786,
+        "r_verdict": "UNCERTAIN",
+        "sufficient": true
+      }
+    },
+    "split2_train2022_24_val2025_26": {
+      "train": {
+        "label": "train(split2_train2022_24_val2025_26)",
+        "n": 4799,
+        "win_rate": 0.5839,
+        "profit_factor": 1.331,
+        "avg_win": 5041.43,
+        "avg_loss": 5315.54,
+        "net_pnl": 3510953.97,
+        "mean_r": 0.1454,
+        "ci_lo_r": 0.1149,
+        "ci_hi_r": 0.176,
+        "r_verdict": "POSITIVE",
+        "sufficient": true
+      },
+      "val": {
+        "label": "val(split2_train2022_24_val2025_26)",
+        "n": 2246,
+        "win_rate": 0.427,
+        "profit_factor": 0.84,
+        "avg_win": 6083.71,
+        "avg_loss": 5394.67,
+        "net_pnl": -1108656.96,
+        "mean_r": -0.0971,
+        "ci_lo_r": -0.1458,
+        "ci_hi_r": -0.0478,
+        "r_verdict": "NEGATIVE",
+        "sufficient": true
+      }
+    }
+  },
+  "regime_crosstab": {
+    "PULLBACK_LONG": {
+      "BULL_TRENDING": {
+        "n": 4493,
+        "wr": 0.503,
+        "pf": 1.131,
+        "mean_r": 0.0704,
+        "verdict": "POSITIVE"
+      }
+    },
+    "RANGE_REVERSAL_LONG": {
+      "RANGE": {
+        "n": 2,
+        "wr": 0.0,
+        "pf": 0.0,
+        "mean_r": -1.118,
+        "verdict": "NEGATIVE"
+      }
+    },
+    "TREND_BREAKOUT_LONG": {
+      "BULL_TRENDING": {
+        "n": 2550,
+        "wr": 0.5886,
+        "pf": 1.152,
+        "mean_r": 0.0651,
+        "verdict": "POSITIVE"
+      }
+    }
+  },
+  "confidence_buckets": {
+    "60-69": {
+      "label": "60-69",
+      "n": 2,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "avg_win": 0,
+      "avg_loss": 5439.45,
+      "net_pnl": -10878.9,
+      "mean_r": -1.118,
+      "ci_lo_r": -1.138,
+      "ci_hi_r": -1.098,
+      "r_verdict": "NEGATIVE",
+      "sufficient": false
+    },
+    "70-79": {
+      "label": "70-79",
+      "n": 4493,
+      "win_rate": 0.503,
+      "profit_factor": 1.131,
+      "avg_win": 6015.13,
+      "avg_loss": 5384.25,
+      "net_pnl": 1571164.85,
+      "mean_r": 0.0704,
+      "ci_lo_r": 0.0351,
+      "ci_hi_r": 0.1052,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "80-89": {
+      "label": "80-89",
+      "n": 2550,
+      "win_rate": 0.5886,
+      "profit_factor": 1.152,
+      "avg_win": 4241.28,
+      "avg_loss": 5266.12,
+      "net_pnl": 842011.06,
+      "mean_r": 0.0651,
+      "ci_lo_r": 0.0274,
+      "ci_hi_r": 0.1026,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    }
+  },
+  "hub_unshadowed": {
+    "n": 0,
+    "label": "HUB_SIGNAL un-shadowed (technical proxy)"
+  },
+  "exit_policies": {
+    "current": {
+      "label": "Current (T1 partial + 1\u00d7ATR trail + 45d stale)",
+      "n": 1600,
+      "win_rate": 0.5456,
+      "profit_factor": 1.181,
+      "avg_win": 5283.0,
+      "avg_loss": 5372.48,
+      "net_pnl": 706262.55,
+      "mean_r": 0.0887,
+      "ci_lo_r": 0.0347,
+      "ci_hi_r": 0.1425,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "full_trail": {
+      "label": "Full trail, no partial (1\u00d7ATR from entry)",
+      "n": 1779,
+      "win_rate": 0.2929,
+      "profit_factor": 0.485,
+      "avg_win": 2336.58,
+      "avg_loss": 1996.83,
+      "net_pnl": -1294652.99,
+      "mean_r": -0.1493,
+      "ci_lo_r": -0.1746,
+      "ci_hi_r": -0.1245,
+      "r_verdict": "NEGATIVE",
+      "sufficient": true
+    },
+    "partial_fixed": {
+      "label": "Partial at T1, fixed T2 exit (no trail)",
+      "n": 1215,
+      "win_rate": 0.4757,
+      "profit_factor": 1.431,
+      "avg_win": 7480.03,
+      "avg_loss": 4743.32,
+      "net_pnl": 1301962.42,
+      "mean_r": 0.2142,
+      "ci_lo_r": 0.1429,
+      "ci_hi_r": 0.2854,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "be_after_1r": {
+      "label": "Break-even stop once +1R reached",
+      "n": 1221,
+      "win_rate": 0.2907,
+      "profit_factor": 1.245,
+      "avg_win": 9732.07,
+      "avg_loss": 3203.63,
+      "net_pnl": 680541.12,
+      "mean_r": 0.1123,
+      "ci_lo_r": 0.043,
+      "ci_hi_r": 0.1818,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "trail_150": {
+      "label": "T1 partial + 1.5\u00d7ATR trail",
+      "n": 1558,
+      "win_rate": 0.5443,
+      "profit_factor": 1.143,
+      "avg_win": 5138.39,
+      "avg_loss": 5367.4,
+      "net_pnl": 546502.86,
+      "mean_r": 0.0711,
+      "ci_lo_r": 0.0152,
+      "ci_hi_r": 0.1264,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "trail_075": {
+      "label": "T1 partial + 0.75\u00d7ATR trail",
+      "n": 1611,
+      "win_rate": 0.5469,
+      "profit_factor": 1.238,
+      "avg_win": 5529.65,
+      "avg_loss": 5389.36,
+      "net_pnl": 937382.57,
+      "mean_r": 0.1163,
+      "ci_lo_r": 0.0612,
+      "ci_hi_r": 0.1716,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    }
+  },
+  "caveats": [
+    "Survivorship bias: universe is today's live symbols; delisted stocks excluded",
+    "HUB_SIGNAL un-shadowed uses EMA/ST/RSI proxy, not real 7-factor hub scores",
+    "pattern_direction forced to NEUTRAL in bridge (no candlestick stack)",
+    "RANGE_REVERSAL hammer check uses real OHLCV via df.iloc[-1] \u2014 correct",
+    "Cost model: Varsity M7 (STT + exchange + SEBI + stamp + GST + brokerage)",
+    "Slippage: 0.01\u20130.03% adverse on entry (live _SLIP_MIN/_SLIP_MAX matched)"
+  ],
+  "elapsed_minutes": 8.6,
+  "verdict": {
+    "statement": "Out-of-sample, on the live decision path, the system shows mean expectancy of 0.068 R/trade (95% CI [0.042, 0.094]).  OOS (2025-26): -0.097 R (NEGATIVE).  Strategy PULLBACK_LONG carries the edge; RANGE_REVERSAL_LONG is dilutive.",
+    "edge_status": "NO EDGE",
+    "regime_note": "Edge present across multiple regimes.",
+    "strategy_note": "Best: PULLBACK_LONG (0.070 R)  Worst: RANGE_REVERSAL_LONG (-1.118 R)",
+    "confidence_note": "Confidence is NOT predictive \u2014 thresholds may be theater.",
+    "oos_note": "OOS (2025-26): mean_R=-0.097, NEGATIVE",
+    "recommendation": "Do NOT use real money.  Edge is negative or zero."
+  }
+}

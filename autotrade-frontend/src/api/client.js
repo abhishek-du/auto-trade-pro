@@ -54,7 +54,8 @@ export const saveSettings             = (body) => api.patch('/api/v1/settings/',
 export const getIndiaMarketStatus  = ()              => api.get('/api/v1/india/market-status');
 export const getIndiaVix           = ()              => api.get('/api/v1/india/vix');
 export const getIndiaFiiDii        = ()              => api.get('/api/v1/india/fii-dii');
-export const getIndiaOptionsChain  = (symbol)        => api.get(`/api/v1/india/options-chain/${symbol}`);
+export const getIndiaOptionsChain      = (symbol) => api.get(`/api/v1/india/options-chain/${symbol}`);
+export const getIndiaIndexOptionsChain = (symbol) => api.get(`/api/v1/india/options-chain-index/${symbol}`);
 export const getIndiaMutualFunds   = ()              => api.get('/api/v1/india/mutual-funds');
 export const getIndiaMFSip         = (code, amt = 5000, months = 12) =>
     api.get(`/api/v1/india/mutual-funds/${code}/sip`, { params: { monthly_amount: amt, months } });

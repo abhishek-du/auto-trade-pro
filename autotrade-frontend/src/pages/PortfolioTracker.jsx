@@ -795,12 +795,12 @@ export default function PortfolioTracker() {
           <AgentActivityPanel />
 
           {/* Tab bar */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 onClick={() => handleTabChange(id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 whitespace-nowrap transition-colors ${
                   tab === id ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'
                 }`}
               >
