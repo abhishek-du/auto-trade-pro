@@ -1331,6 +1331,84 @@ async def get_fno_status(symbol: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get(
+    "/options-chain/{symbol}",
+    summary="Live per-stock option chain via Kite — reliable PCR/max-pain/IV (also feeds the hub)",
+)
+async def get_options_chain(symbol: str, db: AsyncSession = Depends(get_db)):
+    """On-demand near-ATM option chain for an F&O stock, sourced from Kite.
+
+    Unlike /options-research (flaky Tavily web search), this reads the real chain
+    from the broker. Persists OptionsChainSnapshot + OptionContractSnapshot best-
+    effort so the hub's per-stock options factor picks it up for this symbol too.
+    """
+    from crawler.zerodha_client import get_kite_client
+    from crawler.equity_options import _build_chain_via_kite, _bare
+    from crawler.options_chain import (
+        calculate_max_pain, get_support_resistance_from_oi, compute_and_persist_greeks,
+    )
+    from db.models import KiteInstrument, OptionsChainSnapshot
+
+    bare = _bare(symbol)
+    is_fno = (await db.execute(
+        select(func.count()).select_from(KiteInstrument).where(
+            KiteInstrument.exchange == "NFO",
+            KiteInstrument.name == bare,
+            KiteInstrument.instrument_type.in_(("CE", "PE")),
+        )
+    )).scalar() > 0
+    if not is_fno:
+        return {"symbol": bare, "is_fno": False, "available": False}
+
+    kite = get_kite_client()
+    if not kite.access_token:
+        raise HTTPException(status_code=503, detail="Kite token unavailable — cannot fetch live chain")
+    try:
+        d = await kite.get_ltp([f"NSE:{bare}"])
+        spot = float((d.get(f"NSE:{bare}") or {}).get("last_price") or 0.0)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"spot fetch failed: {exc}")
+
+    chain = await _build_chain_via_kite(bare, spot, db, strike_window=settings.HUB_OPTIONS_STRIKE_WINDOW)
+    if not chain or not chain["options_data"]:
+        return {"symbol": bare, "is_fno": True, "available": False}
+
+    od = chain["options_data"]
+    call_oi, put_oi = chain["total_call_oi"], chain["total_put_oi"]
+    pcr = round(put_oi / call_oi, 3) if call_oi > 0 else 0.0
+    max_pain = calculate_max_pain(od, spot)
+    levels = get_support_resistance_from_oi(od, spot)
+    atm_strike = min((r["strike_price"] for r in od if r["strike_price"]),
+                     key=lambda k: abs(k - spot), default=spot)
+
+    atm_iv = None
+    try:
+        db.add(OptionsChainSnapshot(
+            symbol=bare, expiry_date=chain["expiry_date"], atm_strike=atm_strike,
+            pcr=pcr, max_pain=max_pain, total_call_oi=call_oi, total_put_oi=put_oi,
+            support_levels=levels["support"], resistance_levels=levels["resistance"],
+        ))
+        atm_iv = await compute_and_persist_greeks(bare, chain, db)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.debug(f"[options-chain] {bare} persist failed: {exc}")
+
+    calls = sorted((r for r in od if r["call_oi"] > 0), key=lambda r: r["call_oi"], reverse=True)[:3]
+    puts = sorted((r for r in od if r["put_oi"] > 0), key=lambda r: r["put_oi"], reverse=True)[:3]
+    key_strikes = ([{"type": "CALL", "strike": r["strike_price"]} for r in calls]
+                   + [{"type": "PUT", "strike": r["strike_price"]} for r in puts])
+
+    return {
+        "symbol": bare, "is_fno": True, "available": True, "source": "kite",
+        "spot": spot, "expiry_date": str(chain["expiry_date"]),
+        "pcr": pcr, "max_pain": max_pain,
+        "iv": round(atm_iv * 100, 1) if atm_iv else None,
+        "support": levels["support"], "resistance": levels["resistance"],
+        "key_strikes": key_strikes,
+    }
+
+
+@router.get(
     "/screener-deep/{symbol}",
     summary="Full Screener.in data: quarterly P&L, balance sheet, cash flow, shareholding, pros/cons",
 )
