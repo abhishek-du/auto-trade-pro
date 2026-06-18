@@ -196,6 +196,20 @@ class Settings(BaseSettings):
     # Volatility strategies (long straddle when IV-Rank is low). Defined-risk.
     FNO_VOL_ENABLED:            bool  = False
 
+    # Per-stock options enrichment for the Master Intelligence Hub. When ON, a
+    # 2×/day Celery job fetches equity option chains (via Kite quote) for the
+    # F&O-eligible subset of the hub universe and persists OptionContractSnapshot
+    # + IVHistory so the hub's options factor uses each stock's OWN PCR/IV-skew
+    # instead of falling back to the index-wide NIFTY PCR. Also forces the NFO
+    # instrument master to sync (needed to resolve strikes) even if ENABLE_FNO
+    # is off. Independent of ENABLE_FNO (which gates agent F&O trading).
+    ENABLE_HUB_OPTIONS:         bool  = False
+    # Max F&O underlyings enriched per run (∩ hub universe, capped for rate limit).
+    HUB_OPTIONS_MAX_SYMBOLS:    int   = 200
+    # Strikes kept each side of ATM (bounds quote size; near-ATM PCR is cleaner
+    # than full-chain PCR where far-OTM OI is stale).
+    HUB_OPTIONS_STRIKE_WINDOW:  int   = 12
+
     # Exit policy — validated OOS in Phase 2 backtest
     # partial_fixed: book 50% at T1, hold remaining to fixed T2 target (no trailing)
     # current:       book 50% at T1, trail remaining to T2 with 1×ATR trailing stop

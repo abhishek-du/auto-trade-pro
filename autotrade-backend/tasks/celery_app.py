@@ -103,6 +103,15 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 10},
     },
 
+    # 2×/day during NSE hours (05:30 UTC = 11:00 IST, 09:30 UTC = 15:00 IST):
+    # per-stock options enrichment so the hub scores each F&O stock on its own
+    # PCR/IV instead of the index-wide NIFTY fallback. Gated by ENABLE_HUB_OPTIONS.
+    "india-equity-options-enrich": {
+        "task":     "tasks.india_equity_options_enrich",
+        "schedule": crontab(hour="5,9", minute=30, day_of_week="1-5"),
+        "options":  {"countdown": 15},
+    },
+
     # Daily 14:30 UTC = 8:00 PM IST: AMFI NAV bulk fetch (publishes after 7 PM IST)
     "india-mf-nav-daily": {
         "task":     "tasks.india_mutual_fund_nav",
