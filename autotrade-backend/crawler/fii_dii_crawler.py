@@ -320,7 +320,10 @@ def _fii_base_points(fii_net: float) -> int:
     else:                   return -30
 
 
-async def calculate_fii_dii_score(session: AsyncSession) -> float:
+async def calculate_fii_dii_score(
+    session: AsyncSession,
+    bar_date: datetime.datetime | None = None,
+) -> float:
     """Score the last 5 days of institutional flow on a -100 to +100 scale.
 
     Scoring rules
@@ -337,10 +340,14 @@ async def calculate_fii_dii_score(session: AsyncSession) -> float:
     Bonus: 5-day cumulative FII flow > 0 →  +10 pts  (sustained inflow trend)
 
     Result is clamped to [-100, +100].
+
+    When bar_date is provided (backtest mode) only FII/DII rows on or before
+    that date are used, eliminating look-ahead bias.
     """
-    result = await session.execute(
-        select(FIIDIIFlow).order_by(desc(FIIDIIFlow.date)).limit(5)
-    )
+    q = select(FIIDIIFlow).order_by(desc(FIIDIIFlow.date)).limit(5)
+    if bar_date is not None:
+        q = q.where(FIIDIIFlow.date <= bar_date.date())
+    result = await session.execute(q)
     rows = list(result.scalars().all())
 
     if not rows:

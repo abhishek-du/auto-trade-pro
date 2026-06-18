@@ -1106,7 +1106,11 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     }
 
 
-async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
+async def get_market_sentiment(
+    symbol: str,
+    session: AsyncSession,
+    bar_date: datetime | None = None,
+) -> float:
     """Return the average sentiment score for the last N news items mentioning symbol.
 
     Primary lookup: PostgreSQL JSON containment on ``tickers_affected``. The
@@ -1121,6 +1125,9 @@ async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
     lookup is empty (covers ADRs, forex codes, and any ticker the
     kite_instruments map doesn't know about).
 
+    When bar_date is provided (backtest mode) only news crawled on or before
+    that date is considered, eliminating look-ahead bias.
+
     Returns 0.0 when no relevant news is found.
     """
     sym = (symbol or "").strip()
@@ -1132,10 +1139,13 @@ async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
     # both via the ::jsonb cast on the bind parameter.
     payload = f'["{sym}"]'
 
+    date_filter = [text("tickers_affected::jsonb @> :payload ::jsonb").bindparams(payload=payload)]
+    if bar_date is not None:
+        date_filter.append(NewsItem.crawled_at <= bar_date)
+
     result = await session.execute(
         select(NewsItem.score)
-        .where(text("tickers_affected::jsonb @> :payload ::jsonb")
-               .bindparams(payload=payload))
+        .where(*date_filter)
         .order_by(NewsItem.crawled_at.desc())
         .limit(_SENTIMENT_WINDOW)
     )
@@ -1147,9 +1157,12 @@ async def get_market_sentiment(symbol: str, session: AsyncSession) -> float:
     # raw headline text and the fallback always misses.
     if not scores:
         bare = sym.replace(".NS", "").replace(".BO", "")
+        bare_filter = [NewsItem.headline.ilike(f"%{bare}%")]
+        if bar_date is not None:
+            bare_filter.append(NewsItem.crawled_at <= bar_date)
         result2 = await session.execute(
             select(NewsItem.score)
-            .where(NewsItem.headline.ilike(f"%{bare}%"))
+            .where(*bare_filter)
             .order_by(NewsItem.crawled_at.desc())
             .limit(_SENTIMENT_WINDOW)
         )

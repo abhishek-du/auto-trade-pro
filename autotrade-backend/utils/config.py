@@ -229,6 +229,19 @@ class Settings(BaseSettings):
     AGENT_MAX_NEW_ENTRIES_DAY:  int   = 20   # per-day new-trade ceiling (paper: bypassed)
     AGENT_CONSEC_LOSS_LOCKOUT:  int   = 2
     AGENT_CONFIDENCE_THRESHOLD: int   = 30
+    # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
+    # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
+    AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
+    # Hard per-position cap as a fraction of equity.
+    # 5% means at most ₹1L of a ₹20L book in any single stock (prevents a single
+    # overnight gap-down from causing catastrophic drawdown).
+    AGENT_MAX_POSITION_WEIGHT:  float = 0.05
+    # Volatility-adjusted sizing: when India VIX rises above the high threshold,
+    # position sizes are linearly reduced toward VIX_SIZE_SCALE_MIN.
+    # At VIX=22 → 100% size; at VIX=30 → 50%; above 30 → floor at 50%.
+    VIX_HIGH_THRESHOLD:         float = 22.0
+    VIX_SIZE_SCALE_MIN:         float = 0.50
+    VIX_EXTREME_THRESHOLD:      float = 30.0   # VIX at which floor kicks in
 
     # Hub-score-driven exits — close held positions when intelligence changes.
     # When Hub 7-factor score for a held BUY drops to or below this value, the

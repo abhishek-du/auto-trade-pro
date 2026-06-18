@@ -488,6 +488,103 @@ async def _process_symbol(
                 _send_shortlist_alert(candidate, df=df, executed=False)
             )
 
+    # 4d. News Sentiment Circuit Breaker — BUY candidates only.
+    #
+    # Blocks TREND_BREAKOUT_LONG and RANGE_REVERSAL_LONG entries (and Hub BUY
+    # signals that behave like breakouts/reversals) when FinBERT sentiment is
+    # deeply negative OR a hard-keyword is detected in recent headlines.
+    #
+    # Rationale: breakout and reversal trades require *confirmation* from the
+    # market narrative — buying a breakout into negative news is the most
+    # reliably losing pattern in our backtest. Trend-following (HUB_7FACTOR)
+    # already embeds the news subscore in master_score, but a separate hard
+    # gate here prevents a high technical score from overriding a -0.3 FinBERT
+    # read that the Hub's 7% news weight would otherwise dilute.
+    #
+    # Implementation: read Hub news subscore when available (no extra query);
+    # fall back to a fresh get_market_sentiment() call for technical candidates.
+    # Keyword check runs against DB headlines — no extra API call needed.
+
+    _NEWS_BREAKER_STRATEGIES = {"TREND_BREAKOUT_LONG", "RANGE_REVERSAL_LONG", "HUB_7FACTOR"}
+    # Words that indicate hard news risk — halt / fraud / insolvency / regulatory.
+    _NEWS_HARD_KEYWORDS = frozenset({
+        "fraud", "scam", "probe", "sebi", "cbi", "ed ", "enforcement",
+        "halt", "suspend", "delist", "bankrupt", "insolvency", "default",
+        "nclt", "nclt order", "promoter pledge", "pledg", "pledged",
+        "fir", "arrest", "regulatory action", "show cause", "penalty",
+        "circuit", "upper circuit breaker", "lower circuit",
+        "earnings miss", "profit warning", "guidance cut",
+    })
+    _NEWS_SENTIMENT_BLOCK_THRESHOLD = -0.30   # FinBERT scale: −1..+1
+
+    if candidate is not None and candidate.side == "BUY":
+        _strategy = getattr(candidate, "strategy", "")
+        if _strategy in _NEWS_BREAKER_STRATEGIES:
+            # ── Get news score (Hub units −100..+100 → normalise to −1..+1) ──
+            _hub_sub = getattr(candidate, "hub_subscores", None) or {}
+            _raw_news_score: float | None = None
+            if _hub_sub and "news" in _hub_sub:
+                _raw_news_score = float(_hub_sub["news"]) / 100.0  # −100..+100 → −1..+1
+            else:
+                # Technical-only candidate — fetch from DB (no external call)
+                try:
+                    from crawler.news_crawler import get_market_sentiment
+                    _raw_news_score = await get_market_sentiment(symbol, session)
+                except Exception:
+                    _raw_news_score = None
+
+            _blocked_news = False
+            _block_reason = ""
+
+            # Gate 1: FinBERT sentiment below threshold
+            if _raw_news_score is not None and _raw_news_score < _NEWS_SENTIMENT_BLOCK_THRESHOLD:
+                _blocked_news = True
+                _block_reason = (
+                    f"news_sentiment_circuit_breaker: FinBERT={_raw_news_score:+.2f} "
+                    f"< {_NEWS_SENTIMENT_BLOCK_THRESHOLD:+.2f} threshold"
+                )
+
+            # Gate 2: Hard-keyword scan against last 10 DB headlines (free — no Tavily call)
+            if not _blocked_news:
+                try:
+                    from sqlalchemy import select as _sa_select, text as _sa_text
+                    from db.models import NewsItem as _NewsItem
+                    _headline_rows = (await session.execute(
+                        _sa_select(_NewsItem.headline)
+                        .where(_sa_text("tickers_affected::jsonb @> :p ::jsonb")
+                               .bindparams(p=f'["{symbol}"]'))
+                        .order_by(_NewsItem.crawled_at.desc())
+                        .limit(10)
+                    )).scalars().all()
+                    _headlines_text = " ".join(h.lower() for h in _headline_rows if h)
+                    _hit = next(
+                        (kw for kw in _NEWS_HARD_KEYWORDS if kw in _headlines_text),
+                        None,
+                    )
+                    if _hit:
+                        _blocked_news = True
+                        _block_reason = (
+                            f"news_sentiment_circuit_breaker: hard keyword '{_hit}' "
+                            f"in recent headlines"
+                        )
+                except Exception as _kw_exc:
+                    logger.debug(f"[agent/news_cb] keyword scan failed for {symbol}: {_kw_exc}")
+
+            if _blocked_news:
+                logger.warning(
+                    f"[agent] NEWS_CB BLOCKED {symbol} | strategy={_strategy} | {_block_reason}"
+                )
+                await _log_skipped_decision(
+                    symbol=symbol,
+                    candidate=candidate,
+                    regime=features.regime,
+                    macro_bias=macro_bias,
+                    fund_score=fund_score,
+                    drop_reason=_block_reason,
+                    session=session,
+                )
+                return None
+
     # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
     # Tell the sizer how much capital is already deployed so it respects the
     # portfolio-wide cash buffer when sizing toward the deployment target.
@@ -521,6 +618,12 @@ async def _process_symbol(
         return None
 
     # 6. Risk Manager veto
+    # Stamp the candidate's sector so can_take_trade() can check the exposure gate.
+    # Resolution order: Hub hub_subscores → india_specific.SECTOR_MAP → None (unknown).
+    if candidate is not None and not getattr(candidate, "sector", None):
+        from engine.india_specific import SECTOR_MAP
+        candidate.sector = SECTOR_MAP.get(symbol) or SECTOR_MAP.get(symbol.replace(".NS", "") + ".NS")
+
     risk_ok, risk_reason = RiskManagerAgent(portfolio.to_risk_ctx()).can_take_trade(
         candidate=candidate if candidate else decision,
         equity=portfolio.equity,
@@ -594,6 +697,8 @@ async def _process_symbol(
         portfolio.open_positions[_sym]["entry_ts"]     = datetime.utcnow().isoformat()
         # Track product so MIS square-off sweep can identify intraday positions
         portfolio.open_positions[_sym]["product"]      = getattr(decision, "product", "CNC")
+        # Track sector so sector_exposure() in portfolio_context can enforce the cap
+        portfolio.open_positions[_sym]["sector"]       = getattr(candidate, "sector", None) or getattr(decision, "sector", None)
 
         # Telegram entry alert.
         # Hub-override trades already got the full shortlist alert → send a brief

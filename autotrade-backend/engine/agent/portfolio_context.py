@@ -35,6 +35,19 @@ class AgentPortfolioContext:
         )
         return round(total, 4)
 
+    def sector_exposure(self) -> dict[str, float]:
+        """Return {sector: notional_fraction} for all open positions that have a sector tag."""
+        if self.equity <= 0:
+            return {}
+        totals: dict[str, float] = {}
+        for p in self.open_positions.values():
+            sec = p.get("sector")
+            if not sec:
+                continue
+            notional = p.get("qty", 0) * p.get("entry", 0)
+            totals[sec] = totals.get(sec, 0.0) + notional / self.equity
+        return {k: round(v, 4) for k, v in totals.items()}
+
     def to_risk_ctx(self) -> dict:
         return {
             "daily_pnl_pct":       self.daily_pnl_pct,
@@ -46,6 +59,7 @@ class AgentPortfolioContext:
             "cash":                self.cash,
             "open_symbols":        self.open_symbols,
             "symbol_correlations": self.symbol_correlations,
+            "sector_exposure":     self.sector_exposure(),
         }
 
     def add_position(self, decision) -> None:
@@ -68,7 +82,7 @@ class AgentPortfolioContext:
             pnl = (exit_price - pos["entry"]) * pos["qty"]
         else:
             pnl = (pos["entry"] - exit_price) * pos["qty"]
-        self.cash += pos["qty"] * exit_price + pnl
+        self.cash += pos["qty"] * pos["entry"] + pnl
         if pnl < 0:
             self.consec_losses_today += 1
         else:

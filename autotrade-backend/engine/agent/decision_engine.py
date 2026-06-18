@@ -93,12 +93,22 @@ class DecisionEngine:
         # passed by the caller so the cash-buffer room is respected portfolio-wide.
         deployed_notional = getattr(candidate, "deployed_notional", 0.0)
         conviction = abs(getattr(candidate, "master_score", None) or candidate.confidence)
+        live_vix: float = 15.0
+        try:
+            from crawler.live_prices import PRICE_CACHE
+            live_vix = float(PRICE_CACHE.get("^INDIAVIX", {}).get("price", 15) or 15)
+        except Exception:
+            pass
         qty, _size_reason = capital_utilization_size(
             equity, conviction, candidate.entry, candidate.stop,
-            deployed_notional, size_factor=size_factor,
+            deployed_notional, size_factor=size_factor, vix=live_vix,
         )
         if qty <= 0:
             return None, f"qty_zero:{_size_reason}"
+        from engine.agent.risk_manager import vix_size_factor as _vix_sf
+        _vsf = _vix_sf(live_vix)
+        if _vsf < 1.0:
+            candidate.reasons.append(f"vix_scaled:{live_vix:.1f}→sf={_vsf:.2f}")
 
         risk_amt = qty * abs(candidate.entry - candidate.stop)
         risk_pct = risk_amt / max(equity, 1)
