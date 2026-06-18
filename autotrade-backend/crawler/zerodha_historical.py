@@ -251,3 +251,48 @@ async def sync_full_nse_universe(
     summary = {"symbols": len(rows), "fetched_ok": ok, "empty": empty, "saved": total_saved}
     logger.info(f"[sync_full_nse_universe] → {summary}")
     return summary
+
+
+# ── Live 1-minute candle sync (runs every 60 s during market hours) ───────────
+
+async def sync_live_1m_candles(
+    session: AsyncSession,
+    symbols: list[str] | None = None,
+    *,
+    delay_sec: float = 0.35,
+) -> dict:
+    """Fetch today's 1-minute candles from Kite for every watched symbol.
+
+    Designed to be called every 60 s while NSE is open.  Uses upsert so
+    repeated runs for the same bar are idempotent.  Symbols default to the
+    union of nse_symbols + nse_mid_symbols; the caller can override.
+    """
+    from zoneinfo import ZoneInfo
+
+    _IST = ZoneInfo("Asia/Kolkata")
+    now_ist = _dt.datetime.now(_IST).replace(tzinfo=None)   # naive IST (Kite expects this)
+    from_dt = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    to_dt   = now_ist
+
+    if symbols is None:
+        symbols = list(settings.nse_symbols) + list(getattr(settings, "nse_mid_symbols", []))
+
+    all_candles: list[dict] = []
+    errors: list[str] = []
+
+    for sym in symbols:
+        result = await get_kite_candles_for_range(sym, from_dt, to_dt, interval="1m")
+        if result:
+            all_candles.extend(result)
+        await asyncio.sleep(delay_sec)
+
+    saved = await save_candles_to_db(all_candles, session) if all_candles else 0
+
+    summary = {
+        "symbols": len(symbols),
+        "candles": len(all_candles),
+        "saved":   saved,
+        "errors":  errors,
+    }
+    logger.info(f"[live_1m] → {summary}")
+    return summary
