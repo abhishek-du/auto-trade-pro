@@ -266,6 +266,12 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_sync_candles",
         "schedule": crontab(hour=10, minute=0),
     },
+    # Every minute during NSE session (03:45–10:00 UTC = 09:15–15:30 IST).
+    # The task itself re-checks the clock and skips outside 09:15–15:30 IST.
+    "kite-live-1m-candles": {
+        "task":     "tasks.kite_live_candles",
+        "schedule": crontab(minute="*", hour="3-10", day_of_week="1-5"),
+    },
     # Instruments need a FRESH token → run at 02:45 UTC, AFTER the 02:30 token
     # refresh (otherwise the daily download uses the previous day's expired token).
     "kite-refresh-instruments-daily": {

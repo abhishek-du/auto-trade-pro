@@ -1171,6 +1171,35 @@ def kite_sync_holdings_task():
     return result
 
 
+@celery_app.task(name="tasks.kite_live_candles")
+def kite_live_candles_task():
+    """Fetch 1-minute candles from Kite every 60 s while NSE market is open.
+
+    Runs 09:15–15:30 IST Mon–Fri via beat.  Uses upsert so repeated calls
+    for the same minute bar are idempotent.  Silently skips when the market
+    is closed or ZERODHA_ENABLED is false.
+    """
+    from utils.config import settings
+    if not settings.ZERODHA_ENABLED:
+        return {"skipped": "zerodha_disabled"}
+
+    now_ist = datetime.datetime.now(_IST)
+    h, m = now_ist.hour, now_ist.minute
+    in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
+    if not in_session:
+        return {"skipped": "outside_market_hours"}
+
+    async def _run():
+        from tasks._db import celery_session
+        from crawler.zerodha_historical import sync_live_1m_candles
+        async with celery_session() as session:
+            return await sync_live_1m_candles(session)
+
+    result = _run_async(_run())
+    logger.info(f"[kite_live_candles] {result}")
+    return result
+
+
 @celery_app.task(name="tasks.kite_sync_candles")
 def kite_sync_candles_task():
     """Fetch daily candles for all NSE watchlist symbols via Kite (10:00 UTC)."""
