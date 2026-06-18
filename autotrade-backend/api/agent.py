@@ -390,6 +390,87 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 
 # ── POST /positions/{symbol}/close ────────────────────────────────────────────
 
+@router.post("/kill-switch")
+async def kill_switch(
+    x_kill_confirm: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flatten the entire book and halt the agent — systemic crisis response.
+
+    Closes ALL open positions at best available price, disables AGENT_ENABLED,
+    and sends a Telegram alert. Requires header  X-Kill-Confirm: FLATTEN  to
+    prevent accidental triggers.
+
+    Safe to call multiple times — idempotent (second call finds no open positions).
+    """
+    if x_kill_confirm != "FLATTEN":
+        raise HTTPException(
+            403,
+            "Requires header: X-Kill-Confirm: FLATTEN  — "
+            "this endpoint flattens the entire book and halts the agent."
+        )
+
+    from db.models import OpenPosition
+    from paper_trading.trade_simulator import close_paper_trade
+    from crawler.live_prices import PRICE_CACHE
+
+    # 1. Disable agent immediately so no new trades open while we're closing.
+    settings.AGENT_ENABLED = False
+
+    # 2. Fetch all open positions.
+    rows = (await db.execute(select(OpenPosition))).scalars().all()
+
+    closed: list[dict] = []
+    failed: list[str]  = []
+
+    for pos in rows:
+        sym = pos.symbol
+        try:
+            price = float(PRICE_CACHE.get(sym, {}).get("price", 0) or 0)
+            if price <= 0:
+                price = float((await db.execute(
+                    select(Candle.close).where(Candle.symbol == sym)
+                    .order_by(Candle.timestamp.desc()).limit(1)
+                )).scalar_one_or_none() or 0.0)
+            if price <= 0:
+                failed.append(f"{sym}:no_price")
+                continue
+
+            trade = await close_paper_trade(pos, price, "KILL_SWITCH", db)
+            closed.append({
+                "symbol":     sym,
+                "exit_price": round(price, 4),
+                "pnl":        round(trade.pnl or 0.0, 2),
+            })
+        except Exception as exc:
+            failed.append(f"{sym}:{exc}")
+
+    await db.commit()
+
+    # 3. Telegram alert.
+    total_pnl = sum(c["pnl"] for c in closed)
+    alert_msg = (
+        f"🚨 KILL SWITCH ACTIVATED\n"
+        f"Agent HALTED. {len(closed)} position(s) closed.\n"
+        f"Total realised PnL: ₹{total_pnl:+,.2f}\n"
+        + (f"Failed: {', '.join(failed)}" if failed else "All positions closed cleanly.")
+    )
+    try:
+        from crawler.telegram_notifier import send_telegram_message
+        await send_telegram_message(alert_msg)
+    except Exception:
+        pass
+
+    return {
+        "status":      "HALTED",
+        "agent_enabled": False,
+        "closed":      closed,
+        "failed":      failed,
+        "total_pnl":   round(total_pnl, 2),
+        "message":     alert_msg,
+    }
+
+
 @router.post("/positions/{symbol}/close")
 async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
     """Manually close an open position — DB-authoritative.
