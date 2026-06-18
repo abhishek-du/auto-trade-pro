@@ -100,6 +100,7 @@ async def run_backtest(
     df: pd.DataFrame,
     config: Optional[BacktestConfig] = None,
     timeframe: str = "1d",
+    session: Optional[AsyncSession] = None,
 ) -> BacktestResult:
     """Replay the India signal generator over *df* bar by bar.
 
@@ -107,6 +108,10 @@ async def run_backtest(
       1. Feed df.iloc[:i] (max *lookback_candles* rows) to generate_india_signal().
       2. If signal == BUY or SELL and no open position: open a virtual trade.
       3. On subsequent bars: check if SL or TP was hit using the bar's H/L.
+
+    Pass *session* to enable time-filtered DB lookups (news, FII/DII, options PCR,
+    VIX history), eliminating look-ahead bias from sentiment/flow factors.
+    Without a session those factors default to 0.0 (neutral).
     """
     from engine.india_signal_generator import generate_india_signal
 
@@ -209,12 +214,19 @@ async def run_backtest(
         if len(window) < 10:
             continue
 
+        # Extract bar timestamp for time-filtering DB lookups (look-ahead fix).
+        bar_ts = df.index[i]
+        bar_date: Optional[datetime.datetime] = (
+            bar_ts.to_pydatetime() if hasattr(bar_ts, "to_pydatetime") else None
+        )
+
         try:
             signal = await generate_india_signal(
                 symbol=symbol,
                 timeframe=timeframe,
                 candles_df=window,
-                session=None,   # no DB writes during backtest
+                session=session,    # None → DB factors are 0.0 (safe fallback)
+                bar_date=bar_date,  # filters news/FII/VIX/PCR to this date
             )
         except Exception as exc:
             logger.debug(f"run_backtest {symbol} bar {i}: signal error — {exc}")
@@ -375,7 +387,7 @@ async def run_backtest_all(
             logger.warning(f"run_backtest_all {sym}: insufficient data — skipping")
             continue
 
-        result = await run_backtest(sym, df, config, timeframe)
+        result = await run_backtest(sym, df, config, timeframe, session=session)
         results.append(result)
 
     results.sort(key=lambda r: r.total_return_pct, reverse=True)

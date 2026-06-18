@@ -63,21 +63,32 @@ _OPTIONS_SYMBOL_MAP: dict[str, str] = {
 async def _fetch_latest_options_snapshot(
     options_symbol: str,
     session: AsyncSession,
+    bar_date: datetime | None = None,
 ) -> OptionsChainSnapshot | None:
-    """Return most recent OptionsChainSnapshot for NIFTY or BANKNIFTY."""
-    return (await session.execute(
+    """Return most recent OptionsChainSnapshot for NIFTY or BANKNIFTY.
+
+    When bar_date is given, only snapshots on or before that date are returned.
+    """
+    q = (
         select(OptionsChainSnapshot)
         .where(OptionsChainSnapshot.symbol == options_symbol)
         .order_by(desc(OptionsChainSnapshot.snapshot_at))
         .limit(1)
-    )).scalars().first()
+    )
+    if bar_date is not None:
+        q = q.where(OptionsChainSnapshot.snapshot_at <= bar_date)
+    return (await session.execute(q)).scalars().first()
 
 
-async def _fetch_latest_fii_net(session: AsyncSession) -> float:
+async def _fetch_latest_fii_net(
+    session: AsyncSession,
+    bar_date: datetime | None = None,
+) -> float:
     """Return the most recent FII net buy value (Cr) from DB, or 0."""
-    row = (await session.execute(
-        select(FIIDIIFlow).order_by(desc(FIIDIIFlow.date)).limit(1)
-    )).scalars().first()
+    q = select(FIIDIIFlow).order_by(desc(FIIDIIFlow.date)).limit(1)
+    if bar_date is not None:
+        q = q.where(FIIDIIFlow.date <= bar_date.date())
+    row = (await session.execute(q)).scalars().first()
     return float(row.fii_net_buy) if row else 0.0
 
 
@@ -225,6 +236,7 @@ async def generate_india_signal(
     timeframe:  str,
     candles_df: pd.DataFrame,
     session:    AsyncSession,
+    bar_date:   datetime | None = None,
 ) -> TradingSignal:
     """Generate a BUY / SELL / HOLD decision for a single Indian market symbol.
 
@@ -272,20 +284,20 @@ async def generate_india_signal(
     indicators = compute_indicators(candles_df)
 
     try:
-        news_score = (await get_market_sentiment(symbol, session)) * 100.0
+        news_score = (await get_market_sentiment(symbol, session, bar_date=bar_date)) * 100.0
     except Exception as exc:
         logger.warning(f"generate_india_signal: sentiment fetch failed for {symbol}: {exc}")
         news_score = 0.0
 
     # ── Step 2: Indian-specific scores ───────────────────────────────────────
     try:
-        fii_score = await calculate_fii_dii_score(session)
+        fii_score = await calculate_fii_dii_score(session, bar_date=bar_date)
     except Exception as exc:
         logger.warning(f"generate_india_signal: FII score failed: {exc}")
         fii_score = 0.0
 
     try:
-        vix_score = await calculate_india_vix_score(session)
+        vix_score = await calculate_india_vix_score(session, bar_date=bar_date)
     except Exception as exc:
         logger.warning(f"generate_india_signal: VIX score failed: {exc}")
         vix_score = 0.0
@@ -304,7 +316,7 @@ async def generate_india_signal(
     options_symbol = _OPTIONS_SYMBOL_MAP.get(symbol)
     if options_symbol:
         try:
-            snapshot = await _fetch_latest_options_snapshot(options_symbol, session)
+            snapshot = await _fetch_latest_options_snapshot(options_symbol, session, bar_date=bar_date)
             if snapshot:
                 current_price = float(candles_df["close"].iloc[-1])
                 pcr_score = calculate_options_score(
@@ -318,7 +330,7 @@ async def generate_india_signal(
     # Raw FII net for reasoning text
     fii_net_buy = 0.0
     try:
-        fii_net_buy = await _fetch_latest_fii_net(session)
+        fii_net_buy = await _fetch_latest_fii_net(session, bar_date=bar_date)
     except Exception:
         pass
 

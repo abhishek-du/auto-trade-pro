@@ -159,7 +159,10 @@ async def _fetch_yfinance_close_pair(ticker: str) -> tuple[float, float] | tuple
 
 # ── 1. India VIX score ────────────────────────────────────────────────────────
 
-async def calculate_india_vix_score(session: AsyncSession) -> float:
+async def calculate_india_vix_score(
+    session: AsyncSession,
+    bar_date: datetime.datetime | None = None,
+) -> float:
     """Fetch India VIX and return a contrarian sentiment score.
 
     Scoring table
@@ -171,15 +174,40 @@ async def calculate_india_vix_score(session: AsyncSession) -> float:
     VIX 15-20    0   normal conditions
     VIX 12-15  +15   low fear — trending bull market
     VIX < 12   -10   complacency — market may be overheated
-    """
-    from crawler.india_price_feed import fetch_india_vix  # deferred — optional dep
 
-    try:
-        loop = asyncio.get_event_loop()
-        vix  = await loop.run_in_executor(None, fetch_india_vix)
-    except Exception as exc:
-        logger.warning(f"calculate_india_vix_score: VIX fetch failed ({exc}); score=0")
-        return 0.0
+    When bar_date is provided (backtest mode) the function queries the candles
+    table for the most-recent ``^INDIAVIX`` daily bar on or before that date
+    instead of doing a live yfinance fetch, eliminating look-ahead bias.
+    """
+    vix: float = 0.0
+
+    if bar_date is not None and session is not None:
+        # Backtest path: read historical VIX from the candles table.
+        try:
+            from db.models import Candle
+            row = (await session.execute(
+                select(Candle)
+                .where(
+                    Candle.symbol    == "^INDIAVIX",
+                    Candle.timeframe == "1d",
+                    Candle.timestamp <= bar_date,
+                )
+                .order_by(Candle.timestamp.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            vix = float(row.close) if row else 15.0  # default neutral if no data
+        except Exception as exc:
+            logger.warning(f"calculate_india_vix_score: historical VIX query failed ({exc}); using neutral")
+            return 0.0
+    else:
+        # Live path: fetch current VIX from yfinance.
+        from crawler.india_price_feed import fetch_india_vix  # deferred — optional dep
+        try:
+            loop = asyncio.get_event_loop()
+            vix  = await loop.run_in_executor(None, fetch_india_vix)
+        except Exception as exc:
+            logger.warning(f"calculate_india_vix_score: VIX fetch failed ({exc}); score=0")
+            return 0.0
 
     if not vix or math.isnan(vix) or vix <= 0:
         logger.warning(f"calculate_india_vix_score: invalid VIX={vix}; score=0")
