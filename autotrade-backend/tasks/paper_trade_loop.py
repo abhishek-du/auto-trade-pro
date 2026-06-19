@@ -127,9 +127,11 @@ async def _loop():
 
 @celery_app.task(name="tasks.paper_trade_loop.run_paper_trade_loop")
 def run_paper_trade_loop():
-    """Celery task: one full paper-trading cycle.
+    """DISABLED — legacy loop replaced by india_trade_loop.
 
-    PAPER TRADING ONLY — virtual currency, no real money involved.
+    This loop used 20% position sizing and had no duplicate detection,
+    causing oversized and duplicate trades. Kept as a registered task
+    so Celery doesn't error on stale schedules, but it refuses to run.
     """
-    logger.info("[paper_trade_loop] Starting cycle")
-    _run_async(_loop())
+    logger.warning("[paper_trade_loop] DISABLED — this legacy loop is dead. Use india_trade_loop.")
+    return

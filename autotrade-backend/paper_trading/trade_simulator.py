@@ -149,6 +149,32 @@ async def open_paper_trade(
     """
     now = datetime.utcnow()
 
+    # ── HARD GUARD: last line of defense against oversized/duplicate trades ───
+    # This gate catches bugs in ANY caller (india_trade_loop, agent_loop,
+    # paper_trade_loop, manual trigger). No trade touches the DB without passing.
+    _guard_equity = float(getattr(settings, "AGENT_EQUITY", 2_000_000))
+    _guard_max_w  = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    _guard_max_notional = _guard_equity * _guard_max_w
+    usd_value_check = position_size.get("usd_value", 0)
+    if usd_value_check > _guard_max_notional * 1.10:
+        msg = (
+            f"HARD GUARD BLOCKED: {signal.symbol} notional ₹{usd_value_check:,.0f} "
+            f"exceeds {_guard_max_w*100:.0f}% of ₹{_guard_equity:,.0f} "
+            f"(max ₹{_guard_max_notional:,.0f})"
+        )
+        logger.error(f"open_paper_trade: {msg}")
+        raise ValueError(msg)
+
+    _bare_sym = signal.symbol.replace(".NS", "").replace(".BO", "").upper()
+    existing = (await session.execute(
+        select(OpenPosition.symbol)
+    )).scalars().all()
+    for s in existing:
+        if s == signal.symbol or s.replace(".NS", "").replace(".BO", "").upper() == _bare_sym:
+            msg = f"HARD GUARD BLOCKED: duplicate position for {signal.symbol} (already have {s})"
+            logger.error(f"open_paper_trade: {msg}")
+            raise ValueError(msg)
+
     # ── Step 1: Slippage simulation ───────────────────────────────────────────
     slippage      = random.uniform(_SLIP_MIN, _SLIP_MAX) * signal.entry_price
     if signal.action == "BUY":

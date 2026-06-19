@@ -140,6 +140,19 @@ async def validate_signal(
     (False, '<reason string>')    — check failed; reason is human-readable.
     """
 
+    # ── Check 0: Block non-equity symbols in the equity risk pipeline ────────
+    # FUT/CE/PE symbols belong to the F&O pipeline with its own margin model.
+    # If they leak into validate_signal, reject immediately.
+    _sym_upper = signal.symbol.upper()
+    if any(tag in _sym_upper for tag in ("FUT", "NIFTY26", "BANKNIFTY26", "FINNIFTY26")):
+        _is_equity_sym = not any(
+            _sym_upper.endswith(sfx) for sfx in ("FUT", "CE", "PE")
+        )
+        if not _is_equity_sym:
+            reason = f"Derivative symbol {signal.symbol} blocked — use F&O pipeline"
+            _log_rejection(signal.symbol, reason)
+            return False, reason
+
     # Load live settings once (falls back to .env defaults if key not in DB)
     cfg = await RuntimeConfig.load(session)
     max_pos       = cfg.max_open_positions          # absolute safety ceiling
