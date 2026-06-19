@@ -240,22 +240,31 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 5: Single-position concentration cap ────────────────────────────
-    # No single position's margin may exceed 40% of available cash (prevents one
-    # tight-stop name from hogging the book even within the risk budget).
-    pos = this_pos   # already sized above
-    required_margin = pos["usd_value"] * 0.1
-    if required_margin > wallet_balance * 0.4:
+    # ── Check 5: Hard per-position notional cap (AGENT_MAX_POSITION_WEIGHT) ─────
+    # Belt-and-suspenders: even if calculate_position_size somehow exceeds the cap,
+    # reject the trade here so no single position ever exceeds 5% of equity.
+    pos = this_pos
+    _max_pos_weight = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    _effective_equity = wallet_balance + sum(getattr(p, "size_usd", 0.0) or 0.0 for p in open_positions)
+    _max_single_notional = _effective_equity * _max_pos_weight
+    if pos["usd_value"] > _max_single_notional * 1.01:   # 1% tolerance
         reason = (
-            f"Single-position cap: margin ₹{required_margin:.0f} > 40% of cash "
-            f"(₹{wallet_balance * 0.4:.0f})"
+            f"Position cap: ₹{pos['usd_value']:.0f} exceeds "
+            f"{_max_pos_weight*100:.0f}% of equity ₹{_effective_equity:.0f} "
+            f"(max ₹{_max_single_notional:.0f})"
         )
         _log_rejection(signal.symbol, reason)
         return False, reason
 
     # ── Check 6: No duplicate open position for this symbol ───────────────────
+    # Normalize .NS/.BO suffixes to catch SYMBOL vs SYMBOL.NS mismatch.
+    _bare_sig = signal.symbol.replace(".NS", "").replace(".BO", "").upper()
     open_symbols = {p.symbol for p in open_positions}
-    if signal.symbol in open_symbols:
+    _dup = any(
+        s == signal.symbol or s.replace(".NS", "").replace(".BO", "").upper() == _bare_sig
+        for s in open_symbols
+    )
+    if _dup:
         reason = f"Already have an open position for {signal.symbol}"
         _log_rejection(signal.symbol, reason)
         return False, reason
@@ -314,9 +323,9 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
     units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
     usd_value = units * signal.entry_price
 
-    # Cap notional at 20% of balance — prevents a tight stop from sizing a single
-    # position into the majority of the portfolio (e.g. 2% risk / 2% stop = 100%).
-    max_notional = balance * 0.20
+    # Hard cap at AGENT_MAX_POSITION_WEIGHT (default 5%) — one position can never
+    # exceed this fraction of balance regardless of stop distance or confidence.
+    max_notional = balance * float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
     if usd_value > max_notional:
         usd_value = max_notional
         units     = usd_value / signal.entry_price if signal.entry_price > 0 else 0.0

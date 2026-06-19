@@ -76,11 +76,6 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week="sunday", hour=21, minute=0),
         "kwargs":   {"days": 60},
     },
-    "paper-trade-loop-every-minute": {
-        "task":     "tasks.paper_trade_loop.run_paper_trade_loop",
-        "schedule": 60,
-    },
-
     # ── Indian market tasks ───────────────────────────────────────────────────
 
     # Every 30 s during NSE hours: OHLCV candles + index snapshots + VIX
