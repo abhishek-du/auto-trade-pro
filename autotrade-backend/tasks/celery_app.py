@@ -139,11 +139,18 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week="sunday", hour=1, minute=0),
     },
 
-    # Daily 02:50 UTC (08:20 IST, after candle/instrument refresh, before open):
-    # rebuild the Hub's ~500-name deep-score universe by 30-day avg turnover.
+    # Daily 02:50 UTC (08:20 IST): rebuild Hub universe by 30-day avg turnover.
     "rebuild-hub-universe-daily": {
         "task":     "tasks.rebuild_hub_universe",
         "schedule": crontab(hour=2, minute=50),
+    },
+
+    # Daily 03:10 UTC (08:40 IST): backfill yesterday's 1d close for all Hub symbols.
+    # Runs AFTER universe rebuild so the symbol list is fresh. Ensures Hub scoring
+    # always has the latest daily candle even if intraday crawl missed symbols.
+    "backfill-hub-1d-candles-daily": {
+        "task":     "tasks.backfill_hub_1d_candles",
+        "schedule": crontab(hour=3, minute=10),
     },
 
     # Every 15 min during NSE hours: score full NSE universe → market_shortlist
