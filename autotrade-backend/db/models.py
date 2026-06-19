@@ -1282,6 +1282,73 @@ class UserWatchlist(Base):
         return f"<UserWatchlist {self.symbol}>"
 
 
+class HubDailyHistory(Base):
+    """Daily flight-recorder for the Hub 7-factor engine.
+
+    One row per (date, symbol) — captures every score and the pre-trade
+    research gate outcome BEFORE any trade decision is made.  This is the
+    historical dataset that enables accurate Hub-replay backtesting: instead
+    of re-computing scores from scratch, the backtest queries this table by
+    (date, symbol) and replays the exact intelligence the live agent saw.
+
+    Populated by persist_daily_history() called at the end of each Hub cycle.
+    """
+    __tablename__ = "hub_daily_history"
+    __table_args__ = (
+        Index("ix_hdh_symbol_date", "symbol", "date"),
+        Index("ix_hdh_date_score",  "date",   "master_score"),
+    )
+
+    # ── Identity ───────────────────────────────────────────────────────────────
+    date:   Mapped[date]  = mapped_column(Date,      primary_key=True, nullable=False)
+    symbol: Mapped[str]   = mapped_column(String(30), primary_key=True, nullable=False)
+
+    # ── Hub 7-factor sub-scores (same scale as MasterIntelligenceScore) ────────
+    technical_score:   Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    news_score:        Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    sector_score:      Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    macro_score:       Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    earnings_score:    Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fundamental_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    options_score:     Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    master_score:      Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # ── Signal + state ────────────────────────────────────────────────────────
+    signal:        Mapped[str]      = mapped_column(String(15),  nullable=False, default="HOLD")
+    regime:        Mapped[str]      = mapped_column(String(30),  nullable=False, default="UNKNOWN")
+    sector:        Mapped[str]      = mapped_column(String(40),  nullable=True)
+    fund_grade:    Mapped[str]      = mapped_column(String(15),  nullable=True)
+    is_blocked:    Mapped[bool]     = mapped_column(Boolean,     nullable=False, default=False)
+    blocked_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    # ── Macro snapshot at score time (hard to reconstruct later) ─────────────
+    india_vix:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    fii_net_3d:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    dii_net_3d:    Mapped[float | None] = mapped_column(Float, nullable=True)
+    nse_mood:      Mapped[str | None]   = mapped_column(String(25), nullable=True)
+    ad_ratio:      Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # ── Pre-trade research gate outcome (NULL = not researched / HOLD signal) ─
+    # Populated only for BUY/STRONG_BUY signals (mirrors live agent behavior).
+    web_veto:         Mapped[bool | None]  = mapped_column(Boolean, nullable=True)
+    web_veto_reason:  Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    web_confidence:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    research_note:    Mapped[str | None]   = mapped_column(Text, nullable=True)
+    research_source:  Mapped[str | None]   = mapped_column(String(40), nullable=True)
+
+    # ── Rich reasoning JSON (full breakdown for debugging + analysis) ─────────
+    reasoning: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    scored_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        veto_str = "" if self.web_veto is None else f" veto={self.web_veto}"
+        return (
+            f"<HubDailyHistory {self.date} {self.symbol} "
+            f"score={self.master_score:.1f} signal={self.signal}{veto_str}>"
+        )
+
+
 class HubUniverse(Base):
     """The configurable universe the Master Intelligence Hub deep-scores each
     cycle (7-factor). Rebuilt daily as the top-N NSE equities by average daily
