@@ -778,6 +778,102 @@ def india_trade_loop():
     _run_async(_india_trade_loop())
 
 
+# ── 6b. Fast stop-loss check — every 5 s ─────────────────────────────────────
+#
+# Reads live LTP from PRICE_CACHE (WebSocket ticker, sub-second updates) and
+# closes any open position whose stop-loss is hit WITHOUT waiting for the 60s
+# trade loop.  Does NOT score, does NOT open new trades — pure exit-only path.
+# Uses the same close_paper_trade() as the main loop so P&L, wallet, and logs
+# are all updated identically.
+
+async def _fast_sl_check() -> None:
+    from crawler.live_prices import PRICE_CACHE
+    from db.models import OpenPosition, TradeDirection
+    from paper_trading.trade_simulator import close_paper_trade
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from tasks._db import celery_session
+
+    if not _is_india_trading_window():
+        return
+
+    async with celery_session() as session:
+        result = await session.execute(
+            select(OpenPosition).options(selectinload(OpenPosition.trade))
+        )
+        positions = list(result.scalars().all())
+
+        closed: list[dict] = []
+        for pos in positions:
+            sym_base   = pos.symbol.replace(".NS", "")
+            price_data = PRICE_CACHE.get(pos.symbol) or PRICE_CACHE.get(sym_base) or {}
+            price      = float(price_data.get("price", 0) or 0)
+            if price <= 0 or not pos.stop_loss:
+                continue
+
+            is_buy = pos.direction == TradeDirection.BUY
+            sl_hit = (is_buy and price <= pos.stop_loss) or (
+                not is_buy and price >= pos.stop_loss
+            )
+            if not sl_hit:
+                # Also check take_profit for fast wins
+                if pos.take_profit:
+                    tp_hit = (is_buy and price >= pos.take_profit) or (
+                        not is_buy and price <= pos.take_profit
+                    )
+                    if not tp_hit:
+                        continue
+                    reason = "TAKE_PROFIT"
+                else:
+                    continue
+            else:
+                reason = "STOP_LOSS"
+
+            try:
+                trade = await close_paper_trade(pos, price, reason, session)
+                await session.commit()
+                closed.append({
+                    "symbol":      trade.symbol,
+                    "direction":   pos.direction.value,
+                    "entry_price": trade.entry_price,
+                    "exit_price":  price,
+                    "qty":         trade.size_units,
+                    "pnl":         trade.pnl,
+                    "reason":      reason,
+                })
+                logger.info(
+                    f"[fast_sl] {trade.symbol} @ ₹{price:.2f} → {reason} "
+                    f"pnl=₹{trade.pnl:,.2f}"
+                )
+            except Exception as exc:
+                logger.warning(f"[fast_sl] close failed for {pos.symbol}: {exc}")
+                await session.rollback()
+
+        # Telegram alerts for live exits
+        from utils.config import settings as _cfg
+        if closed and _cfg.telegram_available:
+            try:
+                from integrations.telegram_service import send, fmt_exit
+                for c in closed:
+                    await send(fmt_exit(
+                        symbol=c["symbol"],
+                        side=c["direction"],
+                        entry=c["entry_price"],
+                        exit_price=c["exit_price"],
+                        qty=c["qty"],
+                        pnl=c["pnl"],
+                        reason=c["reason"],
+                    ))
+            except Exception as exc:
+                logger.debug(f"[fast_sl] Telegram notify failed: {exc}")
+
+
+@celery_app.task(name="tasks.fast_sl_check")
+def fast_sl_check():
+    """Stop-loss / take-profit check on live PRICE_CACHE ticks every 5 s."""
+    _run_async(_fast_sl_check())
+
+
 # ── 7. Intraday MIS burst: morning entry + EOD squareoff ─────────────────────
 #
 # Goals:
