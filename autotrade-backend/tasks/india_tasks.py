@@ -780,14 +780,13 @@ def india_trade_loop():
 
 # ── 6b. Fast stop-loss check — every 5 s ─────────────────────────────────────
 #
-# Reads live LTP from PRICE_CACHE (WebSocket ticker, sub-second updates) and
-# closes any open position whose stop-loss is hit WITHOUT waiting for the 60s
-# trade loop.  Does NOT score, does NOT open new trades — pure exit-only path.
+# Fetches current LTP directly from Kite REST API (fresh every 5 s) and closes
+# any open position whose stop-loss or take-profit is hit WITHOUT waiting for
+# the 60 s trade loop.  Does NOT score, does NOT open new trades — pure exit.
 # Uses the same close_paper_trade() as the main loop so P&L, wallet, and logs
-# are all updated identically.
+# are all updated identically.  Skips the tick entirely if Kite is unavailable.
 
 async def _fast_sl_check() -> None:
-    from crawler.live_prices import PRICE_CACHE
     from db.models import OpenPosition, TradeDirection
     from paper_trading.trade_simulator import close_paper_trade
     from sqlalchemy import select
@@ -802,12 +801,31 @@ async def _fast_sl_check() -> None:
             select(OpenPosition).options(selectinload(OpenPosition.trade))
         )
         positions = list(result.scalars().all())
+        if not positions:
+            return
+
+        # ── Fetch fresh LTP directly from Kite REST API ───────────────────────
+        # PRICE_CACHE is an in-memory dict in the main/FastAPI process — Celery
+        # worker processes have a stale copy.  Kite's LTP endpoint returns the
+        # current market price in <100 ms for any number of symbols.
+        symbols = [p.symbol for p in positions
+                   if getattr(p, "instrument_type", "EQUITY") == "EQUITY"]
+        live_px: dict[str, float] = {}
+        if symbols:
+            try:
+                from crawler.zerodha_market import get_live_prices
+                quotes = await get_live_prices(symbols)
+                for sym, q in (quotes or {}).items():
+                    px = q.get("price") or q.get("last_price")
+                    if px and px > 0:
+                        live_px[sym] = float(px)
+            except Exception as exc:
+                logger.debug(f"[fast_sl] Kite LTP fetch failed: {exc}")
+                return  # No fresh prices — skip this tick entirely
 
         closed: list[dict] = []
         for pos in positions:
-            sym_base   = pos.symbol.replace(".NS", "")
-            price_data = PRICE_CACHE.get(pos.symbol) or PRICE_CACHE.get(sym_base) or {}
-            price      = float(price_data.get("price", 0) or 0)
+            price = live_px.get(pos.symbol, 0.0)
             if price <= 0 or not pos.stop_loss:
                 continue
 
