@@ -757,7 +757,114 @@ async def build_master_context(
 _EARNINGS_SCORE = {"OPTIMISTIC": 30, "NEUTRAL": 0, "CAUTIOUS": -20, "NEGATIVE": -40}
 
 
-async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, session: AsyncSession) -> ScoredStock:
+def _intraday_overlay(df_1m: "pd.DataFrame | None") -> tuple[float, dict]:
+    """Compute an intraday score adjustment (−10 to +10) from 1m candles.
+
+    Resamples 1m bars to 5m and 15m, then evaluates:
+      • 5m  RSI(14): oversold/overbought bias            (±5)
+      • 15m RSI(14): confirms / dampens 5m reading      (±3)
+      • 5m  momentum: close vs 12-bar-ago (≈1 h)        (±2)
+
+    Returns (adjustment, detail_dict).  Returns (0.0, {}) if fewer than 15
+    1m bars are available (outside market hours / not enough data yet).
+    """
+    import math
+
+    if df_1m is None or len(df_1m) < 15:
+        return 0.0, {}
+
+    def _resample(df: "pd.DataFrame", minutes: int) -> "pd.DataFrame":
+        import pandas as _pd
+        df2 = df.copy()
+        df2.index = _pd.to_datetime(df2.index)
+        rule = f"{minutes}min"
+        agg = df2.resample(rule, closed="left", label="left").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}
+        ).dropna(subset=["close"])
+        return agg
+
+    def _rsi(series: "pd.Series", period: int = 9) -> float:
+        """Wilder RSI with shorter period (9) suited for intraday bars."""
+        if len(series) < period + 1:
+            return float("nan")
+        delta = series.diff().dropna()
+        gain  = delta.clip(lower=0)
+        loss  = (-delta).clip(lower=0)
+        avg_g = float(gain.iloc[:period].mean())
+        avg_l = float(loss.iloc[:period].mean())
+        for i in range(period, len(delta)):
+            avg_g = (avg_g * (period - 1) + float(gain.iloc[i])) / period
+            avg_l = (avg_l * (period - 1) + float(loss.iloc[i])) / period
+        if avg_l == 0:
+            return 100.0
+        return 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+
+    try:
+        df5  = _resample(df_1m, 5)
+        df15 = _resample(df_1m, 15)
+    except Exception:
+        return 0.0, {}
+
+    adj  = 0.0
+    info: dict = {}
+
+    # ── 5m RSI(9): needs 10 5m bars = 50 1m bars (available from ~10:05 IST) ──
+    rsi_5 = _rsi(df5["close"]) if len(df5) >= 10 else float("nan")
+    if not math.isnan(rsi_5):
+        info["rsi_5m"] = round(float(rsi_5), 1)
+        if rsi_5 <= 25:
+            adj += 5.0
+        elif rsi_5 <= 35:
+            adj += 3.0
+        elif rsi_5 <= 45:
+            adj += 1.0
+        elif rsi_5 >= 75:
+            adj -= 5.0
+        elif rsi_5 >= 65:
+            adj -= 3.0
+        elif rsi_5 >= 55:
+            adj -= 1.0
+
+    # ── 15m RSI(9): needs 10 15m bars = 150 1m bars (available from ~11:45 IST) ─
+    rsi_15 = _rsi(df15["close"]) if len(df15) >= 10 else float("nan")
+    if not math.isnan(rsi_15):
+        info["rsi_15m"] = round(float(rsi_15), 1)
+        if rsi_15 <= 30:
+            adj += 3.0
+        elif rsi_15 <= 40:
+            adj += 1.5
+        elif rsi_15 >= 70:
+            adj -= 3.0
+        elif rsi_15 >= 60:
+            adj -= 1.5
+
+    # ── 5m momentum: close vs 12 bars ago (~1 h) (±2 points) ─────────────
+    if len(df5) >= 13:
+        mom_pct = float((df5["close"].iloc[-1] / df5["close"].iloc[-13] - 1.0) * 100)
+        info["mom_1h_pct"] = round(mom_pct, 2)
+        if mom_pct > 1.0:
+            adj += 2.0
+        elif mom_pct > 0.3:
+            adj += 1.0
+        elif mom_pct < -1.0:
+            adj -= 2.0
+        elif mom_pct < -0.3:
+            adj -= 1.0
+
+    adj = max(-10.0, min(10.0, adj))
+    info["intraday_adj"] = round(adj, 1)
+    return round(adj, 1), info
+
+
+async def score_symbol(
+    symbol: str,
+    df: "pd.DataFrame",
+    ctx: "MasterContext",
+    session: "AsyncSession",
+    *,
+    df_1m: "pd.DataFrame | None" = None,
+) -> "ScoredStock":
     from engine.indicators import compute_indicators
     from engine.agent.analyzer import MarketAnalyzerAgent
 
@@ -766,6 +873,11 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
     # 1. Technical (35%)
     signals = compute_indicators(df)
     technical_score = float(signals.composite_score or 0.0)
+
+    # Intraday overlay: nudge technical score by up to ±10 based on 5m/15m RSI + momentum.
+    # Active only when 1m candles are available (market hours); zero outside hours.
+    _intraday_adj, _intraday_info = _intraday_overlay(df_1m)
+    technical_score = max(-100.0, min(100.0, technical_score + _intraday_adj))
     try:
         features = analyzer.compute_features(df)
         regime = features.regime
@@ -1018,6 +1130,7 @@ async def score_symbol(symbol: str, df: pd.DataFrame, ctx: MasterContext, sessio
         "profit_growth_3yr":  _growth_vals[0],
         "revenue_growth_3yr": _growth_vals[1],
         "tech_detail": tech_detail,
+        "intraday": _intraday_info,
         "macro_detail": {
             "fii_net_3d":  round(ctx.macro.fii_net_3d, 1),
             "dii_net_3d":  round(ctx.macro.dii_net_3d, 1),
@@ -1069,7 +1182,7 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     runs in parallel since score_symbol() does not touch the DB session."""
     from crawler.price_feed import get_latest_candles
 
-    # Phase 1: fetch candles sequentially (DB-bound, shared session)
+    # Phase 1: fetch primary candles sequentially (DB-bound, shared session)
     # Fallback chain: requested timeframe → 1h → 1d → skip.
     _FALLBACKS = {"5m": ["1h", "1d"], "1h": ["1d"], "15m": ["1h", "1d"], "1d": []}
     _fallbacks = _FALLBACKS.get(timeframe, ["1h", "1d"])
@@ -1095,13 +1208,53 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
         except Exception as exc:
             logger.debug(f"[hub] candle fetch failed for {symbol}: {exc}")
 
+    # Phase 1b: fetch today's 1m candles for the intraday overlay.
+    # Only symbols that passed Phase 1 are fetched; missing ones get None (no overlay).
+    # Uses up to 200 bars (≈3.3 h): 5m RSI(9) needs 50 bars (from ~10:05 IST),
+    # 15m RSI(9) needs 150 bars (from ~11:45 IST), momentum needs 60 bars.
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    _IST = _ZI("Asia/Kolkata")
+    _today_open = _dt.datetime.now(_IST).replace(hour=9, minute=15, second=0, microsecond=0)
+    _today_open_utc = _today_open.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    from db.models import Candle as _Candle
+    from sqlalchemy import select as _sel
+
+    dfs_1m: dict = {}
+    for symbol in dfs:
+        try:
+            rows = (await session.execute(
+                _sel(_Candle)
+                .where(
+                    _Candle.symbol == symbol,
+                    _Candle.timeframe == "1m",
+                    _Candle.timestamp >= _today_open_utc,
+                )
+                .order_by(_Candle.timestamp.asc())
+                .limit(200)
+            )).scalars().all()
+            if len(rows) >= 15:
+                df1m = pd.DataFrame([{
+                    "open": float(r.open), "high": float(r.high),
+                    "low": float(r.low), "close": float(r.close),
+                    "volume": float(r.volume), "timestamp": r.timestamp,
+                } for r in rows])
+                df1m.set_index("timestamp", inplace=True)
+                dfs_1m[symbol] = df1m
+        except Exception:
+            pass
+
+    if dfs_1m:
+        logger.debug(f"[hub] intraday overlay active for {len(dfs_1m)}/{len(dfs)} symbols")
+
     # Phase 2: score in parallel (no session use inside score_symbol)
     sem = asyncio.Semaphore(10)
 
     async def score_one(symbol: str, df: pd.DataFrame):
         async with sem:
             try:
-                return await score_symbol(symbol, df, ctx, session)
+                return await score_symbol(symbol, df, ctx, session,
+                                          df_1m=dfs_1m.get(symbol))
             except Exception as exc:
                 logger.debug(f"[hub] score error on {symbol}: {exc}")
                 return None
