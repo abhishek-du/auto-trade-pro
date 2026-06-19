@@ -152,7 +152,8 @@ class VirtualWallet:
             return False, msg
 
         wallet.balance -= amount
-        wallet.equity = wallet.balance + wallet.unrealised_pnl
+        start = await VirtualWallet._start_balance(session)
+        wallet.equity = start + wallet.realised_pnl + wallet.unrealised_pnl
         await session.flush()
 
         VirtualWallet._log("MARGIN_DEDUCTED", symbol, amount, wallet.balance)
@@ -195,7 +196,8 @@ class VirtualWallet:
             if current_dd > wallet.max_drawdown:
                 wallet.max_drawdown = current_dd
 
-        wallet.equity = wallet.balance + wallet.unrealised_pnl
+        start = await VirtualWallet._start_balance(session)
+        wallet.equity = start + wallet.realised_pnl + wallet.unrealised_pnl
         await session.flush()
 
         sign = "+" if pnl >= 0 else ""
@@ -229,13 +231,9 @@ class VirtualWallet:
         Capital locked = starting_balance − balance (what was actually deducted).
         """
         wallet = await VirtualWallet.get_or_create(session)
-        # Full-equity model: reserved capital = full trade value, not a margin fraction.
-        # starting_balance - balance = total capital committed to open positions.
         start  = await VirtualWallet._start_balance(session)
-        capital_in_positions = max(0.0, start - wallet.balance)
-
         wallet.unrealised_pnl = total_unrealised
-        wallet.equity = wallet.balance + capital_in_positions + total_unrealised
+        wallet.equity = start + wallet.realised_pnl + total_unrealised
         await session.flush()
 
     # ─────────────────────────────────────────────────────────────────────────
