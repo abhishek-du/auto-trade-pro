@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from 'react';
+import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
 import {
   Search, ChevronLeft, ChevronRight, ChevronDown,
   TrendingUp, TrendingDown, IndianRupee, Activity,
@@ -6,6 +6,7 @@ import {
   Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen, Bot,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { formatINR } from '../utils/indianFormat';
@@ -363,11 +364,27 @@ function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
 
 // ── Open Positions (live) ─────────────────────────────────────────────────────
 
-function OpenPositionsSection({ positions }) {
+function OpenPositionsSection({ positions, livePrices = {} }) {
   if (!positions || positions.length === 0) return null;
 
-  const totalInvested   = positions.reduce((s, p) => s + (p.size_usd ?? 0), 0);
-  const totalUnrealised = positions.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0);
+  // Enrich each position with live price + recomputed P&L from WebSocket feed
+  const enriched = positions.map(pos => {
+    const bare   = (pos.symbol ?? '').replace('.NS', '').toUpperCase();
+    const liveD  = livePrices[bare + '.NS'] || livePrices[bare] || null;
+    const current_price   = liveD?.price ?? pos.current_price;
+    const qty             = pos.size_units ?? (pos.size_usd / (pos.entry_price || 1));
+    const isBuy           = pos.direction?.toUpperCase() === 'BUY';
+    const unrealised_pnl  = liveD
+      ? (current_price - pos.entry_price) * qty * (isBuy ? 1 : -1)
+      : (pos.unrealised_pnl ?? 0);
+    const unrealised_pct  = pos.size_usd
+      ? unrealised_pnl / pos.size_usd * 100
+      : (pos.unrealised_pct ?? 0);
+    return { ...pos, current_price, unrealised_pnl, unrealised_pct };
+  });
+
+  const totalInvested   = enriched.reduce((s, p) => s + (p.size_usd ?? 0), 0);
+  const totalUnrealised = enriched.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0);
   const isGain          = totalUnrealised >= 0;
 
   return (
@@ -393,7 +410,7 @@ function OpenPositionsSection({ positions }) {
 
       {/* Position cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
-        {positions.map((pos) => {
+        {enriched.map((pos) => {
           const pnl         = pos.unrealised_pnl ?? 0;
           const pct         = pos.unrealised_pct ?? 0;
           const isBuy       = pos.direction?.toUpperCase() === 'BUY';
@@ -502,12 +519,14 @@ function OpenPositionsSection({ positions }) {
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Trades() {
-  const { trades, loading } = useTrades();
-  const [wallet,      setWallet]      = useState(null);
-  const [positions,   setPositions]   = useState([]);
-  const [agentStatus, setAgentStatus] = useState(null);
+  const { trades, loading, refetch: refetchTrades } = useTrades();
+  const [wallet,        setWallet]        = useState(null);
+  const [positions,     setPositions]     = useState([]);
+  const [agentStatus,   setAgentStatus]   = useState(null);
+  const [livePrices,    setLivePrices]    = useState({});
+  const [agentActivity, setAgentActivity] = useState(null); // last agent event
 
-  /* poll wallet + positions + agent status every 10 s for live P&L */
+  /* ── HTTP fallback — refresh every 30 s (WebSocket is primary) ── */
   useEffect(() => {
     function refresh() {
       getPortfolio().then(setWallet).catch(() => {});
@@ -515,9 +534,42 @@ export default function Trades() {
       fetch('/api/v1/agent/status').then(r => r.ok ? r.json() : null).then(d => d && setAgentStatus(d)).catch(() => {});
     }
     refresh();
-    const id = setInterval(refresh, 10_000);
+    const id = setInterval(refresh, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  /* ── /ws/portfolio — wallet pushed every 10 s ── */
+  const onPortfolioMsg = useCallback((msg) => {
+    if (msg.type === 'portfolio_update') {
+      setWallet(prev => prev ? {
+        ...prev,
+        balance:        msg.balance,
+        equity:         msg.equity,
+        unrealised_pnl: msg.unrealised_pnl,
+        realised_pnl:   msg.realised_pnl,
+        roi_percent:    msg.roi_percent,
+      } : prev);
+    }
+  }, []);
+  useWebSocket('/ws/portfolio', { onMessage: onPortfolioMsg });
+
+  /* ── /ws/live-prices — prices + trade events + agent events ── */
+  const onLivePricesMsg = useCallback((msg) => {
+    if (msg.type === 'full_snapshot' && msg.data) {
+      setLivePrices(msg.data);
+    } else if (msg.type === 'price_update' && msg.data) {
+      setLivePrices(prev => ({ ...prev, ...msg.data }));
+    } else if (msg.type === 'agent_event') {
+      setAgentActivity(msg);
+      // New trade opened or closed → refresh positions + trades immediately
+      if (msg.event === 'TRADE_OPENED' || msg.event === 'TRADE_CLOSED') {
+        refetchTrades();
+        getPortfolioPositions().then(setPositions).catch(() => {});
+        getPortfolio().then(setWallet).catch(() => {});
+      }
+    }
+  }, [refetchTrades]);
+  const { status: wsStatus } = useWebSocket('/ws/live-prices', { onMessage: onLivePricesMsg });
 
   /* build symbol → position map for fast lookup.
      Agent trades use id="agent_N" which never matches OpenPosition.trade_id
@@ -579,8 +631,22 @@ export default function Trades() {
       {/* ── Investment summary ── */}
       <InvestmentSummary wallet={wallet} agentStatus={agentStatus} trades={trades} positions={positions} />
 
+      {/* ── WebSocket status + agent activity ── */}
+      <div className="flex items-center gap-3 text-[11px]">
+        <span className={`flex items-center gap-1 ${wsStatus === 'connected' ? 'text-profit' : 'text-muted'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'connected' ? 'bg-profit animate-pulse' : 'bg-slate-500'}`} />
+          {wsStatus === 'connected' ? 'Live WebSocket' : 'Reconnecting…'}
+        </span>
+        {agentActivity && (
+          <span className="flex items-center gap-1 text-cyan-400">
+            <Bot size={11} />
+            Agent: {agentActivity.event} {agentActivity.symbol ?? ''} {agentActivity.pnl != null ? `₹${agentActivity.pnl?.toFixed(0)}` : ''}
+          </span>
+        )}
+      </div>
+
       {/* ── Open positions (live) ── */}
-      <OpenPositionsSection positions={positions} />
+      <OpenPositionsSection positions={positions} livePrices={livePrices} />
 
       {/* ── Secondary stats row ── */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
