@@ -30,6 +30,8 @@ import time
 from collections import defaultdict
 from datetime import date, datetime
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -46,6 +48,28 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 from db.database import AsyncSessionLocal
 from sqlalchemy import text
 from utils.config import settings
+
+# ── Research gate flags (set by CLI args) ─────────────────────────────────────
+_ENABLE_HUB_DB       = False   # --hub: use Hub DB scores where available
+_ENABLE_RESEARCH_GATE = False  # --research-gate: fundamental + news vetoes
+
+# Hard-veto keyword regex (same as pre_trade_research.py)
+_HARD_VETO_PATTERNS = re.compile(
+    r"\b("
+    r"sebi.{0,20}(notice|ban|suspend|penalt|fraud|order|action|investig)"
+    r"|ed.{0,15}raid"
+    r"|cbi.{0,15}(arrest|raid|probe)"
+    r"|promoter.{0,20}(sell|pledg|exit)"
+    r"|corporate.{0,15}fraud"
+    r"|accounting.{0,15}(fraud|irregularit)"
+    r"|insolvency|liquidat|bankrupt|wind.up|nclt"
+    r"|trading.{0,10}suspend"
+    r"|delist"
+    r"|default.{0,20}(loan|npa|debt)"
+    r"|earnings.{0,15}miss"
+    r")\b",
+    re.I,
+)
 
 _DEFAULT_FROM = date(2022, 1, 1)
 _MIN_BARS     = settings.AGENT_WARMUP_BARS + 50
@@ -329,6 +353,9 @@ def backtest_symbol(
     symbol: str,
     equity: float = _EQUITY,
     nifty_ok: dict[str, bool] | None = None,
+    hub_scores: dict[tuple, dict] | None = None,
+    fund_data: dict | None = None,
+    news_vetoes: dict[tuple, bool] | None = None,
 ) -> dict:
     warmup = settings.AGENT_WARMUP_BARS
     if len(df) < warmup + 10:
@@ -338,6 +365,17 @@ def backtest_symbol(
         f = precompute(df)
     except Exception as exc:
         return {"error": str(exc)}
+
+    # ── Research gate: pre-compute per-symbol static veto ─────────────────────
+    bare_sym = symbol.replace(".NS", "").replace(".BO", "")
+    # Fundamental veto: promoter pledging > 50% → block all BUY entries.
+    # Data is semi-static (changes quarterly) — treated as a permanent filter.
+    _pledging_veto = False
+    _fund_score    = 50.0   # neutral default
+    if _ENABLE_RESEARCH_GATE and fund_data:
+        fd = fund_data.get(bare_sym, {})
+        _pledging_veto = (fd.get("pledged_pct", 0) or 0) > 50
+        _fund_score    = float(fd.get("fundamental_score", 50) or 50)
 
     open_pos      = None
     trades        = []
@@ -448,7 +486,44 @@ def backtest_symbol(
             # Symbol cooldown: 20-bar blackout after a stop-hit loss to avoid
             # repeatedly re-entering a weakening stock (e.g. CHOICEIN.NS pattern).
             cooldown_ok = (i >= last_stop_bar + 20)
-            sig = _signal_at(row, prev_row) if cooldown_ok else None
+
+            # ── Hub DB Replay ─────────────────────────────────────────────────
+            # When a Hub 7-factor score exists in DB for this symbol-date, use
+            # it as the primary signal source. This replays EXACTLY what the live
+            # agent saw for dates where the Hub was running.
+            hub_entry = (hub_scores or {}).get((bare_sym, bar_ts))
+            if _ENABLE_HUB_DB and hub_entry and cooldown_ok:
+                if hub_entry["is_blocked"]:
+                    sig = None  # Hub explicitly blocked this symbol
+                else:
+                    ms = hub_entry["master_score"]
+                    hub_regime = hub_entry.get("regime", row.get("regime", "UNKNOWN"))
+                    if abs(ms) >= _CONF_THRESH and hub_regime != "HIGH_VOL_RANGE":
+                        close = float(row["close"])
+                        atr   = float(row["atr14"])
+                        if atr > 0 and not np.isnan(close):
+                            side = "BUY" if ms > 0 else "SELL"
+                            if side == "BUY":
+                                stop   = close - 2.0 * atr
+                                target = close + 4.0 * atr
+                            else:
+                                stop   = close + 2.0 * atr
+                                target = close - 4.0 * atr
+                            sig = {
+                                "side":       side,
+                                "entry":      close,
+                                "stop":       stop,
+                                "target":     target,
+                                "strategy":   "HUB_7FACTOR_DB",
+                                "confidence": min(100, int(abs(ms))),
+                            }
+                        else:
+                            sig = None
+                    else:
+                        sig = None
+            else:
+                sig = _signal_at(row, prev_row) if cooldown_ok else None
+
             if sig:
                 # Symmetric macro gate: longs only when Nifty above EMA50,
                 # shorts only when Nifty below EMA50. (No-op when gate disabled.)
@@ -456,6 +531,22 @@ def backtest_symbol(
                     sig = None
                 elif sig["side"] == "SELL" and nifty_ok is not None and nifty_allow:
                     sig = None
+
+            # ── Research gate: apply veto filters ────────────────────────────
+            if sig and sig["side"] == "BUY" and _ENABLE_RESEARCH_GATE:
+                # Hard veto 1: high promoter pledging (data-driven, no LLM needed)
+                if _pledging_veto:
+                    sig = None
+
+                # Hard veto 2: news keyword match from DB (approximates Tavily gate)
+                elif news_vetoes and (bare_sym, bar_ts) in news_vetoes:
+                    sig = None
+
+                # Soft filter: low fundamental score reduces effective confidence.
+                # If combined quality drops below threshold, skip entry.
+                elif _fund_score < 30:
+                    sig = None
+
             if sig and sig["confidence"] >= _CONF_THRESH:
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
@@ -526,6 +617,110 @@ async def load_candles(symbol: str, from_dt: datetime) -> pd.DataFrame:
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["close"])
+
+
+async def load_hub_scores_bulk(symbols: list[str], from_dt: datetime) -> dict[tuple, dict]:
+    """Load all Hub DB scores for the symbol list.
+
+    Returns {(bare_symbol, date_str): {"master_score": float, "signal": str, "is_blocked": bool}}
+    Only useful for dates where the live Hub was running (fills in going forward).
+    """
+    if not symbols:
+        return {}
+    # Build both bare and .NS variants since Hub may store either form
+    all_variants = list({
+        v
+        for s in symbols
+        for v in (s, s.replace(".NS", "").replace(".BO", ""), s.replace(".BO", ".NS"))
+    })
+    placeholders = ", ".join(f":s{i}" for i in range(len(all_variants)))
+    params = {f"s{i}": v for i, v in enumerate(all_variants)}
+    params["f"] = from_dt
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(text(f"""
+            SELECT symbol, bar_time, master_score, signal, is_blocked, regime
+            FROM master_intelligence_scores
+            WHERE symbol IN ({placeholders})
+              AND bar_time >= :f
+            ORDER BY bar_time
+        """), params)).all()
+    out: dict[tuple, dict] = {}
+    for row in rows:
+        bare = row[0].replace(".NS", "").replace(".BO", "")
+        date_str = str(row[1])[:10]
+        key = (bare, date_str)
+        # Keep the latest score per (symbol, date)
+        if key not in out or row[1] > out[key]["_bar_time"]:
+            out[key] = {
+                "master_score": float(row[2] or 0),
+                "signal":       row[3] or "HOLD",
+                "is_blocked":   bool(row[4]),
+                "regime":       row[5] or "",
+                "_bar_time":    row[1],
+            }
+    return out
+
+
+async def load_fundamental_vetoes(symbols: list[str]) -> dict[str, dict]:
+    """Load fundamental_data for universe symbols.
+
+    Returns {bare_symbol: {"pledged_pct": float, "fundamental_score": float}}
+    Used as static pre-trade research gate: pledged_pct > 50 → hard veto.
+    """
+    if not symbols:
+        return {}
+    bare_list = list({s.replace(".NS", "").replace(".BO", "") for s in symbols})
+    all_variants = bare_list + [s + ".NS" for s in bare_list]
+    placeholders = ", ".join(f":s{i}" for i in range(len(all_variants)))
+    params = {f"s{i}": v for i, v in enumerate(all_variants)}
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(text(f"""
+            SELECT symbol, pledged_pct, fundamental_score
+            FROM fundamental_data
+            WHERE symbol IN ({placeholders})
+        """), params)).all()
+    out: dict[str, dict] = {}
+    for row in rows:
+        bare = row[0].replace(".NS", "").replace(".BO", "")
+        out[bare] = {
+            "pledged_pct":       float(row[1] or 0),
+            "fundamental_score": float(row[2] or 50),
+        }
+    return out
+
+
+async def load_news_vetoes(symbols: list[str], from_dt: datetime) -> dict[tuple, bool]:
+    """Load news items and apply hard-veto keyword regex.
+
+    Returns {(bare_symbol, date_str): True} for symbol-days where a hard-veto
+    keyword was found in news headlines. Works for dates where news was crawled
+    (recent weeks), acts as proxy for the Tavily web research gate.
+    """
+    if not symbols:
+        return {}
+    bare_list = list({s.replace(".NS", "").replace(".BO", "") for s in symbols})
+    all_variants = bare_list + [s + ".NS" for s in bare_list]
+    placeholders = ", ".join(f":s{i}" for i in range(len(all_variants)))
+    params = {f"s{i}": v for i, v in enumerate(all_variants)}
+    params["f"] = from_dt
+    async with AsyncSessionLocal() as db:
+        try:
+            rows = (await db.execute(text(f"""
+                SELECT symbol, published_at, title, summary
+                FROM news_items
+                WHERE symbol IN ({placeholders})
+                  AND published_at >= :f
+            """), params)).all()
+        except Exception:
+            return {}
+    out: dict[tuple, bool] = {}
+    for row in rows:
+        bare = row[0].replace(".NS", "").replace(".BO", "")
+        date_str = str(row[1])[:10]
+        combined = f"{row[2] or ''} {row[3] or ''}"
+        if _HARD_VETO_PATTERNS.search(combined):
+            out[(bare, date_str)] = True
+    return out
 
 
 def aggregate_stats(all_trades: list[dict]) -> dict:
@@ -702,7 +897,13 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     symbols = await load_hub_symbols(top_n)
     if symbol_limit:
         symbols = symbols[:symbol_limit]
-    print(f"[backtest] {len(symbols)} symbols | from {from_date} | conf threshold {_CONF_THRESH}")
+    gates = []
+    if _ENABLE_HUB_DB:
+        gates.append("Hub-DB-replay")
+    if _ENABLE_RESEARCH_GATE:
+        gates.append("research-gate")
+    gate_str = " | gates: " + ", ".join(gates) if gates else ""
+    print(f"[backtest] {len(symbols)} symbols | from {from_date} | conf threshold {_CONF_THRESH}{gate_str}")
 
     # Load Nifty index trend gate: NIFTYBEES.NS close vs EMA50 per date.
     # When Nifty is below its EMA50, all new BUY entries are blocked (macro gate).
@@ -723,6 +924,34 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     except Exception as exc:
         print(f"[backtest] WARNING: NIFTYBEES load failed ({exc}) — gate disabled")
 
+    # ── Pre-load enrichment data (loaded once, shared across all symbols) ──────
+    hub_scores:  dict[tuple, dict] = {}
+    fund_data:   dict[str, dict]   = {}
+    news_vetoes: dict[tuple, bool] = {}
+
+    if _ENABLE_HUB_DB:
+        print("[backtest] Loading Hub 7-factor DB scores...")
+        hub_scores = await load_hub_scores_bulk(symbols, from_dt)
+        covered = len({k[0] for k in hub_scores})
+        dates   = len({k[1] for k in hub_scores})
+        print(f"[backtest] Hub scores: {len(hub_scores)} rows | "
+              f"{covered} symbols | {dates} dates "
+              f"(only dates the live Hub ran — older bars use technical signals)")
+
+    if _ENABLE_RESEARCH_GATE:
+        print("[backtest] Loading fundamental data for research gate...")
+        fund_data = await load_fundamental_vetoes(symbols)
+        pledged   = sum(1 for d in fund_data.values() if (d.get("pledged_pct") or 0) > 50)
+        print(f"[backtest] Fundamental data: {len(fund_data)} symbols | "
+              f"{pledged} with pledging > 50% (hard veto)")
+
+        print("[backtest] Loading news items for keyword veto...")
+        news_vetoes = await load_news_vetoes(symbols, from_dt)
+        if news_vetoes:
+            print(f"[backtest] News vetoes: {len(news_vetoes)} symbol-days with red-flag keywords")
+        else:
+            print("[backtest] News vetoes: none found (limited news history)")
+
     all_trades: list[dict] = []
     ok = skip = 0
 
@@ -737,7 +966,13 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
             skip += 1
             continue
 
-        result = backtest_symbol(df, symbol, nifty_ok=nifty_ok_by_date or None)
+        result = backtest_symbol(
+            df, symbol,
+            nifty_ok=nifty_ok_by_date or None,
+            hub_scores=hub_scores or None,
+            fund_data=fund_data or None,
+            news_vetoes=news_vetoes or None,
+        )
         if "error" in result:
             skip += 1
             continue
@@ -785,10 +1020,22 @@ if __name__ == "__main__":
     p.add_argument("--out",     default=None, help="Save JSON report to path")
     p.add_argument("--shorts",  action="store_true",
                    help="Enable the short-selling leg (combined long/short portfolio)")
+    p.add_argument("--hub",     action="store_true",
+                   help="Enable Hub 7-factor DB replay: use master_intelligence_scores for "
+                        "dates where the live Hub ran, fall back to technical signals for older bars")
+    p.add_argument("--research-gate", action="store_true",
+                   help="Enable pre-trade research gate: promoter-pledging hard veto "
+                        "(fundamental_data.pledged_pct > 50) + news keyword veto from DB. "
+                        "Approximates live run_pre_trade_research() without Tavily/LLM")
     args = p.parse_args()
 
-    _ENABLE_SHORTS = args.shorts
-    print(f"[backtest] short leg: {'ENABLED' if _ENABLE_SHORTS else 'disabled (long-only)'}")
+    _ENABLE_SHORTS        = args.shorts
+    _ENABLE_HUB_DB        = args.hub
+    _ENABLE_RESEARCH_GATE = args.research_gate
+
+    print(f"[backtest] short leg    : {'ENABLED' if _ENABLE_SHORTS else 'disabled (long-only)'}")
+    print(f"[backtest] Hub DB replay: {'ENABLED' if _ENABLE_HUB_DB else 'disabled'}")
+    print(f"[backtest] Research gate: {'ENABLED' if _ENABLE_RESEARCH_GATE else 'disabled'}")
 
     asyncio.run(run(
         top_n=args.top_n,
