@@ -450,6 +450,19 @@ class AgentExecutionManager:
             await VirtualWallet.return_margin(session, trade_value, pnl, symbol)
             await session.commit()
 
+            # WebSocket push — instant trade-closed event to UI
+            try:
+                from api.websocket import broadcast_agent_event
+                import asyncio as _aio
+                _aio.ensure_future(broadcast_agent_event("TRADE_CLOSED", {
+                    "symbol":     symbol,
+                    "exit_price": exit_price,
+                    "pnl":        pnl,
+                    "reason":     reason,
+                }))
+            except Exception:
+                pass
+
             # Telegram exit alert
             if settings.telegram_available:
                 from integrations.telegram_service import send, fmt_exit

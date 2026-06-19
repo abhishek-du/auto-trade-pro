@@ -723,6 +723,19 @@ async def _process_symbol(
 
     if order_id:
         portfolio.add_position(decision)
+        try:
+            from api.websocket import broadcast_agent_event
+            import asyncio as _aio
+            _aio.ensure_future(broadcast_agent_event("TRADE_OPENED", {
+                "symbol":   decision.symbol,
+                "side":     decision.action,
+                "entry":    decision.entry,
+                "qty":      getattr(decision, "qty", None),
+                "strategy": decision.strategy,
+                "score":    getattr(decision, "master_score", None),
+            }))
+        except Exception:
+            pass
         _sym  = decision.symbol
         _risk = abs(decision.entry - decision.stop)
         portfolio.open_positions[_sym]["target1"]      = round(decision.entry + 1.0 * _risk, 2)

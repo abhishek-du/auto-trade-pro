@@ -284,6 +284,16 @@ class LivePriceManager:
 live_price_manager = LivePriceManager()
 
 
+async def broadcast_agent_event(event_type: str, payload: dict):
+    """Push an agent decision/trade event to all /ws/live-prices subscribers."""
+    await live_price_manager.broadcast_event({
+        "type":      "agent_event",
+        "event":     event_type,
+        "timestamp": datetime.utcnow().isoformat(),
+        **payload,
+    })
+
+
 # ── /ws/candles/{symbol} — real-time candle updates ───────────────────────────
 
 @router.websocket("/candles/{symbol}")
