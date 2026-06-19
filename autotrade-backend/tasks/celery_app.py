@@ -189,12 +189,13 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 20},
     },
 
-    # DISABLED: Kite equity instrument refresh — Hub universe built from candles, not Kite.
-    # Only NFO contracts (FUT/CE/PE) remain in kite_instruments for F&O resolution.
-    # "zerodha-instrument-refresh-daily": {
-    #     "task":     "tasks.india_tasks.refresh_zerodha_instruments",
-    #     "schedule": crontab(hour=2, minute=35),
-    # },
+    # Daily 03:05 UTC (08:35 IST): refresh NFO contracts (NIFTY/BANKNIFTY/FINNIFTY only).
+    # Applies smart filters: nearest 2-3 expiries + 15% OTM strike window.
+    # NSE/BSE equity instruments are NOT synced — Hub uses candles for its universe.
+    "zerodha-nfo-instrument-refresh-daily": {
+        "task":     "tasks.india_tasks.refresh_zerodha_instruments",
+        "schedule": crontab(hour=3, minute=5),
+    },
 
     # Daily 00:35 UTC = 06:05 IST: check if Kite token expired at 6 AM
     "zerodha-token-expiry-check": {
@@ -275,7 +276,7 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_live_candles",
         "schedule": crontab(minute="*/3", hour="3-10", day_of_week="1-5"),
     },
-    # DISABLED: Kite equity instrument refresh — not needed, Hub uses candles for universe.
+    # DISABLED: legacy kite_refresh_instruments task (replaced by zerodha-nfo above)
     # "kite-refresh-instruments-daily": {
     #     "task":     "tasks.kite_refresh_instruments",
     #     "schedule": crontab(hour=2, minute=45),

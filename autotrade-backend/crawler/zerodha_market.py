@@ -121,83 +121,140 @@ def _symbol_to_kite(symbol: str) -> str:
 # ── Instrument token refresh ──────────────────────────────────────────────────
 
 async def refresh_instrument_tokens(session: AsyncSession) -> int:
-    """Download the instrument master from Kite and upsert into kite_instruments.
+    """Download NFO instrument master from Kite and upsert into kite_instruments.
 
-    Syncs NSE (equity), BSE (equity), and NFO (F&O futures + options) segments so
-    the agent can resolve both cash and derivative contracts. The KiteInstrument
-    table already carries expiry/strike/lot_size/instrument_type/segment columns.
+    Only NFO (F&O) contracts are synced — NSE/BSE equity instruments are no longer
+    stored here because the Hub universe is built from candle turnover (yfinance),
+    not from the Kite instrument master.
 
-    Scheduled daily at 08:00 IST so tokens are fresh before market open.
-    Returns total number of instruments saved across all exchanges.
+    Smart filters applied on every refresh:
+      - Keep only NIFTY, BANKNIFTY, FINNIFTY underlyings (agent's F&O universe)
+      - Keep nearest 2 futures expiries per underlying
+      - Keep nearest 3 option expiries per underlying
+      - Keep only strikes within 15% of last known spot (prevents ~70% OTM junk)
+      - Drop already-expired contracts
+
+    Scheduled daily at 08:35 IST so contracts are fresh before market open.
+    Returns number of NFO contracts saved.
     """
+    import datetime as _dt
+
     kite = get_kite_client()
     if not kite.access_token:
-        logger.warning("[zerodha_market] No access token — skipping instrument refresh")
+        logger.warning("[zerodha_market] No access token — skipping NFO instrument refresh")
         return 0
 
-    # NFO is gated behind the F&O master flag so we don't download ~50k F&O rows
-    # unless derivatives are actually enabled.
-    exchanges = ["NSE", "BSE"]
-    if getattr(settings, "ENABLE_FNO", False) or getattr(settings, "ENABLE_HUB_OPTIONS", False):
-        exchanges.append("NFO")
+    if not (getattr(settings, "ENABLE_FNO", False)):
+        logger.info("[zerodha_market] ENABLE_FNO=false — skipping NFO refresh")
+        return 0
 
-    now = datetime.datetime.utcnow()
-    total_saved = 0
+    # Index underlyings the agent actually trades
+    _FNO_NAMES = set(getattr(settings, "fno_index_symbols", ["NIFTY", "BANKNIFTY", "FINNIFTY"]))
+    _OTM_PCT   = 0.15   # keep strikes within 15% of spot
+    _MAX_FUT   = 2      # nearest N futures expiries
+    _MAX_OPT   = 3      # nearest N option expiries
 
-    for exch in exchanges:
+    # Approximate spot prices — refreshed from candles at runtime
+    from sqlalchemy import text as _text
+    _spots: dict[str, float] = {}
+    _candle_map = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "^CNXIT"}
+    for nm, csym in _candle_map.items():
+        row = (await session.execute(
+            _text(f"SELECT close FROM candles WHERE symbol='{csym}' AND timeframe='1d' ORDER BY timestamp DESC LIMIT 1")
+        )).scalar()
+        if row:
+            _spots[nm] = float(row)
+    logger.info(f"[zerodha_market] NFO spot prices for OTM filter: {_spots}")
+
+    try:
+        rows = await kite.get_instruments("NFO")
+    except Exception as exc:
+        logger.error(f"[zerodha_market] NFO instrument download failed: {exc}", exc_info=True)
+        return 0
+
+    today = _dt.date.today()
+
+    # Build sorted expiry lists per underlying+type for the "nearest N" filter
+    _expiry_sets: dict[tuple, list] = {}
+    for r in rows:
+        nm    = str(r.get("name") or "")
+        itype = str(r.get("instrument_type") or "")
+        exp_s = str(r.get("expiry") or "")
+        if nm not in _FNO_NAMES or not exp_s:
+            continue
         try:
-            rows = await kite.get_instruments(exch)
-        except Exception as exc:
-            logger.error(f"[zerodha_market] {exch} instrument download failed: {exc}", exc_info=True)
+            exp = _dt.date.fromisoformat(exp_s)
+        except ValueError:
+            continue
+        if exp < today:
+            continue
+        _expiry_sets.setdefault((nm, itype), set()).add(exp)
+
+    _allowed_exp: dict[tuple, set] = {
+        k: set(sorted(v)[:(_MAX_FUT if k[1] == "FUT" else _MAX_OPT)])
+        for k, v in _expiry_sets.items()
+    }
+
+    # Clear existing NFO rows, insert filtered batch
+    await session.execute(delete(KiteInstrument).where(KiteInstrument.exchange == "NFO"))
+
+    now   = datetime.datetime.utcnow()
+    batch: list[KiteInstrument] = []
+    for r in rows:
+        nm    = str(r.get("name") or "")
+        itype = str(r.get("instrument_type") or "")
+        if nm not in _FNO_NAMES:
+            continue
+        exp_s = str(r.get("expiry") or "")
+        if not exp_s:
+            continue
+        try:
+            exp = _dt.date.fromisoformat(exp_s)
+        except ValueError:
+            continue
+        if exp < today:
+            continue
+        if exp not in _allowed_exp.get((nm, itype), set()):
             continue
 
-        # Clear existing rows for this exchange, then bulk-insert
-        await session.execute(
-            delete(KiteInstrument).where(KiteInstrument.exchange == exch)
-        )
-
-        batch: list[KiteInstrument] = []
-        for r in rows:
-            try:
-                token = int(r.get("instrument_token") or 0)
-                if not token:
-                    continue
-                batch.append(KiteInstrument(
-                    instrument_token = token,
-                    exchange_token   = int(r.get("exchange_token") or 0),
-                    tradingsymbol    = str(r.get("tradingsymbol") or ""),
-                    name             = str(r.get("name") or ""),
-                    last_price       = float(r.get("last_price") or 0.0),
-                    expiry           = str(r.get("expiry") or ""),
-                    strike           = float(r.get("strike") or 0.0),
-                    tick_size        = float(r.get("tick_size") or 0.05),
-                    lot_size         = int(float(r.get("lot_size") or 1)),
-                    instrument_type  = str(r.get("instrument_type") or "EQ"),
-                    segment          = str(r.get("segment") or exch),
-                    exchange         = exch,
-                    refreshed_at     = now,
-                ))
-            except (ValueError, TypeError):
+        # OTM filter for options
+        if itype in ("CE", "PE"):
+            strike = float(r.get("strike") or 0)
+            spot   = _spots.get(nm, 0)
+            if spot and (strike < spot * (1 - _OTM_PCT) or strike > spot * (1 + _OTM_PCT)):
                 continue
 
-        if batch:
-            session.add_all(batch)
-            await session.flush()
+        try:
+            token = int(r.get("instrument_token") or 0)
+            if not token:
+                continue
+            batch.append(KiteInstrument(
+                instrument_token = token,
+                exchange_token   = int(r.get("exchange_token") or 0),
+                tradingsymbol    = str(r.get("tradingsymbol") or ""),
+                name             = nm,
+                last_price       = float(r.get("last_price") or 0.0),
+                expiry           = exp_s,
+                strike           = float(r.get("strike") or 0.0),
+                tick_size        = float(r.get("tick_size") or 0.05),
+                lot_size         = int(float(r.get("lot_size") or 1)),
+                instrument_type  = itype,
+                segment          = str(r.get("segment") or "NFO"),
+                exchange         = "NFO",
+                refreshed_at     = now,
+            ))
+        except (ValueError, TypeError):
+            continue
 
-            # Update in-memory NSE_TOKENS for cash equity instruments only
-            if exch == "NSE":
-                for inst in batch:
-                    if inst.instrument_type == "EQ":
-                        sym = f"{inst.tradingsymbol}.NS"
-                        NSE_TOKENS[sym] = inst.instrument_token
-                        _TOKEN_TO_SYMBOL[inst.instrument_token] = sym
+    if batch:
+        session.add_all(batch)
+        await session.flush()
 
-        total_saved += len(batch)
-        logger.info(f"[zerodha_market] {exch} instruments refreshed: {len(batch)} rows")
-
-    logger.info(f"[zerodha_market] Instrument tokens refreshed: {total_saved} total rows "
-                f"across {exchanges}")
-    return total_saved
+    logger.info(
+        f"[zerodha_market] NFO instruments refreshed: {len(batch)} contracts "
+        f"(from {len(rows):,} raw) — names={sorted(_FNO_NAMES)}"
+    )
+    return len(batch)
 
 
 async def hydrate_tokens_from_db(session: AsyncSession) -> int:
