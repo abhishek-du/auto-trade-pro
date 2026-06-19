@@ -1129,3 +1129,174 @@ async def persist_scores(scored: list, bar_time: datetime, session: AsyncSession
         ))
     await session.commit()
     logger.info(f"[hub] persisted {len(scored)} scores for bar_time={bar_time}")
+
+
+async def run_research_gate_for_history(
+    scored: list,
+    max_symbols: int = 15,
+) -> dict[str, dict]:
+    """Run pre-trade research gate for top BUY signals.
+
+    Returns {symbol: research_result_dict} for symbols that were researched.
+    Called once per Hub cycle — results are stored in hub_daily_history.
+    Capped at max_symbols to stay within Tavily free-tier budget.
+    """
+    from engine.pre_trade_research import run_pre_trade_research
+
+    # Only research non-blocked BUY / STRONG_BUY signals, ranked by master_score
+    candidates = [
+        s for s in scored
+        if not s.is_blocked and s.signal in ("BUY", "STRONG_BUY")
+    ][:max_symbols]
+
+    results: dict[str, dict] = {}
+    for stock in candidates:
+        try:
+            r = await run_pre_trade_research(
+                symbol=stock.symbol,
+                action="BUY",
+                score=stock.master_score,
+                regime=stock.regime,
+                entry=0.0,   # not known yet at scoring time
+                stop=0.0,
+                t1=0.0,
+                fund_grade=getattr(stock, "fund_grade", "WATCHLIST"),
+            )
+            results[stock.symbol] = r
+            logger.debug(
+                f"[hub/research] {stock.symbol}: "
+                f"veto={r['veto']} source={r['source']}"
+            )
+        except Exception as exc:
+            logger.debug(f"[hub/research] {stock.symbol} failed: {exc}")
+    return results
+
+
+async def persist_daily_history(
+    scored: list,
+    ctx: "MasterContext",
+    session: AsyncSession,
+    research_results: dict[str, dict] | None = None,
+) -> None:
+    """Upsert one row per (date, symbol) into hub_daily_history.
+
+    This is the flight-recorder: every Hub cycle's full output lands here
+    so the backtest can replay EXACTLY what the live agent saw on any date,
+    including web-research veto decisions.
+
+    Uses raw SQL ON CONFLICT DO UPDATE so re-runs within the same day
+    overwrite with the latest scores (last cycle of the day wins).
+    """
+    from sqlalchemy import text
+    from datetime import date as _date
+
+    if not scored:
+        return
+
+    bar_date = _date.today()
+    rr = research_results or {}
+
+    # Macro snapshot — captured once for this cycle, shared across all symbols
+    vix         = round(ctx.macro.india_vix,   2)
+    fii_net_3d  = round(ctx.macro.fii_net_3d,  2)
+    dii_net_3d  = round(ctx.macro.dii_net_3d,  2)
+    nse_mood    = ctx.macro.nse_market_mood
+    ad_ratio    = round(ctx.macro.advance_decline_ratio, 3)
+
+    rows_upserted = 0
+    for s in scored:
+        r = s.reasoning
+        res = rr.get(s.symbol)
+
+        web_veto        = res["veto"]         if res else None
+        web_veto_reason = res.get("veto_reason", "") if res else None
+        web_confidence  = None   # run_pre_trade_research doesn't return a numeric confidence
+        research_note   = res.get("research_note", "") if res else None
+        research_source = res.get("source", "")         if res else None
+
+        # Extract sector from reasoning (populated by score_symbol)
+        sector_detail = r.get("sector_detail", {})
+        sector        = sector_detail.get("sector") or r.get("sector_name")
+
+        try:
+            await session.execute(text("""
+                INSERT INTO hub_daily_history (
+                    date, symbol,
+                    technical_score, news_score, sector_score, macro_score,
+                    earnings_score, fundamental_score, options_score, master_score,
+                    signal, regime, sector, fund_grade, is_blocked, blocked_reason,
+                    india_vix, fii_net_3d, dii_net_3d, nse_mood, ad_ratio,
+                    web_veto, web_veto_reason, web_confidence,
+                    research_note, research_source,
+                    reasoning, scored_at
+                ) VALUES (
+                    :date, :symbol,
+                    :technical, :news, :sector_s, :macro,
+                    :earnings, :fundamental, :options, :master,
+                    :signal, :regime, :sector_name, :fund_grade,
+                    :is_blocked, :blocked_reason,
+                    :vix, :fii, :dii, :mood, :adr,
+                    :web_veto, :web_veto_reason, :web_conf,
+                    :research_note, :research_source,
+                    :reasoning::jsonb, NOW()
+                )
+                ON CONFLICT (date, symbol) DO UPDATE SET
+                    technical_score   = EXCLUDED.technical_score,
+                    news_score        = EXCLUDED.news_score,
+                    sector_score      = EXCLUDED.sector_score,
+                    macro_score       = EXCLUDED.macro_score,
+                    earnings_score    = EXCLUDED.earnings_score,
+                    fundamental_score = EXCLUDED.fundamental_score,
+                    options_score     = EXCLUDED.options_score,
+                    master_score      = EXCLUDED.master_score,
+                    signal            = EXCLUDED.signal,
+                    regime            = EXCLUDED.regime,
+                    sector            = EXCLUDED.sector,
+                    fund_grade        = EXCLUDED.fund_grade,
+                    is_blocked        = EXCLUDED.is_blocked,
+                    blocked_reason    = EXCLUDED.blocked_reason,
+                    india_vix         = EXCLUDED.india_vix,
+                    fii_net_3d        = EXCLUDED.fii_net_3d,
+                    dii_net_3d        = EXCLUDED.dii_net_3d,
+                    nse_mood          = EXCLUDED.nse_mood,
+                    ad_ratio          = EXCLUDED.ad_ratio,
+                    web_veto          = COALESCE(EXCLUDED.web_veto, hub_daily_history.web_veto),
+                    web_veto_reason   = COALESCE(EXCLUDED.web_veto_reason, hub_daily_history.web_veto_reason),
+                    web_confidence    = COALESCE(EXCLUDED.web_confidence, hub_daily_history.web_confidence),
+                    research_note     = COALESCE(EXCLUDED.research_note, hub_daily_history.research_note),
+                    research_source   = COALESCE(EXCLUDED.research_source, hub_daily_history.research_source),
+                    reasoning         = EXCLUDED.reasoning,
+                    scored_at         = NOW()
+            """), {
+                "date":    bar_date,    "symbol":     s.symbol,
+                "technical":  float(r.get("technical", 0)),
+                "news":       float(r.get("news", 0)),
+                "sector_s":   float(r.get("sector", 0)),
+                "macro":      float(r.get("macro", 0)),
+                "earnings":   float(r.get("earnings", 0)),
+                "fundamental": float(r.get("fundamental", 0)),
+                "options":    float(r.get("options", 0)),
+                "master":     float(s.master_score),
+                "signal":     s.signal,       "regime":       s.regime,
+                "sector_name": sector,         "fund_grade":  getattr(s, "fund_grade", None),
+                "is_blocked": s.is_blocked,   "blocked_reason": s.blocked_reason,
+                "vix":        vix,            "fii":          fii_net_3d,
+                "dii":        dii_net_3d,     "mood":         nse_mood,
+                "adr":        ad_ratio,
+                "web_veto":   web_veto,       "web_veto_reason": web_veto_reason,
+                "web_conf":   web_confidence,
+                "research_note":   research_note,
+                "research_source": research_source,
+                "reasoning": __import__("json").dumps(r),
+            })
+            rows_upserted += 1
+        except Exception as exc:
+            logger.debug(f"[hub/history] upsert failed for {s.symbol}: {exc}")
+
+    await session.commit()
+    researched = sum(1 for v in rr.values() if v)
+    vetoed     = sum(1 for v in rr.values() if v and v.get("veto"))
+    logger.info(
+        f"[hub/history] upserted {rows_upserted} rows for {bar_date} | "
+        f"researched={researched} vetoed={vetoed}"
+    )

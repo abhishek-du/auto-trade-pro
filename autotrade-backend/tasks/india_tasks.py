@@ -1822,6 +1822,7 @@ def run_master_intelligence_cycle():
         from db.database import get_db
         from engine.intelligence_hub import (
             build_master_context, score_universe, persist_scores,
+            persist_daily_history, run_research_gate_for_history,
             _get_sector_for_symbol,
         )
         from engine.agent.agent_loop import (
@@ -1871,6 +1872,17 @@ def run_master_intelligence_cycle():
                 # the whole universe is covered, not just the hourly-fed names.
                 scored = await score_universe(universe, ctx, session, timeframe="1d")
                 await persist_scores(scored, cycle_start, session)
+
+                # ── Flight recorder: store full Hub output + web research gate ──
+                # Runs pre-trade research for top 15 BUY signals (Tavily budget-safe:
+                # ~15 calls/cycle × 1 cycle/day = 330 calls/month, within free tier).
+                # The hub_daily_history table becomes the historical replay source
+                # for backtest — grows one row per symbol per trading day.
+                try:
+                    research_results = await run_research_gate_for_history(scored, max_symbols=15)
+                    await persist_daily_history(scored, ctx, session, research_results)
+                except Exception as _hist_exc:
+                    logger.warning(f"[hub] daily history persist failed: {_hist_exc}")
 
                 top_buys = [
                     {"symbol": s.symbol, "score": s.master_score}

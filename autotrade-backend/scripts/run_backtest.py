@@ -495,6 +495,8 @@ def backtest_symbol(
             if _ENABLE_HUB_DB and hub_entry and cooldown_ok:
                 if hub_entry["is_blocked"]:
                     sig = None  # Hub explicitly blocked this symbol
+                elif hub_entry.get("web_veto") is True:
+                    sig = None  # Pre-trade research gate vetoed this trade
                 else:
                     ms = hub_entry["master_score"]
                     hub_regime = hub_entry.get("regime", row.get("regime", "UNKNOWN"))
@@ -620,14 +622,16 @@ async def load_candles(symbol: str, from_dt: datetime) -> pd.DataFrame:
 
 
 async def load_hub_scores_bulk(symbols: list[str], from_dt: datetime) -> dict[tuple, dict]:
-    """Load all Hub DB scores for the symbol list.
+    """Load Hub scores for the symbol list from hub_daily_history (primary source)
+    with fallback to master_intelligence_scores (legacy cycle table).
 
-    Returns {(bare_symbol, date_str): {"master_score": float, "signal": str, "is_blocked": bool}}
-    Only useful for dates where the live Hub was running (fills in going forward).
+    hub_daily_history has (date, symbol) PK — one authoritative row per day.
+    master_intelligence_scores may have multiple rows per day (one per cycle).
+
+    Returns {(bare_symbol, date_str): {...score fields..., "web_veto": bool|None}}
     """
     if not symbols:
         return {}
-    # Build both bare and .NS variants since Hub may store either form
     all_variants = list({
         v
         for s in symbols
@@ -635,29 +639,61 @@ async def load_hub_scores_bulk(symbols: list[str], from_dt: datetime) -> dict[tu
     })
     placeholders = ", ".join(f":s{i}" for i in range(len(all_variants)))
     params = {f"s{i}": v for i, v in enumerate(all_variants)}
-    params["f"] = from_dt
-    async with AsyncSessionLocal() as s:
-        rows = (await s.execute(text(f"""
-            SELECT symbol, bar_time, master_score, signal, is_blocked, regime
-            FROM master_intelligence_scores
-            WHERE symbol IN ({placeholders})
-              AND bar_time >= :f
-            ORDER BY bar_time
-        """), params)).all()
+    params["f"] = from_dt.date() if hasattr(from_dt, "date") else from_dt
+
     out: dict[tuple, dict] = {}
-    for row in rows:
-        bare = row[0].replace(".NS", "").replace(".BO", "")
-        date_str = str(row[1])[:10]
-        key = (bare, date_str)
-        # Keep the latest score per (symbol, date)
-        if key not in out or row[1] > out[key]["_bar_time"]:
-            out[key] = {
-                "master_score": float(row[2] or 0),
-                "signal":       row[3] or "HOLD",
-                "is_blocked":   bool(row[4]),
-                "regime":       row[5] or "",
-                "_bar_time":    row[1],
-            }
+
+    async with AsyncSessionLocal() as s:
+        # Primary: hub_daily_history — permanent archive with web_veto
+        try:
+            rows = (await s.execute(text(f"""
+                SELECT symbol, date, master_score, signal, is_blocked, regime, web_veto
+                FROM hub_daily_history
+                WHERE symbol IN ({placeholders})
+                  AND date >= :f
+                ORDER BY date
+            """), params)).all()
+            for row in rows:
+                bare = row[0].replace(".NS", "").replace(".BO", "")
+                date_str = str(row[1])[:10]
+                out[(bare, date_str)] = {
+                    "master_score": float(row[2] or 0),
+                    "signal":       row[3] or "HOLD",
+                    "is_blocked":   bool(row[4]),
+                    "regime":       row[5] or "",
+                    "web_veto":     row[6],
+                    "_source":      "daily_history",
+                }
+        except Exception as e:
+            pass  # table may not exist on older DBs — fall through to legacy
+
+        # Fallback: master_intelligence_scores (no web_veto, multiple rows per day)
+        params_ts = dict(params)
+        params_ts["f"] = from_dt
+        try:
+            rows2 = (await s.execute(text(f"""
+                SELECT symbol, bar_time, master_score, signal, is_blocked, regime
+                FROM master_intelligence_scores
+                WHERE symbol IN ({placeholders})
+                  AND bar_time >= :f
+                ORDER BY bar_time
+            """), params_ts)).all()
+            for row in rows2:
+                bare = row[0].replace(".NS", "").replace(".BO", "")
+                date_str = str(row[1])[:10]
+                key = (bare, date_str)
+                if key not in out:   # only fill gaps not covered by daily_history
+                    out[key] = {
+                        "master_score": float(row[2] or 0),
+                        "signal":       row[3] or "HOLD",
+                        "is_blocked":   bool(row[4]),
+                        "regime":       row[5] or "",
+                        "web_veto":     None,
+                        "_source":      "mis_legacy",
+                    }
+        except Exception:
+            pass
+
     return out
 
 
