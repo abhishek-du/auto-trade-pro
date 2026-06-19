@@ -486,6 +486,9 @@ async def _india_trade_loop():
             if conf < conf_threshold:
                 continue
             action = "BUY" if "BUY" in c["signal"] else "SELL"
+            # Shorts need higher conviction — only short on strong Hub signals
+            if action == "SELL" and conf < 50:
+                continue
 
             # Current price: live cache → last candle close
             sym_base = c["symbol"].replace(".NS", "")
@@ -506,7 +509,8 @@ async def _india_trade_loop():
             if action == "BUY":
                 stop_loss, take_profit = entry_price * 0.95, entry_price * 1.10
             else:
-                stop_loss, take_profit = entry_price * 1.05, entry_price * 0.90
+                # Tighter provisional levels for shorts (1×ATR proxy ≈ 3%)
+                stop_loss, take_profit = entry_price * 1.03, entry_price * 0.94
 
             # ── Portfolio caps: skip if single-stock or sector limit exceeded ──
             if action == "BUY":
