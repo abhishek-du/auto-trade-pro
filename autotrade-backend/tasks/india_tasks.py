@@ -350,6 +350,10 @@ async def _india_trade_loop():
     if not is_window:
         return
 
+    # ── Live snapshot: hot-patch PRICE_CACHE + SECTOR_CACHE from Kite ─────
+    from crawler.live_snapshot import fetch_live_snapshot
+    await fetch_live_snapshot()
+
     async with celery_session() as session:
 
         # Step 1: close SL/TP hits, refresh unrealised PnL
@@ -941,6 +945,9 @@ async def _intraday_entry_task():
         logger.info(f"[intraday_entry] Outside entry window ({now_ist.strftime('%H:%M')} IST)")
         return
 
+    from crawler.live_snapshot import fetch_live_snapshot
+    await fetch_live_snapshot()
+
     async with celery_session() as session:
         # ── Guard: count MIS positions already opened today ────────────────────
         today_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1339,6 +1346,9 @@ async def _intraday_squareoff_task():
 
     if not getattr(_cfg, "INTRADAY_ENABLED", True):
         return
+
+    from crawler.live_snapshot import fetch_live_snapshot
+    await fetch_live_snapshot()
 
     async with celery_session() as session:
         mis_positions = (await session.execute(
@@ -1972,6 +1982,14 @@ def run_master_intelligence_cycle():
         portfolio   = _get_portfolio()
         cycle_start = datetime.utcnow()
 
+        # ── Live snapshot: hot-patch PRICE_CACHE + SECTOR_CACHE from Kite ─────
+        # Celery workers never receive WebSocket ticks — without this every
+        # downstream PRICE_CACHE read (macro, VIX, sector mood, entry price)
+        # would use stale data.
+        from crawler.live_snapshot import fetch_live_snapshot
+        _open_syms = list(portfolio.open_positions.keys())
+        await fetch_live_snapshot(extra_symbols=_open_syms)
+
         async for session in get_db():
             cycle_log = HubCycleLog(cycle_start=cycle_start, bar_time=cycle_start, status="running")
             session.add(cycle_log)
@@ -2166,9 +2184,11 @@ def agent_eod_reconcile_task():
     async def _run():
         from db.database import get_db
         from crawler.live_prices import PRICE_CACHE
+        from crawler.live_snapshot import fetch_live_snapshot
         from engine.agent.agent_loop import _get_portfolio, _executor, eod_reconcile
 
         portfolio = _get_portfolio()
+        await fetch_live_snapshot(extra_symbols=list(portfolio.open_positions.keys()))
         async for session in get_db():
             await _executor.check_and_close_positions(portfolio, PRICE_CACHE, session)
             break
