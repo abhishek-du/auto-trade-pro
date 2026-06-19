@@ -1,12 +1,19 @@
 [Unit]
-Description=AutoTrade Pro — Celery beat (scheduler)
+Description=AutoTrade Pro — Celery beat scheduler (auto-reloads on .py changes)
 After=network.target autotrade-celery-worker.service
 
 [Service]
 Type=simple
 WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
 Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
-ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/celery -A tasks.celery_app beat --loglevel=warning
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/watchmedo \
+    auto-restart \
+    --directory=. \
+    --pattern="*.py" \
+    --recursive \
+    -- \
+    /home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/celery \
+    -A tasks.celery_app beat --loglevel=warning
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
