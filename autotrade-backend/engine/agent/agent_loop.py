@@ -367,6 +367,17 @@ async def _process_symbol(
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
+    # Duplicate position guard — block re-entry for any symbol already held.
+    # Normalise both sides (.NS / bare) so "VIJAYA.NS" and "VIJAYA" match the
+    # same in-memory key regardless of how the position was originally stored.
+    _bare_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
+    _already = any(
+        k == symbol or k.replace(".NS", "").replace(".BO", "").upper() == _bare_sym
+        for k in portfolio.open_positions
+    )
+    if _already:
+        return None
+
     # 1. Get candle data from DB — single, deterministic timeframe.
     # NO fallback cascade: a cascade let the agent's trading style (and the scale
     # of every ATR-based stop/target) be decided by whatever candle data happened

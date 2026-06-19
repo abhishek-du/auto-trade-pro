@@ -488,6 +488,7 @@ async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
 
     pos = (await db.execute(
         select(OpenPosition).where(OpenPosition.symbol == symbol)
+        .order_by(OpenPosition.opened_at.asc())
     )).scalars().first()
     if pos is None:
         raise HTTPException(404, f"{symbol} not in open positions")

@@ -156,7 +156,11 @@ class RiskManagerAgent:
             return False, "CASH_BUFFER"
 
         # ── Diversification ───────────────────────────────────────────────────
-        if candidate.symbol in ctx.get("open_symbols", []):
+        _bare_cand = candidate.symbol.replace(".NS", "").replace(".BO", "").upper()
+        if any(
+            s == candidate.symbol or s.replace(".NS", "").replace(".BO", "").upper() == _bare_cand
+            for s in ctx.get("open_symbols", [])
+        ):
             return False, "ALREADY_IN_POSITION"
 
         # Correlation cluster guard (Varsity M16)
