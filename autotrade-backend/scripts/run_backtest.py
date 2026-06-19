@@ -52,6 +52,7 @@ _MIN_BARS     = settings.AGENT_WARMUP_BARS + 50
 _EQUITY       = 500_000.0   # per-symbol notional for position sizing
 _RISK_PCT     = settings.AGENT_MAX_RISK_PER_TRADE   # 1%
 _CONF_THRESH  = max(settings.AGENT_CONFIDENCE_THRESHOLD, 40)  # use 40 minimum in backtest
+_ENABLE_SHORTS = False      # toggled by --shorts; enables the short-selling leg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -240,6 +241,70 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
                 "strategy": "HUB_SIGNAL", "confidence": 55,
             }
 
+    # ══ SHORT LEG (mirror of the long setups) — only when --shorts enabled ════
+    if _ENABLE_SHORTS:
+        # ── TREND_BREAKDOWN_SHORT (mirror of TREND_BREAKOUT_LONG) ─────────────
+        if (regime == "BEAR_TRENDING"
+                and not np.isnan(r["swing_low_20"])
+                and close < r["swing_low_20"]
+                and r["vol_spike"]
+                and 25 <= r["rsi14"] <= 45
+                and r["adx14"] > 20
+                and r["ema20"] < r["ema50"]):
+            stop = min(r["swing_low_20"] + 1.5 * atr, r["ema20"] + 0.5 * atr)
+            risk = stop - close
+            if risk > 0:
+                return {
+                    "side": "SELL", "entry": close,
+                    "stop": stop,  "target": close - 2.0 * risk,
+                    "strategy": "TREND_BREAKDOWN_SHORT", "confidence": 75,
+                }
+
+        # ── RALLY_SHORT (mirror of PULLBACK_LONG) — sell a bounce into EMA20 ──
+        if (regime == "BEAR_TRENDING" and prev_row is not None
+                and r["ema20"] < r["ema50"] and r["rsi14"] <= 50
+                and r["adx14"] >= 15
+                and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
+                and close < r["ema20"]):
+            stop = float(prev_row["high"]) + 0.5 * atr
+            risk = stop - close
+            if risk > 0:
+                return {
+                    "side": "SELL", "entry": close,
+                    "stop": stop,  "target": close - 2.0 * risk,
+                    "strategy": "RALLY_SHORT", "confidence": 70,
+                }
+
+        # ── RANGE_REVERSAL_SHORT (mirror) — fade upper band in a range ────────
+        if (regime in ("RANGE", "HIGH_VOL_RANGE", "LOW_VOL_RANGE", "UNKNOWN")
+                and close >= r["bb_upper"] and r["rsi14"] >= 65
+                and r["ema50"] < r["ema200"]      # medium-term trend not up
+                and r["adx14"] < 25):             # confirmed range, not trending
+            stop = r["high"] + 0.5 * atr
+            risk = stop - close
+            tgt  = r["bb_mid"]
+            if risk > 0 and tgt < close:
+                return {
+                    "side": "SELL", "entry": close,
+                    "stop": stop,  "target": tgt,
+                    "strategy": "RANGE_REVERSAL_SHORT", "confidence": 63,
+                }
+
+        # ── HUB_SIGNAL SELL (mirror of HUB long) ─────────────────────────────
+        if (r["ema20"] < r["ema50"] and r["st_dir"] == -1
+                and r["rsi14"] < 55
+                and regime != "BULL_TRENDING"
+                and not (regime == "UNKNOWN" and r["adx14"] < 15)):
+            stop   = close + 2.0 * atr
+            target = close - 4.0 * atr
+            risk   = stop - close
+            if risk > 0 and target > 0:
+                return {
+                    "side": "SELL", "entry": close,
+                    "stop": stop,  "target": target,
+                    "strategy": "HUB_SIGNAL_SHORT", "confidence": 55,
+                }
+
     return None
 
 
@@ -289,9 +354,9 @@ def backtest_symbol(
 
         # ── Manage open position ──────────────────────────────────────────────
         if open_pos:
+            # T1 hit → book 50%, move stop to break-even, hold rest to fixed T2
+            t1 = open_pos.get("t1")
             if open_pos["side"] == "BUY":
-                # T1 hit → book 50%, move stop to break-even, hold rest to fixed T2
-                t1 = open_pos.get("t1")
                 if t1 and not open_pos.get("partial_done") and bar_high >= t1:
                     partial_qty = int(open_pos["qty"] * 0.5)
                     if partial_qty > 0:
@@ -300,6 +365,15 @@ def backtest_symbol(
                         open_pos["partial_done"] = True
                         open_pos["qty"]         -= partial_qty
                         open_pos["stop"]         = max(open_pos["stop"], open_pos["entry"])
+            else:  # SELL/short: T1 is below entry, profit booked as price falls
+                if t1 and not open_pos.get("partial_done") and bar_low <= t1:
+                    partial_qty = int(open_pos["qty"] * 0.5)
+                    if partial_qty > 0:
+                        open_pos["partial_pnl"]  = (open_pos["entry"] - t1) * partial_qty
+                        open_pos["partial_qty"]  = partial_qty
+                        open_pos["partial_done"] = True
+                        open_pos["qty"]         -= partial_qty
+                        open_pos["stop"]         = min(open_pos["stop"], open_pos["entry"])
 
             exit_price = None
             reason     = None
@@ -311,17 +385,29 @@ def backtest_symbol(
                 elif bar_high >= open_pos["target"]:
                     exit_price = open_pos["target"]
                     reason     = "TARGET_HIT"
+            else:  # SELL/short: stop ABOVE entry, target BELOW entry
+                if bar_high >= open_pos["stop"]:
+                    exit_price = open_pos["stop"]
+                    reason     = "STOP_HIT"
+                elif bar_low <= open_pos["target"]:
+                    exit_price = open_pos["target"]
+                    reason     = "TARGET_HIT"
 
             if exit_price is not None:
                 remaining_qty = open_pos["qty"]
                 partial_pnl   = open_pos.get("partial_pnl", 0.0)
                 partial_qty   = open_pos.get("partial_qty", 0)
                 total_qty     = remaining_qty + partial_qty  # original position size
-                final_pnl     = (exit_price - open_pos["entry"]) * remaining_qty
+                if open_pos["side"] == "BUY":
+                    final_pnl = (exit_price - open_pos["entry"]) * remaining_qty
+                    entry_side, exit_side = "BUY", "SELL"
+                else:  # short: gain when exit < entry
+                    final_pnl = (open_pos["entry"] - exit_price) * remaining_qty
+                    entry_side, exit_side = "SELL", "BUY"
                 pnl           = final_pnl + partial_pnl
-                total_cost    = (estimate_cost(total_qty,     open_pos["entry"], "BUY") +
-                                 estimate_cost(remaining_qty, exit_price, "SELL") +
-                                 estimate_cost(partial_qty,   open_pos.get("t1", exit_price), "SELL"))
+                total_cost    = (estimate_cost(total_qty,     open_pos["entry"], entry_side) +
+                                 estimate_cost(remaining_qty, exit_price, exit_side) +
+                                 estimate_cost(partial_qty,   open_pos.get("t1", exit_price), exit_side))
                 pnl -= total_cost
                 equity += pnl
                 _init_risk = abs(open_pos["entry"] - open_pos["initial_stop"]) * total_qty
@@ -362,7 +448,14 @@ def backtest_symbol(
             # Symbol cooldown: 20-bar blackout after a stop-hit loss to avoid
             # repeatedly re-entering a weakening stock (e.g. CHOICEIN.NS pattern).
             cooldown_ok = (i >= last_stop_bar + 20)
-            sig = _signal_at(row, prev_row) if (nifty_allow and cooldown_ok) else None
+            sig = _signal_at(row, prev_row) if cooldown_ok else None
+            if sig:
+                # Symmetric macro gate: longs only when Nifty above EMA50,
+                # shorts only when Nifty below EMA50. (No-op when gate disabled.)
+                if sig["side"] == "BUY" and not nifty_allow:
+                    sig = None
+                elif sig["side"] == "SELL" and nifty_ok is not None and nifty_allow:
+                    sig = None
             if sig and sig["confidence"] >= _CONF_THRESH:
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
@@ -375,7 +468,8 @@ def backtest_symbol(
                             "stop":         sig["stop"],
                             "initial_stop": sig["stop"],  # persisted for R-multiple; never trails
                             "target":       sig["target"],
-                            "t1":           sig["entry"] + 2.0 * atr14,
+                            "t1":           (sig["entry"] + 2.0 * atr14) if sig["side"] == "BUY"
+                                            else (sig["entry"] - 2.0 * atr14),
                             "trail_dist":   atr14,  # 1× ATR — backtested as optimal for NSE
                             "trailing":     False,
                             "qty":          qty,
@@ -689,7 +783,12 @@ if __name__ == "__main__":
     p.add_argument("--from",    dest="from_date", default=str(_DEFAULT_FROM),
                    help="Start date YYYY-MM-DD (default 2022-01-01)")
     p.add_argument("--out",     default=None, help="Save JSON report to path")
+    p.add_argument("--shorts",  action="store_true",
+                   help="Enable the short-selling leg (combined long/short portfolio)")
     args = p.parse_args()
+
+    _ENABLE_SHORTS = args.shorts
+    print(f"[backtest] short leg: {'ENABLED' if _ENABLE_SHORTS else 'disabled (long-only)'}")
 
     asyncio.run(run(
         top_n=args.top_n,
