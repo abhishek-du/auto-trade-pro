@@ -2386,7 +2386,8 @@ async def _backfill_hub_1d_candles():
     failed = 0
     for sym in universe:
         try:
-            candles = await fetch_candles_yfinance(sym, period="5d", interval="1d")
+            from crawler.price_feed import fetch_candles
+            candles = await fetch_candles(sym, timeframe="1d")
             if candles:
                 from tasks._db import celery_session as _cs
                 async with _cs() as s2:
