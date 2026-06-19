@@ -289,18 +289,41 @@ async def fetch_candles_alphavantage(
 # ── 3. Unified fetcher ────────────────────────────────────────────────────────
 
 async def fetch_candles(symbol: str, timeframe: str = "1h") -> list[dict]:
-    """Try yfinance first; fall back to Alpha Vantage if yfinance returns nothing.
+    """Fetch OHLCV candles with a 3-tier priority: Kite → yfinance → Alpha Vantage.
 
-    Logs which source was used.  Returns [] on complete failure — never raises.
+    Kite (Zerodha) is tried first when an access token is available — it returns
+    official NSE data with exact IST timestamps and no rate-limiting issues.
+    yfinance is the fallback for when Kite is not connected (token expired etc.).
+    Alpha Vantage is the last resort if both above return nothing.
     """
+    # ── Tier 1: Kite Connect (official NSE data) ──────────────────────────────
+    try:
+        from crawler.zerodha_client import get_kite_client
+        from crawler.zerodha_instruments import get_token
+        kite = get_kite_client()
+        if kite.access_token:
+            token = get_token(symbol)
+            if token:
+                import datetime as _dt2
+                days_back = {"1m": 5, "5m": 30, "15m": 60, "1h": 400, "1d": 1825}.get(timeframe, 60)
+                from_date = (_dt2.date.today() - _dt2.timedelta(days=days_back)).isoformat()
+                to_date   = _dt2.date.today().isoformat()
+                from crawler.zerodha_historical import get_kite_candles_for_range
+                candles = await get_kite_candles_for_range(symbol, from_date, to_date, interval=timeframe)
+                if candles:
+                    logger.debug(f"[price_feed] {symbol}/{timeframe}: Kite ✓ {len(candles)} bars")
+                    return candles
+    except Exception as _kite_exc:
+        logger.debug(f"[price_feed] Kite fetch skipped for {symbol}: {_kite_exc}")
+
+    # ── Tier 2: yfinance ─────────────────────────────────────────────────────
     period  = _YF_PERIOD.get(timeframe, "60d")
     candles = await fetch_candles_yfinance(symbol, period=period, interval=timeframe)
-
     if candles:
         return candles
 
+    # ── Tier 3: Alpha Vantage ────────────────────────────────────────────────
     logger.info(f"yfinance returned 0 bars for {symbol}/{timeframe} — trying Alpha Vantage")
-
     if not settings.alpha_vantage_available:
         logger.warning("ALPHA_VANTAGE_KEY not configured — no fallback available")
         return []
