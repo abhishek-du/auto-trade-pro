@@ -202,7 +202,7 @@ class Candle(Base):
     )
 
     id:        Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol:    Mapped[str]      = mapped_column(String(20),  nullable=False)
+    symbol:    Mapped[str]      = mapped_column(String(50),  nullable=False)
     timeframe: Mapped[str]      = mapped_column(String(10),  nullable=False)
     open:      Mapped[float]    = mapped_column(Float, nullable=False)
     high:      Mapped[float]    = mapped_column(Float, nullable=False)

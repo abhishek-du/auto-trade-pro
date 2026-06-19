@@ -52,11 +52,29 @@ HARDCODED_TOKENS: dict[str, int] = {
     "NTPC":       2977281,
     "COALINDIA":  5215745,
     "ONGC":       633601,
-    # Indices
-    "NIFTY 50":   256265,
-    "SENSEX":     265,        # BSE token (NIFTY 50 segment)
-    "NIFTY BANK": 260105,
-    "INDIA VIX":  264969,
+    # Broad indices
+    "NIFTY 50":           256265,
+    "SENSEX":             265,        # BSE token
+    "NIFTY BANK":         260105,
+    "INDIA VIX":          264969,
+    "NIFTY 100":          260617,
+    "NIFTY 200":          264457,
+    "NIFTY 500":          268041,
+    "NIFTY NEXT 50":      270857,
+    "NIFTY MIDCAP 50":    260873,
+    "NIFTY MIDCAP 100":   256777,
+    "NIFTY SMALLCAP 100": 267017,
+    # Sector indices
+    "NIFTY IT":           259849,
+    "NIFTY PHARMA":       262409,
+    "NIFTY AUTO":         263433,
+    "NIFTY FMCG":         261897,
+    "NIFTY ENERGY":       261641,
+    "NIFTY INFRA":        261385,
+    "NIFTY METAL":        263689,
+    "NIFTY PSU BANK":     262921,
+    "NIFTY FIN SERVICE":  257801,
+    "NIFTY MEDIA":        263945,
 }
 
 # Live cache — populated by refresh_instrument_cache()
