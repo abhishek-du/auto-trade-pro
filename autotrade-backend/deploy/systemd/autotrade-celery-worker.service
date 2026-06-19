@@ -1,15 +1,21 @@
 [Unit]
-Description=AutoTrade Pro — Celery worker (mark-to-market, journal sync, scans)
+Description=AutoTrade Pro — Celery worker (auto-reloads on .py changes)
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
 Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
-ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/celery -A tasks.celery_app worker --loglevel=warning --concurrency=2
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/watchmedo \
+    auto-restart \
+    --directory=. \
+    --pattern="*.py" \
+    --recursive \
+    -- \
+    /home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/celery \
+    -A tasks.celery_app worker --loglevel=warning --concurrency=2
 Restart=always
 RestartSec=5
-# Restart even if it crashes repeatedly
 StartLimitIntervalSec=0
 StandardOutput=append:/tmp/celery_worker.log
 StandardError=append:/tmp/celery_worker.log
