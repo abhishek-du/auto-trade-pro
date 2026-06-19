@@ -163,6 +163,28 @@ async def open_option_paper_trade(
     """
     from paper_trading.virtual_wallet import VirtualWallet
 
+    # Hard guard: premium cost must not exceed 5% of equity
+    _max = settings.AGENT_EQUITY * settings.AGENT_MAX_POSITION_WEIGHT
+    if spec.notional > _max * 1.10:
+        logger.error(
+            f"[fno/opt] HARD GUARD: {spec.tradingsymbol} cost ₹{spec.notional:,.0f} "
+            f"exceeds {settings.AGENT_MAX_POSITION_WEIGHT*100:.0f}% of equity (max ₹{_max:,.0f})"
+        )
+        return None
+
+    # Duplicate guard: no two options on the same underlying+type
+    existing = (await session.execute(
+        select(OpenPosition.symbol).where(
+            OpenPosition.underlying_symbol == spec.underlying,
+            OpenPosition.option_type == spec.option_type,
+        )
+    )).scalars().all()
+    if existing:
+        logger.warning(
+            f"[fno/opt] BLOCKED {spec.tradingsymbol} — already have {existing[0]}"
+        )
+        return None
+
     now = datetime.utcnow()
     label = f"{spec.underlying} {spec.strike:.0f}{spec.option_type} {spec.expiry:%d-%b}"
 

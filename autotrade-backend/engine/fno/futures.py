@@ -71,15 +71,24 @@ async def select_index_future(
     notional = round(qty * entry, 2)
     margin = _margin.span_exposure_margin(notional)
 
-    # Trim lots until the margin fits the available budget.
+    # Trim lots until margin fits both the available budget AND 5% cap.
+    _max_margin = equity * settings.AGENT_MAX_POSITION_WEIGHT
     while lots > 1:
         ok, _ = await _margin.can_block_margin(margin, equity, session)
-        if ok:
+        if ok and margin <= _max_margin * 1.10:
             break
         lots -= 1
         qty = lots * lot_size
         notional = round(qty * entry, 2)
         margin = _margin.span_exposure_margin(notional)
+
+    # If even 1 lot exceeds the margin cap, reject entirely
+    if margin > _max_margin * 1.10:
+        logger.warning(
+            f"[fno/fut] {underlying}: 1 lot margin ₹{margin:,.0f} exceeds "
+            f"5% cap ₹{_max_margin:,.0f} — skipping"
+        )
+        return None
 
     if direction.upper() == "BUY":
         stop   = round(entry * (1 - _STOP_PCT), 2)
@@ -101,6 +110,25 @@ async def open_future_paper_trade(
 ) -> PaperTrade | None:
     """Open a futures paper position; blocks the approximate SPAN margin."""
     from paper_trading.virtual_wallet import VirtualWallet
+
+    # Hard guard: margin blocked must not exceed 5% of equity
+    _max_margin = settings.AGENT_EQUITY * settings.AGENT_MAX_POSITION_WEIGHT
+    if spec.margin > _max_margin * 1.10:
+        logger.error(
+            f"[fno/fut] HARD GUARD: {spec.tradingsymbol} margin ₹{spec.margin:,.0f} "
+            f"exceeds {settings.AGENT_MAX_POSITION_WEIGHT*100:.0f}% of equity (max ₹{_max_margin:,.0f})"
+        )
+        return None
+
+    # Duplicate guard: no two positions on the same underlying
+    existing = (await session.execute(
+        select(OpenPosition.symbol).where(
+            OpenPosition.underlying_symbol == spec.underlying
+        )
+    )).scalars().all()
+    if existing:
+        logger.warning(f"[fno/fut] BLOCKED {spec.underlying} FUT — already have {existing[0]}")
+        return None
 
     ok, msg = await _margin.can_block_margin(spec.margin, settings.AGENT_EQUITY, session)
     if not ok:
