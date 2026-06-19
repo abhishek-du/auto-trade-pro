@@ -364,11 +364,13 @@ async def fetch_hub_candidate(
         stop   = round(entry - 2.0 * atr, 2)
         target = round(entry + 4.0 * atr, 2)
     else:
-        stop   = round(entry + 2.0 * atr, 2)
-        target = round(entry - 4.0 * atr, 2)
+        stop   = round(entry + 1.0 * atr, 2)
+        target = round(entry - 2.0 * atr, 2)
 
-    # Position size reduction flag for range regimes
+    # Position size reduction flag for range regimes; shorts always half-size
     size_factor = 0.5 if regime in ("RANGE", "LOW_VOL_RANGE") else 1.0
+    if side == "SELL":
+        size_factor *= 0.5
     if size_factor < 1.0:
         logger.info(
             f"[hub_override] {symbol} {regime} → size_factor=0.5 (50% position)"

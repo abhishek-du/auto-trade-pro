@@ -318,6 +318,10 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
     risk_frac = min_risk + (max_risk - min_risk) * t
 
     risk_amount   = balance * risk_frac
+    # Shorts carry squeeze risk — half size vs longs.
+    _is_short = getattr(signal, "action", "BUY") == "SELL"
+    if _is_short:
+        risk_amount *= 0.5
     risk_per_unit = abs(signal.entry_price - signal.stop_loss)
 
     units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
@@ -325,7 +329,11 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
 
     # Hard cap at AGENT_MAX_POSITION_WEIGHT (default 5%) — one position can never
     # exceed this fraction of balance regardless of stop distance or confidence.
-    max_notional = balance * float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    # Shorts capped at half that (2.5%).
+    _max_weight = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    if _is_short:
+        _max_weight *= 0.5
+    max_notional = balance * _max_weight
     if usd_value > max_notional:
         usd_value = max_notional
         units     = usd_value / signal.entry_price if signal.entry_price > 0 else 0.0

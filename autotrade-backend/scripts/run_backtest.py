@@ -265,68 +265,47 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
                 "strategy": "HUB_SIGNAL", "confidence": 55,
             }
 
-    # ══ SHORT LEG (mirror of the long setups) — only when --shorts enabled ════
+    # ══ SMART SHORT LEG — only high-confluence setups when --shorts enabled ════
+    # Old strategy results (2023-2026 backtest):
+    #   RALLY_SHORT          -₹8.9L  PF=0.82  → KILLED (counter-trend, DII floor)
+    #   TREND_BREAKDOWN_SHORT -₹3.6L PF=0.51  → KILLED (momentum short, squeeze risk)
+    #   HUB_SIGNAL_SHORT     +₹0.15L PF=3.96  → KEPT (tiny sample, needs more data)
+    #   RANGE_REVERSAL_SHORT +₹1.5L  PF=1.18  → KEPT + tightened
     if _ENABLE_SHORTS:
-        # ── TREND_BREAKDOWN_SHORT (mirror of TREND_BREAKOUT_LONG) ─────────────
-        if (regime == "BEAR_TRENDING"
-                and not np.isnan(r["swing_low_20"])
-                and close < r["swing_low_20"]
-                and r["vol_spike"]
-                and 25 <= r["rsi14"] <= 45
-                and r["adx14"] > 20
-                and r["ema20"] < r["ema50"]):
-            stop = min(r["swing_low_20"] + 1.5 * atr, r["ema20"] + 0.5 * atr)
-            risk = stop - close
-            if risk > 0:
-                return {
-                    "side": "SELL", "entry": close,
-                    "stop": stop,  "target": close - 2.0 * risk,
-                    "strategy": "TREND_BREAKDOWN_SHORT", "confidence": 75,
-                }
-
-        # ── RALLY_SHORT (mirror of PULLBACK_LONG) — sell a bounce into EMA20 ──
-        if (regime == "BEAR_TRENDING" and prev_row is not None
-                and r["ema20"] < r["ema50"] and r["rsi14"] <= 50
-                and r["adx14"] >= 15
-                and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
-                and close < r["ema20"]):
-            stop = float(prev_row["high"]) + 0.5 * atr
-            risk = stop - close
-            if risk > 0:
-                return {
-                    "side": "SELL", "entry": close,
-                    "stop": stop,  "target": close - 2.0 * risk,
-                    "strategy": "RALLY_SHORT", "confidence": 70,
-                }
-
-        # ── RANGE_REVERSAL_SHORT (mirror) — fade upper band in a range ────────
+        # ── RANGE_REVERSAL_SHORT — fade extreme overbought at BB upper ────────
+        # Tightened vs old: RSI >= 70 (was 65), stop = 1×ATR (was 0.5×ATR above high),
+        # added volume confirmation, requires EMA50 < EMA200 (medium-term not up).
         if (regime in ("RANGE", "HIGH_VOL_RANGE", "LOW_VOL_RANGE", "UNKNOWN")
-                and close >= r["bb_upper"] and r["rsi14"] >= 65
-                and r["ema50"] < r["ema200"]      # medium-term trend not up
-                and r["adx14"] < 25):             # confirmed range, not trending
-            stop = r["high"] + 0.5 * atr
+                and close >= r["bb_upper"] and r["rsi14"] >= 70
+                and r["ema50"] < r["ema200"]
+                and r["adx14"] < 25
+                and r["vol_spike"]):
+            stop = close + 1.0 * atr
             risk = stop - close
             tgt  = r["bb_mid"]
             if risk > 0 and tgt < close:
                 return {
                     "side": "SELL", "entry": close,
                     "stop": stop,  "target": tgt,
-                    "strategy": "RANGE_REVERSAL_SHORT", "confidence": 63,
+                    "strategy": "RANGE_REVERSAL_SHORT", "confidence": 68,
                 }
 
-        # ── HUB_SIGNAL SELL (mirror of HUB long) ─────────────────────────────
-        if (r["ema20"] < r["ema50"] and r["st_dir"] == -1
-                and r["rsi14"] < 55
-                and regime != "BULL_TRENDING"
-                and not (regime == "UNKNOWN" and r["adx14"] < 15)):
-            stop   = close + 2.0 * atr
-            target = close - 4.0 * atr
-            risk   = stop - close
-            if risk > 0 and target > 0:
+        # ── EXHAUSTION_SHORT — overbought in a confirmed downtrend ────────────
+        # High-confluence: stock bounced into overbought territory (RSI >= 65)
+        # while medium-term trend is down (EMA50 < EMA200) and short-term
+        # bearish (EMA20 < EMA50). This is the "dead cat bounce" fade.
+        if (r["ema20"] < r["ema50"] < r["ema200"]
+                and r["rsi14"] >= 65
+                and close >= r["ema20"]
+                and r["adx14"] >= 15):
+            stop = close + 1.0 * atr
+            risk = stop - close
+            tgt  = r["ema50"] if r["ema50"] < close else close - 2.0 * atr
+            if risk > 0 and tgt < close:
                 return {
                     "side": "SELL", "entry": close,
-                    "stop": stop,  "target": target,
-                    "strategy": "HUB_SIGNAL_SHORT", "confidence": 55,
+                    "stop": stop,  "target": tgt,
+                    "strategy": "EXHAUSTION_SHORT", "confidence": 72,
                 }
 
     return None
@@ -509,8 +488,8 @@ def backtest_symbol(
                                 stop   = close - 2.0 * atr
                                 target = close + 4.0 * atr
                             else:
-                                stop   = close + 2.0 * atr
-                                target = close - 4.0 * atr
+                                stop   = close + 1.0 * atr
+                                target = close - 2.0 * atr
                             sig = {
                                 "side":       side,
                                 "entry":      close,
@@ -552,7 +531,8 @@ def backtest_symbol(
             if sig and sig["confidence"] >= _CONF_THRESH:
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
-                    qty = int((equity * _RISK_PCT) / risk_per_share)
+                    _size_mult = 0.5 if sig["side"] == "SELL" else 1.0
+                    qty = int((equity * _RISK_PCT * _size_mult) / risk_per_share)
                     if qty > 0:
                         atr14 = float(row["atr14"])
                         open_pos = {
