@@ -472,41 +472,6 @@ async def _process_symbol(
         if getattr(candidate, "strategy", "") != "TREND_BREAKOUT_LONG":
             return None
 
-    # Short-side safety gates — applied when EQUITY_SHORT_ENABLED=True.
-    # Two guards beyond the strategy-level conditions:
-    #   1. VIX panic block: never short into extreme fear (VIX > SHORT_MAX_VIX).
-    #      Extreme VIX means chaotic moves — shorts get squeezed violently.
-    #   2. Nifty trend gate (Hub SELL only): block if Nifty is above EMA50.
-    #      MeanReversionShort is already gated to RANGE regime, so it bypasses this.
-    if candidate is not None and getattr(candidate, "side", None) == "SELL":
-        live_vix: float = 15.0
-        try:
-            from crawler.live_prices import PRICE_CACHE as _PC
-            live_vix = float(_PC.get("^INDIAVIX", {}).get("price", 15) or 15)
-        except Exception:
-            pass
-        short_max_vix = getattr(settings, "SHORT_MAX_VIX", 28.0)
-        if live_vix > short_max_vix:
-            logger.info(
-                f"[agent] SHORT BLOCKED {symbol} — VIX {live_vix:.1f} > cap {short_max_vix}"
-            )
-            return None
-
-        # Hub SELL: only allowed when Nifty is not in a bull trend (< EMA50).
-        is_hub_sell = getattr(candidate, "strategy", "") == "HUB_7FACTOR"
-        if is_hub_sell and getattr(settings, "SHORT_HUB_SELL_NIFTY_GATE", True):
-            try:
-                from crawler.live_prices import PRICE_CACHE as _PC2
-                nifty_px = float(_PC2.get("^NSEI", {}).get("price", 0) or 0)
-                nifty_ema50 = float(_PC2.get("^NSEI", {}).get("ema50", 0) or 0)
-                if nifty_px > 0 and nifty_ema50 > 0 and nifty_px > nifty_ema50:
-                    logger.info(
-                        f"[agent] HUB SELL BLOCKED {symbol} — Nifty {nifty_px:.0f} > EMA50 {nifty_ema50:.0f}"
-                    )
-                    return None
-            except Exception:
-                pass  # no PRICE_CACHE data → allow (conservative gate)
-
     # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
     #     candidate regardless of whether execution ultimately proceeds.
     #     Threshold: any Hub BUY signal with |master_score| >= 40 OR signal is
