@@ -1,0 +1,22 @@
+[Unit]
+Description=AutoTrade Pro — Zerodha daily token refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
+# Give backend 30s to be ready (important on boot)
+ExecStartPre=/bin/sleep 30
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python scripts/refresh_zerodha_token.py --backend http://localhost:8000
+# Retry up to 5 times (1 min apart) if the script fails
+Restart=on-failure
+RestartSec=60
+StartLimitBurst=5
+StartLimitIntervalSec=600
+StandardOutput=append:/tmp/zerodha_refresh.log
+StandardError=append:/tmp/zerodha_refresh.log
+
+[Install]
+WantedBy=default.target

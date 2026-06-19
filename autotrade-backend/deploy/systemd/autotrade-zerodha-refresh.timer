@@ -1,0 +1,14 @@
+[Unit]
+Description=AutoTrade Pro — Zerodha token refresh at 8:00 AM IST (every day)
+Requires=autotrade-zerodha-refresh.service
+
+[Timer]
+# 8:00 AM IST = 02:30 AM UTC, every day including Saturday & Sunday
+OnCalendar=*-*-* 02:30:00 UTC
+# If machine was off at 02:30 (boot after expiry), run immediately on next start
+Persistent=true
+# Small jitter so it doesn't clash with other boot tasks
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
