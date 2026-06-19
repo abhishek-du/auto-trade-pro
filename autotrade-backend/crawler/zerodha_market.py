@@ -108,7 +108,12 @@ def _to_kite_interval(tf: str) -> str:
 
 def _symbol_to_kite(symbol: str) -> str:
     """Convert 'RELIANCE.NS' → 'NSE:RELIANCE', '^NSEI' → 'NSE:NIFTY 50'."""
-    _index_map = {"^NSEI": "NSE:NIFTY 50", "^BSESN": "BSE:SENSEX", "^NSEBANK": "NSE:NIFTY BANK"}
+    _index_map = {
+        "^NSEI":     "NSE:NIFTY 50",
+        "^BSESN":    "BSE:SENSEX",
+        "^NSEBANK":  "NSE:NIFTY BANK",
+        "^INDIAVIX": "NSE:INDIA VIX",
+    }
     if symbol in _index_map:
         return _index_map[symbol]
     if symbol.endswith(".NS"):
