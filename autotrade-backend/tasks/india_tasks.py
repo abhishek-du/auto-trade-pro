@@ -2366,3 +2366,44 @@ def rebuild_hub_universe_task(top_n: int | None = None, min_turnover_cr: float |
     30-day avg turnover). Size from HUB_UNIVERSE_SIZE env (default 500)."""
     logger.info("[rebuild_hub_universe] starting daily universe rebuild")
     return _run_async(_rebuild_hub_universe(top_n, min_turnover_cr))
+
+
+async def _backfill_hub_1d_candles():
+    """Fetch yesterday's 1d candle for every Hub universe symbol.
+
+    Runs at 3:10 AM daily — after rebuild_hub_universe (2:50 AM) and before
+    the first Hub scoring cycle. Ensures the Hub always has today's close
+    available regardless of whether the intraday crawl caught all symbols.
+    """
+    from engine.hub_universe import get_hub_universe
+    from crawler.price_feed import fetch_candles_yfinance, save_candles_to_db
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        universe = await get_hub_universe(session)
+
+    saved_total = 0
+    failed = 0
+    for sym in universe:
+        try:
+            candles = await fetch_candles_yfinance(sym, period="5d", interval="1d")
+            if candles:
+                from tasks._db import celery_session as _cs
+                async with _cs() as s2:
+                    saved = await save_candles_to_db(candles, s2)
+                    await s2.commit()
+                    saved_total += saved
+        except Exception:
+            failed += 1
+
+    logger.info(
+        f"[backfill_hub_1d] done — universe={len(universe)} saved={saved_total} failed={failed}"
+    )
+    return {"universe": len(universe), "saved": saved_total, "failed": failed}
+
+
+@celery_app.task(name="tasks.backfill_hub_1d_candles")
+def backfill_hub_1d_candles_task():
+    """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols."""
+    logger.info("[backfill_hub_1d] starting daily 1d candle backfill for Hub universe")
+    return _run_async(_backfill_hub_1d_candles())
