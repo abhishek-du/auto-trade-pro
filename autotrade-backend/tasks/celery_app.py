@@ -161,6 +161,13 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 30},
     },
 
+    # Every 5 s during NSE hours: stop-loss / take-profit check on live PRICE_CACHE.
+    # Pure exit-only path — reads WebSocket LTP, no scoring, no new entries.
+    "fast-sl-check-every-5s": {
+        "task":     "tasks.fast_sl_check",
+        "schedule": 5,
+    },
+
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",
