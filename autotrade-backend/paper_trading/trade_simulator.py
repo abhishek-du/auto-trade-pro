@@ -38,7 +38,7 @@ _SLIP_MAX = 0.0003
 # Legacy: basis-point range used by TradeSimulator
 _SLIP_BPS_MIN = 2
 _SLIP_BPS_MAX = 8
-_MAX_POSITION_PCT = 0.20
+_MAX_POSITION_PCT = 0.05
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,7 +76,7 @@ class TradeSimulator:
         stop_loss_price: float,
         risk_fraction: float | None = None,
     ) -> tuple[float, float]:
-        rf            = risk_fraction if risk_fraction is not None else settings.MAX_RISK_PER_TRADE
+        rf            = risk_fraction if risk_fraction is not None else float(getattr(settings, "AGENT_MAX_RISK_PER_TRADE", 0.01))
         stop_distance = abs(entry_price - stop_loss_price)
         if stop_distance == 0:
             return 0.0, 0.0
