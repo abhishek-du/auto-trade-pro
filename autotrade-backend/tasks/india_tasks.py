@@ -553,47 +553,6 @@ async def _india_trade_loop():
             ))
 
         actionable = [s for s in signals if s.action in ("BUY", "SELL")]
-
-        # ── Short-selling guards ──────────────────────────────────────────────
-        # Applied before ranking so vetoed SELL signals don't consume cycle slots.
-        _short_enabled = bool(getattr(settings, "EQUITY_SHORT_ENABLED", False))
-        _sell_count = sum(1 for s in actionable if s.action == "SELL")
-        if _sell_count and not _short_enabled:
-            logger.info("[india_trade_loop] EQUITY_SHORT_ENABLED=False — dropping SELL signals")
-            actionable = [s for s in actionable if s.action != "SELL"]
-        elif _sell_count:
-            _live_vix   = float((PRICE_CACHE.get("^INDIAVIX") or {}).get("price", 0) or 0)
-            _max_vix    = float(getattr(settings, "SHORT_MAX_VIX", 28.0))
-            if _live_vix > _max_vix:
-                logger.info(
-                    f"[india_trade_loop] VIX {_live_vix:.1f} > {_max_vix:.0f} — "
-                    f"panic mode, blocking all SELL signals"
-                )
-                actionable = [s for s in actionable if s.action != "SELL"]
-            elif getattr(settings, "SHORT_HUB_SELL_NIFTY_GATE", True):
-                # Block shorts when Nifty is above its 50-day EMA (uptrend).
-                # Defaults to ALLOW if candles unavailable (never fail-closed on data absence).
-                try:
-                    import pandas as _pd
-                    _nsei_candles = await get_latest_candles("^NSEI", "1d", 60, session)
-                    if len(_nsei_candles) >= 20:
-                        _closes      = _pd.Series([float(c.close) for c in _nsei_candles])
-                        _nifty_ema50 = _closes.ewm(span=50, adjust=False).mean().iloc[-1]
-                        _nifty_price = _closes.iloc[-1]
-                        if _nifty_price > _nifty_ema50:
-                            logger.info(
-                                f"[india_trade_loop] Nifty {_nifty_price:.0f} > EMA50 "
-                                f"{_nifty_ema50:.0f} — uptrend, blocking SELL signals"
-                            )
-                            actionable = [s for s in actionable if s.action != "SELL"]
-                        else:
-                            logger.info(
-                                f"[india_trade_loop] Nifty {_nifty_price:.0f} < EMA50 "
-                                f"{_nifty_ema50:.0f} — downtrend, SELL signals allowed"
-                            )
-                except Exception as _nifty_exc:
-                    logger.debug(f"[india_trade_loop] Nifty EMA50 gate check failed: {_nifty_exc}")
-
         logger.info(
             f"[india_trade_loop] candidates={len(candidates)}  "
             f"above_{conf_threshold:.0f}%={len(actionable)}  "

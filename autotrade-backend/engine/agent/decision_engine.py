@@ -76,12 +76,6 @@ class DecisionEngine:
         if candidate is None:
             return None, "no_candidate"
 
-        # NSE/BSE: equity delivery short is illegal; intraday short requires EQUITY_SHORT_ENABLED.
-        # This guard applies to ALL candidate sources (hub override + strategy selector).
-        if candidate.side == "SELL" and not getattr(settings, "EQUITY_SHORT_ENABLED", False):
-            logger.debug(f"[agent/decision] {symbol} SELL blocked — EQUITY_SHORT_ENABLED=False")
-            return None, "EQUITY_SHORT_ENABLED=False"
-
         from engine.agent.risk_manager import capital_utilization_size
 
         # Apply regime-based position size reduction flag (set by fetch_hub_candidate)
@@ -360,13 +354,6 @@ async def fetch_hub_candidate(
             )
             await _log_hub_rejection(symbol, master_score, regime, reason, 0, session)
             return None
-
-    # Respect EQUITY_SHORT_ENABLED flag for SELL signals
-    if side == "SELL" and not getattr(settings, "EQUITY_SHORT_ENABLED", False):
-        reason = "EQUITY_SHORT_ENABLED=False"
-        logger.debug(f"[hub_override] {symbol} SELL skipped — {reason}")
-        await _log_hub_rejection(symbol, master_score, regime, reason, 0, session)
-        return None
 
     entry = features.close
     atr   = features.atr14
