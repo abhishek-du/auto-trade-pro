@@ -112,7 +112,8 @@ async def from_verdicts(days: int):
     from sqlalchemy import text
     async with AsyncSessionLocal() as s:
         rows = (await s.execute(text(f"""
-            SELECT v.mode, v.llm_verdict, v.llm_confidence, v.taken, pt.pnl, pt.r_multiple
+            SELECT v.mode, v.llm_verdict, v.llm_confidence, v.taken, pt.pnl, pt.r_multiple,
+                   COALESCE((v.detail->>'shadow')::boolean, false) AS shadow
             FROM reasoning_verdicts v
             LEFT JOIN LATERAL (
                 SELECT pnl, r_multiple FROM paper_trades p
@@ -147,8 +148,22 @@ async def from_verdicts(days: int):
             print(f"    llm_conf>=60 mean R  : {mean(hi):+.3f} (n={len(hi)})")
             print(f"    llm_conf <60 mean R  : {mean(lo):+.3f} (n={len(lo)})")
             print(f"    → LLM confidence is {'PREDICTIVE ✅' if mean(hi)>mean(lo)+0.05 else 'not clearly predictive ⚠️'}")
-    print("  NOTE: skip quality (did it avoid losers?) needs SHADOW MODE — log the")
-    print("        verdict but still take the trade — so would-be-skips get outcomes.")
+
+    # ── Shadow-mode skip-quality (the unbiased test) ──────────────────────────
+    shadow = [r for r in rows if r[6] and r[5] is not None]
+    if shadow:
+        wb_skip = [float(r[5]) for r in shadow if r[1] == "SKIP"]   # would-be-skipped, taken anyway
+        wb_take = [float(r[5]) for r in shadow if r[1] == "TAKE"]
+        print("\n  ── SHADOW-MODE skip quality (unbiased) ──")
+        print(f"    would-be-SKIP trades: n={len(wb_skip)} mean R={mean(wb_skip):+.3f}")
+        print(f"    would-be-TAKE trades: n={len(wb_take)} mean R={mean(wb_take):+.3f}")
+        if wb_skip and wb_take:
+            gap = mean(wb_take) - mean(wb_skip)
+            print(f"    gap (TAKE - SKIP)   : {gap:+.3f} R   "
+                  f"{'✅ gate SKIPs the losers — enabling it would help' if gap > 0.05 else '⚠️ no clear skip edge — keep OFF'}")
+    else:
+        print("  NOTE: no SHADOW rows yet. Set AGENT_LLM_SHADOW_MODE=true (+ reasoning")
+        print("        enabled) to measure skip quality without biasing the book.")
 
 
 if __name__ == "__main__":

@@ -360,6 +360,17 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
         pass
     candidate.reasons.append(f"llm_{mode}:{verdict} conf={llm_conf} risk={key_risk}")
 
+    # Shadow mode: log the verdict but DON'T act on it — the trade proceeds either
+    # way, so would-be-SKIPs still get real outcomes for an unbiased A/B. `taken` is
+    # True (the trade IS taken); llm_verdict still records what the gate WOULD do.
+    shadow = bool(getattr(settings, "AGENT_LLM_SHADOW_MODE", False))
+    if shadow:
+        record["shadow"] = True
+        candidate.reasons.append("llm_shadow:logged_not_enforced")
+        await _log_verdict(symbol, candidate, decision, mode, arith_conf,
+                           verdict, llm_conf, decision.confidence, taken=True, record=record)
+        return decision, None
+
     if verdict == "SKIP":
         await _log_verdict(symbol, candidate, decision, mode, arith_conf,
                            verdict, llm_conf, None, taken=False, record=record)
