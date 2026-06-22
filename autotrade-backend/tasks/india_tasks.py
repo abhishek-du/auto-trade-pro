@@ -112,12 +112,19 @@ def india_fii_dii_fetch():
 # ── 3. india_options_analysis — every 15 min ─────────────────────────────────
 
 async def _india_options_analysis():
+    import datetime as _dt
+    import pytz as _pytz
     from crawler.india_price_feed import is_nse_market_open
     from crawler.options_chain import run_options_analysis
     from tasks._db import celery_session
 
-    if not is_nse_market_open():
-        logger.info("[india_options] NSE closed — skipping")
+    # Allow a 15-minute post-close buffer (15:30–15:45 IST) so the agent
+    # always has fresh option premiums for the EOD intraday squareoff window.
+    _ist = _pytz.timezone("Asia/Kolkata")
+    _now_ist = _dt.datetime.now(_ist).time()
+    _in_buffer = _now_ist < _dt.time(15, 45)
+    if not is_nse_market_open() and not _in_buffer:
+        logger.info("[india_options] NSE closed and outside buffer window — skipping")
         return
 
     async with celery_session() as session:
@@ -749,7 +756,38 @@ async def _india_trade_loop():
 
         logger.info(f"[india_trade_loop] opened {opened} new position(s) this cycle")
 
-        # Step 8: persist daily performance snapshot
+        # ── Step 8b: F&O index option evaluation (additive pass) ─────────────
+        # Runs AFTER the equity pass so the wallet balance is already reduced
+        # by any equity positions opened above. Gated by ENABLE_OPTIONS flag.
+        # Only executes during NSE hours — evaluate_index_options() itself is
+        # a no-op when ENABLE_FNO/ENABLE_OPTIONS are False.
+        fno_opened: list[dict] = []
+        if getattr(settings, "ENABLE_OPTIONS", False):
+            try:
+                from engine.fno.selection import evaluate_index_options
+                # Refresh balance after equity trades
+                _wallet_now = await VirtualWallet.get_summary(session)
+                fno_opened = await evaluate_index_options(session, _wallet_now["balance"])
+                if fno_opened:
+                    logger.info(
+                        f"[india_trade_loop] F&O: opened {len(fno_opened)} index option "
+                        f"position(s): "
+                        + ", ".join(f"{t['tradingsymbol']} ({t['direction']})" for t in fno_opened)
+                    )
+                    # Telegram alert for each option opened
+                    if getattr(settings, "telegram_available", False):
+                        from integrations.telegram_service import send
+                        for t in fno_opened:
+                            await send(
+                                f"📊 *F&O Option Opened*\n"
+                                f"`{t['tradingsymbol']}`\n"
+                                f"Direction: {t['direction']} | Premium: ₹{t.get('premium', 0):.2f} "
+                                f"| Lots: {t.get('lots', 1)} | Score: {t.get('score', 0):+.0f}"
+                            )
+            except Exception as exc:
+                logger.warning(f"[india_trade_loop] F&O option pass failed: {exc}")
+
+        # Step 9: persist daily performance snapshot
         await VirtualWallet.take_daily_snapshot(session)
         final = await VirtualWallet.get_summary(session)
         logger.info(
@@ -757,7 +795,7 @@ async def _india_trade_loop():
             f"balance=₹{final['balance']:.0f}  "
             f"equity=₹{final['equity']:.0f}  "
             f"roi={final['roi_percent']:+.2f}%  "
-            f"open={len(open_positions)}"
+            f"open={len(open_positions)}  fno={len(fno_opened)}"
         )
         await session.commit()
 
