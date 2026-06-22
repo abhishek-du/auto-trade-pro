@@ -264,6 +264,10 @@ class Settings(BaseSettings):
     HUB_UNIVERSE_SIZE:         int   = 2000    # top-N NSE equities by 30-day turnover
     HUB_UNIVERSE_MIN_TURNOVER_CR: float = 20.0  # min ₹ Cr/day to qualify
 
+    # Price-feed watchdog: alert if no intraday (5m) candle has been written in
+    # this many minutes during NSE hours (catches a frozen/stale live feed).
+    CANDLE_STALENESS_ALERT_MIN: int   = 20
+
     # Universe / timing
     # Daily bars: this is the basis the strategies were designed on and the ONLY
     # basis validated by the backtest (scripts/run_backtest.py runs on 1d). ATR,

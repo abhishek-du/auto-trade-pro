@@ -198,17 +198,22 @@ async def zerodha_callback(
         # the whole backend restarts — the root cause of multi-day candle gaps
         # after the daily 6 AM token expiry, even though the refresh "succeeds".
         try:
-            from crawler.zerodha_ticker import (
-                is_ticker_running, start_kite_ticker, stop_kite_ticker,
-            )
+            from crawler.zerodha_ticker import start_kite_ticker, stop_kite_ticker
             from crawler.india_price_feed import is_nse_market_open
-            if is_ticker_running():
-                stop_kite_ticker()
+            # ALWAYS tear down any existing ticker first — do NOT gate on
+            # is_ticker_running(). A KiteTicker bakes the access_token in at
+            # construction and auto-reconnects on that OLD token after the daily
+            # 6 AM expiry, so a stale ticker keeps 403-looping while intermittently
+            # reporting "connected." Unconditionally destroying it (stop_ticker
+            # nulls the singleton) guarantees the next start builds a fresh ticker
+            # on the renewed token. Then start now if the market is open; otherwise
+            # the 09:15 open task starts it cleanly (singleton is now None).
+            stop_kite_ticker()
+            if is_nse_market_open():
                 start_kite_ticker()
-                logger.info("[zerodha] ticker force-restarted with fresh token")
-            elif is_nse_market_open():
-                start_kite_ticker()
-                logger.info("[zerodha] ticker started with fresh token (market open)")
+                logger.info("[zerodha] ticker rebuilt with fresh token (market open)")
+            else:
+                logger.info("[zerodha] stale ticker cleared; open task will start fresh at 09:15")
         except Exception as exc:
             logger.warning(f"[zerodha] ticker restart after token refresh failed: {exc}")
 

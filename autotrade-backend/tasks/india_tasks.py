@@ -1522,19 +1522,39 @@ async def _check_zerodha_token():
     from crawler.zerodha_client import clear_kite_token, get_kite_client
     from utils.config import settings
 
-    if not settings.ZERODHA_ACCESS_TOKEN:
+    # 1. If we have a token and it still works, nothing to do.
+    if settings.ZERODHA_ACCESS_TOKEN:
+        try:
+            await get_kite_client().get_profile()
+            logger.info("[zerodha] Token still valid")
+            return
+        except Exception:
+            clear_kite_token()
+            logger.warning("[zerodha] Token expired at 6 AM — attempting headless auto re-login")
+
+    # 2. Self-heal: re-login headlessly (OAuth via scripts.refresh_zerodha_token).
+    #    The refresh hits the backend callback, which now also rebuilds the ticker.
+    try:
+        result = zerodha_token_refresh_task()
+    except Exception as exc:
+        result = {"status": "error", "error": repr(exc)}
+    if isinstance(result, dict) and result.get("status") == "ok":
+        logger.info("[zerodha] 6 AM self-heal re-login succeeded — live feed restored")
         return
 
-    kite = get_kite_client()
+    # 3. Auto-login failed → the feed stays frozen until a manual login. ALERT.
+    msg = (
+        "⚠️ <b>Zerodha auto re-login FAILED</b> (6 AM token refresh).\n"
+        "Live price feed will stay frozen until manual login at "
+        "<code>/api/v1/zerodha/login-url</code>.\n"
+        f"Detail: <code>{str(result)[:300]}</code>"
+    )
+    logger.error(f"[zerodha] {msg}")
     try:
-        await kite.get_profile()
-        logger.info("[zerodha] Token still valid")
-    except Exception:
-        clear_kite_token()
-        logger.warning(
-            "[zerodha] Token expired at 6 AM — user must re-login via "
-            "/api/v1/zerodha/login-url"
-        )
+        from integrations.telegram_service import send
+        await send(msg)
+    except Exception as exc:
+        logger.warning(f"[zerodha] telegram alert failed: {exc}")
 
 
 @celery_app.task(name="tasks.india_tasks.check_zerodha_token")
@@ -2318,19 +2338,80 @@ def _on_worker_ready(**_kwargs):
 
 @celery_app.task(name="tasks.kite_start_ticker")
 def kite_start_ticker_task():
-    """Start the KiteTicker just before market open (03:45 UTC / 09:15 IST)."""
+    """(Re)start the KiteTicker just before market open (03:45 UTC / 09:15 IST).
+
+    ALWAYS rebuilds — never skips on is_ticker_running(). A KiteTicker from a prior
+    session bakes the (now 6 AM-expired) token in at construction and auto-reconnects
+    on it, 403-looping while intermittently reporting 'connected'. Treating that as
+    'already running' is exactly what kept the feed frozen, so we tear any existing
+    ticker down and rebuild it on the current token.
+    """
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
-        return {"skipped": True}
-    from crawler.zerodha_ticker import start_kite_ticker, is_ticker_running
+        return {"skipped": "zerodha_disabled"}
+    from crawler.zerodha_ticker import start_kite_ticker, stop_kite_ticker
     from crawler.india_price_feed import is_nse_market_open
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
-    if is_ticker_running():
-        return {"skipped": "already_running"}
-    started = start_kite_ticker()
-    logger.info(f"[kite_start_ticker] Started: {started}")
+    stop_kite_ticker()             # kill any stale-token ticker (no-op if none)
+    started = start_kite_ticker()  # rebuild on the current token
+    logger.info(f"[kite_start_ticker] (re)built ticker on current token: {started}")
     return {"started": bool(started)}
+
+
+# ── Price-feed watchdog: alert if candles stop being written during market hours ──
+_last_candle_stale_alert = None   # module-level cooldown (per worker process)
+
+
+async def _candle_staleness_watchdog():
+    """During NSE hours, alert (≤1×/hour) if no intraday (5m) candle has been
+    written in CANDLE_STALENESS_ALERT_MIN minutes — the early-warning the system
+    lacked when the feed silently froze for days. 5m is the broadest signal (whole
+    universe via yfinance), so it catches a wedged worker, a dead ticker, or an
+    expired Kite token alike."""
+    global _last_candle_stale_alert
+    from crawler.india_price_feed import is_nse_market_open
+    if not is_nse_market_open():
+        return {"skipped": "market_closed"}
+
+    threshold = int(getattr(settings, "CANDLE_STALENESS_ALERT_MIN", 20))
+    from tasks._db import celery_session
+    from sqlalchemy import text
+    async with celery_session() as s:
+        age = (await s.execute(text(
+            "SELECT extract(epoch FROM ((now() AT TIME ZONE 'utc') - max(timestamp)))/60 "
+            "FROM candles WHERE timeframe='5m'"
+        ))).scalar()
+    if age is None:
+        return {"status": "no_candles"}
+    age = float(age)
+    if age <= threshold:
+        return {"status": "fresh", "age_min": round(age, 1)}
+
+    # Stale — alert, with a 1-hour cooldown so a multi-hour outage doesn't spam.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if _last_candle_stale_alert and (now - _last_candle_stale_alert).total_seconds() < 3600:
+        return {"status": "stale_suppressed", "age_min": round(age, 1)}
+    _last_candle_stale_alert = now
+    msg = (
+        f"⚠️ <b>Price feed stale</b> — newest 5m candle is {age:.0f} min old "
+        f"(threshold {threshold} min) during market hours.\n"
+        f"Likely cause: expired Kite token, dead WebSocket ticker, or a wedged "
+        f"Celery worker. Check <code>/api/v1/zerodha/status</code>."
+    )
+    logger.error(f"[watchdog] {msg}")
+    try:
+        from integrations.telegram_service import send
+        await send(msg)
+    except Exception as exc:
+        logger.warning(f"[watchdog] telegram alert failed: {exc}")
+    return {"status": "stale_alerted", "age_min": round(age, 1)}
+
+
+@celery_app.task(name="tasks.candle_staleness_watchdog")
+def candle_staleness_watchdog_task():
+    """Every 5 min: warn if the live price feed has gone stale (see above)."""
+    return _run_async(_candle_staleness_watchdog())
 
 
 # ── Retroactive news re-tagging (one-shot, manual trigger) ───────────────────
