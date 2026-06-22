@@ -2110,6 +2110,12 @@ def run_master_intelligence_cycle():
                                 portfolio.close_position(sym, price)
                                 logger.warning(f"[hub] exited {sym}: sector {sec} STRONGLY_BEARISH")
 
+                    # Per-cycle funnel counter — how many candidates fall out at
+                    # each stage. Emitted as one [trade_flow] line so the monitor can
+                    # show the BUY/short/F&O/risk-veto/shadow-skip drop-off.
+                    flow = {"candidates": 0, "no_data": 0, "no_candidate": 0,
+                            "fuse_drop": 0, "shadow_skip": 0, "risk_veto": 0,
+                            "executed": 0, "exec_error": 0}
                     tried = 0
                     for stock in scored:
                         if stock.is_blocked:
@@ -2119,9 +2125,11 @@ def run_master_intelligence_cycle():
                         if tried >= 10 or decisions_made >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
                             break
                         tried += 1
+                        flow["candidates"] += 1
                         try:
                             candles = await get_latest_candles(stock.symbol, "15m", 300, session)
                             if not candles or len(candles) < 50:
+                                flow["no_data"] += 1
                                 continue
                             cs = sorted(candles, key=lambda c: c.timestamp)
                             df = pd.DataFrame([{
@@ -2137,6 +2145,7 @@ def run_master_intelligence_cycle():
                                 fund_grade=stock.fund_grade,
                             )
                             if candidate is None:
+                                flow["no_candidate"] += 1
                                 continue
                             decision, _reject = de.fuse(
                                 symbol=stock.symbol, candidate=candidate, regime=stock.regime,
@@ -2144,6 +2153,7 @@ def run_master_intelligence_cycle():
                                 fund_grade=stock.fund_grade, equity=portfolio.equity,
                             )
                             if decision is None:
+                                flow["fuse_drop"] += 1
                                 if _reject:
                                     logger.debug(f"[hub] {stock.symbol} fuse-filtered: {_reject}")
                                 continue
@@ -2155,14 +2165,17 @@ def run_master_intelligence_cycle():
                                 stock.symbol, candidate, decision
                             )
                             if decision is None:
+                                flow["shadow_skip"] += 1
                                 logger.info(f"[hub] {stock.symbol} LLM-reason SKIP: {_llm_reject}")
                                 continue
                             ok, why = rm.can_take_trade(candidate, portfolio.equity)
                             if not ok:
+                                flow["risk_veto"] += 1
                                 logger.info(f"[hub] blocked {stock.symbol}: {why}")
                                 continue
                             order_id = await executor.execute(decision, session)
                             if order_id:
+                                flow["executed"] += 1
                                 portfolio.add_position(decision)
                                 # Multi-target exit keys (mirror agent_loop._process_symbol)
                                 _sym  = decision.symbol
@@ -2178,7 +2191,14 @@ def run_master_intelligence_cycle():
                                     f"score={stock.master_score:.1f} conf={decision.confidence}%"
                                 )
                         except Exception as exc:
+                            flow["exec_error"] += 1
                             logger.error(f"[hub] exec error {stock.symbol}: {exc}")
+
+                    # One structured funnel line per cycle (greppable by the monitor):
+                    # shows exactly where candidates dropped out this cycle.
+                    logger.info(
+                        "[trade_flow] " + " ".join(f"{k}={v}" for k, v in flow.items())
+                    )
 
                 # Score MF portfolio
                 try:

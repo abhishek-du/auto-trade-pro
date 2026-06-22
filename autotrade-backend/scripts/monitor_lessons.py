@@ -80,6 +80,29 @@ async def build_report() -> str:
     except Exception as exc:
         w(f"  ERROR running A/B: {exc}")
 
+    # ── 3b. trade_flow funnel (aggregate today's [trade_flow] cycle lines) ─────
+    w("\n[3b] Candidate funnel today (summed across cycles):")
+    try:
+        import glob, re
+        log_path = os.path.join(_ROOT, "logs",
+                                f"autotrade_{datetime.datetime.utcnow():%Y-%m-%d}.log")
+        agg: dict[str, int] = {}
+        cycles = 0
+        if os.path.exists(log_path):
+            with open(log_path, errors="ignore") as f:
+                for ln in f:
+                    if "[trade_flow]" not in ln:
+                        continue
+                    cycles += 1
+                    for k, v in re.findall(r"(\w+)=(\d+)", ln.split("[trade_flow]", 1)[1]):
+                        agg[k] = agg.get(k, 0) + int(v)
+        if agg:
+            w(f"  cycles={cycles} | " + " ".join(f"{k}={v}" for k, v in agg.items()))
+        else:
+            w("  (no [trade_flow] lines today — hub cycle didn't run or market closed)")
+    except Exception as exc:
+        w(f"  ERROR reading trade_flow: {exc}")
+
     # ── 4. anomaly flags ──────────────────────────────────────────────────────
     w("\n[4] Health flags:")
     text_all = "\n".join(out).lower()
