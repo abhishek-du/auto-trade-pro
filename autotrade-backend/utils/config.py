@@ -249,6 +249,11 @@ class Settings(BaseSettings):
     # before deciding (a ReAct loop, ≤3 tool calls). Takes priority over debate.
     # ~2-5 LLM calls + DB queries per candidate. Default OFF.
     AGENT_LLM_TOOLUSE_ENABLED:   bool = False
+    # Shadow mode: when True, the reasoning gate still runs and LOGS its verdict,
+    # but NEVER vetoes or blends — the arithmetic decision passes through unchanged.
+    # So would-be-SKIP trades are still taken and get real outcomes, enabling an
+    # unbiased A/B (did the gate's SKIPs actually avoid losers?). Default OFF.
+    AGENT_LLM_SHADOW_MODE:       bool = False
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
