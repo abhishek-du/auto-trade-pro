@@ -201,7 +201,13 @@ class Candle(Base):
         UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle_bar"),
     )
 
-    id:        Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # BigInteger, NOT Integer: candles is a very high-churn table and the save path
+    # uses INSERT ... ON CONFLICT DO NOTHING, which burns a sequence value on every
+    # ATTEMPTED row (duplicates included). An int4 PK exhausted at 2.14B and froze
+    # ALL candle writes on 2026-06-19 (SequenceGeneratorLimitExceededError), which
+    # starved the price feed + Hub. bigint makes exhaustion a non-issue.
+    # See migration 0004_candles_id_bigint.
+    id:        Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     symbol:    Mapped[str]      = mapped_column(String(50),  nullable=False)
     timeframe: Mapped[str]      = mapped_column(String(10),  nullable=False)
     open:      Mapped[float]    = mapped_column(Float, nullable=False)
