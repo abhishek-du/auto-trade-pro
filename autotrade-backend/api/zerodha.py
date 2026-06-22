@@ -191,6 +191,27 @@ async def zerodha_callback(
         user_name = session_data.get("user_name", "")
         user_id   = session_data.get("user_id", "")
         logger.info(f"[zerodha] OAuth complete — user={user_name} ({user_id})")
+
+        # Force-restart the live WebSocket ticker so it reconnects with the FRESH
+        # token. Without this, a ticker that started on a now-expired token keeps
+        # throwing 403 Forbidden and the live price feed silently freezes until
+        # the whole backend restarts — the root cause of multi-day candle gaps
+        # after the daily 6 AM token expiry, even though the refresh "succeeds".
+        try:
+            from crawler.zerodha_ticker import (
+                is_ticker_running, start_kite_ticker, stop_kite_ticker,
+            )
+            from crawler.india_price_feed import is_nse_market_open
+            if is_ticker_running():
+                stop_kite_ticker()
+                start_kite_ticker()
+                logger.info("[zerodha] ticker force-restarted with fresh token")
+            elif is_nse_market_open():
+                start_kite_ticker()
+                logger.info("[zerodha] ticker started with fresh token (market open)")
+        except Exception as exc:
+            logger.warning(f"[zerodha] ticker restart after token refresh failed: {exc}")
+
         return _html_success(user_name, user_id)
     except Exception as exc:
         logger.error(f"[zerodha] Callback error: {exc}", exc_info=True)
