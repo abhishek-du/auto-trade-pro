@@ -123,11 +123,26 @@ async def fetch_candles_yfinance(
             df = df.reset_index()
             date_col = df.columns[0]   # 'Datetime' for intraday, 'Date' for daily
 
-            # Convert timezone-aware timestamps → UTC-naive
+            # Normalise timestamps to naive (the column is TIMESTAMP WITHOUT TIME ZONE).
+            #
+            # Daily/weekly/monthly bars are CALENDAR DATES, not instants. yfinance
+            # indexes them at midnight in the exchange tz (00:00 IST for .NS/.BO).
+            # Converting those to UTC shifts them back 5h30m to 18:30 the PREVIOUS
+            # day, so date(timestamp) lands on the wrong day — Mondays fall on
+            # Sunday — corrupting every date-based calc (regime-by-year, beta
+            # regression) and duplicating sessions vs the Kite path (which stores
+            # the IST date at 00:00). So daily+ bars are stored as the IST trading
+            # date floored to 00:00; only intraday bars keep the true UTC instant.
             ts_col = df[date_col]
+            _is_daily = interval in ("1d", "1wk", "1mo")
             try:
                 if ts_col.dt.tz is not None:
-                    ts_col = ts_col.dt.tz_convert("UTC").dt.tz_localize(None)
+                    if _is_daily:
+                        ts_col = ts_col.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+                    else:
+                        ts_col = ts_col.dt.tz_convert("UTC").dt.tz_localize(None)
+                elif _is_daily:
+                    ts_col = ts_col.dt.normalize()   # already naive — still floor to the date
             except Exception:
                 pass  # already naive
 
