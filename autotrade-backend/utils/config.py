@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     AGENT_MAX_NEW_ENTRIES_DAY:  int   = 20   # per-day new-trade ceiling (paper: bypassed)
     AGENT_CONSEC_LOSS_LOCKOUT:  int   = 2
     AGENT_CONFIDENCE_THRESHOLD: int   = 30
+    # Level-1 LLM reasoning gate: when True, candidates that clear the arithmetic
+    # confidence threshold are additionally reasoned over by the LLM (bull/bear/
+    # risk → TAKE/SKIP + confidence), which can veto or blend the decision. Default
+    # OFF — opt-in until A/B validated. Runs only on already-qualified candidates.
+    AGENT_LLM_REASONING_ENABLED: bool = False
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
