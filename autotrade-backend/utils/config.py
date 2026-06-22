@@ -254,6 +254,12 @@ class Settings(BaseSettings):
     # So would-be-SKIP trades are still taken and get real outcomes, enabling an
     # unbiased A/B (did the gate's SKIPs actually avoid losers?). Default OFF.
     AGENT_LLM_SHADOW_MODE:       bool = False
+    # Level-4: reflection / memory. When True, the agent reflects on each CLOSED
+    # trade (entry thesis vs outcome) and stores a transferable lesson; the
+    # reasoning gate then injects the most relevant recent lessons into its prompt,
+    # so the agent learns from its own history. Default OFF.
+    AGENT_LLM_REFLECTION_ENABLED: bool = False
+    AGENT_LLM_LESSONS_IN_PROMPT:  int  = 5   # how many lessons to inject per decision
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20

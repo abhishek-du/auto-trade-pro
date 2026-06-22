@@ -1520,3 +1520,28 @@ class ReasoningVerdict(Base):
     def __repr__(self) -> str:
         return (f"<ReasoningVerdict {self.symbol} {self.mode} "
                 f"{self.llm_verdict} taken={self.taken} @{self.ts}>")
+
+
+class TradeLesson(Base):
+    """Level-4 reflection memory: one distilled, transferable lesson per closed
+    trade (entry thesis vs realised outcome). The reasoning gate retrieves recent
+    lessons by strategy+regime and injects them into its prompt, so the agent
+    learns from its own history."""
+    __tablename__ = "trade_lessons"
+    __table_args__ = (
+        Index("ix_trade_lessons_strategy_regime", "strategy", "regime"),
+    )
+
+    id:          Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    symbol:      Mapped[str]          = mapped_column(String(50), nullable=False)
+    strategy:    Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    regime:      Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    side:        Mapped[str | None]   = mapped_column(String(8),  nullable=True)
+    exit_reason: Mapped[str | None]   = mapped_column(String(20), nullable=True)
+    r_multiple:  Mapped[float | None] = mapped_column(Float, nullable=True)
+    won:         Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)
+    lesson:      Mapped[str]          = mapped_column(Text, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<TradeLesson {self.symbol} {self.strategy}/{self.regime} won={self.won}>"
