@@ -32,6 +32,7 @@ import {
 } from 'lucide-react';
 import MetricCard          from '../components/MetricCard';
 import SimulationLogViewer from '../components/SimulationLogViewer';
+import { fmtIST }          from '../utils/datetime';
 import GoLiveChecker       from '../components/GoLiveChecker';
 import LoadingSpinner      from '../components/LoadingSpinner';
 import {
@@ -98,7 +99,7 @@ function ScoreBar({ label, value, color }) {
 function formatLog(log) {
   if (typeof log === 'string') return log;
   const time = log.timestamp
-    ? new Date(log.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    ? fmtIST(log.timestamp, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
     : '';
   const sym  = log.symbol && log.symbol !== '—' ? ` [${log.symbol}]` : '';
   return `[${time}] [${log.event_type ?? 'LOG'}]${sym} ${log.message ?? ''}`;
