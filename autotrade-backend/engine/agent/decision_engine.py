@@ -78,6 +78,22 @@ def _candidate_context(symbol: str, candidate, decision) -> str:
     )
 
 
+def _parse_first_json(resp: str) -> dict | None:
+    """Extract the FIRST JSON object from an LLM response, tolerating trailing
+    text or extra objects (raw_decode stops after the first complete value)."""
+    if not resp:
+        return None
+    import json as _json
+    i = resp.find("{")
+    if i < 0:
+        return None
+    try:
+        obj, _end = _json.JSONDecoder().raw_decode(resp[i:])
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
 async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
     """Level-1 LLM reasoning: ask the model to reason over a qualified candidate
     (bull case / bear case / biggest risk) and return a structured verdict.
@@ -86,8 +102,6 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
     (the caller then falls back to the arithmetic decision — fail-open).
     """
     try:
-        import json as _json
-        import re as _re
         from utils.llm import call_llm_chat
 
         sys_prompt = (
@@ -106,12 +120,7 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
             {"role": "user",   "content": user_prompt},
         ]
         resp = await call_llm_chat(messages, max_tokens=300, temperature=0.2, groq_fallback=True)
-        if not resp:
-            return None
-        m = _re.search(r"\{.*\}", resp, _re.S)
-        if not m:
-            return None
-        return _json.loads(m.group(0))
+        return _parse_first_json(resp)
     except Exception as exc:
         logger.debug(f"[agent/llm_reason] {symbol} reasoning failed: {exc}")
         return None
@@ -126,8 +135,6 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
     """
     try:
         import asyncio as _aio
-        import json as _json
-        import re as _re
         from utils.llm import call_llm_chat
 
         context = _candidate_context(symbol, candidate, decision)
@@ -167,16 +174,144 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
              {"role": "user",   "content": judge_user}],
             max_tokens=320, temperature=0.2, groq_fallback=True,
         )
-        if not resp:
+        data = _parse_first_json(resp)
+        if not data:
             return None
-        m = _re.search(r"\{.*\}", resp, _re.S)
-        if not m:
-            return None
-        data = _json.loads(m.group(0))
         data["_panel"] = {"bull": bull[:200], "bear": bear[:200], "risk": risk[:200]}
         return data
     except Exception as exc:
         logger.debug(f"[agent/llm_debate] {symbol} debate failed: {exc}")
+        return None
+
+
+# ── Level-3 agentic tools: the LLM pulls fresh data before deciding ──────────
+async def _tool_fundamentals(symbol: str) -> str:
+    try:
+        from db.database import AsyncSessionLocal
+        from sqlalchemy import text as _t
+        bare = symbol.replace(".NS", "")
+        async with AsyncSessionLocal() as s:
+            r = (await s.execute(_t(
+                "SELECT pe_ratio,roe,roce,debt_to_equity,revenue_growth_3yr,"
+                "profit_growth_3yr,promoter_holding,fundamental_score FROM fundamental_data "
+                "WHERE symbol IN (:a,:b) ORDER BY last_updated DESC LIMIT 1"),
+                {"a": symbol, "b": bare + ".NS"})).fetchone()
+        if not r:
+            return "fundamentals: no data"
+        return (f"fundamentals: PE={r[0]} ROE={r[1]} ROCE={r[2]} D/E={r[3]} "
+                f"rev_growth_3y={r[4]} profit_growth_3y={r[5]} promoter={r[6]}% score={r[7]}")
+    except Exception as exc:
+        return f"fundamentals: error ({exc})"
+
+
+async def _tool_news(symbol: str) -> str:
+    try:
+        from db.database import AsyncSessionLocal
+        from sqlalchemy import text as _t
+        bare = symbol.replace(".NS", "")
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(_t(
+                "SELECT headline,sentiment,score FROM news_items "
+                "WHERE headline ILIKE :pat AND published_at > now() - interval '10 days' "
+                "ORDER BY published_at DESC LIMIT 3"), {"pat": f"%{bare}%"})).fetchall()
+        if not rows:
+            return "news: no recent headlines"
+        return "news: " + " | ".join(f"[{x[1]}/{x[2]}] {x[0][:90]}" for x in rows)
+    except Exception as exc:
+        return f"news: error ({exc})"
+
+
+async def _tool_options(symbol: str) -> str:
+    try:
+        from db.database import AsyncSessionLocal
+        from sqlalchemy import text as _t
+        bare = symbol.replace(".NS", "")
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(_t(
+                "SELECT option_type, sum(oi) FROM option_contract_snapshots "
+                "WHERE underlying IN (:a,:b) AND snapshot_at = "
+                "(SELECT max(snapshot_at) FROM option_contract_snapshots WHERE underlying IN (:a,:b)) "
+                "GROUP BY option_type"), {"a": bare, "b": symbol})).fetchall()
+        if not rows:
+            return "options: no chain data"
+        oi = {str(k): float(v or 0) for k, v in rows}
+        ce, pe = oi.get("CE", 0) or oi.get("call", 0), oi.get("PE", 0) or oi.get("put", 0)
+        pcr = round(pe / ce, 2) if ce else None
+        return f"options: CE_OI={ce:.0f} PE_OI={pe:.0f} PCR={pcr}"
+    except Exception as exc:
+        return f"options: error ({exc})"
+
+
+async def _tool_price_action(symbol: str) -> str:
+    try:
+        from db.database import AsyncSessionLocal
+        from sqlalchemy import text as _t
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(_t(
+                "SELECT close FROM candles WHERE symbol=:s AND timeframe='1d' "
+                "ORDER BY timestamp DESC LIMIT 20"), {"s": symbol})).fetchall()
+        cl = [float(x[0]) for x in rows]
+        if len(cl) < 6:
+            return "price_action: insufficient history"
+        last = cl[0]
+        ret5 = round((last / cl[5] - 1) * 100, 2)
+        hi20, lo20 = max(cl), min(cl)
+        pos = round((last - lo20) / (hi20 - lo20) * 100, 0) if hi20 > lo20 else 50
+        return f"price_action: last={last} 5d_return={ret5}% pos_in_20d_range={pos}%"
+    except Exception as exc:
+        return f"price_action: error ({exc})"
+
+
+_LLM_TOOLS = {
+    "fundamentals": _tool_fundamentals,
+    "news":         _tool_news,
+    "options":      _tool_options,
+    "price_action": _tool_price_action,
+}
+
+
+async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None:
+    """Level-3 agentic reasoning: give the LLM tools (news / options / fundamentals
+    / price_action) and let it INVESTIGATE before deciding — a ReAct loop. The model
+    chooses which tools to call; we execute and feed results back until it decides
+    (or a 4-round cap). Returns {verdict,confidence,bull,bear,key_risk,tools_used}."""
+    try:
+        from utils.llm import call_llm_chat
+
+        sys_prompt = (
+            "You are an NSE swing-trading analyst with TOOLS. Investigate the candidate "
+            "before deciding. Available tools: fundamentals, news, options, price_action "
+            "(each takes the symbol). Call at most 3 tools, only those that matter.\n"
+            'To call a tool, respond ONLY: {"action":"tool","tool":"<name>"}\n'
+            'When ready, respond ONLY: {"action":"decide","verdict":"TAKE"|"SKIP",'
+            '"confidence":<0-100 int>,"bull":"<your bull case, max 20 words>",'
+            '"bear":"<your bear case, max 20 words>","key_risk":"<the single biggest risk, max 12 words>"}\n'
+            "Fill bull/bear/key_risk with real analysis, not placeholders. "
+            "Be skeptical — SKIP on weak/conflicting evidence."
+        )
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": _candidate_context(symbol, candidate, decision)},
+        ]
+        used: list[str] = []
+        for _ in range(4):  # max 4 LLM rounds (≤3 tool calls + a decide)
+            resp = await call_llm_chat(messages, max_tokens=220, temperature=0.2, groq_fallback=True)
+            step = _parse_first_json(resp)
+            if not step:
+                return None
+            if step.get("action") == "tool" and step.get("tool") in _LLM_TOOLS and len(used) < 3:
+                tool = step["tool"]
+                result = await _LLM_TOOLS[tool](symbol)
+                used.append(tool)
+                messages.append({"role": "assistant", "content": resp})
+                messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
+                continue
+            if step.get("action") == "decide" or "verdict" in step:
+                step["tools_used"] = used
+                return step
+        return None  # ran out of rounds without deciding
+    except Exception as exc:
+        logger.debug(f"[agent/llm_tooluse] {symbol} tool-use failed: {exc}")
         return None
 
 
@@ -191,11 +326,13 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     if not getattr(settings, "AGENT_LLM_REASONING_ENABLED", False):
         return decision, None
 
-    # Level-2 debate panel when enabled, else Level-1 single-pass reasoning.
-    debate = bool(getattr(settings, "AGENT_LLM_DEBATE_ENABLED", False))
-    mode   = "debate" if debate else "reason"
-    data   = (await llm_debate_candidate(symbol, candidate, decision)) if debate \
-             else (await llm_reason_candidate(symbol, candidate, decision))
+    # Dispatch by level: tool-use (L3) > debate (L2) > single-pass reasoning (L1).
+    if getattr(settings, "AGENT_LLM_TOOLUSE_ENABLED", False):
+        mode, data = "tooluse", await llm_tooluse_candidate(symbol, candidate, decision)
+    elif getattr(settings, "AGENT_LLM_DEBATE_ENABLED", False):
+        mode, data = "debate", await llm_debate_candidate(symbol, candidate, decision)
+    else:
+        mode, data = "reason", await llm_reason_candidate(symbol, candidate, decision)
     if not data:
         candidate.reasons.append(f"llm_{mode}:unavailable→arithmetic")
         return decision, None
@@ -215,6 +352,8 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
             record["judge"] = str(data["judge"])[:160]
         if data.get("_panel"):
             record["panel"] = data["_panel"]
+        if data.get("tools_used"):
+            record["tools_used"] = data["tools_used"]
         decision.confidence_factors["llm_reasoning"] = record
     except Exception:
         pass

@@ -244,6 +244,11 @@ class Settings(BaseSettings):
     # the verdict — instead of the single-pass Level-1 reasoning. ~4 LLM calls per
     # qualified candidate, so keep it for high-conviction names. Default OFF.
     AGENT_LLM_DEBATE_ENABLED:    bool = False
+    # Level-3: agentic tool-use. When True, the gate lets the LLM call data tools
+    # (news / options / fundamentals / price_action) to investigate a candidate
+    # before deciding (a ReAct loop, ≤3 tool calls). Takes priority over debate.
+    # ~2-5 LLM calls + DB queries per candidate. Default OFF.
+    AGENT_LLM_TOOLUSE_ENABLED:   bool = False
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
