@@ -2147,6 +2147,16 @@ def run_master_intelligence_cycle():
                                 if _reject:
                                     logger.debug(f"[hub] {stock.symbol} fuse-filtered: {_reject}")
                                 continue
+                            # Level-1/2/3 LLM reasoning gate (opt-in flags; runs only
+                            # on already-qualified candidates, fail-open). Mirrors
+                            # agent_loop._process_symbol so both execution paths reason.
+                            from engine.agent.decision_engine import apply_reasoning_gate
+                            decision, _llm_reject = await apply_reasoning_gate(
+                                stock.symbol, candidate, decision
+                            )
+                            if decision is None:
+                                logger.info(f"[hub] {stock.symbol} LLM-reason SKIP: {_llm_reject}")
+                                continue
                             ok, why = rm.can_take_trade(candidate, portfolio.equity)
                             if not ok:
                                 logger.info(f"[hub] blocked {stock.symbol}: {why}")
