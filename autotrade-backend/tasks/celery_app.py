@@ -305,6 +305,14 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.kite_start_ticker",
         "schedule": crontab(hour=3, minute=45),
     },
+
+    # Every 5 min: warn (Telegram) if the live price feed has gone stale during
+    # NSE hours — early warning for a frozen feed (expired token / dead ticker /
+    # wedged worker). The task self-gates on market hours.
+    "candle-staleness-watchdog-5min": {
+        "task":     "tasks.candle_staleness_watchdog",
+        "schedule": 300,
+    },
     "fetch-earnings-daily": {
         "task":     "tasks.fetch_earnings_transcripts",
         "schedule": crontab(hour=14, minute=30),  # 20:00 IST
