@@ -355,6 +355,13 @@ class OptionContractSnapshot(Base):
     __table_args__ = (
         Index("ix_option_contract_under_expiry", "underlying", "expiry_date"),
         Index("ix_option_contract_snapshot_at", "snapshot_at"),
+        # One row per contract per snapshot instant — lets the historical bhavcopy
+        # backfill insert with ON CONFLICT DO NOTHING (idempotent, re-runnable).
+        # Live appends use distinct sub-second snapshot_at, so they never collide.
+        UniqueConstraint(
+            "underlying", "expiry_date", "strike", "option_type", "snapshot_at",
+            name="uq_option_snapshot",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
