@@ -10,6 +10,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { formatINR } from '../utils/indianFormat';
+import { fmtIST, asUTCDate } from '../utils/datetime';
 
 const PAGE_SIZE = 20;
 
@@ -22,16 +23,12 @@ const fmtQty = (q) => {
   return (frac > 0.05 && frac < 0.95) ? n.toFixed(1) : Math.round(n).toFixed(0);
 };
 
-const fmtDate = (s) => {
-  if (!s) return '—';
-  try { return new Date(s).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }); }
-  catch { return s; }
-};
+const fmtDate = (s) => (s ? fmtIST(s) : '—');
 
 function elapsed(openedAt, closedAt = null) {
   if (!openedAt) return '—';
-  const end  = closedAt ? new Date(closedAt) : new Date();
-  const ms   = end - new Date(openedAt);
+  const end  = closedAt ? asUTCDate(closedAt) : new Date();
+  const ms   = end - asUTCDate(openedAt);
   const mins = Math.floor(ms / 60000);
   if (mins < 60)  return `${mins}m`;
   const hrs = Math.floor(mins / 60);

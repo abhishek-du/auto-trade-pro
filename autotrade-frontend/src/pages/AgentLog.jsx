@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, CheckCircle, XCircle } from 'lucide-react';
 import { apiFetch } from '../api/client';
+import { fmtIST } from '../utils/datetime';
 
 const fmt2 = (n) => n == null ? '—' : Number(n).toFixed(1);
 
@@ -155,7 +156,7 @@ export default function AgentLog() {
                     </Link>
                     {e.timestamp && (
                       <div className="text-muted text-[10px] font-mono">
-                        {new Date(e.timestamp).toLocaleString('en-IN', { hour12: false, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        {fmtIST(e.timestamp, { hour12: false, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                       </div>
                     )}
                   </div>
