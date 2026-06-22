@@ -21,6 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import Candle
 from utils.logger import logger
 
+# Live India VIX is one slow-moving number, but calculate_india_vix_score() is
+# called once PER SYMBOL during a scan. Uncached, a 443-symbol scan fired ~443 live
+# yfinance VIX fetches → yfinance 429 rate-limiting that also starved the candle
+# crawl. Cache the live fetch for a short TTL so a whole scan reuses one fetch.
+_LIVE_VIX_CACHE: dict = {"value": None, "mono": 0.0}
+_LIVE_VIX_TTL: float = 60.0  # seconds
+
 # ── Sector maps ───────────────────────────────────────────────────────────────
 
 SECTOR_MAP: dict[str, str] = {
@@ -200,14 +207,25 @@ async def calculate_india_vix_score(
             logger.warning(f"calculate_india_vix_score: historical VIX query failed ({exc}); using neutral")
             return 0.0
     else:
-        # Live path: fetch current VIX from yfinance.
-        from crawler.india_price_feed import fetch_india_vix  # deferred — optional dep
-        try:
-            loop = asyncio.get_event_loop()
-            vix  = await loop.run_in_executor(None, fetch_india_vix)
-        except Exception as exc:
-            logger.warning(f"calculate_india_vix_score: VIX fetch failed ({exc}); score=0")
-            return 0.0
+        # Live path: fetch current VIX from yfinance, cached for _LIVE_VIX_TTL so a
+        # full per-symbol scan triggers ONE fetch instead of one per symbol (which
+        # caused yfinance 429 storms that starved the candle crawl).
+        import time as _time
+        _now = _time.monotonic()
+        _cached = _LIVE_VIX_CACHE["value"]
+        if _cached is not None and (_now - _LIVE_VIX_CACHE["mono"]) < _LIVE_VIX_TTL:
+            vix = _cached
+        else:
+            from crawler.india_price_feed import fetch_india_vix  # deferred — optional dep
+            try:
+                loop = asyncio.get_event_loop()
+                vix  = await loop.run_in_executor(None, fetch_india_vix)
+                if vix and vix > 0:
+                    _LIVE_VIX_CACHE["value"] = vix
+                    _LIVE_VIX_CACHE["mono"]  = _now
+            except Exception as exc:
+                logger.warning(f"calculate_india_vix_score: VIX fetch failed ({exc}); score=0")
+                return 0.0
 
     if not vix or math.isnan(vix) or vix <= 0:
         logger.warning(f"calculate_india_vix_score: invalid VIX={vix}; score=0")
