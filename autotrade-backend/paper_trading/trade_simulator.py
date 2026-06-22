@@ -487,6 +487,14 @@ async def close_paper_trade(
     except Exception as exc:
         logger.debug(f"close_paper_trade: agent ledger sync skipped for {trade.symbol}: {exc}")
 
+    # Level-4 reflection: distil a transferable lesson from this closed trade
+    # (gated by AGENT_LLM_REFLECTION_ENABLED, fail-open, never blocks the close).
+    try:
+        from engine.agent.reflection import reflect_on_closed_trade
+        await reflect_on_closed_trade(trade)
+    except Exception as exc:
+        logger.debug(f"close_paper_trade: reflection skipped for {trade.symbol}: {exc}")
+
     return trade
 
 

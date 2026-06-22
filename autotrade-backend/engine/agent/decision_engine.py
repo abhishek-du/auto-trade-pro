@@ -59,12 +59,13 @@ class AgentDecisionOutput:
         return d
 
 
-def _candidate_context(symbol: str, candidate, decision) -> str:
+async def _candidate_context(symbol: str, candidate, decision) -> str:
     """Shared, model-readable summary of a candidate + its 7-factor breakdown.
-    Used by both the Level-1 reasoning gate and the Level-2 debate panel."""
+    Used by all reasoning levels. When Level-4 reflection is on, appends the most
+    relevant past lessons so the model learns from the agent's own history."""
     sub = getattr(candidate, "hub_subscores", {}) or {}
     cf  = getattr(decision, "confidence_factors", {}) or {}
-    return (
+    base = (
         f"Symbol {symbol} | Side {decision.action} | Strategy {candidate.strategy}\n"
         f"Regime {decision.regime} | MasterScore {decision.master_score}\n"
         f"Entry {candidate.entry} Stop {candidate.stop} Target {candidate.target} "
@@ -76,6 +77,15 @@ def _candidate_context(symbol: str, candidate, decision) -> str:
         f"fii_bias={cf.get('fii_bias')} regime_factor={cf.get('regime_factor')}\n"
         f"Arithmetic confidence {decision.confidence}%"
     )
+    try:
+        from engine.agent.reflection import get_relevant_lessons
+        lessons = await get_relevant_lessons(candidate.strategy, decision.regime, decision.action)
+        if lessons:
+            base += "\nPast lessons from similar trades:\n" + \
+                    "\n".join(f"- {l}" for l in lessons)
+    except Exception:
+        pass
+    return base
 
 
 def _parse_first_json(resp: str) -> dict | None:
@@ -114,7 +124,7 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
             '{"verdict":"TAKE"|"SKIP","confidence":<0-100 int>,'
             '"bull":"<=20 words","bear":"<=20 words","key_risk":"<=12 words"}'
         )
-        user_prompt = _candidate_context(symbol, candidate, decision)
+        user_prompt = await _candidate_context(symbol, candidate, decision)
         messages = [
             {"role": "system", "content": sys_prompt},
             {"role": "user",   "content": user_prompt},
@@ -137,7 +147,7 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
         import asyncio as _aio
         from utils.llm import call_llm_chat
 
-        context = _candidate_context(symbol, candidate, decision)
+        context = await _candidate_context(symbol, candidate, decision)
 
         async def _analyst(role: str) -> str:
             msgs = [
@@ -289,9 +299,10 @@ async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None
             "Fill bull/bear/key_risk with real analysis, not placeholders. "
             "Be skeptical — SKIP on weak/conflicting evidence."
         )
+        ctx0 = await _candidate_context(symbol, candidate, decision)
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user",   "content": _candidate_context(symbol, candidate, decision)},
+            {"role": "user",   "content": ctx0},
         ]
         used: list[str] = []
         for _ in range(4):  # max 4 LLM rounds (≤3 tool calls + a decide)
