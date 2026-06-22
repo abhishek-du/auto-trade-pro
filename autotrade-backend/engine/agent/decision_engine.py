@@ -59,6 +59,25 @@ class AgentDecisionOutput:
         return d
 
 
+def _candidate_context(symbol: str, candidate, decision) -> str:
+    """Shared, model-readable summary of a candidate + its 7-factor breakdown.
+    Used by both the Level-1 reasoning gate and the Level-2 debate panel."""
+    sub = getattr(candidate, "hub_subscores", {}) or {}
+    cf  = getattr(decision, "confidence_factors", {}) or {}
+    return (
+        f"Symbol {symbol} | Side {decision.action} | Strategy {candidate.strategy}\n"
+        f"Regime {decision.regime} | MasterScore {decision.master_score}\n"
+        f"Entry {candidate.entry} Stop {candidate.stop} Target {candidate.target} "
+        f"R:R {candidate.risk_reward}\n"
+        f"7-factor: technical={sub.get('technical')} news={sub.get('news')} "
+        f"sector={sub.get('sector')} macro={sub.get('macro')} earnings={sub.get('earnings')} "
+        f"fundamental={sub.get('fundamental')} options={sub.get('options')}\n"
+        f"Modifiers: news_factor={cf.get('news_factor')} earnings_tone={cf.get('earnings_tone')} "
+        f"fii_bias={cf.get('fii_bias')} regime_factor={cf.get('regime_factor')}\n"
+        f"Arithmetic confidence {decision.confidence}%"
+    )
+
+
 async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
     """Level-1 LLM reasoning: ask the model to reason over a qualified candidate
     (bull case / bear case / biggest risk) and return a structured verdict.
@@ -71,8 +90,6 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
         import re as _re
         from utils.llm import call_llm_chat
 
-        sub = getattr(candidate, "hub_subscores", {}) or {}
-        cf  = getattr(decision, "confidence_factors", {}) or {}
         sys_prompt = (
             "You are a disciplined Indian-equity (NSE) swing-trading analyst. Given a "
             "candidate trade and its 7-factor breakdown, reason briefly about the bull "
@@ -83,18 +100,7 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
             '{"verdict":"TAKE"|"SKIP","confidence":<0-100 int>,'
             '"bull":"<=20 words","bear":"<=20 words","key_risk":"<=12 words"}'
         )
-        user_prompt = (
-            f"Symbol {symbol} | Side {decision.action} | Strategy {candidate.strategy}\n"
-            f"Regime {decision.regime} | MasterScore {decision.master_score}\n"
-            f"Entry {candidate.entry} Stop {candidate.stop} Target {candidate.target} "
-            f"R:R {candidate.risk_reward}\n"
-            f"7-factor: technical={sub.get('technical')} news={sub.get('news')} "
-            f"sector={sub.get('sector')} macro={sub.get('macro')} earnings={sub.get('earnings')} "
-            f"fundamental={sub.get('fundamental')} options={sub.get('options')}\n"
-            f"Modifiers: news_factor={cf.get('news_factor')} earnings_tone={cf.get('earnings_tone')} "
-            f"fii_bias={cf.get('fii_bias')} regime_factor={cf.get('regime_factor')}\n"
-            f"Arithmetic confidence {decision.confidence}%"
-        )
+        user_prompt = _candidate_context(symbol, candidate, decision)
         messages = [
             {"role": "system", "content": sys_prompt},
             {"role": "user",   "content": user_prompt},
@@ -111,6 +117,69 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
         return None
 
 
+async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
+    """Level-2 multi-agent debate: a Bull, a Bear and a Risk analyst argue
+    independently (in parallel), then a Judge synthesises the verdict.
+
+    Returns {verdict, confidence, bull, bear, key_risk, judge} (plus raw analyst
+    notes) or None on failure (caller falls back to arithmetic — fail-open).
+    """
+    try:
+        import asyncio as _aio
+        import json as _json
+        import re as _re
+        from utils.llm import call_llm_chat
+
+        context = _candidate_context(symbol, candidate, decision)
+
+        async def _analyst(role: str) -> str:
+            msgs = [
+                {"role": "system", "content": role},
+                {"role": "user",   "content": context},
+            ]
+            return (await call_llm_chat(msgs, max_tokens=160, temperature=0.3,
+                                        groq_fallback=True)) or ""
+
+        bull_role = ("You are a BULL-side NSE equity analyst. In <=40 words, make the "
+                     "strongest concrete case FOR taking this long trade — name the catalyst/edge.")
+        bear_role = ("You are a BEAR-side NSE equity analyst. In <=40 words, make the "
+                     "strongest case AGAINST it — name the most likely way this trade loses.")
+        risk_role = ("You are a RISK manager. In <=40 words, judge the risk/reward, regime "
+                     "fit and position risk; state plainly whether the risk is acceptable.")
+
+        bull, bear, risk = await _aio.gather(
+            _analyst(bull_role), _analyst(bear_role), _analyst(risk_role)
+        )
+        if not (bull or bear or risk):
+            return None
+
+        judge_sys = (
+            "You are the head portfolio manager. Weigh the BULL, BEAR and RISK views "
+            "and decide TAKE or SKIP. Be skeptical — SKIP when the bear/risk case "
+            "outweighs a thin bull case or the factors conflict. "
+            'Respond with ONLY compact JSON: '
+            '{"verdict":"TAKE"|"SKIP","confidence":<0-100 int>,"bull":"<=20 words",'
+            '"bear":"<=20 words","key_risk":"<=12 words","judge":"<=25 words rationale"}'
+        )
+        judge_user = f"{context}\n\nBULL: {bull}\nBEAR: {bear}\nRISK: {risk}"
+        resp = await call_llm_chat(
+            [{"role": "system", "content": judge_sys},
+             {"role": "user",   "content": judge_user}],
+            max_tokens=320, temperature=0.2, groq_fallback=True,
+        )
+        if not resp:
+            return None
+        m = _re.search(r"\{.*\}", resp, _re.S)
+        if not m:
+            return None
+        data = _json.loads(m.group(0))
+        data["_panel"] = {"bull": bull[:200], "bear": bear[:200], "risk": risk[:200]}
+        return data
+    except Exception as exc:
+        logger.debug(f"[agent/llm_debate] {symbol} debate failed: {exc}")
+        return None
+
+
 async def apply_reasoning_gate(symbol: str, candidate, decision):
     """Level-1 reasoning gate (opt-in via AGENT_LLM_REASONING_ENABLED).
 
@@ -122,9 +191,13 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     if not getattr(settings, "AGENT_LLM_REASONING_ENABLED", False):
         return decision, None
 
-    data = await llm_reason_candidate(symbol, candidate, decision)
+    # Level-2 debate panel when enabled, else Level-1 single-pass reasoning.
+    debate = bool(getattr(settings, "AGENT_LLM_DEBATE_ENABLED", False))
+    mode   = "debate" if debate else "reason"
+    data   = (await llm_debate_candidate(symbol, candidate, decision)) if debate \
+             else (await llm_reason_candidate(symbol, candidate, decision))
     if not data:
-        candidate.reasons.append("llm_reason:unavailable→arithmetic")
+        candidate.reasons.append(f"llm_{mode}:unavailable→arithmetic")
         return decision, None
 
     verdict  = str(data.get("verdict", "TAKE")).upper()
@@ -134,13 +207,18 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     bear     = str(data.get("bear", ""))[:120]
 
     try:
-        decision.confidence_factors["llm_reasoning"] = {
-            "verdict": verdict, "confidence": llm_conf,
+        record = {
+            "mode": mode, "verdict": verdict, "confidence": llm_conf,
             "bull": bull, "bear": bear, "key_risk": key_risk,
         }
+        if data.get("judge"):
+            record["judge"] = str(data["judge"])[:160]
+        if data.get("_panel"):
+            record["panel"] = data["_panel"]
+        decision.confidence_factors["llm_reasoning"] = record
     except Exception:
         pass
-    candidate.reasons.append(f"llm_reason:{verdict} conf={llm_conf} risk={key_risk}")
+    candidate.reasons.append(f"llm_{mode}:{verdict} conf={llm_conf} risk={key_risk}")
 
     if verdict == "SKIP":
         return None, f"llm_reasoning_skip:{key_risk or 'weak_edge'}"
