@@ -81,13 +81,13 @@ class TradeSimulator:
         if stop_distance == 0:
             return 0.0, 0.0
         risk_usd   = balance * rf
-        size_units = risk_usd / stop_distance
-        size_usd   = size_units * entry_price
+        # Whole shares only — NSE/BSE equity quantity is always an integer.
+        size_units = int(risk_usd / stop_distance)
         max_usd    = balance * _MAX_POSITION_PCT
-        if size_usd > max_usd:
-            size_usd   = max_usd
-            size_units = size_usd / entry_price
-        return round(size_units, 6), round(size_usd, 4)
+        if size_units * entry_price > max_usd and entry_price > 0:
+            size_units = int(max_usd // entry_price)
+        size_usd   = size_units * entry_price
+        return size_units, round(size_usd, 4)
 
     @staticmethod
     def execute_buy(symbol: str, requested_price: float, size_units: float) -> FillResult:
@@ -184,8 +184,18 @@ async def open_paper_trade(
     slippage_applied = actual_entry - signal.entry_price
 
     direction = TradeDirection(signal.action)
-    units     = position_size["units"]
-    usd_value = position_size["usd_value"]
+    # Equity quantity must be a whole number of shares (NSE/BSE: 1.2 is not a legal
+    # order size). Sizing floors to an int upstream; coerce + guard here so no caller
+    # can ever open a fractional or zero-share position.
+    units     = int(position_size["units"])
+    if units < 1:
+        msg = (
+            f"HARD GUARD BLOCKED: {signal.symbol} sized to {units} shares "
+            f"(risk budget too small for 1 share at ₹{signal.entry_price:,.2f})"
+        )
+        logger.warning(f"open_paper_trade: {msg}")
+        raise ValueError(msg)
+    usd_value = position_size["usd_value"]   # notional of the whole-share position
 
     # ── Trade management levels ───────────────────────────────────────────────
     # signal.take_profit = Target 1 (first checkpoint / trailing trigger).
