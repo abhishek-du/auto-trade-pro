@@ -337,29 +337,32 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
         candidate.reasons.append(f"llm_{mode}:unavailable→arithmetic")
         return decision, None
 
+    arith_conf = decision.confidence   # snapshot BEFORE any blend
     verdict  = str(data.get("verdict", "TAKE")).upper()
     llm_conf = data.get("confidence")
     key_risk = str(data.get("key_risk", ""))[:80]
     bull     = str(data.get("bull", ""))[:120]
     bear     = str(data.get("bear", ""))[:120]
 
+    record = {
+        "mode": mode, "verdict": verdict, "confidence": llm_conf,
+        "bull": bull, "bear": bear, "key_risk": key_risk,
+    }
+    if data.get("judge"):
+        record["judge"] = str(data["judge"])[:160]
+    if data.get("_panel"):
+        record["panel"] = data["_panel"]
+    if data.get("tools_used"):
+        record["tools_used"] = data["tools_used"]
     try:
-        record = {
-            "mode": mode, "verdict": verdict, "confidence": llm_conf,
-            "bull": bull, "bear": bear, "key_risk": key_risk,
-        }
-        if data.get("judge"):
-            record["judge"] = str(data["judge"])[:160]
-        if data.get("_panel"):
-            record["panel"] = data["_panel"]
-        if data.get("tools_used"):
-            record["tools_used"] = data["tools_used"]
         decision.confidence_factors["llm_reasoning"] = record
     except Exception:
         pass
     candidate.reasons.append(f"llm_{mode}:{verdict} conf={llm_conf} risk={key_risk}")
 
     if verdict == "SKIP":
+        await _log_verdict(symbol, candidate, decision, mode, arith_conf,
+                           verdict, llm_conf, None, taken=False, record=record)
         return None, f"llm_reasoning_skip:{key_risk or 'weak_edge'}"
 
     # TAKE → blend arithmetic + LLM confidence (defensive parse).
@@ -371,7 +374,40 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
             decision.confidence_factors["final_confidence_blended"] = blended
     except Exception:
         pass
+    await _log_verdict(symbol, candidate, decision, mode, arith_conf,
+                       verdict, llm_conf, decision.confidence, taken=True, record=record)
     return decision, None
+
+
+async def _log_verdict(symbol, candidate, decision, mode, arith_conf,
+                       verdict, llm_conf, final_conf, taken: bool, record: dict) -> None:
+    """Append one row to reasoning_verdicts (self-contained session, fail-safe) so
+    EVERY gate verdict — taken or skipped, either execution path — is captured and
+    later joinable to the trade outcome. Never raises into the decision flow."""
+    try:
+        from db.database import AsyncSessionLocal
+        from db.models import ReasoningVerdict
+
+        def _int(x):
+            try: return int(x)
+            except Exception: return None
+
+        async with AsyncSessionLocal() as s:
+            s.add(ReasoningVerdict(
+                symbol=symbol, mode=mode,
+                side=getattr(decision, "action", None) or getattr(candidate, "side", None),
+                strategy=getattr(candidate, "strategy", None),
+                regime=getattr(decision, "regime", None),
+                entry=getattr(candidate, "entry", None),
+                arith_confidence=_int(arith_conf),
+                llm_verdict=verdict, llm_confidence=_int(llm_conf),
+                final_confidence=_int(final_conf), taken=taken,
+                key_risk=str(record.get("key_risk", ""))[:120] or None,
+                detail=record,
+            ))
+            await s.commit()
+    except Exception as exc:
+        logger.debug(f"[agent/verdict_log] {symbol} log failed: {exc}")
 
 
 class DecisionEngine:

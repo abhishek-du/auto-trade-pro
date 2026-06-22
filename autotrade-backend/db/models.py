@@ -1489,3 +1489,34 @@ class TradeExcursionSample(Base):
             f"<TradeExcursionSample trade={self.trade_id} "
             f"@{self.ts} pnl={self.unrealised_pnl:+.2f} r={self.unrealised_r}>"
         )
+
+
+class ReasoningVerdict(Base):
+    """Append-only log of every LLM reasoning-gate verdict (L1/L2/L3), written by
+    apply_reasoning_gate() for BOTH taken and skipped candidates and BOTH execution
+    paths. Joinable to paper_trades on (symbol, ts≈opened_at) to attribute outcome,
+    so A/B (does reasoning beat arithmetic?) is a single query."""
+    __tablename__ = "reasoning_verdicts"
+    __table_args__ = (
+        Index("ix_reasoning_verdicts_symbol_ts", "symbol", "ts"),
+    )
+
+    id:               Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts:               Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    symbol:           Mapped[str]      = mapped_column(String(50), nullable=False)
+    mode:             Mapped[str]      = mapped_column(String(12), nullable=False)   # reason | debate | tooluse
+    side:             Mapped[str | None]   = mapped_column(String(8),  nullable=True)
+    strategy:         Mapped[str | None]   = mapped_column(String(50), nullable=True)
+    regime:           Mapped[str | None]   = mapped_column(String(30), nullable=True)
+    entry:            Mapped[float | None] = mapped_column(Float, nullable=True)
+    arith_confidence: Mapped[int | None]   = mapped_column(Integer, nullable=True)  # before LLM
+    llm_verdict:      Mapped[str | None]   = mapped_column(String(8),  nullable=True)  # TAKE | SKIP
+    llm_confidence:   Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    final_confidence: Mapped[int | None]   = mapped_column(Integer, nullable=True)  # after blend (None if skipped)
+    taken:            Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)
+    key_risk:         Mapped[str | None]   = mapped_column(String(120), nullable=True)
+    detail:           Mapped[dict | None]  = mapped_column(JSONB, nullable=True)  # full record (bull/bear/panel/tools)
+
+    def __repr__(self) -> str:
+        return (f"<ReasoningVerdict {self.symbol} {self.mode} "
+                f"{self.llm_verdict} taken={self.taken} @{self.ts}>")
