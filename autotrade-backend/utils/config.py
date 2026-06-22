@@ -239,6 +239,11 @@ class Settings(BaseSettings):
     # risk → TAKE/SKIP + confidence), which can veto or blend the decision. Default
     # OFF — opt-in until A/B validated. Runs only on already-qualified candidates.
     AGENT_LLM_REASONING_ENABLED: bool = False
+    # Level-2: multi-agent debate. When True (and reasoning is enabled), the gate
+    # runs a Bull / Bear / Risk analyst panel (in parallel) and a Judge synthesises
+    # the verdict — instead of the single-pass Level-1 reasoning. ~4 LLM calls per
+    # qualified candidate, so keep it for high-conviction names. Default OFF.
+    AGENT_LLM_DEBATE_ENABLED:    bool = False
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
