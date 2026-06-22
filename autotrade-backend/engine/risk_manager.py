@@ -337,8 +337,10 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
         risk_amount *= 0.5
     risk_per_unit = abs(signal.entry_price - signal.stop_loss)
 
-    units     = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
-    usd_value = units * signal.entry_price
+    # Whole shares only — NSE/BSE equity trades in integer quantity; a size like
+    # 1.2 shares is not a legal order. Floor the risk-derived size to an int.
+    raw_units = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
+    units     = int(raw_units)
 
     # Hard cap at AGENT_MAX_POSITION_WEIGHT (default 5%) — one position can never
     # exceed this fraction of balance regardless of stop distance or confidence.
@@ -347,12 +349,14 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
     if _is_short:
         _max_weight *= 0.5
     max_notional = balance * _max_weight
-    if usd_value > max_notional:
-        usd_value = max_notional
-        units     = usd_value / signal.entry_price if signal.entry_price > 0 else 0.0
+    if signal.entry_price > 0 and units * signal.entry_price > max_notional:
+        units = int(max_notional // signal.entry_price)   # floored whole shares
+
+    # Notional reflects the actual whole-share position so wallet accounting is exact.
+    usd_value = units * signal.entry_price
 
     result = {
-        "units":        round(units, 6),
+        "units":        units,                  # integer share count
         "usd_value":    round(usd_value, 4),
         "risk_amount":  round(risk_amount, 4),
         "risk_percent": round(risk_frac * 100, 2),
