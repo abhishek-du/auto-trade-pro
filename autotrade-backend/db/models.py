@@ -1516,6 +1516,11 @@ class ReasoningVerdict(Base):
     taken:            Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)
     key_risk:         Mapped[str | None]   = mapped_column(String(120), nullable=True)
     detail:           Mapped[dict | None]  = mapped_column(JSONB, nullable=True)  # full record (bull/bear/panel/tools)
+    # The 7-factor Hub breakdown + confidence modifiers AT DECISION TIME, so the
+    # forward A/B can attribute outcomes to individual factors (which factor moves
+    # realised R?). Keys: technical/news/sector/macro/earnings/fundamental/options
+    # + news_factor/earnings_tone/fii_bias/regime_factor.
+    factors:          Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
 
     def __repr__(self) -> str:
         return (f"<ReasoningVerdict {self.symbol} {self.mode} "
