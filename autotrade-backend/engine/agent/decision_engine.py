@@ -414,6 +414,19 @@ async def _log_verdict(symbol, candidate, decision, mode, arith_conf,
             try: return int(x)
             except Exception: return None
 
+        # 7-factor Hub breakdown + modifiers at decision time → per-factor outcome
+        # attribution later. Floats kept as-is; tone/bias kept for grouping.
+        sub = getattr(candidate, "hub_subscores", {}) or {}
+        cf  = getattr(decision, "confidence_factors", {}) or {}
+        factors = {
+            "technical":   sub.get("technical"),   "news":        sub.get("news"),
+            "sector":      sub.get("sector"),      "macro":       sub.get("macro"),
+            "earnings":    sub.get("earnings"),    "fundamental": sub.get("fundamental"),
+            "options":     sub.get("options"),
+            "news_factor": cf.get("news_factor"),  "earnings_tone": cf.get("earnings_tone"),
+            "fii_bias":    cf.get("fii_bias"),     "regime_factor": cf.get("regime_factor"),
+        }
+
         async with AsyncSessionLocal() as s:
             s.add(ReasoningVerdict(
                 symbol=symbol, mode=mode,
@@ -425,7 +438,7 @@ async def _log_verdict(symbol, candidate, decision, mode, arith_conf,
                 llm_verdict=verdict, llm_confidence=_int(llm_conf),
                 final_confidence=_int(final_conf), taken=taken,
                 key_risk=str(record.get("key_risk", ""))[:120] or None,
-                detail=record,
+                detail=record, factors=factors,
             ))
             await s.commit()
     except Exception as exc:
