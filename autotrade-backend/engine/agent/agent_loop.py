@@ -16,7 +16,7 @@ from engine.agent.selector        import StrategySelectorAgent
 from engine.agent.fundamentals    import FundamentalsAgent
 from engine.agent.macro           import MacroSectorAgent
 from engine.agent.risk_manager    import RiskManagerAgent
-from engine.agent.decision_engine import DecisionEngine
+from engine.agent.decision_engine import DecisionEngine, apply_reasoning_gate
 from engine.agent.execution       import AgentExecutionManager
 from engine.agent.portfolio_context import AgentPortfolioContext
 from utils.config import settings
@@ -626,6 +626,20 @@ async def _process_symbol(
                 drop_reason=reject_reason or "decision_filtered",
                 session=session,
             )
+        return None
+
+    # 5b. Level-1 LLM reasoning gate (opt-in: AGENT_LLM_REASONING_ENABLED).
+    # Runs only on a candidate that already cleared the arithmetic threshold, so
+    # LLM cost is bounded to qualified trades. Can veto (SKIP) or blend confidence.
+    # Fail-open: disabled/LLM-down → arithmetic decision passes through unchanged.
+    decision, _llm_reject = await apply_reasoning_gate(symbol, candidate, decision)
+    if decision is None:
+        logger.info(f"[agent] LLM-reason SKIP {symbol} | {_llm_reject}")
+        await _log_skipped_decision(
+            symbol=symbol, candidate=candidate, regime=features.regime,
+            macro_bias=macro_bias, fund_score=fund_score,
+            drop_reason=_llm_reject or "llm_reasoning_skip", session=session,
+        )
         return None
 
     # 6. Risk Manager veto

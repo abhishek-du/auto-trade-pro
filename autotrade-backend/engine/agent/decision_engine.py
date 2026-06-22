@@ -59,6 +59,104 @@ class AgentDecisionOutput:
         return d
 
 
+async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
+    """Level-1 LLM reasoning: ask the model to reason over a qualified candidate
+    (bull case / bear case / biggest risk) and return a structured verdict.
+
+    Returns {verdict, confidence, bull, bear, key_risk} or None on any failure
+    (the caller then falls back to the arithmetic decision — fail-open).
+    """
+    try:
+        import json as _json
+        import re as _re
+        from utils.llm import call_llm_chat
+
+        sub = getattr(candidate, "hub_subscores", {}) or {}
+        cf  = getattr(decision, "confidence_factors", {}) or {}
+        sys_prompt = (
+            "You are a disciplined Indian-equity (NSE) swing-trading analyst. Given a "
+            "candidate trade and its 7-factor breakdown, reason briefly about the bull "
+            "case, the bear case, and the single biggest risk, then decide TAKE or SKIP. "
+            "Be skeptical: SKIP when the edge is weak, the factors conflict, the regime "
+            "is unsupportive, or the risk/reward is poor. "
+            'Respond with ONLY compact JSON: '
+            '{"verdict":"TAKE"|"SKIP","confidence":<0-100 int>,'
+            '"bull":"<=20 words","bear":"<=20 words","key_risk":"<=12 words"}'
+        )
+        user_prompt = (
+            f"Symbol {symbol} | Side {decision.action} | Strategy {candidate.strategy}\n"
+            f"Regime {decision.regime} | MasterScore {decision.master_score}\n"
+            f"Entry {candidate.entry} Stop {candidate.stop} Target {candidate.target} "
+            f"R:R {candidate.risk_reward}\n"
+            f"7-factor: technical={sub.get('technical')} news={sub.get('news')} "
+            f"sector={sub.get('sector')} macro={sub.get('macro')} earnings={sub.get('earnings')} "
+            f"fundamental={sub.get('fundamental')} options={sub.get('options')}\n"
+            f"Modifiers: news_factor={cf.get('news_factor')} earnings_tone={cf.get('earnings_tone')} "
+            f"fii_bias={cf.get('fii_bias')} regime_factor={cf.get('regime_factor')}\n"
+            f"Arithmetic confidence {decision.confidence}%"
+        )
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": user_prompt},
+        ]
+        resp = await call_llm_chat(messages, max_tokens=300, temperature=0.2, groq_fallback=True)
+        if not resp:
+            return None
+        m = _re.search(r"\{.*\}", resp, _re.S)
+        if not m:
+            return None
+        return _json.loads(m.group(0))
+    except Exception as exc:
+        logger.debug(f"[agent/llm_reason] {symbol} reasoning failed: {exc}")
+        return None
+
+
+async def apply_reasoning_gate(symbol: str, candidate, decision):
+    """Level-1 reasoning gate (opt-in via AGENT_LLM_REASONING_ENABLED).
+
+    On a candidate that has already cleared the arithmetic threshold, let the LLM
+    confirm/veto and blend confidence. Returns (decision_or_None, reject_reason).
+    Fail-open: if the gate is disabled or the LLM is unavailable, the arithmetic
+    decision passes through unchanged so trading never blocks on the LLM.
+    """
+    if not getattr(settings, "AGENT_LLM_REASONING_ENABLED", False):
+        return decision, None
+
+    data = await llm_reason_candidate(symbol, candidate, decision)
+    if not data:
+        candidate.reasons.append("llm_reason:unavailable→arithmetic")
+        return decision, None
+
+    verdict  = str(data.get("verdict", "TAKE")).upper()
+    llm_conf = data.get("confidence")
+    key_risk = str(data.get("key_risk", ""))[:80]
+    bull     = str(data.get("bull", ""))[:120]
+    bear     = str(data.get("bear", ""))[:120]
+
+    try:
+        decision.confidence_factors["llm_reasoning"] = {
+            "verdict": verdict, "confidence": llm_conf,
+            "bull": bull, "bear": bear, "key_risk": key_risk,
+        }
+    except Exception:
+        pass
+    candidate.reasons.append(f"llm_reason:{verdict} conf={llm_conf} risk={key_risk}")
+
+    if verdict == "SKIP":
+        return None, f"llm_reasoning_skip:{key_risk or 'weak_edge'}"
+
+    # TAKE → blend arithmetic + LLM confidence (defensive parse).
+    try:
+        lc = int(llm_conf)
+        if 0 <= lc <= 100:
+            blended = int(round((decision.confidence + lc) / 2))
+            decision.confidence = blended
+            decision.confidence_factors["final_confidence_blended"] = blended
+    except Exception:
+        pass
+    return decision, None
+
+
 class DecisionEngine:
 
     def fuse(
