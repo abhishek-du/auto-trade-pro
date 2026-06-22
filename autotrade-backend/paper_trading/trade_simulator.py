@@ -195,7 +195,13 @@ async def open_paper_trade(
         )
         logger.warning(f"open_paper_trade: {msg}")
         raise ValueError(msg)
-    usd_value = position_size["usd_value"]   # notional of the whole-share position
+    # Charge the wallet the ACTUAL fill cost (post-slippage), not the pre-slippage
+    # notional from sizing. The position is booked at `actual_entry`, so deducting
+    # the signal-price notional instead left the entry slippage uncharged — cash +
+    # cost-basis overshot the wallet base by the accumulated slippage and inflated
+    # equity / unrealised P&L. Matching cash to the booked price makes slippage a
+    # real cost and keeps cash + holdings reconcile to the wallet base exactly.
+    usd_value = round(units * actual_entry, 4)
 
     # ── Trade management levels ───────────────────────────────────────────────
     # signal.take_profit = Target 1 (first checkpoint / trailing trigger).

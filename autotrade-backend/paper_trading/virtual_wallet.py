@@ -248,13 +248,32 @@ class VirtualWallet:
             wallet.winning_trades / wallet.total_trades * 100
             if wallet.total_trades > 0 else 0.0
         )
-        roi = (wallet.equity - start) / start * 100 if start else 0.0
+
+        # Compute unrealised P&L LIVE from open positions — the SAME compute_live_pnl
+        # path the /positions page uses — so the navbar summary matches it instead of
+        # lagging on the last periodic mark-to-market snapshot. Equity is then derived
+        # from the leak-immune identity equity = start + realised + unrealised (not
+        # balance + holdings, whose cash side can carry tiny entry-slippage drift).
+        try:
+            from paper_trading.position_tracker import PositionTracker
+            from paper_trading.trade_simulator import compute_live_pnl
+            positions = await PositionTracker.get_open_positions(session)
+            live = await compute_live_pnl(positions, session)
+            unrealised = sum(
+                float(live.get(p.id, (None, p.unrealised_pnl, None))[1] or 0.0)
+                for p in positions
+            )
+        except Exception:
+            unrealised = wallet.unrealised_pnl  # fall back to last stored snapshot
+
+        equity = start + wallet.realised_pnl + unrealised
+        roi = (equity - start) / start * 100 if start else 0.0
 
         return {
             "balance":        round(wallet.balance, 2),
-            "equity":         round(wallet.equity, 2),
+            "equity":         round(equity, 2),
             "realised_pnl":   round(wallet.realised_pnl, 2),
-            "unrealised_pnl": round(wallet.unrealised_pnl, 2),
+            "unrealised_pnl": round(unrealised, 2),
             "total_trades":   wallet.total_trades,
             "winning_trades": wallet.winning_trades,
             "win_rate":       round(win_rate, 2),
