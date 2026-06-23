@@ -730,6 +730,42 @@ async def _india_trade_loop():
                     break
                 continue
 
+            # ── Level-1/2/3 LLM reasoning gate on the LIVE trade path ──────────
+            # Runs only on validated signals about to be opened (≤ max_new/cycle, so
+            # LLM cost is bounded). Builds lightweight candidate/decision shims from
+            # the signal so the gate + its 7-factor verdict logging work here too.
+            # SHADOW mode only logs (trade proceeds); otherwise it can SKIP or blend.
+            try:
+                from types import SimpleNamespace as _NS
+                from engine.agent.decision_engine import apply_reasoning_gate
+                _hub  = getattr(signal, "hub_subscores", None) or {}
+                _strat = getattr(signal, "strategy", "HUB_SIGNAL")
+                _rgm   = getattr(signal, "regime", "") or _hub.get("regime", "")
+                _tgt   = getattr(signal, "target_2", None) or signal.take_profit or 0.0
+                _rr    = getattr(signal, "risk_reward_ratio", 0.0)
+                _cand = _NS(symbol=signal.symbol, side=signal.action, strategy=_strat,
+                            entry=signal.entry_price, stop=signal.stop_loss or 0.0,
+                            target=_tgt, risk_reward=_rr, hub_subscores=_hub, reasons=[])
+                _dec = _NS(action=signal.action, regime=_rgm, strategy=_strat,
+                           master_score=getattr(signal, "final_score", None) or signal.confidence,
+                           confidence=int(signal.confidence or 0),
+                           entry=signal.entry_price, stop=signal.stop_loss or 0.0,
+                           target=_tgt, risk_reward=_rr,
+                           confidence_factors={k: _hub.get(k) for k in
+                               ("technical", "news", "sector", "macro",
+                                "earnings", "fundamental", "options")})
+                _kept, _llm_reject = await apply_reasoning_gate(signal.symbol, _cand, _dec)
+                if _kept is None:
+                    logger.info(f"[india_trade_loop] LLM-reason SKIP {signal.symbol}: {_llm_reject}")
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal,
+                        rejected=True, reject_reason=f"[llm_reason] {_llm_reject}",
+                    )
+                    continue
+                signal.confidence = _kept.confidence  # propagate blend (no-op in shadow)
+            except Exception as _exc:
+                logger.debug(f"[india_trade_loop] reasoning gate skipped {signal.symbol}: {_exc}")
+
             pos_size = calculate_position_size(signal, balance)
             # SELL = equity short → must be intraday MIS (NSE rule); BUY = CNC delivery
             _product = "MIS" if signal.action == "SELL" else "CNC"
