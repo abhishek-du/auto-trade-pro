@@ -344,3 +344,24 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=9, minute=40, day_of_week="1-5"),
     },
 }
+
+
+# ── Auto-expiry: bound the queue so stale periodic tasks DROP, never pile up ──
+# Root cause of a 63k-task Redis backlog: high-frequency periodic tasks (fast_sl
+# every 5s, price scans every 30-60s) were enqueued faster than the worker could
+# consume them, and with NO `expires` set they accumulated forever — burying the
+# 15-min hub cycle and everything else for days. With an expiry, a task the worker
+# can't reach within ~its own cadence is discarded by Celery instead of queued
+# indefinitely (the next tick supersedes it), so the queue stays self-bounded.
+# Applied programmatically so every current AND future entry is covered.
+for _name, _cfg in celery_app.conf.beat_schedule.items():
+    _opts = _cfg.setdefault("options", {})
+    if "expires" in _opts:
+        continue
+    _sch = _cfg["schedule"]
+    if isinstance(_sch, (int, float)):
+        _opts["expires"] = max(int(_sch) * 2, 20)   # interval tasks: ~2 cycles of grace
+    elif "master-intelligence" in _name:
+        _opts["expires"] = 900                        # 15-min hub cycle: drop if a full cycle late
+    else:
+        _opts["expires"] = 3600                       # daily/weekly crons: 1h grace
