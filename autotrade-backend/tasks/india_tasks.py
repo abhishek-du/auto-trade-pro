@@ -205,6 +205,50 @@ def fno_expiry_sweep():
     return _run_async(_fno_expiry_sweep())
 
 
+# ── 3c. breakout_discovery — every 5 min during NSE hours ────────────────────
+
+async def _run_breakout_discovery():
+    """Scan ALL NSE candles for today's breakout stocks and inject them into the
+    hub_universe + user_watchlist so the agent scores and trades them automatically.
+
+    This is the fix for the ROTO problem: small/mid-cap stocks that suddenly
+    move 5%+ on heavy volume are invisible to the Hub (which ranks by 30-day avg
+    turnover). This engine catches them in real-time and promotes them into the
+    agent's scoring universe so no breakout is ever missed again.
+    """
+    from crawler.india_price_feed import is_nse_market_open
+    from engine.breakout_screener import run_breakout_discovery
+    from tasks._db import celery_session
+
+    if not is_nse_market_open():
+        return {"status": "market_closed"}
+
+    async with celery_session() as session:
+        result = await run_breakout_discovery(session)
+        await session.commit()
+
+    logger.info(
+        f"[breakout_discovery] scanned → {result.get('candidates', 0)} breakouts found | "
+        f"injected hub={result.get('injected_hub', 0)} watchlist={result.get('injected_watchlist', 0)}"
+    )
+    if result.get("symbols"):
+        for s in result["symbols"][:5]:
+            logger.info(
+                f"[breakout_discovery] 🚀 {s['symbol'].replace('.NS', '')}  "
+                f"{s['change_pct']:+.1f}%  vol={s['volume_ratio']:.1f}×  {s['reason']}"
+            )
+    return result
+
+
+@celery_app.task(name="tasks.breakout_discovery")
+def breakout_discovery():
+    """Every 5 min: scan ALL NSE symbols for price+volume breakouts and auto-inject
+    them into hub_universe + user_watchlist so the agent never misses a ROTO-type move.
+    """
+    logger.info("[breakout_discovery] Starting breakout scan")
+    return _run_async(_run_breakout_discovery())
+
+
 # ── 4. india_mutual_fund_nav — daily 14:30 UTC (20:00 IST) ───────────────────
 
 async def _india_mutual_fund_nav():

@@ -331,6 +331,18 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=9, minute=55, day_of_week="1-5"),
     },
 
+    # ── Breakout Auto-Discovery ───────────────────────────────────────────────
+    # Every 5 min during NSE hours: scan ALL 9,600+ NSE symbols for price+volume
+    # breakouts (≥4% move + ≥2× volume) and inject them into hub_universe +
+    # user_watchlist automatically. This is the fix for the "ROTO problem" —
+    # small-cap breakouts that are invisible to the turnover-ranked Hub universe.
+    # Injected symbols are scored in the next 15-min Hub cycle and traded normally.
+    "breakout-discovery-every-5min": {
+        "task":     "tasks.breakout_discovery",
+        "schedule": 300,
+        "options":  {"countdown": 60},   # 60s after each 5-min mark
+    },
+
     # ── Intraday MIS trading ──────────────────────────────────────────────────
     # 09:30 IST = 04:00 UTC: open 2-3 equity + optionally 1 NIFTY/BN option as MIS.
     # Uses top Hub BUY signals; separate budget from the positional CNC book.
