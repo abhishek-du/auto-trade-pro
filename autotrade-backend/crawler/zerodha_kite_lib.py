@@ -29,6 +29,46 @@ from utils.logger import logger
 _kite: Any | None = None
 _ticker: Any | None = None
 
+# ── Live token source of truth (fixes the stale-singleton bug) ────────────────
+# The Kite access_token expires daily at 06:00 IST and is refreshed (to .env) by
+# a SEPARATE process at 08:00. Long-running processes (celery worker/beat,
+# uvicorn) cached the token at boot and never re-read it, so every Kite REST call
+# failed all day until restart. current_access_token() re-reads .env ONLY when
+# the file's mtime changes (≈1 stat/call), so a refresh propagates to every
+# process within seconds — no restart needed.
+_ENV_PATH = Path(__file__).parent.parent / ".env"
+_TOKEN_CACHE: dict = {"mtime": -1.0, "token": ""}
+
+
+def current_access_token() -> str:
+    """Authoritative access_token, re-read from .env only when it changes."""
+    try:
+        mt = _ENV_PATH.stat().st_mtime
+        if mt != _TOKEN_CACHE["mtime"]:
+            tok = ""
+            for line in _ENV_PATH.read_text().splitlines():
+                if line.startswith("ZERODHA_ACCESS_TOKEN="):
+                    tok = line.split("=", 1)[1].strip()
+                    break
+            _TOKEN_CACHE["mtime"] = mt
+            _TOKEN_CACHE["token"] = tok
+            if tok and tok != settings.ZERODHA_ACCESS_TOKEN:
+                settings.ZERODHA_ACCESS_TOKEN = tok   # keep process-wide value in sync
+        return _TOKEN_CACHE["token"] or settings.ZERODHA_ACCESS_TOKEN
+    except Exception:
+        return settings.ZERODHA_ACCESS_TOKEN
+
+
+def invalidate_token_cache() -> None:
+    """Force the next current_access_token() to re-read .env (used on auth error)."""
+    _TOKEN_CACHE["mtime"] = -1.0
+
+
+def is_token_error(exc: Exception) -> bool:
+    """True if an exception looks like a Kite auth/token failure."""
+    s = f"{type(exc).__name__} {exc}".lower()
+    return "tokenexception" in s or ("incorrect" in s and ("token" in s or "api_key" in s))
+
 
 def _write_env(key: str, value: str) -> None:
     """Idempotently set KEY=VALUE in the .env file (relative to crawler/)."""
@@ -48,7 +88,9 @@ def _write_env(key: str, value: str) -> None:
 
 
 def get_kite():
-    """Return a cached KiteConnect client (sync) — preserves access_token."""
+    """Return the cached KiteConnect client, always carrying the CURRENT token.
+    Re-applies the token from .env whenever it has changed, so a daily refresh is
+    picked up without a process restart."""
     global _kite
     if _kite is None:
         try:
@@ -58,8 +100,9 @@ def get_kite():
                 "kiteconnect library not installed — run `pip install kiteconnect`"
             ) from exc
         _kite = KiteConnect(api_key=settings.ZERODHA_API_KEY)
-        if settings.ZERODHA_ACCESS_TOKEN:
-            _kite.set_access_token(settings.ZERODHA_ACCESS_TOKEN)
+    tok = current_access_token()
+    if tok and getattr(_kite, "access_token", None) != tok:
+        _kite.set_access_token(tok)
     return _kite
 
 
@@ -414,14 +457,25 @@ def get_historical_data(
     continuous: bool = False,
     oi: bool = False,
 ) -> list[dict]:
-    return get_kite().historical_data(
-        instrument_token=instrument_token,
-        from_date=from_date,
-        to_date=to_date,
-        interval=interval,
-        continuous=continuous,
-        oi=oi,
-    )
+    def _call():
+        return get_kite().historical_data(
+            instrument_token=instrument_token,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval,
+            continuous=continuous,
+            oi=oi,
+        )
+    try:
+        return _call()
+    except Exception as exc:
+        # Reactive self-heal: a token error force-reloads from .env and retries
+        # once, so a refreshed token is adopted even without a restart.
+        if is_token_error(exc):
+            invalidate_token_cache()
+            get_kite()  # re-applies the fresh token to the singleton
+            return _call()
+        raise
 
 
 # ── Margins preview ───────────────────────────────────────────────────────────
