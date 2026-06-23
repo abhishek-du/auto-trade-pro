@@ -260,6 +260,13 @@ class Settings(BaseSettings):
     # so the agent learns from its own history. Default OFF.
     AGENT_LLM_REFLECTION_ENABLED: bool = False
     AGENT_LLM_LESSONS_IN_PROMPT:  int  = 5   # how many lessons to inject per decision
+    # Portfolio-level cognitive cycle: once per trade-loop cycle, an LLM forms a
+    # top-down "veteran trader" thesis over the whole book + market (regime, VIX,
+    # P&L, open-position load) and returns a stance that can HALT new entries or
+    # CAP how many open this cycle. SHADOW logs the thesis without acting; flip
+    # shadow off to let it gate. Both default OFF — opt-in, A/B before enforcing.
+    AGENT_PORTFOLIO_BRAIN_ENABLED: bool = False
+    AGENT_PORTFOLIO_BRAIN_SHADOW:  bool = True
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
