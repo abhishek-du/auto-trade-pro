@@ -5,7 +5,7 @@ import {
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
-  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale, Layers,
+  Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale, Layers, GitBranch,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
@@ -57,6 +57,7 @@ export const SECTIONS = [
     key: 'intel', label: 'Intel', Icon: Sparkles,
     items: [
       { to: '/intelligence',   label: 'Intelligence Hub', Icon: Sparkles, badge: 'hubBadge' },
+      { to: '/pipeline',       label: 'Pipeline Flow',    Icon: GitBranch },
       { to: '/agent-log',      label: 'Agent Log',        Icon: ClipboardList },
       { to: '/news',           label: 'News',             Icon: Newspaper },
       { to: '/earnings',       label: 'Earnings AI',      Icon: FileText, badge: 'earningsBadge' },

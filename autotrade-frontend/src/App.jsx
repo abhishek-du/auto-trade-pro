@@ -82,6 +82,7 @@ import TradingAgent      from './pages/TradingAgent';
 import IntelligenceDashboard from './pages/IntelligenceDashboard';
 import AgentLog          from './pages/AgentLog';
 import MarketScanner     from './pages/MarketScanner';
+import PipelineFlow      from './pages/PipelineFlow';
 import StockDetail        from './pages/StockDetail';
 import FundDetail            from './pages/FundDetail';
 import PortfolioAnalytics   from './pages/PortfolioAnalytics';
@@ -152,6 +153,7 @@ export default function App() {
               <Route path="/agent-log"         element={<AgentLog />}       />
               <Route path="/discover/scanner" element={<MarketScanner />}  />
               <Route path="/intelligence"  element={<IntelligenceDashboard />} />
+              <Route path="/pipeline"      element={<PipelineFlow />} />
               {/* Phase 2 — unified stock + fund detail pages */}
               <Route path="/portfolio-analytics" element={<PortfolioAnalytics />} />
               <Route path="/s/:symbol"    element={<StockDetail />} />
