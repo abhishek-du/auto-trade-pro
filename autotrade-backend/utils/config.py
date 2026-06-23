@@ -267,6 +267,12 @@ class Settings(BaseSettings):
     # shadow off to let it gate. Both default OFF — opt-in, A/B before enforcing.
     AGENT_PORTFOLIO_BRAIN_ENABLED: bool = False
     AGENT_PORTFOLIO_BRAIN_SHADOW:  bool = True
+    # Include a technical/chart read (candlestick patterns, indicator states,
+    # support/resistance, ML next-day forecast) in the per-candidate LLM reasoning
+    # context, so the model reasons over the chart like a trader — not just the
+    # numeric factors. Cheap (built from already-computed local data, no new LLM
+    # call); only takes effect when AGENT_LLM_REASONING_ENABLED is also on.
+    AGENT_CHART_BRIEF_ENABLED:     bool = True
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20

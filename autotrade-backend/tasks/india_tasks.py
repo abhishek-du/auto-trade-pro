@@ -808,9 +808,24 @@ async def _india_trade_loop():
                 _rgm   = getattr(signal, "regime", "") or _hub.get("regime", "")
                 _tgt   = getattr(signal, "target_2", None) or signal.take_profit or 0.0
                 _rr    = getattr(signal, "risk_reward_ratio", 0.0)
+                # Technical/chart brief — built from recent candles (reused from the
+                # level-calc step if available), so the LLM reasons over the chart + ML.
+                _brief = ""
+                try:
+                    if getattr(settings, "AGENT_CHART_BRIEF_ENABLED", True):
+                        from engine.agent.chart_brief import build_chart_brief
+                        _bc = await get_latest_candles(signal.symbol, "1d", 120, session)
+                        if _bc and len(_bc) >= 20:
+                            _bc = sorted(_bc, key=lambda c: c.timestamp)
+                            _bdf = pd.DataFrame([{"open": c.open, "high": c.high, "low": c.low,
+                                "close": c.close, "volume": c.volume} for c in _bc])
+                            _brief = build_chart_brief(signal.symbol, _bdf)
+                except Exception as _bx:
+                    logger.debug(f"[india_trade_loop] chart_brief skipped {signal.symbol}: {_bx}")
                 _cand = _NS(symbol=signal.symbol, side=signal.action, strategy=_strat,
                             entry=signal.entry_price, stop=signal.stop_loss or 0.0,
-                            target=_tgt, risk_reward=_rr, hub_subscores=_hub, reasons=[])
+                            target=_tgt, risk_reward=_rr, hub_subscores=_hub, reasons=[],
+                            chart_brief=_brief)
                 _dec = _NS(action=signal.action, regime=_rgm, strategy=_strat,
                            master_score=getattr(signal, "final_score", None) or signal.confidence,
                            confidence=int(signal.confidence or 0),

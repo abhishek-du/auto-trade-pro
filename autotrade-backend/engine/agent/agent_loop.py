@@ -628,6 +628,16 @@ async def _process_symbol(
             )
         return None
 
+    # 5a. Attach a technical/chart read (candlestick + indicators + ML) so the
+    # reasoning gate weighs the chart, not just the numeric factors. Reuses the df
+    # already in scope; fail-open.
+    try:
+        if getattr(settings, "AGENT_CHART_BRIEF_ENABLED", True):
+            from engine.agent.chart_brief import build_chart_brief
+            candidate.chart_brief = build_chart_brief(symbol, df)
+    except Exception as _bx:
+        logger.debug(f"[agent] chart_brief skipped {symbol}: {_bx}")
+
     # 5b. Level-1 LLM reasoning gate (opt-in: AGENT_LLM_REASONING_ENABLED).
     # Runs only on a candidate that already cleared the arithmetic threshold, so
     # LLM cost is bounded to qualified trades. Can veto (SKIP) or blend confidence.

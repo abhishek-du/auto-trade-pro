@@ -77,6 +77,12 @@ async def _candidate_context(symbol: str, candidate, decision) -> str:
         f"fii_bias={cf.get('fii_bias')} regime_factor={cf.get('regime_factor')}\n"
         f"Arithmetic confidence {decision.confidence}%"
     )
+    # Technical / chart read (candlestick patterns, indicator states, support/
+    # resistance, ML direction) so the model reasons over the CHART, not just the
+    # numeric factors. Attached upstream by the trade loops; absent → skipped.
+    brief = getattr(candidate, "chart_brief", None)
+    if brief:
+        base += "\nTechnical / chart read:\n" + str(brief)
     try:
         from engine.agent.reflection import get_relevant_lessons
         lessons = await get_relevant_lessons(candidate.strategy, decision.regime, decision.action)
@@ -115,11 +121,15 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
         from utils.llm import call_llm_chat
 
         sys_prompt = (
-            "You are a disciplined Indian-equity (NSE) swing-trading analyst. Given a "
-            "candidate trade and its 7-factor breakdown, reason briefly about the bull "
-            "case, the bear case, and the single biggest risk, then decide TAKE or SKIP. "
-            "Be skeptical: SKIP when the edge is weak, the factors conflict, the regime "
-            "is unsupportive, or the risk/reward is poor. "
+            "You are a senior discretionary Indian-equity (NSE) swing trader. Weigh "
+            "ALL the evidence given like a human expert would — the 7 fundamental/"
+            "sentiment factors (technical, news, sector, macro, earnings, fundamental, "
+            "options), the technical/chart read (candlestick patterns, indicator "
+            "states, support/resistance, ML next-day forecast), and any past lessons. "
+            "Reason briefly about the bull case, the bear case, and the single biggest "
+            "risk, then decide TAKE or SKIP. Be skeptical: SKIP when the chart and the "
+            "factors disagree, the edge is weak, the regime is unsupportive, or the "
+            "risk/reward is poor — do not take a trade just because the score is high. "
             'Respond with ONLY compact JSON: '
             '{"verdict":"TAKE"|"SKIP","confidence":<0-100 int>,'
             '"bull":"<=20 words","bear":"<=20 words","key_risk":"<=12 words"}'
