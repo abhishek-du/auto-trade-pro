@@ -2243,8 +2243,8 @@ def run_master_intelligence_cycle():
                         tried += 1
                         flow["candidates"] += 1
                         try:
-                            candles = await get_latest_candles(stock.symbol, "15m", 300, session)
-                            if not candles or len(candles) < 50:
+                            candles = await get_latest_candles(stock.symbol, settings.AGENT_TIMEFRAME, 300, session)
+                            if not candles or len(candles) < 20:
                                 flow["no_data"] += 1
                                 continue
                             cs = sorted(candles, key=lambda c: c.timestamp)
