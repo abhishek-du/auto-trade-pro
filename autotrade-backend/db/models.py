@@ -1550,3 +1550,32 @@ class TradeLesson(Base):
 
     def __repr__(self) -> str:
         return f"<TradeLesson {self.symbol} {self.strategy}/{self.regime} won={self.won}>"
+
+
+class PortfolioThesis(Base):
+    """One row per trade-loop cycle: the portfolio-level 'veteran trader' thesis
+    (top-down market + book read) and the stance it produced. Logged for every
+    cycle the brain runs (shadow or enforcing) so the stance can be A/B'd against
+    realised book P&L before it is allowed to gate trading."""
+    __tablename__ = "portfolio_theses"
+    __table_args__ = (
+        Index("ix_portfolio_theses_ts", "ts"),
+    )
+
+    id:              Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts:              Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    stance:          Mapped[str]          = mapped_column(String(16), nullable=False)  # AGGRESSIVE|NORMAL|DEFENSIVE|HALT
+    halt_new:        Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)
+    size_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_new_entries: Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    enforced:        Mapped[bool]         = mapped_column(Boolean, nullable=False, default=False)  # False = shadow
+    equity:          Mapped[float | None] = mapped_column(Float, nullable=True)
+    daily_roi:       Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_positions:  Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    vix:             Mapped[float | None] = mapped_column(Float, nullable=True)
+    thesis:          Mapped[str | None]   = mapped_column(Text, nullable=True)
+    key_risks:       Mapped[str | None]   = mapped_column(String(300), nullable=True)
+    detail:          Mapped[dict | None]  = mapped_column(JSONB, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<PortfolioThesis {self.stance} halt={self.halt_new} enforced={self.enforced} @{self.ts}>"

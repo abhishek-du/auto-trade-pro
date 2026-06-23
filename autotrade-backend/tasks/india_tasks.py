@@ -724,6 +724,55 @@ async def _india_trade_loop():
         )
         open_positions = list(pos_result.scalars().all())
 
+        # Step 5b: Portfolio-level cognitive cycle — one top-down "veteran trader"
+        # read of the whole book + market before any per-candidate decision. Logs
+        # its stance every cycle; only gates trading when NOT in shadow mode.
+        try:
+            if getattr(settings, "AGENT_PORTFOLIO_BRAIN_ENABLED", False):
+                from engine.agent.portfolio_brain import portfolio_cognitive_cycle, log_thesis
+                _start    = summary.get("equity", 0) - summary.get("realised_pnl", 0) - summary.get("unrealised_pnl", 0)
+                _deployed = max(0.0, summary["equity"] - balance)
+                _vix = 0.0
+                try:
+                    _vix = float((PRICE_CACHE.get("^INDIAVIX", {}) or {}).get("price", 0) or 0)
+                except Exception:
+                    pass
+                _actionable = [s for s in level_pool]
+                _buys  = sum(1 for s in _actionable if s.action == "BUY")
+                _sells = sum(1 for s in _actionable if s.action == "SELL")
+                _top   = ", ".join(f"{s.symbol.replace('.NS','')}:{round(s.final_score)}"
+                                   for s in _actionable[:5])
+                _brain_ctx = {
+                    "regime": (getattr(level_pool[0], "regime", "") if level_pool else "") or "UNKNOWN",
+                    "vix": round(_vix, 1) or None, "macro_bias": None, "mood": None,
+                    "nifty_5d_ret": None,
+                    "equity": round(summary["equity"]), "cash": round(balance),
+                    "deployed_pct": round(100 * _deployed / max(summary["equity"], 1)),
+                    "open_positions": len(open_positions),
+                    "max_positions": int(getattr(settings, "AGENT_MAX_POSITIONS", 15)),
+                    "day_roi": round(summary.get("roi_percent", 0.0), 2),
+                    "unrealised": round(summary.get("unrealised_pnl", 0.0)),
+                    "worst_open": None, "best_open": None,
+                    "n_candidates": len(_actionable), "n_buy": _buys, "n_sell": _sells,
+                    "top_candidates": _top,
+                }
+                _stance = await portfolio_cognitive_cycle(_brain_ctx)
+                if _stance:
+                    _enforce = not getattr(settings, "AGENT_PORTFOLIO_BRAIN_SHADOW", True)
+                    await log_thesis(_stance, _brain_ctx, enforced=_enforce)
+                    logger.info(
+                        f"[portfolio_brain] stance={_stance['stance']} halt={_stance['halt_new']} "
+                        f"cap={_stance['max_new_entries']} mult={_stance['size_multiplier']} "
+                        f"{'ENFORCED' if _enforce else 'shadow'} | {_stance['thesis'][:80]}"
+                    )
+                    if _enforce:
+                        if _stance["halt_new"]:
+                            max_new = 0
+                        elif _stance["max_new_entries"] is not None:
+                            max_new = min(max_new, int(_stance["max_new_entries"]))
+        except Exception as _exc:
+            logger.debug(f"[portfolio_brain] skipped: {_exc}")
+
         # Step 6: work down the ranked pool, opening until the risk budget / cash
         # buffer (inside validate_signal) or the per-cycle cap stops us.
         opened = 0
