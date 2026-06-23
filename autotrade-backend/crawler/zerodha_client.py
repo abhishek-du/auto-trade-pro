@@ -322,12 +322,22 @@ _kite_client: KiteClient | None = None
 
 
 def get_kite_client() -> KiteClient:
+    """Return the cached async client, always carrying the CURRENT token. Re-reads
+    the live token from .env (mtime-gated) so a daily refresh propagates to this
+    long-running process without a restart — same fix as the sync get_kite()."""
     global _kite_client
     if _kite_client is None:
         _kite_client = KiteClient(
             api_key=settings.ZERODHA_API_KEY,
             access_token=settings.ZERODHA_ACCESS_TOKEN,
         )
+    try:
+        from crawler.zerodha_kite_lib import current_access_token
+        tok = current_access_token()
+        if tok and _kite_client.access_token != tok:
+            _kite_client.access_token = tok
+    except Exception:
+        pass
     return _kite_client
 
 
