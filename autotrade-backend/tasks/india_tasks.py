@@ -264,28 +264,44 @@ def india_fundamental_update():
 
 # ── 6. india_trade_loop — every 60 s ─────────────────────────────────────────
 
-# Cooldown tracking: don't re-alert the same symbol within 4 h
-_shortlist_alerted_loop: dict[str, "datetime.datetime"] = {}
-_SHORTLIST_COOLDOWN_H = 4
+# De-dup tracking: re-alert a symbol ONLY when its content changes — the 7-factor
+# Hub score moved meaningfully OR the news subscore changed — not on a fixed timer.
+# Maps bare symbol → {"score": float, "news": float, "ts": datetime} of the last alert.
+_shortlist_alerted_loop: dict[str, dict] = {}
+_SHORTLIST_SCORE_DELTA   = 5.0   # re-alert if |Δ master score| ≥ this
+_SHORTLIST_MIN_REALERT_M = 30    # anti-spam floor: never re-alert within this many minutes
 _MAX_SHORTLIST_PER_CYCLE = 5
 
 
 async def _send_loop_shortlist_alert(signal) -> None:
     """Send a full shortlist Telegram alert with 7-factor breakdown + web research.
 
-    Fires regardless of whether a trade was actually opened.
-    Respects a 4-hour per-symbol cooldown. Non-blocking; swallows all errors.
+    Fires regardless of whether a trade was actually opened. Re-alerts a symbol
+    ONLY when its 7-factor Hub score moves by >= _SHORTLIST_SCORE_DELTA or its news
+    subscore changes — so an unchanged signal is never re-sent. A short minimum
+    interval guards against flip-flap. Non-blocking; swallows all errors.
     """
     from utils.config import settings as _s
     if not _s.telegram_available:
         return
     bare = signal.symbol.replace(".NS", "")
     now  = datetime.datetime.utcnow()
-    last = _shortlist_alerted_loop.get(bare)
-    if last and (now - last).total_seconds() < _SHORTLIST_COOLDOWN_H * 3600:
-        return
+    score    = round(signal.final_score, 1)
+    cur_news = round(float((getattr(signal, "hub_subscores", {}) or {}).get("news", 0) or 0), 1)
 
-    score = round(signal.final_score, 1)
+    prev = _shortlist_alerted_loop.get(bare)
+    if prev is not None:
+        # Anti-spam floor: never re-alert the same symbol too quickly.
+        if (now - prev["ts"]).total_seconds() < _SHORTLIST_MIN_REALERT_M * 60:
+            return
+        score_changed = abs(score - prev["score"]) >= _SHORTLIST_SCORE_DELTA
+        news_changed  = cur_news != prev["news"]
+        if not (score_changed or news_changed):
+            logger.debug(
+                f"[trade_loop/shortlist] {bare} unchanged "
+                f"(score {prev['score']}→{score}, news {prev['news']}→{cur_news}) — skip"
+            )
+            return
 
     # ── Tavily search + crawl (advanced depth = full article text) ────────────
     crawl_data: dict = {}
@@ -323,8 +339,8 @@ async def _send_loop_shortlist_alert(signal) -> None:
             crawl_data=crawl_data or None,
         )
         await send(msg)
-        _shortlist_alerted_loop[bare] = now
-        logger.info(f"[trade_loop/shortlist] ✓ alert sent for {bare} score={score:+.0f}")
+        _shortlist_alerted_loop[bare] = {"score": score, "news": cur_news, "ts": now}
+        logger.info(f"[trade_loop/shortlist] ✓ alert sent for {bare} score={score:+.0f} news={cur_news:+.0f}")
     except Exception as exc:
         logger.debug(f"[trade_loop/shortlist] send failed {bare}: {exc}")
 
