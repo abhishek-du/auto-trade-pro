@@ -62,3 +62,7 @@ db/init/*.sql
 logs/trade_journal.xlsx
 logs/google_token.pickle
 logs/.~lock.*
+
+# Runtime log artifacts (keep tracked docs like logs/ERROR_ANALYSIS.md)
+logs/*.log
+logs/*.txt
