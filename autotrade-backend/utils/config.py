@@ -301,7 +301,7 @@ class Settings(BaseSettings):
     # (top-N by turnover, rebuilt daily). Set a comma-separated list to override.
     HUB_SYMBOLS:               str   = ""
     HUB_UNIVERSE_SIZE:         int   = 2000    # top-N NSE equities by 30-day turnover
-    HUB_UNIVERSE_MIN_TURNOVER_CR: float = 20.0  # min ₹ Cr/day to qualify
+    HUB_UNIVERSE_MIN_TURNOVER_CR: float = 5.0   # min ₹ Cr/day to qualify
 
     # Price-feed watchdog: alert if no intraday (5m) candle has been written in
     # this many minutes during NSE hours (catches a frozen/stale live feed).
@@ -363,6 +363,14 @@ class Settings(BaseSettings):
     # ── Risk / trade sizing ───────────────────────────────────────────────────
     ATR_MULTIPLIER: float = 2.0       # stop = entry ± ATR × this
     MIN_RISK_REWARD: float = 2.0      # take-profit = entry ± risk × this
+
+    # ── Breakout Auto-Discovery (breakout_screener.py) ────────────────────────
+    # Runs every 5 min during NSE hours — auto-promotes small/mid-cap breakout
+    # stocks (like ROTO +7%) into the Hub universe so agent never misses them.
+    BREAKOUT_PCT:     float = 4.0    # min % single-day price move to qualify
+    BREAKOUT_VOL_MIN: float = 2.0    # min today-vol / 20d-avg-vol ratio
+    BREAKOUT_RSI_MAX: float = 85.0   # ignore blow-off tops above this RSI
+    BREAKOUT_MAX_INJ: int   = 20     # max breakouts injected per 5-min cycle
 
     # ── Trade journal → spreadsheet ──────────────────────────────────────────
     # Logs every trade (why bought, targets, ETA, which target hit, duration,
