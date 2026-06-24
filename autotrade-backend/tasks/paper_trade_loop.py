@@ -44,10 +44,14 @@ async def _loop():
                 f"[paper_trade_loop] {len(auto_closed)} position(s) auto-closed "
                 f"this cycle"
             )
-            # Telegram exit alerts
+            # Telegram exit alerts — import dedup set from india_tasks
             if settings.telegram_available:
                 from integrations.telegram_service import send, fmt_exit
+                from tasks.india_tasks import _exit_alerted_trade_ids
                 for c in auto_closed:
+                    tid = c.get("trade_id")
+                    if tid and tid in _exit_alerted_trade_ids:
+                        continue
                     await send(fmt_exit(
                         symbol=c["symbol"],
                         side=c["direction"],
@@ -57,6 +61,8 @@ async def _loop():
                         pnl=c["pnl"],
                         reason=c["reason"],
                     ))
+                    if tid:
+                        _exit_alerted_trade_ids.add(tid)
 
         # ── Step 2: generate actionable signals for all watchlist symbols ─────
         signals = await analyze_all_symbols(session)
