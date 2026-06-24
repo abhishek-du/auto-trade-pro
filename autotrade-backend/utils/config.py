@@ -332,7 +332,7 @@ class Settings(BaseSettings):
     # ── Intraday (MIS) daily trading ──────────────────────────────────────────
     # Morning burst: top Hub signals placed as MIS at 09:30 IST; auto-squareoff at 15:10 IST.
     # These positions are budgeted SEPARATELY from the positional CNC book.
-    INTRADAY_ENABLED:              bool  = True
+    INTRADAY_ENABLED:              bool  = False  # swing-only mode — intraday MIS tasks self-guard on this flag
     INTRADAY_MAX_TRADES_PER_DAY:   int   = 3       # equity MIS slots per day
     INTRADAY_POSITION_SIZE_INR:    float = 150_000.0  # ₹1.5L per equity intraday trade
     INTRADAY_SL_PCT:               float = 0.005      # 0.5% stop-loss (tight intraday)
