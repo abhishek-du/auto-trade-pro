@@ -1031,6 +1031,17 @@ async def _fast_sl_check() -> None:
             if price <= 0 or not pos.stop_loss:
                 continue
 
+            # Sanity check: if price is >50% different from entry, it's almost
+            # certainly a corporate action (split/bonus/demerger) or a bad tick —
+            # not a real market move. Skip to avoid false P&L.
+            entry_ref = float(pos.entry_price or 0)
+            if entry_ref > 0 and abs(price - entry_ref) / entry_ref > 0.50:
+                logger.warning(
+                    f"[fast_sl] {pos.symbol} price ₹{price:.2f} deviates "
+                    f">50% from entry ₹{entry_ref:.2f} — likely corp action, skipping"
+                )
+                continue
+
             is_buy = pos.direction == TradeDirection.BUY
             sl_hit = (is_buy and price <= pos.stop_loss) or (
                 not is_buy and price >= pos.stop_loss
