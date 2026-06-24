@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
 import { PieChart as PieIcon, RefreshCw, ClipboardList, Sliders, Info } from 'lucide-react'
 import { useAllocation } from '../hooks/useAllocation'
 import { usePortfolioTracker } from '../hooks/usePortfolioTracker'
+import { useSIPTracker } from '../hooks/useSIPTracker'
 import LoadingSpinner from '../components/LoadingSpinner'
 import RiskProfileSelector  from '../components/allocation/RiskProfileSelector'
 import AllocationDonut      from '../components/allocation/AllocationDonut'
@@ -29,6 +30,10 @@ export default function AssetAllocation() {
   const { portfolios, activeId } = usePortfolioTracker()
   const portfolioId = urlPortfolio || activeId
 
+  const { goals, loadGoals } = useSIPTracker()
+  useEffect(() => { loadGoals() }, [loadGoals])
+  const sipGoalIds = goals.map(g => g.id || g.goal_id).filter(Boolean)
+
   const {
     analysis, loading, error, loadAnalysis,
     riskProfile, setRiskProfile,
@@ -36,7 +41,7 @@ export default function AssetAllocation() {
     newInvestment, setNewInvestment,
     effectiveTarget, customTarget, applyCustomTarget, setCustomTarget,
     submitQuestionnaire,
-  } = useAllocation(portfolioId, [])
+  } = useAllocation(portfolioId, sipGoalIds)
 
   const [tab,              setTab]              = useState('overview')
   const [showQuestionnaire,setShowQuestionnaire]= useState(false)
