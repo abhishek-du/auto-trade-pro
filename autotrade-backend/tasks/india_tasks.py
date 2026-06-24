@@ -1048,6 +1048,16 @@ async def _fast_sl_check() -> None:
                     logger.warning(f"[fast_sl] corp action handler failed: {_ca_exc}")
                 continue  # Never fire a stop on a suspected corp-action price
 
+            # Sanity check: if price spiked >3× above entry, the data feed is
+            # returning a pre-split (unadjusted) price for a recently split stock.
+            # A genuine 3× intraday move is essentially impossible; skip this tick.
+            if entry_ref > 0 and price > entry_ref * 3.0:
+                logger.warning(
+                    f"[fast_sl] {pos.symbol} price ₹{price:.2f} is >3× entry "
+                    f"₹{entry_ref:.2f} — likely stale pre-split feed, skipping"
+                )
+                continue
+
             is_buy = pos.direction == TradeDirection.BUY
             sl_hit = (is_buy and price <= pos.stop_loss) or (
                 not is_buy and price >= pos.stop_loss
@@ -2349,7 +2359,15 @@ def run_master_intelligence_cycle():
                             } for c in cs])
                             df.set_index("timestamp", inplace=True)
 
-                            # Bridge hub score → features so HubSignalStrategy fires
+                            # Bridge hub score → features so HubSignalStrategy fires.
+                            # If score_symbol failed to compute features (exception path),
+                            # recompute from the df we already loaded for this candidate.
+                            if stock.features is None:
+                                try:
+                                    from engine.agent.analyzer import TechnicalAnalyzer
+                                    stock.features = TechnicalAnalyzer().compute_features(df)
+                                except Exception as _fe:
+                                    logger.debug(f"[hub] {stock.symbol} features recompute failed: {_fe}")
                             if stock.features is not None:
                                 stock.features.hub_composite_score = stock.master_score
                                 stock.features.hub_signal          = stock.signal
