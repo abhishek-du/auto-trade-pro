@@ -8,7 +8,7 @@ const fmtINR = (n) =>
 function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-lg border border-border px-3 py-2 text-xs shadow-xl" style={{ background: '#131E30' }}>
+    <div className="rounded-lg border border-border px-3 py-2 text-xs shadow-xl glass-panel">
       <p className="text-muted mb-1">{label}</p>
       <p className="text-slate-100 font-bold">{fmtINR(payload[0]?.value)}</p>
     </div>
@@ -41,7 +41,7 @@ export default function CandlestickChart() {
   const color = up ? '#10B981' : '#F43F5E';
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden h-80 flex flex-col" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden h-80 flex flex-col glass-panel">
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
         <div>
           <h2 className="text-slate-100 font-semibold text-sm">Equity Curve</h2>

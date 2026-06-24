@@ -32,7 +32,7 @@ export default function GoalCard({ goal, isActive, onClick, onDelete }) {
       className={`relative rounded-xl border p-4 cursor-pointer transition-all ${
         isActive
           ? 'border-accent bg-accent/10'
-          : 'border-border bg-panel hover:border-accent/40 hover:bg-white/2'
+          : 'border-border glass-panel hover:border-accent/40 hover:bg-white/2'
       }`}
     >
       <div className="flex items-start justify-between gap-3">

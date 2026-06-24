@@ -5,7 +5,7 @@ const fmtUSD = (n) => '₹' + new Intl.NumberFormat('en-IN', { minimumFractionDi
 function MiniTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-lg border border-border px-3 py-2 text-xs" style={{ background: '#131E30' }}>
+    <div className="rounded-lg border border-border px-3 py-2 text-xs glass-panel">
       <p className="text-muted mb-1">{label}</p>
       <p className="text-slate-100 font-bold">{fmtUSD(payload[0]?.value)}</p>
     </div>
@@ -19,7 +19,7 @@ export default function AnalyticsPanel({ data }) {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border overflow-hidden glass-panel">
         <div className="px-5 py-3.5 border-b border-border">
           <h3 className="text-slate-100 font-semibold text-sm">Equity Curve</h3>
         </div>
@@ -57,7 +57,7 @@ export default function AnalyticsPanel({ data }) {
           { label: 'Total P&L',    value: fmtUSD(data?.total_pnl),                cls: (data?.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss' },
           { label: 'Avg R:R',      value: data?.avg_rr ? `${data.avg_rr.toFixed(2)}:1` : '—', cls: 'text-cyan' },
         ].map(({ label, value, cls }) => (
-          <div key={label} className="rounded-xl border border-border p-4" style={{ background: '#131E30' }}>
+          <div key={label} className="rounded-xl border border-border p-4 glass-panel">
             <p className="text-muted text-[11px] uppercase tracking-wider mb-1.5">{label}</p>
             <p className={`font-bold text-lg tabular-nums ${cls}`}>{value}</p>
           </div>

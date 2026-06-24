@@ -71,12 +71,17 @@ def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
                         for v in (sl, t1, t2))
             # Sanity: stop on the correct side, targets beyond entry in trade direction
             if valid:
+                # Carry S&R levels so validate_signal() can apply Varsity's 4% gate.
+                _sup = setup.get("support", 0.0) or 0.0
+                _res = setup.get("resistance", 0.0) or 0.0
                 if is_buy and sl < entry and t1 > entry and t2 > t1:
                     return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
-                            "target_2": round(t2, 2), "atr": round(atr, 2), "source": "dynamic"}
+                            "target_2": round(t2, 2), "atr": round(atr, 2),
+                            "source": "dynamic", "support": _sup, "resistance": _res}
                 if (not is_buy) and sl > entry and t1 < entry and t2 < t1:
                     return {"stop_loss": round(sl, 2), "target_1": round(t1, 2),
-                            "target_2": round(t2, 2), "atr": round(atr, 2), "source": "dynamic"}
+                            "target_2": round(t2, 2), "atr": round(atr, 2),
+                            "source": "dynamic", "support": _sup, "resistance": _res}
         except Exception:
             pass  # fall through to ATR
 
@@ -229,6 +234,29 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
+    # ── Check 3b: S&R proximity gate (Varsity checklist item 2 — MANDATORY) ───
+    # The stop-loss must sit near a genuine S&R level.  If the nearest support
+    # (for BUY) or resistance (for SELL) is >4% from the SL, there is no
+    # technical backstop and the trade is skipped.
+    # Gate only fires when sr_support/sr_resistance were populated by the hub
+    # pipeline (via compute_trade_levels → build_trade_setup).  Signals that
+    # don't carry S&R data (sr_support == 0) bypass the check rather than being
+    # falsely rejected.
+    _is_buy_dir = signal.action in ("BUY", "STRONG_BUY")
+    _sr_level   = (getattr(signal, "sr_support", 0.0) or 0.0) if _is_buy_dir \
+                  else (getattr(signal, "sr_resistance", 0.0) or 0.0)
+    if _sr_level > 0 and signal.stop_loss > 0:
+        _sr_dist_pct = abs(signal.stop_loss - _sr_level) / signal.stop_loss * 100
+        _SR_MAX_PCT  = float(getattr(settings, "SR_MAX_DIST_PCT", 4.0))
+        if _sr_dist_pct > _SR_MAX_PCT:
+            reason = (
+                f"S&R gate: SL ₹{signal.stop_loss:.2f} is {_sr_dist_pct:.1f}% from "
+                f"nearest {'support' if _is_buy_dir else 'resistance'} "
+                f"₹{_sr_level:.2f} (max {_SR_MAX_PCT:.0f}%)"
+            )
+            _log_rejection(signal.symbol, reason)
+            return False, reason
+
     # ── Check 4: Risk:Reward ratio ────────────────────────────────────────────
     # Measure reward to the FINAL target (target_2) the position actually rides
     # to, not target_1 (which is just the trailing-stop trigger). With ATR levels
@@ -335,7 +363,13 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
     _is_short = getattr(signal, "action", "BUY") == "SELL"
     if _is_short:
         risk_amount *= 0.5
-    risk_per_unit = abs(signal.entry_price - signal.stop_loss)
+    # Varsity Ch 14 Percentage Risk: units = max_risk / SL_distance_per_share.
+    # SL distance reflects the actual pattern-specific risk (e.g. below hammer low,
+    # below S&R) and is more precise than ATR for EOD swing setups. ATR (Ch 13.4
+    # Percentage Volatility) is the fallback when SL is not meaningful.
+    atr_val = getattr(signal, "atr", 0.0) or 0.0
+    sl_dist = abs(signal.entry_price - signal.stop_loss)
+    risk_per_unit = sl_dist if sl_dist > 0 else atr_val
 
     # Whole shares only — NSE/BSE equity trades in integer quantity; a size like
     # 1.2 shares is not a legal order. Floor the risk-derived size to an int.
@@ -375,10 +409,37 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
 # 3. Daily performance stats
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _kelly_percent(pnl_values: list[float]) -> float:
+    """Compute Kelly% from a list of closed-trade P&L values.
+
+    Varsity Ch 14.2 formula: Kelly% = W - [(1-W) / R]
+      W = winning trades / total trades
+      R = average gain of winning trades / average loss of losing trades
+
+    Returns 0.0 when there is insufficient history (< 10 trades).
+    Clamped to [0, 1] — negative Kelly means no edge; do not size up.
+    """
+    if len(pnl_values) < 10:
+        return 0.0
+    wins   = [p for p in pnl_values if p > 0]
+    losses = [p for p in pnl_values if p <= 0]
+    if not wins or not losses:
+        return 0.0
+    W = len(wins) / len(pnl_values)
+    avg_gain = sum(wins) / len(wins)
+    avg_loss = abs(sum(losses) / len(losses))
+    if avg_loss <= 0:
+        return 0.0
+    R = avg_gain / avg_loss
+    kelly = W - (1.0 - W) / R
+    return max(0.0, min(1.0, kelly))
+
+
 async def get_daily_stats(session: AsyncSession) -> dict:
     """Return today's (UTC) trading statistics from closed paper trades.
 
-    Queries the paper_trades table for all trades closed since midnight UTC.
+    Queries the paper_trades table for all trades closed since midnight UTC,
+    plus all-time Kelly% from full history (Varsity Ch 14).
 
     Returns
     -------
@@ -388,6 +449,8 @@ async def get_daily_stats(session: AsyncSession) -> dict:
         losses_today   — trades where pnl <= 0
         pnl_today      — net PnL for the day (can be negative)
         win_rate_today — wins / trades_today as a percentage (0.0 if no trades)
+        kelly_pct      — Kelly% from all-time history (0.0 if < 10 trades)
+        kelly_risk_pct — suggested risk% per trade = kelly_pct × max_risk cap
     """
     today = _today_start()
 
@@ -408,18 +471,37 @@ async def get_daily_stats(session: AsyncSession) -> dict:
     pnl_today    = sum(pnl_values)
     win_rate     = (wins_today / trades_today * 100.0) if trades_today else 0.0
 
+    # Kelly's Criterion — Varsity Ch 14: use all-time trade history for stable
+    # win-rate and win/loss ratio estimates; today alone is never enough samples.
+    all_pnl_result = await session.execute(
+        select(PaperTrade.pnl).where(
+            and_(
+                PaperTrade.status.in_([TradeStatus.CLOSED, TradeStatus.STOPPED]),
+                PaperTrade.pnl.isnot(None),
+            )
+        )
+    )
+    all_pnl = [float(v) for v in all_pnl_result.scalars().all()]
+    kelly    = _kelly_percent(all_pnl)
+    _, max_risk, _ = _conviction_risk_pct()
+    # Varsity: expose Kelly% × max_cap. E.g. Kelly=30% of 5% cap = 1.5% risk.
+    kelly_risk = kelly * max_risk
+
     stats = {
         "trades_today":   trades_today,
         "wins_today":     wins_today,
         "losses_today":   losses_today,
         "pnl_today":      round(pnl_today, 4),
         "win_rate_today": round(win_rate, 2),
+        "kelly_pct":      round(kelly * 100, 2),
+        "kelly_risk_pct": round(kelly_risk * 100, 2),
     }
 
     logger.debug(
         f"Daily stats  trades={trades_today}  "
         f"W/L={wins_today}/{losses_today}  "
         f"pnl=${pnl_today:+.2f}  "
-        f"win_rate={win_rate:.1f}%"
+        f"win_rate={win_rate:.1f}%  "
+        f"kelly={kelly*100:.1f}%  kelly_risk={kelly_risk*100:.2f}%"
     )
     return stats

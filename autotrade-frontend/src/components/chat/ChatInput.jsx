@@ -89,8 +89,7 @@ export default function ChatInput({ value, onChange, onSend, onSuggestionClick, 
 
       {/* Autocomplete dropdown */}
       {showAuto && autocomplete.length > 0 && (
-        <div className="mb-2 rounded-xl border border-border overflow-hidden"
-          style={{ background: '#0F1829' }}>
+        <div className="mb-2 rounded-xl border border-border overflow-hidden glass-panel">
           {autocomplete.slice(0, 5).map((item) => (
             <button
               key={item.symbol}
@@ -135,8 +134,7 @@ export default function ChatInput({ value, onChange, onSend, onSuggestionClick, 
         <button
           onClick={() => { if (!loading && value.trim()) { setShowAuto(false); onSend() } }}
           disabled={loading || !value.trim()}
-          className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}
+          className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed glass-panel"
         >
           {loading
             ? <Loader2 size={16} className="text-white animate-spin" />

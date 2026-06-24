@@ -22,8 +22,8 @@ from utils.logger import logger
 async def rebuild_hub_universe(
     session: AsyncSession,
     *,
-    top_n: int = 500,
-    min_turnover_cr: float = 5.0,
+    top_n: int = 1500,
+    min_turnover_cr: float = 2.0,
 ) -> dict:
     """Rebuild the hub_universe table: top-N NSE equities by 30-day avg turnover.
 
@@ -86,10 +86,16 @@ async def rebuild_hub_universe(
 
     await session.execute(delete(HubUniverse))
     for rank, r in enumerate(rows, start=1):
+        # Swing mode: stocks ranked 50-1500 are swing candidates.
+        # Top-49 are index heavyweights (intraday/positional dominated).
+        # Breakout-injected stocks are also set is_swing=True by the screener.
+        # Zerodha Varsity: swing works best on liquid mid/large-caps → rank 50-1500.
+        is_swing = 50 <= rank <= 1500
         session.add(HubUniverse(
             symbol=r.symbol,
             turnover_cr=round(float(r.turnover) / 1e7, 2),
             rank=rank,
+            is_swing=is_swing,
         ))
     await session.commit()
 

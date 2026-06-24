@@ -37,7 +37,7 @@ function AgentActivityPanel() {
   const recent = (decisions || []).slice(0, 5)
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <BrainCircuit size={16} className="text-accent" />
@@ -159,7 +159,7 @@ function PaperPortfolioPanel() {
   ]
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Briefcase size={16} className="text-cyan" />
         <h3 className="text-slate-100 font-semibold text-sm">My Portfolio</h3>
@@ -249,7 +249,7 @@ function AgentWatchlistPanel() {
   }
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Plus size={15} className="text-accent" />
         <h3 className="text-slate-100 font-semibold text-sm">Agent Watchlist</h3>
@@ -264,7 +264,7 @@ function AgentWatchlistPanel() {
           className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
         />
         {results.length > 0 && (
-          <div className="absolute z-10 mt-1 w-full bg-panel border border-border rounded-lg shadow-xl overflow-hidden">
+          <div className="absolute z-10 mt-1 w-full glass-panel border border-border rounded-lg shadow-xl overflow-hidden">
             {results.map((r) => (
               <button key={r.symbol} disabled={busy} onClick={() => add(r.ticker || r.symbol.replace('.NS', ''))}
                 className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-surface/60 text-sm">
@@ -315,7 +315,7 @@ function RealZerodhaAccountPanel() {
   const mfValue = mf.reduce((s, h) => s + ((h.last_price ?? 0) * (h.quantity ?? 0)), 0)
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center gap-2">
         <Briefcase size={16} className="text-amber-400" />
         <h3 className="text-slate-100 font-semibold text-sm">Real Zerodha Account</h3>
@@ -387,7 +387,7 @@ function FnOPositionsPanel() {
   const fmt = (n) => formatINR(n ?? 0)
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <Zap size={15} className="text-cyan" />
         <h3 className="text-slate-100 font-semibold text-sm">F&O Positions (Index)</h3>
@@ -702,7 +702,7 @@ export default function PortfolioTracker() {
 
       {/* ── No portfolio state ── */}
       {!hasPortfolio && (
-        <div className="bg-panel border border-border rounded-xl p-12 text-center space-y-4">
+        <div className="glass-panel border border-border rounded-xl p-12 text-center space-y-4">
           <Briefcase size={40} className="text-muted/40 mx-auto" />
           <p className="text-slate-300 font-semibold">No portfolios yet</p>
           {zStatus?.connected ? (
@@ -795,7 +795,7 @@ export default function PortfolioTracker() {
           <AgentActivityPanel />
 
           {/* Tab bar */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
+          <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -811,7 +811,7 @@ export default function PortfolioTracker() {
           </div>
 
           {/* Tab content */}
-          <div className="bg-panel border border-border rounded-xl p-4">
+          <div className="glass-panel border border-border rounded-xl p-4">
             {tab === 'holdings' && (
               <HoldingsTable
                 holdings={holdings}
@@ -842,7 +842,7 @@ export default function PortfolioTracker() {
             )}
 
             {tab === 'doctor' && (
-              <div className="rounded-xl border border-border p-5 space-y-4" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border p-5 space-y-4 glass-panel">
                 <div className="flex items-center gap-2">
                   <Stethoscope size={16} className="text-red-400" />
                   <p className="text-slate-200 font-semibold text-sm">Portfolio Health Check</p>
@@ -850,8 +850,7 @@ export default function PortfolioTracker() {
                 <p className="text-muted text-xs">Get a full AI-powered diagnosis of concentration, tax efficiency, risk quality, and more.</p>
                 <Link
                   to="/doctor"
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm text-white"
-                  style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm text-white glass-panel"
                 >
                   <Stethoscope size={14} />
                   Open Portfolio Doctor →

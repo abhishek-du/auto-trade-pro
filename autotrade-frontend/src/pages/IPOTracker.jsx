@@ -60,7 +60,7 @@ function NoIPOsState({ activeTab, hasAnyData, apiKeyConfigured, onRefresh }) {
     )
   }
   return (
-    <div className="rounded-xl border border-border px-5 py-10 flex flex-col items-center gap-2" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border px-5 py-10 flex flex-col items-center gap-2 glass-panel">
       <BarChart2 size={24} className="text-muted/30" />
       <p className="text-muted text-sm">No {activeTab} IPOs right now</p>
       <p className="text-muted/50 text-xs">Switch tabs or check back soon</p>
@@ -84,7 +84,7 @@ const TYPE_FILTERS = [
 
 function StatPill({ label, value, color }) {
   return (
-    <div className="flex flex-col items-center px-4 py-2 rounded-xl border border-border" style={{ background: '#0F1829' }}>
+    <div className="flex flex-col items-center px-4 py-2 rounded-xl border border-border glass-panel">
       <span className="text-lg font-black tabular-nums" style={{ color }}>{value}</span>
       <span className="text-[10px] text-muted uppercase tracking-widest">{label}</span>
     </div>
@@ -156,7 +156,7 @@ export default function IPOTracker() {
         {/* Left: list */}
         <div className="flex-1 min-w-0 space-y-4">
           {/* Tabs */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
+          <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
             {TABS.map(t => (
               <button
                 key={t.id}

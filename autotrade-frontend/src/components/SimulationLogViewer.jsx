@@ -46,7 +46,7 @@ export default function SimulationLogViewer({ logs = [] }) {
   }, [filtered, autoScroll]);
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <div className="flex items-center gap-2 text-muted">

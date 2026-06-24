@@ -270,10 +270,9 @@ export default function Navbar({ onSearchOpen }) {
   const title = PAGE_TITLES[pathname] ?? 'AutoTrade Pro';
 
   return (
-    <header className="shrink-0 border-b border-border" style={{ background: '#0A1120' }}>
+    <header className="shrink-0 border-b border-white/5 bg-black/40 backdrop-blur-md relative z-40">
       {/* Disclaimer */}
-      <div className="flex items-center justify-center gap-2 px-4 py-1.5 border-b border-warn/15"
-        style={{ background: 'rgba(245,158,11,0.05)' }}>
+      <div className="flex items-center justify-center gap-2 px-4 py-1.5 border-b border-warn/15 bg-amber-500/5">
         <AlertTriangle size={11} className="text-warn/70 shrink-0" />
         <span className="text-warn/70 text-[11px] font-semibold tracking-wider uppercase">
           Paper Trading Only — Simulated Money — No Real Trades
@@ -292,7 +291,7 @@ export default function Navbar({ onSearchOpen }) {
         {onSearchOpen && (
           <button
             onClick={onSearchOpen}
-            className="hidden md:flex items-center gap-2 flex-1 min-w-0 max-w-sm mx-2 lg:mx-6 bg-white/[0.04] border border-border hover:border-accent/40 rounded-lg px-3 h-9 text-muted text-sm transition-colors"
+            className="hidden md:flex items-center gap-2 flex-1 min-w-0 max-w-sm mx-2 lg:mx-6 bg-white/5 border border-white/10 hover:border-accent/40 rounded-lg px-3 h-9 text-slate-400 hover:text-slate-200 hover:bg-white/10 text-sm transition-all duration-300 shadow-[0_2px_10px_rgba(0,0,0,0.2)]"
           >
             <Search size={14} className="shrink-0" />
             <span className="flex-1 text-left truncate">Search any stock, MF…</span>

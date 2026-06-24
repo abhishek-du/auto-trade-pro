@@ -255,7 +255,7 @@ export default function Settings() {
       </div>
 
       {/* Risk & Position Controls */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel border border-border rounded-xl overflow-hidden">
         <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
           <TrendingUp size={16} className="text-cyan" />
           <h2 className="text-slate-200 font-semibold text-sm">Risk &amp; Position Controls</h2>
@@ -304,7 +304,7 @@ export default function Settings() {
       </div>
 
       {/* Trading Product */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel border border-border rounded-xl overflow-hidden">
         <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
           <Shield size={16} className="text-green-400" />
           <h2 className="text-slate-200 font-semibold text-sm">Trading Product</h2>
@@ -330,7 +330,7 @@ export default function Settings() {
       </div>
 
       {/* NSE Watchlist */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel border border-border rounded-xl overflow-hidden">
         <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
           <SettingsIcon size={16} className="text-accent" />
           <h2 className="text-slate-200 font-semibold text-sm">Priority Watchlist</h2>

@@ -72,10 +72,8 @@ function tokenize(text, onSymbolClick) {
 function TypingIndicator() {
   return (
     <div className="flex items-center gap-3">
-      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-white text-xs font-bold"
-        style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>A</div>
-      <div className="px-4 py-3 rounded-2xl rounded-tl-sm border border-border"
-        style={{ background: '#0F1829' }}>
+      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-white text-xs font-bold glass-panel">A</div>
+      <div className="px-4 py-3 rounded-2xl rounded-tl-sm border border-border glass-panel">
         <div className="typing-indicator flex items-center gap-1">
           <span /><span /><span />
         </div>
@@ -125,8 +123,7 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
   // Assistant
   return (
     <div className="flex items-start gap-3 group">
-      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-white text-xs font-bold"
-        style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>A</div>
+      <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-white text-xs font-bold glass-panel">A</div>
 
       <div className="flex-1 min-w-0">
         <div className={`relative px-4 py-3 rounded-2xl rounded-tl-sm border ${message.isError ? 'border-red-500/30' : 'border-border'}`}

@@ -4,7 +4,7 @@ function HistTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   return (
-    <div className="rounded-lg border border-border px-3 py-2 text-xs" style={{ background: '#131E30' }}>
+    <div className="rounded-lg border border-border px-3 py-2 text-xs glass-panel">
       <p className="text-muted mb-0.5">{d?.date}</p>
       <p className="text-slate-100 font-bold">Score: {d?.score} (Grade {d?.grade})</p>
     </div>
@@ -14,7 +14,7 @@ function HistTooltip({ active, payload }) {
 export default function ScoreHistory({ history = [] }) {
   if (history.length < 2) {
     return (
-      <div className="rounded-xl border border-border p-5 flex flex-col items-center justify-center gap-2 h-full" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border p-5 flex flex-col items-center justify-center gap-2 h-full glass-panel">
         <p className="text-muted text-sm font-semibold">Score History</p>
         <p className="text-muted/60 text-xs text-center">Run again next month to see score trend</p>
       </div>
@@ -32,7 +32,7 @@ export default function ScoreHistory({ history = [] }) {
   const improving = last >= first
 
   return (
-    <div className="rounded-xl border border-border p-5 space-y-3 h-full" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border p-5 space-y-3 h-full glass-panel">
       <div className="flex items-center justify-between">
         <p className="text-slate-200 font-semibold text-sm">Score History</p>
         <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${improving ? 'bg-profit/15 text-profit' : 'bg-loss/15 text-loss'}`}>

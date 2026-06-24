@@ -16,14 +16,14 @@ export default function SectorBreadthTable({ byIndex }) {
   }).sort((a, b) => b.ratio - a.ratio)
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-border">
         <h3 className="text-slate-200 text-sm font-semibold">Breadth by Index</h3>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-border bg-panel/80">
+            <tr className="border-b border-border glass-panel/80">
               <th className="px-3 py-2 text-left text-muted text-[10px] font-semibold uppercase tracking-wider">Index</th>
               <th className="px-3 py-2 text-right text-muted text-[10px] font-semibold uppercase tracking-wider">Advances</th>
               <th className="px-3 py-2 text-right text-muted text-[10px] font-semibold uppercase tracking-wider">Declines</th>

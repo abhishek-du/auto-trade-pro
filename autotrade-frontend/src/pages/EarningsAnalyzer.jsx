@@ -78,7 +78,7 @@ function StockSearch({ onSelect }) {
         />
       </div>
       {open && results.length > 0 && (
-        <div className="absolute top-full mt-1 left-0 right-0 z-20 bg-panel border border-border rounded-lg shadow-xl overflow-hidden max-h-48 overflow-y-auto">
+        <div className="absolute top-full mt-1 left-0 right-0 z-20 glass-panel border border-border rounded-lg shadow-xl overflow-hidden max-h-48 overflow-y-auto">
           {results.map(r => (
             <div key={r.symbol} onClick={() => pick(r)}
               className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-white/5 text-xs">
@@ -212,7 +212,7 @@ export default function EarningsAnalyzer() {
       {/* Empty / welcome state */}
       {!symbol && !loading && (
         <div className="space-y-6">
-          <div className="rounded-2xl border border-border py-14 flex flex-col items-center gap-4" style={{ background: '#0F1829' }}>
+          <div className="rounded-2xl border border-border py-14 flex flex-col items-center gap-4 glass-panel">
             <div className="p-4 rounded-2xl" style={{ background: 'rgba(59,130,246,0.08)' }}>
               <Sparkles size={40} className="text-blue-400/60" />
             </div>
@@ -254,7 +254,7 @@ export default function EarningsAnalyzer() {
 
           {/* Meta row */}
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-            <div className="md:col-span-3 rounded-xl border border-border p-4 space-y-2" style={{ background: '#0F1829' }}>
+            <div className="md:col-span-3 rounded-xl border border-border p-4 space-y-2 glass-panel">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-slate-100 font-bold text-base">{summary.company_name}</h2>
                 <span className="text-[9px] font-bold uppercase px-2 py-0.5 rounded border border-accent/30 text-cyan bg-accent/10">{summary.quarter}</span>

@@ -14,7 +14,7 @@ function fmtL(v) {
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-panel border border-border rounded-lg px-3 py-2 text-xs space-y-1 shadow-xl">
+    <div className="glass-panel border border-border rounded-lg px-3 py-2 text-xs space-y-1 shadow-xl">
       <p className="text-muted font-medium">{label}</p>
       {payload.map(p => (
         <p key={p.dataKey} style={{ color: p.color }}>

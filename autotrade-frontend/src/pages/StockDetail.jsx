@@ -202,7 +202,7 @@ function InvestCard({ tradeSetup, ltp, signal }) {
     '5–15 trading days';
 
   return (
-    <div className="bg-card border border-border rounded-xl p-4">
+    <div className="glass-panel rounded-xl p-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300">
       <div className="flex items-center gap-2 mb-3">
         <IndianRupee size={14} className="text-amber-400" />
         <span className="text-slate-200 text-sm font-semibold">If I invest ₹10,000 today</span>
@@ -253,7 +253,7 @@ function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded, explan
   if (noData || excluded) {
     return (
       <div
-        className={`bg-card border border-border rounded-xl p-4 transition-all ${hasDetail ? 'cursor-pointer hover:border-slate-600/80' : 'opacity-50'}`}
+        className={`glass-panel rounded-xl p-4 transition-all ${hasDetail ? 'cursor-pointer hover:-translate-y-1 hover:shadow-lg hover:border-white/20' : 'opacity-50'}`}
         onClick={() => hasDetail && setExpanded(e => !e)}
       >
         <div className="flex items-center justify-between mb-2">
@@ -302,7 +302,7 @@ function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded, explan
 
   return (
     <div
-      className={`bg-card border border-border ${border} rounded-xl p-4 transition-colors ${hasDetail ? 'cursor-pointer' : ''}`}
+      className={`glass-panel rounded-xl p-4 transition-all duration-300 ${hasDetail ? 'cursor-pointer hover:-translate-y-1 hover:shadow-lg' : ''} ${border}`}
       onClick={() => hasDetail && setExpanded(e => !e)}
     >
       <div className="flex items-center justify-between mb-2">
@@ -345,9 +345,9 @@ function IntelChip({ label, rawScore, note, icon: Icon, noData, excluded, explan
 function DeepTab({ label, subtitle, badge, badgeColor = '', icon: Icon, children }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel rounded-xl overflow-hidden hover:shadow-md transition-shadow">
       <button
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.03] transition-colors"
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/5 transition-colors"
         onClick={() => setOpen(o => !o)}
       >
         {Icon && <Icon size={14} className="text-muted shrink-0" />}
@@ -517,12 +517,12 @@ export default function StockDetail() {
 
   useEffect(() => {
     load();
-    // Poll price every 30 s while page is visible
+    // Poll price every 15 s — matches backend refresh cycle
     pollRef.current = setInterval(() => {
       apiFetch(`/api/v1/india/live-prices/${encodeURIComponent(nsSymbol)}`)
         .then(d => setPrice(d))
         .catch(() => {});
-    }, 30_000);
+    }, 15_000);
     return () => clearInterval(pollRef.current);
   }, [load, nsSymbol]);
 
@@ -538,8 +538,8 @@ export default function StockDetail() {
   const aw         = reasoning.active_weights ?? {};
   const ts         = deep?.trade_setup ?? {};
   const indicators = deep?.indicators ?? {};
-  // wsLive overrides REST price for real-time tick — falls back gracefully
-  const ltp        = wsLive?.price ?? deep?.ltp ?? price?.price ?? null;
+  // Priority: WS tick (real-time) → REST poll (30 s) → deep analysis (one-shot)
+  const ltp        = wsLive?.price ?? price?.price ?? deep?.ltp ?? null;
   const ltpChange  = wsLive?.change_pct ?? price?.change_pct ?? deep?.change_pct ?? null;
 
   // Build "What changed today" events from real data + synthetic indicator events.
@@ -628,65 +628,67 @@ export default function StockDetail() {
   const noData = !verdictPending && !intel && !deep && !price;
 
   return (
-    <div className="-m-6 flex flex-col min-h-screen" style={{ background: '#080D1A' }}>
+    <div className="-m-4 md:-m-6 flex flex-col min-h-screen" style={{ background: '#080D1A' }}>
 
       {/* ── Sticky symbol header ─────────────────────────────────────── */}
-      <div className="sticky top-0 z-30 border-b border-border px-5 py-3 flex items-center gap-3"
-        style={{ background: 'rgba(8,13,26,0.97)', backdropFilter: 'blur(12px)' }}>
-        <button onClick={() => navigate(-1)} className="text-muted hover:text-slate-300 p-1 rounded-lg hover:bg-white/5">
-          <ArrowLeft size={16} />
-        </button>
-        <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-900 to-blue-600 grid place-items-center font-bold text-white text-sm shrink-0">
-          {display?.[0] ?? '?'}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-slate-100 font-semibold text-base">{fund?.company_name || price?.name || display}</span>
-            <span className="font-mono text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted">{display}</span>
-            <span className="text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted">NSE · EQ</span>
-            {isTracked ? (
-              <span className="text-[10px] font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 px-1.5 py-0.5 rounded"
-                title="Deep-scored by the Hub: technical + news + fundamentals + earnings + sector + macro + options">
-                HUB 7-FACTOR
-              </span>
-            ) : !verdictPending && (
-              <span className="text-[10px] font-semibold text-amber-400/90 bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 rounded"
-                title="Not in the Hub's auto-trade universe — technical analysis only, agent will not trade this">
-                NOT IN AUTO-TRADE UNIVERSE
-              </span>
-            )}
-            {signal && <SignalChip signal={signal} />}
+      <div className="sticky -top-4 md:-top-6 z-30 border-b border-white/5 px-4 md:px-5 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 bg-black/40 backdrop-blur-md">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <button onClick={() => navigate(-1)} className="text-muted hover:text-slate-300 p-1 rounded-lg hover:bg-white/5 shrink-0">
+            <ArrowLeft size={16} />
+          </button>
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-900 to-blue-600 grid place-items-center font-bold text-white text-sm shrink-0">
+            {display?.[0] ?? '?'}
           </div>
-          <div className="text-muted text-xs mt-0.5 truncate">
-            {fund ? `${fund.sector || 'NSE Equity'}${fund.market_cap_cr ? ` · ₹${fmt(fund.market_cap_cr, 0)} Cr mkt cap` : ''}` : 'NSE Equity'}
-          </div>
-        </div>
-        <div className="flex items-baseline gap-2 shrink-0">
-          {loading && !price ? <Skel w="w-28" h="h-8" /> : (
-            <>
-              <span className="font-mono text-2xl font-bold text-slate-100">{ltp ? `₹${fmt(ltp)}` : price?.price ? `₹${fmt(price.price)}` : '—'}</span>
-              {ltpChange != null && (
-                <span className={`font-mono text-sm font-semibold ${ltpChange >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  {pct(ltpChange)}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-slate-100 font-semibold text-base truncate">{fund?.company_name || price?.name || display}</span>
+              <span className="font-mono text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted shrink-0">{display}</span>
+              <span className="text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted shrink-0">NSE · EQ</span>
+              {isTracked ? (
+                <span className="text-[10px] font-bold text-violet-300 bg-violet-500/10 border border-violet-500/30 px-1.5 py-0.5 rounded shrink-0"
+                  title="Deep-scored by the Hub: technical + news + fundamentals + earnings + sector + macro + options">
+                  HUB 7-FACTOR
+                </span>
+              ) : !verdictPending && (
+                <span className="text-[10px] font-semibold text-amber-400/90 bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.5 rounded shrink-0"
+                  title="Not in the Hub's auto-trade universe — technical analysis only, agent will not trade this">
+                  NOT IN AUTO-TRADE UNIVERSE
                 </span>
               )}
-            </>
-          )}
+              {signal && <SignalChip signal={signal} />}
+            </div>
+            <div className="text-muted text-xs mt-0.5 truncate">
+              {fund ? `${fund.sector || 'NSE Equity'}${fund.market_cap_cr ? ` · ₹${fmt(fund.market_cap_cr, 0)} Cr mkt cap` : ''}` : 'NSE Equity'}
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-1 ml-1 shrink-0">
-          <button onClick={toggleWatchlist} disabled={wlLoading} className={`p-1.5 rounded-lg hover:bg-white/5 transition-colors ${inWatchlist ? 'text-amber-400' : 'text-muted hover:text-amber-400'}`} title={inWatchlist ? 'Remove from watchlist' : 'Add to watchlist'}><Star size={15} className={inWatchlist ? 'fill-amber-400' : ''} /></button>
-          <button className="text-muted hover:text-cyan p-1.5 rounded-lg hover:bg-white/5 transition-colors" title="Alert"><Bell size={15} /></button>
-          <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors" title="Share"><Share2 size={15} /></button>
-          <button onClick={load} className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5" title="Refresh">
-            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-          </button>
+        <div className="flex items-center justify-between md:justify-end gap-4 shrink-0">
+          <div className="flex items-baseline gap-2 shrink-0">
+            {loading && !price ? <Skel w="w-28" h="h-8" /> : (
+              <>
+                <span className="font-mono text-2xl font-bold text-slate-100">{ltp ? `₹${fmt(ltp)}` : price?.price ? `₹${fmt(price.price)}` : '—'}</span>
+                {ltpChange != null && (
+                  <span className={`font-mono text-sm font-semibold ${ltpChange >= 0 ? 'text-profit' : 'text-loss'}`}>
+                    {pct(ltpChange)}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={toggleWatchlist} disabled={wlLoading} className={`p-1.5 rounded-lg hover:bg-white/5 transition-colors ${inWatchlist ? 'text-amber-400' : 'text-muted hover:text-amber-400'}`} title={inWatchlist ? 'Remove from watchlist' : 'Add to watchlist'}><Star size={15} className={inWatchlist ? 'fill-amber-400' : ''} /></button>
+            <button className="text-muted hover:text-cyan p-1.5 rounded-lg hover:bg-white/5 transition-colors" title="Alert"><Bell size={15} /></button>
+            <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors" title="Share"><Share2 size={15} /></button>
+            <button onClick={load} className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5" title="Refresh">
+              <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Price strip */}
       {(price || deep) && (
-        <div className="px-5 py-2.5 border-b border-border flex items-center gap-6 text-xs flex-wrap"
-          style={{ background: '#0A1120' }}>
+        <div className="px-5 py-2.5 border-b border-border flex items-center gap-6 text-xs flex-wrap glass-panel">
           {[
             ['Open',    price?.open],
             ['High',    price?.high],
@@ -742,7 +744,7 @@ export default function StockDetail() {
           SECTION 1 — DECISION CENTER
       ═══════════════════════════════════════════════════════════════ */}
       {!noData && <>
-      <section className="px-5 pt-6 pb-6" style={{ background: 'linear-gradient(180deg,#0A1120 0%,#080D1A 100%)' }}>
+      <section className="px-5 pt-6 pb-6 glass-panel">
         <SectionLabel color="text-cyan">
           Section 1 · Decision center
           <span className="ml-auto text-[10px] text-muted font-normal normal-case tracking-normal flex items-center gap-2">
@@ -759,8 +761,8 @@ export default function StockDetail() {
         </SectionLabel>
 
         {/* Action banner */}
-        <div className="rounded-2xl border border-border p-5 mb-3 relative overflow-hidden"
-          style={{ background: 'linear-gradient(145deg,#131E30,#0F1829)', boxShadow: `0 0 40px -15px ${signalGlow}` }}>
+        <div className="rounded-2xl border border-white/10 p-5 mb-3 relative overflow-hidden glass-panel"
+          style={{ boxShadow: `0 0 40px -15px ${signalGlow}` }}>
           <div className="absolute -right-20 -top-20 w-80 h-80 rounded-full blur-3xl opacity-15"
             style={{ background: signalGlow }} />
 
@@ -1052,7 +1054,7 @@ export default function StockDetail() {
       {/* ═══════════════════════════════════════════════════════════════
           SECTION 2 — WHAT CHANGED TODAY (promoted)
       ═══════════════════════════════════════════════════════════════ */}
-      <section className="px-5 pb-6 border-t border-border" style={{ background: '#0A1120' }}>
+      <section className="px-5 pb-6 border-t border-border glass-panel">
         <div className="pt-4">
           <SectionLabel color="text-cyan">
             Today's activity
@@ -1165,7 +1167,7 @@ export default function StockDetail() {
       {/* ═══════════════════════════════════════════════════════════════
           SECTION 4 — CHART
       ═══════════════════════════════════════════════════════════════ */}
-      <section className="px-5 pb-6 border-t border-border" style={{ background: '#0A1120' }}>
+      <section className="px-5 pb-6 border-t border-border glass-panel">
         <div className="pt-4">
           <SectionLabel>Section 4 · Chart</SectionLabel>
           <div className="rounded-xl border border-border overflow-hidden" style={{ height: 420 }}>

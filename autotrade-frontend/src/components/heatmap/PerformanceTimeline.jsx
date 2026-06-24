@@ -19,14 +19,14 @@ export default function PerformanceTimeline({ sectors = [] }) {
   const sorted = [...sectors].sort((a, b) => b.avg_change_pct - a.avg_change_pct)
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-border">
         <h3 className="text-slate-200 text-sm font-semibold">Sector Performance Today</h3>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
-            <tr className="border-b border-border bg-panel/80">
+            <tr className="border-b border-border glass-panel/80">
               <th className="px-3 py-2 text-left text-muted text-[10px] font-semibold uppercase tracking-wider">Sector</th>
               <th className="px-3 py-2 text-center text-muted text-[10px] font-semibold uppercase tracking-wider">Today</th>
               <th className="px-3 py-2 text-center text-muted text-[10px] font-semibold uppercase tracking-wider">Mood</th>

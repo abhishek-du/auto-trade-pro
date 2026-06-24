@@ -74,7 +74,7 @@ function ActionTracker({ findings }) {
   const done = [...checked].filter(k => allActions.some(a => a.key === k)).length
 
   return (
-    <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border glass-panel">
       <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
         <h3 className="text-slate-100 font-semibold text-sm">Your Action Plan</h3>
         <span className="text-xs text-muted">{done} of {allActions.length} completed</span>
@@ -195,7 +195,7 @@ export default function PortfolioDoctor() {
 
       {/* ── No diagnosis state ── */}
       {!diagnosis && !loading && (
-        <div className="rounded-2xl border border-border py-16 flex flex-col items-center gap-4" style={{ background: '#0F1829' }}>
+        <div className="rounded-2xl border border-border py-16 flex flex-col items-center gap-4 glass-panel">
           <div className="p-4 rounded-2xl" style={{ background: 'rgba(239,68,68,0.08)' }}>
             <BriefcaseMedical size={40} className="text-red-400/50" />
           </div>
@@ -281,7 +281,7 @@ export default function PortfolioDoctor() {
 
           {/* AI Narrative */}
           {diagnosis.ai_narrative && (
-            <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+            <div className="rounded-xl border border-border overflow-hidden glass-panel">
               <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center text-white text-xs font-bold">A</div>

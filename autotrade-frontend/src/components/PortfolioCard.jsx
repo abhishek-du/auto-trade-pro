@@ -8,7 +8,7 @@ export default function PortfolioCard({ portfolio }) {
   const up = totalPnl >= 0;
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="px-5 py-4 border-b border-border flex items-center justify-between">
         <h3 className="text-slate-100 font-semibold text-sm">Portfolio Summary</h3>
         <span className={`text-xs font-bold tabular-nums ${up ? 'text-profit' : 'text-loss'}`}>

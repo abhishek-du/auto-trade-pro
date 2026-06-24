@@ -669,6 +669,10 @@ async def _india_trade_loop():
                 signal.take_profit = lv["target_1"]   # T1 = first checkpoint / trailing trigger
                 signal.target_2 = lv["target_2"]      # final target — position rides here
                 signal.atr = lv["atr"]
+                # Varsity checklist item 2: carry S&R levels for the 4% gate in
+                # validate_signal().  Only present on the "dynamic" path (pivot S&R).
+                signal.sr_support    = lv.get("support", 0.0) or 0.0
+                signal.sr_resistance = lv.get("resistance", 0.0) or 0.0
                 risk = abs(signal.entry_price - lv["stop_loss"])
                 signal.risk_reward_ratio = round(abs(lv["target_2"] - signal.entry_price) / risk, 2) if risk > 0 else 0.0
                 # Build rich expert note — replaces the simple one-liner
@@ -1052,6 +1056,16 @@ async def _fast_sl_check() -> None:
             sl_hit = (is_buy and price <= pos.stop_loss) or (
                 not is_buy and price >= pos.stop_loss
             )
+            
+            # Bypass fast SL for swing trades during their minimum hold period
+            if sl_hit and pos.trade_style == "SWING" and pos.swing_min_hold:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                _IST = ZoneInfo("Asia/Kolkata")
+                now_ist = datetime.now(_IST).replace(tzinfo=None)
+                if now_ist < pos.swing_min_hold:
+                    sl_hit = False
+            
             if not sl_hit:
                 # Also check take_profit for fast wins
                 if pos.take_profit:

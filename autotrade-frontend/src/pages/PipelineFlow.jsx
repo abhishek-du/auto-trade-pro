@@ -524,7 +524,7 @@ export default function PipelineFlow() {
       </div>
 
       {/* ── timing summary ───────────────────────────────────────────────────── */}
-      <div className="rounded-2xl border border-border p-5 mt-4" style={{ background: '#0A1120' }}>
+      <div className="rounded-2xl border border-border p-5 mt-4 glass-panel">
         <p className="text-xs font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2">
           <Clock size={12} className="text-cyan" /> What happens tomorrow when market opens
         </p>

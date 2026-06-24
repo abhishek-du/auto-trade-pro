@@ -44,8 +44,7 @@ export default function StockDataCard({ symbol, context }) {
   const chgColor = chg > 0 ? '#10B981' : chg < 0 ? '#EF4444' : '#94A3B8'
 
   return (
-    <div className="mt-2 rounded-xl border border-border overflow-hidden"
-      style={{ background: 'linear-gradient(135deg,#0A1120,#0D1527)' }}>
+    <div className="mt-2 rounded-xl border border-border overflow-hidden glass-panel">
 
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border/50">

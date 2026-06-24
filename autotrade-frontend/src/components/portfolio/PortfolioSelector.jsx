@@ -58,14 +58,14 @@ export default function PortfolioSelector({ portfolios, activeId, onSelect, onCr
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen(o => !o)}
-        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-panel text-slate-200 text-sm font-medium hover:border-accent/40 transition-colors"
+        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border glass-panel text-slate-200 text-sm font-medium hover:border-accent/40 transition-colors"
       >
         <span className="max-w-[180px] truncate">{active?.name || 'Select Portfolio'}</span>
         <ChevronDown size={14} className={`text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
-        <div className="absolute top-full mt-1 left-0 z-50 w-64 bg-panel border border-border rounded-xl shadow-xl overflow-hidden">
+        <div className="absolute top-full mt-1 left-0 z-50 w-64 glass-panel border border-border rounded-xl shadow-xl overflow-hidden">
           {portfolios.map(p => (
             <div
               key={p.id}

@@ -305,37 +305,41 @@ export default function FundDetail() {
   const posChange = changePct != null && changePct >= 0;
 
   return (
-    <div className="-m-6 flex flex-col min-h-screen bg-surface">
+    <div className="-m-4 md:-m-6 flex flex-col min-h-screen bg-surface">
       {/* ── Sticky header ─────────────────────────────────────────────── */}
-      <div className="sticky top-0 z-30 bg-surface/95 backdrop-blur border-b border-border px-5 py-3 flex items-center gap-3">
-        <Link to="/" className="text-muted hover:text-slate-300 p-1 rounded-lg hover:bg-white/5 transition-colors">
-          <ArrowLeft size={16} />
-        </Link>
-        <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-900 to-violet-600 grid place-items-center font-bold text-white text-sm shrink-0">
-          MF
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-slate-100 font-semibold text-base truncate">{name}</span>
-            {signal?.category && (
-              <span className="text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted shrink-0">{signal.category}</span>
-            )}
-            <SignalChip signal={signal?.signal} />
+      <div className="sticky -top-4 md:-top-6 z-30 bg-surface/95 backdrop-blur border-b border-border px-4 md:px-5 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <Link to="/" className="text-muted hover:text-slate-300 p-1 rounded-lg hover:bg-white/5 transition-colors shrink-0">
+            <ArrowLeft size={16} />
+          </Link>
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-900 to-violet-600 grid place-items-center font-bold text-white text-sm shrink-0">
+            MF
           </div>
-          <div className="text-muted text-xs mt-0.5">Scheme code: {scheme}</div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-slate-100 font-semibold text-base truncate">{name}</span>
+              {signal?.category && (
+                <span className="text-[10px] bg-white/5 border border-border px-1.5 py-0.5 rounded text-muted shrink-0">{signal.category}</span>
+              )}
+              <SignalChip signal={signal?.signal} />
+            </div>
+            <div className="text-muted text-xs mt-0.5">Scheme code: {scheme}</div>
+          </div>
         </div>
-        <div className="flex items-baseline gap-2">
-          {nav != null && <span className="font-mono text-2xl font-bold text-slate-100">₹{fmt(nav)}</span>}
-          {changePct != null && (
-            <span className={`font-mono text-sm font-semibold ${posChange ? 'text-profit' : 'text-loss'}`}>{pct(changePct)}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 ml-2">
-          <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors"><Star size={15} /></button>
-          <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors"><Bell size={15} /></button>
-          <button onClick={load} className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors">
-            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-          </button>
+        <div className="flex items-center justify-between md:justify-end gap-4 shrink-0">
+          <div className="flex items-baseline gap-2 shrink-0">
+            {nav != null && <span className="font-mono text-2xl font-bold text-slate-100">₹{fmt(nav)}</span>}
+            {changePct != null && (
+              <span className={`font-mono text-sm font-semibold ${posChange ? 'text-profit' : 'text-loss'}`}>{pct(changePct)}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors"><Star size={15} /></button>
+            <button className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors"><Bell size={15} /></button>
+            <button onClick={load} className="text-muted hover:text-slate-300 p-1.5 rounded-lg hover:bg-white/5 transition-colors">
+              <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -347,8 +351,7 @@ export default function FundDetail() {
       <section className="px-5 pt-6 pb-6 bg-gradient-to-b from-surface to-transparent">
         <SectionLabel>Section 1 · Decision center</SectionLabel>
 
-        <div className="rounded-2xl border border-border p-5 mb-3 relative overflow-hidden"
-          style={{ background: 'linear-gradient(145deg,#131E30,#0F1829)' }}>
+        <div className="rounded-2xl border border-border p-5 mb-3 relative overflow-hidden glass-panel">
           <div className="absolute -right-20 -top-20 w-80 h-80 rounded-full blur-3xl opacity-20"
             style={{ background: signal?.signal === 'BUY' ? '#10B981' : '#3B82F6' }} />
 

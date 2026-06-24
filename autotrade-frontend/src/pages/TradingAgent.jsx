@@ -9,10 +9,10 @@ import { apiFetch } from '../api/client'
 
 function StatusCard({ label, value, sub, color = 'text-slate-100' }) {
   return (
-    <div className="rounded-xl border border-border p-4 space-y-1" style={{ background: '#0F1829' }}>
-      <p className="text-muted text-[10px] uppercase tracking-widest font-semibold">{label}</p>
-      <p className={`font-bold text-xl tabular-nums ${color}`}>{value}</p>
-      {sub && <p className="text-muted text-xs">{sub}</p>}
+    <div className="glass-panel rounded-xl p-4 space-y-1 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300 group">
+      <p className="text-muted text-[10px] uppercase tracking-widest font-semibold group-hover:text-slate-400 transition-colors">{label}</p>
+      <p className={`font-bold text-2xl tabular-nums ${color} drop-shadow-sm`}>{value}</p>
+      {sub && <p className="text-muted text-xs group-hover:text-slate-400 transition-colors">{sub}</p>}
     </div>
   )
 }
@@ -20,45 +20,45 @@ function StatusCard({ label, value, sub, color = 'text-slate-100' }) {
 function PositionsTable({ positions, closePosition }) {
   if (!positions?.length) {
     return (
-      <div className="rounded-xl border border-border p-6 text-center" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border p-6 text-center glass-panel">
         <p className="text-muted text-sm">No open positions</p>
       </div>
     )
   }
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
-      <div className="px-5 py-3 border-b border-border">
+    <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+      <div className="px-5 py-3 border-b border-white/5 bg-black/20">
         <h3 className="text-slate-200 font-semibold text-sm">Open Positions</h3>
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-border">
+            <tr className="border-b border-white/5 bg-white/5">
               {['Symbol','Side','Qty','Entry','Current','Stop','Target','P&L','Strategy',''].map(h => (
-                <th key={h} className="text-left px-3 py-2 text-muted font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
+                <th key={h} className="text-left px-3 py-2.5 text-muted font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-border/40">
+          <tbody className="divide-y divide-white/5">
             {positions.map(p => (
-              <tr key={p.symbol} className="hover:bg-white/[0.02]">
-                <td className="px-3 py-2 font-bold text-slate-100">{p.symbol.replace('.NS','')}</td>
-                <td className="px-3 py-2">
-                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${p.side==='BUY' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>{p.side}</span>
+              <tr key={p.symbol} className="hover:bg-white/10 transition-colors group">
+                <td className="px-3 py-2.5 font-bold text-slate-100">{p.symbol.replace('.NS','')}</td>
+                <td className="px-3 py-2.5">
+                  <span className={`text-[9px] font-bold px-2 py-1 rounded-md shadow-sm ${p.side==='BUY' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'}`}>{p.side}</span>
                 </td>
-                <td className="px-3 py-2 tabular-nums">{p.qty}</td>
-                <td className="px-3 py-2 tabular-nums">{formatINR(p.entry)}</td>
-                <td className="px-3 py-2 tabular-nums">{p.current_price > 0 ? formatINR(p.current_price) : '—'}</td>
-                <td className="px-3 py-2 tabular-nums text-red-400">{formatINR(p.stop)}</td>
-                <td className="px-3 py-2 tabular-nums text-cyan">{formatINR(p.target)}</td>
-                <td className={`px-3 py-2 tabular-nums font-bold ${p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                <td className="px-3 py-2.5 tabular-nums text-slate-300">{p.qty}</td>
+                <td className="px-3 py-2.5 tabular-nums">{formatINR(p.entry)}</td>
+                <td className="px-3 py-2.5 tabular-nums font-medium">{p.current_price > 0 ? formatINR(p.current_price) : '—'}</td>
+                <td className="px-3 py-2.5 tabular-nums text-red-400 font-medium">{formatINR(p.stop)}</td>
+                <td className="px-3 py-2.5 tabular-nums text-cyan font-medium">{formatINR(p.target)}</td>
+                <td className={`px-3 py-2.5 tabular-nums font-bold ${p.unrealized_pnl >= 0 ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.3)]' : 'text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.3)]'}`}>
                   {p.unrealized_pnl >= 0 ? '+' : ''}{formatINR(p.unrealized_pnl)}
                 </td>
-                <td className="px-3 py-2 text-muted text-[10px]">{p.strategy}</td>
-                <td className="px-3 py-2">
+                <td className="px-3 py-2.5 text-muted text-[10px] uppercase tracking-wider">{p.strategy}</td>
+                <td className="px-3 py-2.5 text-right">
                   <button onClick={() => closePosition(p.symbol)}
-                    className="p-1 rounded hover:bg-red-500/10 text-muted hover:text-red-400">
-                    <X size={12} />
+                    className="p-1.5 rounded-lg hover:bg-red-500/20 text-muted hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100">
+                    <X size={14} />
                   </button>
                 </td>
               </tr>
@@ -84,7 +84,7 @@ function RulebookPreview() {
   }
 
   return (
-    <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border glass-panel">
       <button onClick={load} className="w-full flex items-center justify-between px-5 py-3 hover:bg-white/[0.02] transition-colors">
         <h3 className="text-slate-200 font-semibold text-sm">Varsity Rulebook ({rules.length || 13} rules)</h3>
         <span className="text-cyan text-xs">{open ? 'Hide' : 'Show'}</span>
@@ -116,7 +116,7 @@ function TradesHistory({ trades }) {
   const fmt = (n) => n == null ? '—' : Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="px-5 py-3 border-b border-border flex items-center justify-between flex-wrap gap-2">
         <h3 className="text-slate-200 font-semibold text-sm flex items-center gap-2">
           <Clock size={14} className="text-cyan" /> Trade Book
@@ -251,15 +251,16 @@ export default function TradingAgent() {
       {/* Header */}
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl" style={{ background: 'rgba(139,92,246,0.12)' }}>
-            <Bot size={20} className="text-violet-400" />
+          <div className="p-3 rounded-2xl shadow-[0_0_20px_rgba(139,92,246,0.3)] relative overflow-hidden" style={{ background: 'linear-gradient(135deg, rgba(139,92,246,0.2), rgba(124,58,237,0.4))' }}>
+            <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-20" />
+            <Bot size={24} className="text-violet-300 drop-shadow-md relative z-10" />
           </div>
           <div>
             <h1 className="text-slate-100 font-bold text-xl flex items-center gap-2">
               AI Trading Agent
               {enabled && (
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="flex items-center gap-1.5 ml-1 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]" />
                   <span className="text-emerald-400 text-[10px] font-bold uppercase tracking-widest">Live</span>
                 </span>
               )}
@@ -324,7 +325,7 @@ export default function TradingAgent() {
 
       {/* Decision feed + Backtest */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border glass-panel">
           <div className="px-5 py-3 border-b border-border flex items-center justify-between">
             <h3 className="text-slate-200 font-semibold text-sm flex items-center gap-2">
               <Activity size={14} /> Decision Feed
@@ -347,7 +348,7 @@ export default function TradingAgent() {
 
       {/* Performance summary */}
       {performance && performance.total_trades > 0 && (
-        <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border glass-panel">
           <div className="px-5 py-3 border-b border-border">
             <h3 className="text-slate-200 font-semibold text-sm">Performance Summary</h3>
           </div>

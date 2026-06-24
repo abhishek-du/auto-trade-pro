@@ -70,7 +70,7 @@ function EquityTooltip({ active, payload, label }) {
   const bal  = payload[0]?.value ?? 0;
   const dpnl = payload[0]?.payload?.daily_pnl ?? 0;
   return (
-    <div className="bg-panel border border-border rounded-lg p-3 text-xs shadow-lg">
+    <div className="glass-panel border border-border rounded-lg p-3 text-xs shadow-lg">
       <p className="text-muted mb-1">{label}</p>
       <p className="text-slate-100 font-bold">{fmtUSD(bal)}</p>
       <p className={dpnl >= 0 ? 'text-profit' : 'text-loss'}>
@@ -194,7 +194,7 @@ export default function Simulation() {
           )}
           <button
             onClick={load}
-            className="flex items-center gap-2 px-3 py-1.5 bg-panel border border-border hover:border-accent/50 text-muted hover:text-slate-300 rounded-lg text-xs transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 glass-panel border border-border hover:border-accent/50 text-muted hover:text-slate-300 rounded-lg text-xs transition-colors"
           >
             <RefreshCw size={12} />
             Refresh
@@ -253,11 +253,11 @@ export default function Simulation() {
         </div>
 
         {positions.length === 0 ? (
-          <div className="rounded-xl border border-border bg-panel px-4 py-8 text-center text-muted text-sm">
+          <div className="rounded-xl border border-border glass-panel px-4 py-8 text-center text-muted text-sm">
             No open positions. The agent opens trades during NSE hours when signals clear the risk gates.
           </div>
         ) : (
-          <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+          <div className="rounded-xl border border-border overflow-hidden glass-panel">
             {/* desktop header */}
             <div className="hidden md:grid grid-cols-[1.3fr_70px_repeat(4,1fr)_90px_110px] gap-3 px-4 py-2.5 text-[10px] text-muted uppercase tracking-wider border-b border-border">
               <span>Symbol</span><span>Side</span><span>Entry</span><span>Current</span>
@@ -312,7 +312,7 @@ export default function Simulation() {
       {/* ── Section 2 — Equity Curve ── */}
       <section className="space-y-3">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-widest">Equity Curve</h3>
-        <div className="bg-panel border border-border rounded-xl p-5">
+        <div className="glass-panel border border-border rounded-xl p-5">
           {snapshots.length === 0 ? (
             <div className="h-64 flex items-center justify-center text-muted text-sm">
               No equity snapshots yet — run the simulation to generate data
@@ -353,7 +353,7 @@ export default function Simulation() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
           {/* Accepted */}
-          <div className="bg-panel border border-border rounded-xl p-5 space-y-4">
+          <div className="glass-panel border border-border rounded-xl p-5 space-y-4">
             <div className="flex items-center gap-2">
               <CheckCircle size={16} className="text-profit" />
               <h4 className="text-slate-200 font-semibold text-sm">Why AI Accepted Trades</h4>
@@ -388,7 +388,7 @@ export default function Simulation() {
           </div>
 
           {/* Rejected */}
-          <div className="bg-panel border border-border rounded-xl p-5 space-y-4">
+          <div className="glass-panel border border-border rounded-xl p-5 space-y-4">
             <div className="flex items-center gap-2">
               <XCircle size={16} className="text-loss" />
               <h4 className="text-slate-200 font-semibold text-sm">Why AI Rejected Trades</h4>
@@ -439,7 +439,7 @@ export default function Simulation() {
       {/* ── Section 5 — Go-Live Checker ── */}
       <section className="space-y-3">
         <h3 className="text-slate-400 text-xs font-semibold uppercase tracking-widest">Go-Live Readiness</h3>
-        <div className="bg-panel border border-border rounded-xl p-5">
+        <div className="glass-panel border border-border rounded-xl p-5">
           <GoLiveChecker />
         </div>
       </section>

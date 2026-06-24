@@ -51,7 +51,7 @@ export default function TopMoversPanel({ topMovers }) {
   const items = topMovers?.[active] ?? [];
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       {/* Tab bar */}
       <div className="flex border-b border-border">
         {TABS.map(({ key, label, Icon, color }) => (

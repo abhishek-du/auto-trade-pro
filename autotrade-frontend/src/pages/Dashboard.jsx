@@ -74,8 +74,7 @@ function useAdaptiveFetch(path, fastMs, slowMs, isFast, transform = (x) => x) {
 ─────────────────────────────────────────────────────────────────────────── */
 function Card({ children, className = '', pad = 'p-4' }) {
   return (
-    <div className={`rounded-2xl border border-border ${pad} ${className}`}
-      style={{ background: 'linear-gradient(155deg,#0F1829 0%,#101B2E 100%)' }}>
+    <div className={`glass-panel rounded-2xl ${pad} ${className} hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-shadow duration-300`}>
       {children}
     </div>
   );
@@ -105,8 +104,7 @@ function IndexTile({ name, sub, value, change, changePct, vix }) {
     ? (value < 15 ? 'bg-profit/12 text-profit' : value > 20 ? 'bg-loss/12 text-loss' : 'bg-warn/12 text-warn')
     : up ? 'bg-profit/12 text-profit' : 'bg-loss/12 text-loss';
   return (
-    <div className="rounded-xl border border-border px-4 py-3 flex flex-col gap-1.5 min-w-0"
-      style={{ background: 'linear-gradient(135deg,#101B2E,#0C1422)' }}>
+    <div className="glass-panel rounded-xl px-4 py-3 flex flex-col gap-1.5 min-w-0 hover:-translate-y-1 transition-all duration-300">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <p className="text-slate-200 text-xs font-bold truncate">{name}</p>
@@ -166,7 +164,7 @@ function IndexStrip() {
 ─────────────────────────────────────────────────────────────────────────── */
 function StatChip({ label, value, tone = 'text-slate-200' }) {
   return (
-    <div className="bg-white/[0.03] border border-border rounded-lg px-3 py-2 min-w-0">
+    <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-lg px-3 py-2 min-w-0 hover:bg-white/10 transition-colors">
       <p className="text-muted text-[10px] uppercase tracking-wide truncate">{label}</p>
       <p className={`text-sm font-bold tabular-nums ${tone}`}>{value}</p>
     </div>

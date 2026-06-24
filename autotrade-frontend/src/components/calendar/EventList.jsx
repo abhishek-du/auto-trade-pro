@@ -115,7 +115,7 @@ function EventCard({ event }) {
 
 export default function EventList({ events, date, onClose }) {
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden flex flex-col">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <div>

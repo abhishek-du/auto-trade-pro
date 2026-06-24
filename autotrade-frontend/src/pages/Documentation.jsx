@@ -213,8 +213,7 @@ export default function Documentation() {
   return (
     <div className="space-y-6 fade-in">
       <section
-        className="rounded-2xl border border-border p-6 md:p-8"
-        style={{ background: 'linear-gradient(135deg,#0F1829 0%,#131E30 100%)' }}
+        className="rounded-2xl border border-border p-6 md:p-8 glass-panel"
       >
         <div className="flex items-start justify-between gap-6 flex-wrap">
           <div className="space-y-3 max-w-3xl">
@@ -243,7 +242,7 @@ export default function Documentation() {
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)] gap-6 items-start">
-        <aside className="rounded-2xl border border-border bg-panel p-5 xl:sticky xl:top-6">
+        <aside className="rounded-2xl border border-border glass-panel p-5 xl:sticky xl:top-6">
           <p className="text-xs font-semibold uppercase tracking-widest text-muted mb-4">Sections</p>
           <div className="space-y-2">
             {headings.map((heading) => (
@@ -258,7 +257,7 @@ export default function Documentation() {
           </div>
         </aside>
 
-        <article className="rounded-2xl border border-border bg-panel p-6 md:p-8">
+        <article className="rounded-2xl border border-border glass-panel p-6 md:p-8">
           <div className="space-y-4">{renderMarkdown(content)}</div>
         </article>
       </section>

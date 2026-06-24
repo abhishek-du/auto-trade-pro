@@ -3,7 +3,7 @@ const fmtUSD = (n) => formatINR(n ?? 0);
 
 export default function OpenPositions({ positions = [] }) {
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
         <h2 className="text-slate-100 font-semibold text-sm">Open Positions</h2>
         <span className="px-2 py-0.5 text-xs font-bold rounded-full border border-accent/25 text-accent"

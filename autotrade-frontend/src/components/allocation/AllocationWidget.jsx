@@ -46,7 +46,7 @@ export default function AllocationWidget({ portfolioId, sipGoalIds = [], compact
   }, [portfolioId, JSON.stringify(sipGoalIds)])
 
   if (loading) return (
-    <div className="animate-pulse rounded-xl border border-border bg-panel p-4 space-y-3">
+    <div className="animate-pulse rounded-xl border border-border glass-panel p-4 space-y-3">
       <div className="h-3 bg-surface rounded w-1/2" />
       <div className="flex gap-3">
         <div className="w-20 h-20 rounded-full bg-surface" />
@@ -70,7 +70,7 @@ export default function AllocationWidget({ portfolioId, sipGoalIds = [], compact
       .slice(0, 3)
 
     return (
-      <div className="rounded-xl border border-border p-4 space-y-3" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border p-4 space-y-3 glass-panel">
         <div className="flex items-center justify-between">
           <p className="text-slate-200 text-sm font-semibold">Asset Allocation</p>
           <Link to={`/allocation${portfolioId ? `?portfolio=${portfolioId}` : ''}`} className="text-muted hover:text-accent">

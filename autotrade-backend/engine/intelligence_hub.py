@@ -85,6 +85,9 @@ class MacroContext:
     nse_market_mood:       str
     breadth_bias:          int
     total_macro_bias:      int
+    # Varsity Ch 16.5: market regime — momentum works only in uptrend.
+    # Derived from total_macro_bias: BULL(≥2) | BEAR(≤-2) | NEUTRAL.
+    nifty_regime:          str = "NEUTRAL"
 
 
 @dataclass
@@ -267,6 +270,11 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
     breadth_bias = _MOOD_BIAS.get(mood, 0)
     total = max(-5, min(5, fii_bias + dii_bias + vix_bias + breadth_bias))
 
+    # Varsity Ch 16.5: infer market regime from composite macro signals.
+    # BULL when at least 2 net positive signals; BEAR when ≤-2 (persistent FII selling
+    # + weak breadth + elevated VIX → downtrend → suppress momentum swing buys).
+    nifty_regime = "BULL" if total >= 2 else ("BEAR" if total <= -2 else "NEUTRAL")
+
     return MacroContext(
         fii_net_1d=round(fii_net_1d, 1), fii_net_3d=round(fii_net_3d, 1),
         fii_net_5d=round(fii_net_5d, 1), dii_net_3d=round(dii_net_3d, 1),
@@ -274,6 +282,7 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
         india_vix=round(vix, 2), vix_label=vix_label, vix_bias=vix_bias,
         advance_decline_ratio=round(adr, 2), nse_market_mood=mood,
         breadth_bias=breadth_bias, total_macro_bias=total,
+        nifty_regime=nifty_regime,
     )
 
 
@@ -871,20 +880,30 @@ async def score_symbol(
     session: "AsyncSession",
     *,
     df_1m: "pd.DataFrame | None" = None,
+    swing_mode: bool = False,
 ) -> "ScoredStock":
     from engine.indicators import compute_indicators
     from engine.agent.analyzer import MarketAnalyzerAgent
 
     analyzer = MarketAnalyzerAgent()
 
-    # 1. Technical (35%)
+    # 1. Technical (35% default / 55% in swing_mode)
     signals = compute_indicators(df)
-    technical_score = float(signals.composite_score or 0.0)
-
-    # Intraday overlay: nudge technical score by up to ±10 based on 5m/15m RSI + momentum.
-    # Active only when 1m candles are available (market hours); zero outside hours.
-    _intraday_adj, _intraday_info = _intraday_overlay(df_1m)
-    technical_score = max(-100.0, min(100.0, technical_score + _intraday_adj))
+    # Varsity Ch 16 momentum defaults — overwritten in swing_mode block below
+    momentum_12m_score: float = 0.0
+    _ret_12m: float | None = None
+    _nifty_regime: str = ctx.macro.nifty_regime
+    if swing_mode:
+        # Swing mode uses trend-following score (rewards RSI 45-75, BB breakouts,
+        # ongoing MACD uptrend). Intraday overlay is irrelevant on daily candles.
+        technical_score = float(signals.swing_composite_score or 0.0)
+        _intraday_adj, _intraday_info = 0.0, {}
+    else:
+        technical_score = float(signals.composite_score or 0.0)
+        # Intraday overlay: nudge technical score by up to ±10 based on 5m/15m RSI + momentum.
+        # Active only when 1m candles are available (market hours); zero outside hours.
+        _intraday_adj, _intraday_info = _intraday_overlay(df_1m)
+        technical_score = max(-100.0, min(100.0, technical_score + _intraday_adj))
     try:
         features = analyzer.compute_features(df)
         regime = features.regime
@@ -1017,28 +1036,69 @@ async def score_symbol(
     # Exceptions: sector always has a signal (known sector or market breadth proxy);
     # news is considered covered if Tavily, RSS, or yfinance contributed a score.
     _has_earnings = (tone != "NEUTRAL" or _earnings_source != "default")
-    _w = {
-        "technical":   0.35,
-        "news":        0.15 if _has_news else 0.0,
-        "sector":      0.15,  # always: known sector or market breadth fallback
-        "macro":       0.10,
-        "earnings":    0.10 if _has_earnings else 0.0,
-        "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
-        "options":     0.05,
-    }
-    _total_w = sum(_w.values())
-    if _total_w > 0:
-        _w = {k: v / _total_w for k, v in _w.items()}
+    if swing_mode:
+        # ── Varsity Ch 16.3: 12-month trailing momentum score ────────────────
+        # Core of Varsity's Momentum Portfolio: rank by 1-year return.
+        # df already has 300 daily candles for swing symbols.
+        if len(df) >= 200:
+            _ret_12m = float(df["close"].iloc[-1] / df["close"].iloc[-200] - 1) * 100
+            if   _ret_12m >= 30: momentum_12m_score = 30.0
+            elif _ret_12m >= 15: momentum_12m_score = 20.0
+            elif _ret_12m >= 5:  momentum_12m_score = 10.0
+            elif _ret_12m >= 0:  momentum_12m_score =  0.0
+            elif _ret_12m >= -5: momentum_12m_score = -5.0
+            else:                momentum_12m_score = -15.0
 
-    master_score = (
-        technical_score   * _w["technical"] +
-        news_score        * _w["news"] +
-        sector_score      * _w["sector"] +
-        macro_score       * _w["macro"] +
-        earnings_score    * _w["earnings"] +
-        fundamental_score * _w["fundamental"] +
-        options_score     * _w["options"]
-    )
+        # ── Varsity Ch 16.5: bear regime penalty ────────────────────────────
+        # Momentum portfolios bleed heavily in down/choppy markets.
+        # Apply a score haircut when the market regime is BEAR.
+        _nifty_regime = ctx.macro.nifty_regime
+        _regime_penalty = -20.0 if _nifty_regime == "BEAR" else 0.0
+
+        _w = {
+            "technical":    0.50,
+            "sector":       0.20,
+            "momentum_12m": 0.15,
+            "volume":       0.10,
+            "macro":        0.05,
+            "news":         0.0,
+            "earnings":     0.0,
+            "fundamental":  0.0,
+            "options":      0.0,
+        }
+        volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
+        vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
+        master_score = (
+            technical_score    * _w["technical"] +
+            sector_score       * _w["sector"] +
+            momentum_12m_score * _w["momentum_12m"] +
+            vol_score          * _w["volume"] +
+            macro_score        * _w["macro"] +
+            _regime_penalty
+        )
+    else:
+        _w = {
+            "technical":   0.35,
+            "news":        0.15 if _has_news else 0.0,
+            "sector":      0.15,  # always: known sector or market breadth fallback
+            "macro":       0.10,
+            "earnings":    0.10 if _has_earnings else 0.0,
+            "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
+            "options":     0.05,
+        }
+        _total_w = sum(_w.values())
+        if _total_w > 0:
+            _w = {k: v / _total_w for k, v in _w.items()}
+    
+        master_score = (
+            technical_score   * _w["technical"] +
+            news_score        * _w["news"] +
+            sector_score      * _w["sector"] +
+            macro_score       * _w["macro"] +
+            earnings_score    * _w["earnings"] +
+            fundamental_score * _w["fundamental"] +
+            options_score     * _w["options"]
+        )
 
     # Blocking + penalties
     is_blocked, blocked_reason = False, None
@@ -1052,6 +1112,11 @@ async def score_symbol(
         is_blocked, blocked_reason = True, "EARNINGS_NEGATIVE"
     elif sector_mood == "STRONGLY_BEARISH" and master_score > 0:
         is_blocked, blocked_reason = True, "SECTOR_STRONGLY_BEARISH"
+    elif swing_mode and ctx.macro.nifty_regime == "BEAR" and master_score > 0:
+        # Varsity Ch 16.5: hard-block new swing entries in bear market regime.
+        # The score penalty already reduces most signals below BUY threshold;
+        # this catches edge cases that still score positive despite the -20 haircut.
+        is_blocked, blocked_reason = True, "BEAR_REGIME_SWING_BLOCK"
 
     if sector in ctx.portfolio.overweight_sectors:
         master_score *= 0.7
@@ -1081,7 +1146,10 @@ async def score_symbol(
     if sector in ctx.events.ipo_drain_sectors:
         master_score -= 5
 
-    if master_score >= 60:    signal = "STRONG_BUY"
+    from utils.config import settings
+    swing_thresh = getattr(settings, "SWING_CONFIDENCE_THRESHOLD", 40) if swing_mode else 60
+    
+    if master_score >= swing_thresh:    signal = "STRONG_BUY"
     elif master_score >= 25:  signal = "BUY"
     elif master_score >= -25: signal = "NEUTRAL"
     elif master_score >= -60: signal = "SELL"
@@ -1130,6 +1198,10 @@ async def score_symbol(
         "regime": regime, "sector_name": sector, "news_tone": tone,
         "sector_mood": sector_mood, "fund_grade": fund_grade,
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
+        # Varsity Ch 16: momentum portfolio additions
+        "momentum_12m_score": round(momentum_12m_score, 1) if swing_mode else None,
+        "momentum_12m_ret_pct": round(_ret_12m, 1) if (swing_mode and _ret_12m is not None) else None,
+        "nifty_regime": ctx.macro.nifty_regime,
         "headlines": ctx.news.headlines_by_symbol.get(symbol, []),
         "active_weights": {k: round(v, 3) for k, v in _w.items()},
         "news_source":     _news_source,
@@ -1189,14 +1261,32 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     runs in parallel since score_symbol() does not touch the DB session."""
     from crawler.price_feed import get_latest_candles
 
-    # Phase 1: fetch primary candles sequentially (DB-bound, shared session)
+    # Phase 0: fetch swing flags BEFORE candle loop so we can choose the right
+    # timeframe per symbol. Swing symbols use daily candles (Zerodha Varsity Module 2:
+    # swing trading is analysed on EOD/daily charts, not intraday bars).
+    from db.models import HubUniverse
+    from sqlalchemy import select as _sel
+    swing_flags = {}
+    try:
+        if symbols:
+            hub_rows = (await session.execute(
+                _sel(HubUniverse.symbol, HubUniverse.is_swing).where(HubUniverse.symbol.in_(symbols))
+            )).all()
+            swing_flags = {r.symbol: r.is_swing for r in hub_rows}
+    except Exception as exc:
+        logger.debug(f"[hub] failed to fetch swing flags: {exc}")
+
+    # Phase 1: fetch primary candles sequentially (DB-bound, shared session).
+    # Swing symbols get 1d candles (trend context); non-swing get the requested timeframe.
     # Fallback chain: requested timeframe → 1h → 1d → skip.
     _FALLBACKS = {"5m": ["1h", "1d"], "1h": ["1d"], "15m": ["1h", "1d"], "1d": []}
-    _fallbacks = _FALLBACKS.get(timeframe, ["1h", "1d"])
     dfs: dict = {}
     for symbol in symbols:
+        _is_swing = swing_flags.get(symbol, False)
+        _tf = "1d" if _is_swing else timeframe
+        _fallbacks = [] if _is_swing else _FALLBACKS.get(timeframe, ["1h", "1d"])
         try:
-            candles = await get_latest_candles(symbol, timeframe, 300, session)
+            candles = await get_latest_candles(symbol, _tf, 300, session)
             for fb in _fallbacks:
                 if not candles or len(candles) < 50:
                     candles = await get_latest_candles(symbol, fb, 300, session)
@@ -1216,7 +1306,7 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
             logger.debug(f"[hub] candle fetch failed for {symbol}: {exc}")
 
     # Phase 1b: fetch today's 1m candles for the intraday overlay.
-    # Only symbols that passed Phase 1 are fetched; missing ones get None (no overlay).
+    # Only non-swing symbols get this — swing uses daily candles where 1m overlay is noise.
     # Uses up to 200 bars (≈3.3 h): 5m RSI(9) needs 50 bars (from ~10:05 IST),
     # 15m RSI(9) needs 150 bars (from ~11:45 IST), momentum needs 60 bars.
     import datetime as _dt
@@ -1225,10 +1315,11 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     _today_open = _dt.datetime.now(_IST).replace(hour=9, minute=15, second=0, microsecond=0)
     _today_open_utc = _today_open.astimezone(_dt.timezone.utc).replace(tzinfo=None)
     from db.models import Candle as _Candle
-    from sqlalchemy import select as _sel
 
     dfs_1m: dict = {}
     for symbol in dfs:
+        if swing_flags.get(symbol, False):
+            continue  # swing symbols don't need intraday overlay
         try:
             rows = (await session.execute(
                 _sel(_Candle)
@@ -1260,8 +1351,11 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     async def score_one(symbol: str, df: pd.DataFrame):
         async with sem:
             try:
-                return await score_symbol(symbol, df, ctx, session,
-                                          df_1m=dfs_1m.get(symbol))
+                return await score_symbol(
+                    symbol, df, ctx, session,
+                    df_1m=dfs_1m.get(symbol),
+                    swing_mode=swing_flags.get(symbol, False)
+                )
             except Exception as exc:
                 logger.debug(f"[hub] score error on {symbol}: {exc}")
                 return None

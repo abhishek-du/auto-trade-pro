@@ -51,7 +51,7 @@ export default function IndexCard({ data, small }) {
 
   if (!data) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-4 animate-pulse h-36" />
+      <div className="glass-panel border border-border rounded-xl p-4 animate-pulse h-36" />
     );
   }
 
@@ -60,7 +60,7 @@ export default function IndexCard({ data, small }) {
   const chgAbs  = Math.abs(data.change ?? 0);
 
   return (
-    <div className={`bg-panel border border-border rounded-xl p-4 space-y-3 transition-colors ${flashClass}`}>
+    <div className={`glass-panel border border-border rounded-xl p-4 space-y-3 transition-colors ${flashClass}`}>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

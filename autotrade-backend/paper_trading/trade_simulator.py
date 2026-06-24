@@ -273,6 +273,8 @@ async def open_paper_trade(
     await session.flush()                           # populate trade.id
 
     # ── Step 2b: Persist OpenPosition ─────────────────────────────────────────
+    from datetime import timedelta
+    is_swing = product == "CNC"
     position = OpenPosition(
         symbol=signal.symbol,
         direction=direction,
@@ -287,6 +289,8 @@ async def open_paper_trade(
         trade_id=trade.id,
         opened_at=now,
         product=product,
+        trade_style="SWING" if is_swing else product,
+        swing_min_hold=now + timedelta(hours=48) if is_swing else None,
     )
     session.add(position)
     await session.flush()

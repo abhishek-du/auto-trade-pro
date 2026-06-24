@@ -190,9 +190,9 @@ def build_trade_setup(sig: IndicatorSignals, ltp: float, signal: str) -> dict:
     """Compute entry zone, stop-loss, targets, R:R, and textual guidance."""
     nan = math.isnan
 
-    # Support = BB lower unless NaN
-    support    = sig.bb_lower    if not nan(sig.bb_lower)    else ltp * 0.95
-    resistance = sig.bb_upper    if not nan(sig.bb_upper)    else ltp * 1.05
+    # Support = Pivot Support 1 unless NaN
+    support    = sig.support_1 if hasattr(sig, "support_1") and not nan(sig.support_1) else (sig.bb_lower if not nan(sig.bb_lower) else ltp * 0.95)
+    resistance = sig.resistance_1 if hasattr(sig, "resistance_1") and not nan(sig.resistance_1) else (sig.bb_upper if not nan(sig.bb_upper) else ltp * 1.05)
 
     # Stop-loss: just below supertrend when bullish (closest dynamic level),
     # otherwise 2% below support
@@ -211,8 +211,9 @@ def build_trade_setup(sig: IndicatorSignals, ltp: float, signal: str) -> dict:
     if signal in ("STRONG_BUY", "BUY"):
         entry_low  = max(sl * 1.01, ltp * 0.97)
         entry_high = ltp * 1.005
+        pattern_msg = f" Note: {', '.join(sig.patterns)} pattern detected." if getattr(sig, 'patterns', None) else ""
         when_buy = (
-            f"**Ideal entry:** ₹{entry_low:.2f}–₹{entry_high:.2f} zone.\n"
+            f"**Ideal entry:** ₹{entry_low:.2f}–₹{entry_high:.2f} zone.{pattern_msg}\n"
             f"Strategy A — Dip buy: wait for price to pull back into the ₹{entry_low:.2f}–₹{entry_low*1.01:.2f} zone and enter when a reversal candle forms (hammer, bullish engulfing).\n"
             f"Strategy B — Breakout: enter if price closes above ₹{ltp*1.01:.2f} with above-average volume, confirming continuation."
         )

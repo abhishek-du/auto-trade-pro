@@ -117,7 +117,7 @@ export default function GainersLosersTable({ gainers = [], losers = [], mostActi
   const [tab, setTab] = useState('gainers')
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden flex flex-col h-full">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden flex flex-col h-full">
       {/* Tab bar */}
       <div className="flex border-b border-border">
         {TABS.map(t => (

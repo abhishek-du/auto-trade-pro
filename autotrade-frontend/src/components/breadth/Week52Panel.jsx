@@ -48,7 +48,7 @@ export default function Week52Panel({ week52High = [], week52Low = [] }) {
   const lowCount  = week52Low?.length  || 0
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden flex flex-col h-full">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden flex flex-col h-full">
       {/* Tabs */}
       <div className="flex border-b border-border">
         <button

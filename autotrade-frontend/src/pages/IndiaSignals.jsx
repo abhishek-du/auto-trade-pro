@@ -50,7 +50,7 @@ export default function IndiaSignals() {
         ))}
       </div>
 
-      <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border overflow-hidden glass-panel">
         {loading ? (
           <LoadingSpinner />
         ) : signals.length === 0 ? (

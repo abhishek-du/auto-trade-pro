@@ -89,7 +89,7 @@ export default function HoldingsBreakdown({ allocation }) {
   )
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       {ORDER.map(cls => {
         const data = allocation[cls]
         if (!data) return null

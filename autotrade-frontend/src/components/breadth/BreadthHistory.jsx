@@ -16,7 +16,7 @@ function fmtTime(isoStr) {
 export default function BreadthHistory({ historyData = [] }) {
   if (!historyData || historyData.length === 0) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-4">
+      <div className="glass-panel border border-border rounded-xl p-4">
         <h3 className="text-slate-200 text-sm font-semibold mb-3">Today's Breadth Timeline</h3>
         <div className="flex items-center justify-center h-28 text-muted text-xs">
           No intraday breadth history yet
@@ -33,7 +33,7 @@ export default function BreadthHistory({ historyData = [] }) {
   }))
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4">
+    <div className="glass-panel border border-border rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-slate-200 text-sm font-semibold">Today's Breadth Timeline</h3>
         <span className="text-muted text-[10px]">{historyData.length} readings</span>

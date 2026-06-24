@@ -14,7 +14,7 @@ function SkeletonBar() {
 
 function MoodCard({ title, subtitle, mood, loading }) {
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-2">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-2">
       <div className="text-muted text-xs font-semibold uppercase tracking-wider">{title}</div>
       {loading
         ? <div className="h-6 w-32 rounded bg-slate-800/60 animate-pulse" />
@@ -86,7 +86,7 @@ export default function MarketBreadth() {
       </div>
 
       {/* ── A/D Bars ──────────────────────────────────────────────── */}
-      <div className="bg-panel border border-border rounded-xl p-5 space-y-5">
+      <div className="glass-panel border border-border rounded-xl p-5 space-y-5">
         <h2 className="text-slate-200 text-sm font-semibold">Advance / Decline Distribution</h2>
         {loading ? (
           <div className="space-y-4">
@@ -151,7 +151,7 @@ export default function MarketBreadth() {
 
       {/* Market closed notice */}
       {breadth && !loading && nse.total === 0 && (
-        <div className="bg-panel border border-border rounded-xl px-5 py-4">
+        <div className="glass-panel border border-border rounded-xl px-5 py-4">
           <div className="text-center text-muted text-sm">
             <span className="font-semibold text-slate-400">Market data computed from last available prices.</span>
             <br />

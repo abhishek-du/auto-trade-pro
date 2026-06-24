@@ -23,7 +23,7 @@ const moodColor = (m) => ({
 
 function StatCard({ label, value, sub, color = 'text-slate-100', Icon }) {
   return (
-    <div className="bg-panel border border-border rounded-xl p-4">
+    <div className="glass-panel border border-border rounded-xl p-4">
       <div className="flex items-center justify-between mb-2">
         <span className="text-muted text-xs font-medium">{label}</span>
         {Icon && <Icon size={15} className={color} />}
@@ -127,7 +127,7 @@ function FnOPositionRow({ p }) {
 function PositionsPanel({ data }) {
   if (!data || data.count === 0) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-6 text-center text-muted text-sm space-y-1">
+      <div className="glass-panel border border-border rounded-xl p-6 text-center text-muted text-sm space-y-1">
         <p>No open F&O positions right now.</p>
         <p className="text-xs">
           F&O trading is <span className="text-profit font-semibold">enabled</span> and Zerodha&nbsp;Kite
@@ -138,7 +138,7 @@ function PositionsPanel({ data }) {
     );
   }
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
           <Layers size={15} className="text-cyan" /> F&O Positions
@@ -173,7 +173,7 @@ function PositionsPanel({ data }) {
 function ChainPanel({ chain, ivRank }) {
   if (!chain || !chain.strikes?.length) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-6 text-center text-muted text-sm">
+      <div className="glass-panel border border-border rounded-xl p-6 text-center text-muted text-sm">
         No chain data yet for {chain?.underlying}. Greeks populate when the options task runs with
         <code className="text-cyan"> ENABLE_FNO=true</code>.
       </div>
@@ -183,7 +183,7 @@ function ChainPanel({ chain, ivRank }) {
     ? chain.strikes.reduce((a, b) => Math.abs(b.strike - chain.spot) < Math.abs(a.strike - chain.spot) ? b : a)
     : null;
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold text-slate-200">
           {chain.underlying} Chain
@@ -238,7 +238,7 @@ function ChainPanel({ chain, ivRank }) {
 function SignalsPanel({ signals }) {
   if (!signals?.length) return null;
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-border">
         <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
           <TrendingUp size={15} className="text-cyan" /> Signals & Predictions
@@ -308,7 +308,7 @@ function SignalsPanel({ signals }) {
 // ── AI Analysis ───────────────────────────────────────────────────────────────
 function AIAnalysisPanel({ analysis, underlying }) {
   return (
-    <div className="bg-panel border border-border rounded-xl p-5">
+    <div className="glass-panel border border-border rounded-xl p-5">
       <div className="flex items-center gap-2 mb-3">
         <Brain size={15} className="text-violet-400" />
         <h2 className="text-sm font-semibold text-slate-200">AI Desk Analysis — {underlying}</h2>
@@ -336,7 +336,7 @@ function SentimentPanel({ sentiment, newsMood }) {
     { label: 'News Mood', value: newsMood ?? '—', tag: '', color: moodColor(newsMood) },
   ];
   return (
-    <div className="bg-panel border border-border rounded-xl p-5">
+    <div className="glass-panel border border-border rounded-xl p-5">
       <div className="flex items-center gap-2 mb-3">
         <Activity size={15} className="text-cyan" />
         <h2 className="text-sm font-semibold text-slate-200">Market Sentiment</h2>
@@ -364,11 +364,11 @@ function SentimentPanel({ sentiment, newsMood }) {
 // ── News ──────────────────────────────────────────────────────────────────────
 function NewsPanel({ news }) {
   if (!news?.length) return (
-    <div className="bg-panel border border-border rounded-xl p-5 text-sm text-muted">No recent news.</div>
+    <div className="glass-panel border border-border rounded-xl p-5 text-sm text-muted">No recent news.</div>
   );
   const dot = (sent) => sent === 'positive' ? 'bg-profit' : sent === 'negative' ? 'bg-loss' : 'bg-slate-500';
   return (
-    <div className="bg-panel border border-border rounded-xl p-5">
+    <div className="glass-panel border border-border rounded-xl p-5">
       <div className="flex items-center gap-2 mb-3">
         <Newspaper size={15} className="text-blue-400" />
         <h2 className="text-sm font-semibold text-slate-200">Market News</h2>
@@ -457,7 +457,7 @@ export default function FnO() {
       </div>
 
       {/* Live index candlestick chart */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel border border-border rounded-xl overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
           <ChartIcon size={15} className="text-cyan" />
           <h2 className="text-sm font-semibold text-slate-200">{underlying} Chart</h2>

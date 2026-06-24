@@ -66,7 +66,7 @@ export default function SectorHeatmap() {
           )}
 
           {/* View mode switcher */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-lg p-0.5">
+          <div className="flex items-center gap-0.5 glass-panel border border-border rounded-lg p-0.5">
             {VIEW_MODES.map(({ id, Icon, label }) => (
               <button
                 key={id}
@@ -95,7 +95,7 @@ export default function SectorHeatmap() {
       </div>
 
       {/* Color legend */}
-      <div className="bg-panel border border-border rounded-xl px-4 py-3">
+      <div className="glass-panel border border-border rounded-xl px-4 py-3">
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-muted text-[10px] font-semibold uppercase tracking-wider shrink-0">Scale:</span>
           {HEATMAP_LEGEND.map(({ label, changePct }) => {
@@ -111,7 +111,7 @@ export default function SectorHeatmap() {
       </div>
 
       {/* Main heatmap */}
-      <div className="bg-panel border border-border rounded-xl p-4">
+      <div className="glass-panel border border-border rounded-xl p-4">
         {loading ? (
           <div className="grid grid-cols-4 gap-2.5">
             {Array.from({ length: 10 }).map((_, i) => <SkeletonTile key={i} />)}

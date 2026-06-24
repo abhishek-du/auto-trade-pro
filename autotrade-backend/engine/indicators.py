@@ -129,7 +129,11 @@ def _composite_score(
     ema_trend: str,
     stoch_k: float,
 ) -> float:
-    """Weighted composite score in [-100, +100]."""
+    """Mean-reversion composite score in [-100, +100].
+
+    Rewards oversold/under-extended conditions.  Used for intraday / hub default scoring.
+    For swing-trading use _swing_composite_score() instead.
+    """
     # RSI component  ±20
     rsi_score = 0.0
     if not math.isnan(rsi):
@@ -160,6 +164,87 @@ def _composite_score(
     stoch_score = 0.0
     if not math.isnan(stoch_k):
         stoch_score = max(-15.0, min(15.0, (50.0 - stoch_k) * 15.0 / 30.0))
+
+    return rsi_score + macd_score + bb_score + ema_score + stoch_score
+
+
+def _swing_composite_score(
+    rsi: float,
+    macd_cross: str,
+    macd_hist: float,
+    bb_pos: str,
+    ema_trend: str,
+    stoch_k: float,
+) -> float:
+    """Trend-following composite score in [-100, +100] for swing trading.
+
+    Zerodha Varsity Module 2: swing trades ride existing trends — RSI 45-75 is
+    the momentum zone, price near upper BB is breakout strength, and an ongoing
+    MACD uptrend (not just a fresh crossover) is a valid bullish signal.
+
+    Key differences from mean-reversion _composite_score:
+    - RSI 45-75  → positive (momentum zone), not negative
+    - BB NEAR/ABOVE UPPER → mild positive (breakout), not negative
+    - MACD histogram positive without a fresh cross → partial credit (+12)
+    - Stoch 40-75 → neutral-to-positive, not negative
+    """
+    # RSI: momentum zone 45-75 is bullish for swing  ±20
+    rsi_score = 0.0
+    if not math.isnan(rsi):
+        if rsi <= 30:
+            rsi_score = 10.0     # deep oversold pullback — buying opportunity
+        elif rsi <= 45:
+            rsi_score = 5.0      # mild pullback in uptrend
+        elif rsi <= 60:
+            rsi_score = 12.0     # healthy momentum — textbook swing zone
+        elif rsi <= 75:
+            rsi_score = 18.0     # strong momentum — highest conviction zone
+        elif rsi <= 85:
+            rsi_score = 5.0      # extended but still trending; tighten stop
+        else:
+            rsi_score = -10.0    # blow-off top risk
+
+    # MACD: fresh cross = full credit; ongoing uptrend histogram = partial  ±25
+    macd_score = 0.0
+    if macd_cross == "BULLISH_CROSS":
+        macd_score = 25.0
+    elif macd_cross == "BEARISH_CROSS":
+        macd_score = -25.0
+    elif not math.isnan(macd_hist):
+        # Histogram positive = MACD above signal line = trend intact
+        macd_score = 12.0 if macd_hist > 0 else -12.0
+
+    # BB: for swing, upper band is breakout strength not resistance  ±12
+    bb_score = {
+        "ABOVE_UPPER":  10.0,   # breakout — price has cleared resistance
+        "NEAR_UPPER":    5.0,   # approaching breakout zone
+        "MIDDLE":        0.0,   # neutral / mid-consolidation
+        "NEAR_LOWER":   -5.0,   # weak — testing support
+        "BELOW_LOWER": -15.0,   # breakdown — avoid longs
+    }.get(bb_pos, 0.0)
+
+    # EMA trend: same as mean-reversion (trend alignment is paramount)  ±25
+    ema_score = {
+        "STRONG_BULL":  25.0,
+        "BULL":         15.0,
+        "NEUTRAL":       0.0,
+        "BEAR":        -15.0,
+        "STRONG_BEAR": -25.0,
+    }.get(ema_trend, 0.0)
+
+    # Stochastic: 40-75 is the momentum zone for swing, not overbought  ±15
+    stoch_score = 0.0
+    if not math.isnan(stoch_k):
+        if stoch_k <= 20:
+            stoch_score = 10.0   # oversold pullback — swing entry
+        elif stoch_k <= 40:
+            stoch_score = 5.0    # mild oversold
+        elif stoch_k <= 75:
+            stoch_score = 8.0    # momentum zone — bullish for swing
+        elif stoch_k <= 85:
+            stoch_score = 0.0    # mildly extended, neutral
+        else:
+            stoch_score = -10.0  # very overbought — risk of reversal
 
     return rsi_score + macd_score + bb_score + ema_score + stoch_score
 
@@ -599,6 +684,12 @@ class IndicatorSignals:
     vwap_position: str                 # 'ABOVE_VWAP' | 'NEAR_VWAP' | 'BELOW_VWAP'
     vwap_score: float
 
+    pivot: float
+    support_1: float
+    resistance_1: float
+    support_2: float
+    resistance_2: float
+
     ichimoku_tenkan: float
     ichimoku_kijun: float
     ichimoku_senkou_a: float
@@ -616,7 +707,10 @@ class IndicatorSignals:
     ema_ribbon: list[float]            # EMA values for periods [5,8,13,21,34,55,89,144]
     ema_ribbon_state: str              # 'BULLISH_SPREAD'|'BEARISH_SPREAD'|'COMPRESSED'|'TRANSITIONAL'
 
-    composite_score: float            # -100 … +100
+    patterns: list[str]                # E.g. ['Hammer', 'Bullish Engulfing']
+
+    composite_score: float            # -100 … +100  (mean-reversion, intraday default)
+    swing_composite_score: float = 0.0  # -100 … +100  (trend-following, swing mode)
 
     upper_circuit_days: int   = 0    # consecutive candles close ≈ day high
     volume_surge:       float = 1.0  # latest vol / 20-candle avg
@@ -646,6 +740,60 @@ def score_to_signal(score: float) -> str:
     if score >= -25: return "NEUTRAL"
     if score >= -60: return "SELL"
     return "STRONG_SELL"
+
+
+# ── Fibonacci retracement proximity (Varsity Ch 16) ──────────────────────────
+
+def _fibonacci_retracement_bonus(df: pd.DataFrame) -> float:
+    """Return +10 if current price is near a Fibonacci retracement level.
+
+    Varsity Ch 16: after an up-move, price retraces to 23.6%, 38.2%, or
+    61.8% of the move before resuming the original direction.  If a
+    candlestick pattern forms at one of these levels the trade setup has
+    maximum conviction.  We award +10 to swing_score whenever the last
+    close sits within ±2% of any key Fibonacci level.
+
+    Only applied for up-move retracement (trough precedes peak in the
+    90-day lookback) to avoid penalising downtrends.
+    """
+    if len(df) < 30:
+        return 0.0
+
+    # Varsity recommends 12-18 months of data for S&R and Fibonacci construction
+    lookback = df.tail(260)
+    current = float(df["close"].iloc[-1])
+
+    peak_idx = lookback["high"].idxmax()
+    trough_idx = lookback["low"].idxmin()
+
+    # Up-move scenario only: trough must appear before peak
+    if trough_idx >= peak_idx:
+        return 0.0
+
+    high = float(lookback.loc[peak_idx, "high"])
+    low  = float(lookback.loc[trough_idx, "low"])
+    move = high - low
+
+    if move <= 0 or current <= 0:
+        return 0.0
+
+    # Price must be in retracement territory (below the peak)
+    if current >= high * 0.98:
+        return 0.0
+
+    # Classic Fibonacci retracement levels measured down from the peak
+    fib_levels = [
+        high - 0.236 * move,  # 23.6% retracement
+        high - 0.382 * move,  # 38.2% retracement
+        high - 0.618 * move,  # 61.8% retracement
+    ]
+
+    tolerance = current * 0.02  # ±2% of current price
+    for level in fib_levels:
+        if abs(current - level) <= tolerance:
+            return 10.0
+
+    return 0.0
 
 
 # ── Momentum-breakout / upper-circuit detector ────────────────────────────────
@@ -714,13 +862,17 @@ def _nan_bundle() -> IndicatorSignals:
         vwap=nan,          vwap_upper_1=nan,  vwap_upper_2=nan,
         vwap_lower_1=nan,  vwap_lower_2=nan,
         vwap_position="NEAR_VWAP",             vwap_score=0.0,
+        pivot=nan,         support_1=nan,     resistance_1=nan,
+        support_2=nan,     resistance_2=nan,
         ichimoku_tenkan=nan,   ichimoku_kijun=nan,
         ichimoku_senkou_a=nan, ichimoku_senkou_b=nan,
         ichimoku_signal="NEUTRAL",             ichimoku_score=0.0,
         adx=nan,           adx_plus_di=nan,   adx_minus_di=nan,
         adx_trend_strength="NONE", adx_direction="BEARISH", adx_score=0.0,
         ema_ribbon=[nan] * 8,  ema_ribbon_state="COMPRESSED",
+        patterns=[],
         composite_score=0.0,
+        swing_composite_score=0.0,
     )
 
 
@@ -864,6 +1016,78 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
             + momentum_bonus),
     )
 
+    # ── Candlestick Patterns ──────────────────────────────────────────────────
+    from engine.candlestick_patterns import detect_candlestick_patterns
+    patterns = detect_candlestick_patterns(df)
+
+    # Varsity checklist 1 + evaluation step 2 (Ch 19.5):
+    # Recognisable pattern → +15 bullish / −15 bearish, BUT only when the
+    # PRIOR TREND is correct.  A Hammer in an uptrend is noise; a Hammer after
+    # a pullback (prior decline) is the real signal.  Use last 5 closes to
+    # determine if the stock has recently declined (bullish patterns) or rallied
+    # (bearish patterns).
+    _BULLISH_PAT = {"Hammer", "Bullish Engulfing", "Morning Star", "Bullish Harami", "Piercing Pattern"}
+    _BEARISH_PAT = {"Shooting Star", "Bearish Engulfing", "Evening Star", "Bearish Harami", "Dark Cloud Cover", "Hanging Man"}
+    _pat_set = set(patterns)
+
+    _c = df["close"].values.astype(float)
+    prior_decline = len(_c) >= 6 and _c[-1] < _c[-6]   # last close below 5-bar-ago close
+    prior_rally   = len(_c) >= 6 and _c[-1] > _c[-6]
+
+    if _pat_set & _BULLISH_PAT and prior_decline:
+        pattern_bonus = 15.0    # valid: bullish reversal after a pullback
+    elif _pat_set & _BEARISH_PAT and prior_rally:
+        pattern_bonus = -15.0   # valid: bearish reversal after a rally
+    elif _pat_set & _BULLISH_PAT:
+        pattern_bonus = 5.0     # pattern present but no prior decline — partial credit
+    elif _pat_set & _BEARISH_PAT:
+        pattern_bonus = -5.0    # pattern present but no prior rally — partial credit
+    else:
+        pattern_bonus = 0.0
+
+    # Varsity checklist 3: volume confirms direction (vol_surge = latest / 20-day avg)
+    # ≥1.3× avg = above-average; price up + vol up = smart money buying → +10
+    vol_confirm = 0.0
+    if vol_surge >= 1.3:
+        if trend in ("BULL", "STRONG_BULL"):
+            vol_confirm = 10.0
+        elif trend in ("BEAR", "STRONG_BEAR"):
+            vol_confirm = -10.0
+
+    # Varsity Ch 16: Fibonacci retracement proximity → +10
+    # Price near 23.6%/38.2%/61.8% retrace of the recent swing = high-conviction entry zone
+    fib_bonus = _fibonacci_retracement_bonus(df)
+
+    # Swing-specific score: trend-following, uses daily OHLCV context.
+    # Excludes VWAP (meaningless on daily candles) but adds Varsity pattern bonus,
+    # volume confirmation (checklist 1 & 3), and Fibonacci proximity (Ch 16).
+    swing_score = max(
+        -100.0,
+        min(100.0,
+            _swing_composite_score(rsi, cross, _safe_last(hist_arr), bb_pos, trend, sk)
+            + supertrend["score"]
+            + ichimoku["ichimoku_score"]
+            + adx["adx_score"]
+            + ribbon["ribbon_score"]
+            + momentum_bonus
+            + pattern_bonus
+            + vol_confirm
+            + fib_bonus),
+    )
+
+    # ── Pivot Points ─────────────────────────────────────────────────────────
+    if len(df) >= 2:
+        prev_h = df["high"].iloc[-2]
+        prev_l = df["low"].iloc[-2]
+        prev_c = df["close"].iloc[-2]
+        pivot = (prev_h + prev_l + prev_c) / 3.0
+        r1 = (pivot * 2) - prev_l
+        s1 = (pivot * 2) - prev_h
+        r2 = pivot + (prev_h - prev_l)
+        s2 = pivot - (prev_h - prev_l)
+    else:
+        pivot = r1 = s1 = r2 = s2 = float('nan')
+
     return IndicatorSignals(
         rsi=rsi,               rsi_signal=_rsi_signal(rsi),
         macd=macd_val,         macd_signal=macd_sig,  macd_histogram=hist_last,
@@ -898,9 +1122,13 @@ def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
         adx_score=adx["adx_score"],
         ema_ribbon=ribbon["ema_ribbon"],
         ema_ribbon_state=ribbon["ema_ribbon_state"],
+        patterns=patterns,
         composite_score=score,
+        swing_composite_score=swing_score,
         upper_circuit_days=uc_days,
         volume_surge=vol_surge,
+        pivot=float(pivot), support_1=float(s1), resistance_1=float(r1),
+        support_2=float(s2), resistance_2=float(r2),
     )
 
 

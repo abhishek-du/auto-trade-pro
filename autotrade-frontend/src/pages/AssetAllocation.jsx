@@ -120,7 +120,7 @@ export default function AssetAllocation() {
 
       {/* Portfolio banner */}
       {analysis && (
-        <div className="flex items-center gap-4 flex-wrap rounded-xl border border-border px-5 py-3" style={{ background: '#0F1829' }}>
+        <div className="flex items-center gap-4 flex-wrap rounded-xl border border-border px-5 py-3 glass-panel">
           <div className="space-y-0.5">
             <p className="text-muted text-[10px] uppercase tracking-widest">Total Portfolio</p>
             <p className="text-slate-100 text-lg font-bold tabular-nums">{formatINR(analysis.portfolio_total, 0)}</p>
@@ -141,7 +141,7 @@ export default function AssetAllocation() {
       )}
 
       {/* Tabs */}
-      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+      <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit">
         {TABS.map(t => {
           const Icon = t.icon
           return (
@@ -166,7 +166,7 @@ export default function AssetAllocation() {
           {tab === 'overview' && (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               {/* Current donut */}
-              <div className="rounded-xl border border-border p-5 flex flex-col items-center" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border p-5 flex flex-col items-center glass-panel">
                 <p className="text-muted text-[10px] uppercase tracking-widest mb-3">Current Portfolio</p>
                 <AllocationDonut
                   allocation={analysis.current_allocation}
@@ -176,7 +176,7 @@ export default function AssetAllocation() {
               </div>
 
               {/* Target donut */}
-              <div className="rounded-xl border border-border p-5 flex flex-col items-center" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border p-5 flex flex-col items-center glass-panel">
                 <p className="text-muted text-[10px] uppercase tracking-widest mb-3">
                   Target — {riskProfile.replace('_', ' ')}
                 </p>
@@ -212,7 +212,7 @@ export default function AssetAllocation() {
               </div>
 
               {/* Allocation bars */}
-              <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border p-5 glass-panel">
                 <AllocationBars
                   current={analysis.current_allocation}
                   target={effectiveTarget}
@@ -227,7 +227,7 @@ export default function AssetAllocation() {
           {tab === 'rebalancing' && (
             <div className="space-y-5">
               {/* Controls */}
-              <div className="rounded-xl border border-border p-4 space-y-4" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border p-4 space-y-4 glass-panel">
                 <div className="flex flex-wrap gap-6">
                   <div className="space-y-2">
                     <p className="text-muted text-[10px] uppercase tracking-widest">Suggest action when deviation exceeds</p>

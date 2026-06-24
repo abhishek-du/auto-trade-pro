@@ -2,7 +2,7 @@ export default function ProgressOverlay({ loading, progress }) {
   if (!loading) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(8,13,26,0.85)', backdropFilter: 'blur(6px)' }}>
-      <div className="rounded-2xl border border-border p-8 max-w-sm w-full mx-4 text-center space-y-5" style={{ background: '#0F1829' }}>
+      <div className="rounded-2xl border border-border p-8 max-w-sm w-full mx-4 text-center space-y-5 glass-panel">
         {/* Pulsing cross */}
         <div className="flex justify-center">
           <div className="relative">
@@ -18,7 +18,7 @@ export default function ProgressOverlay({ loading, progress }) {
           <p className="text-muted text-xs mt-1">Usually takes 20–30 seconds</p>
         </div>
 
-        <div className="rounded-lg border border-border px-4 py-3" style={{ background: '#131E30' }}>
+        <div className="rounded-lg border border-border px-4 py-3 glass-panel">
           <p className="text-cyan text-xs font-medium">{progress || 'Initialising…'}</p>
         </div>
 

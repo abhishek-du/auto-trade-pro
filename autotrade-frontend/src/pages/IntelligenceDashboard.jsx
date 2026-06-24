@@ -43,7 +43,7 @@ function MacroStrip({ macro }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
       {cards.map(c => (
-        <div key={c.label} className="rounded-xl border border-border p-3 space-y-1" style={{ background: '#0F1829' }}>
+        <div key={c.label} className="rounded-xl border border-border p-3 space-y-1 glass-panel">
           <div className="flex items-center gap-1.5">
             <c.Icon size={12} className={c.color} />
             <p className="text-muted text-[10px] uppercase tracking-widest">{c.label}</p>
@@ -60,7 +60,7 @@ function SectorRotation({ sectors }) {
   const entries = Object.entries(sectors.sector_biases).sort((a, b) => b[1] - a[1])
   const barColor = (v) => v >= 1 ? 'bg-emerald-500' : v <= -1 ? 'bg-red-500' : 'bg-slate-600'
   return (
-    <div className="rounded-xl border border-border p-4 space-y-3" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border p-4 space-y-3 glass-panel">
       <h3 className="text-slate-200 font-semibold text-sm">Sector Rotation</h3>
       <div className="flex flex-wrap gap-2">
         {entries.map(([sec, bias]) => (
@@ -88,7 +88,7 @@ function ScoresTable({ scores, onSelect }) {
     return s.signal === filter
   })
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="px-4 py-3 border-b border-border flex items-center gap-2 flex-wrap">
         <h3 className="text-slate-200 font-semibold text-sm mr-2">Universe Scores</h3>
         {FILTERS.map(f => (
@@ -101,7 +101,7 @@ function ScoresTable({ scores, onSelect }) {
       </div>
       <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
         <table className="w-full text-xs">
-          <thead className="sticky top-0" style={{ background: '#0F1829' }}>
+          <thead className="sticky top-0 glass-panel">
             <tr className="border-b border-border text-muted">
               {['#', 'Symbol', 'Score', 'Signal', 'Tech', 'News', 'Sector', 'Macro', 'Earn', 'Fund', ''].map(h => (
                 <th key={h} className="px-2.5 py-2 text-left font-semibold uppercase tracking-wide whitespace-nowrap">{h}</th>
@@ -148,7 +148,7 @@ function BreakdownPanel({ stock, onClose }) {
     ['Macro', r.macro, 10], ['Earnings', r.earnings, 10], ['Fundamental', r.fundamental, 10], ['Options', r.options, 5],
   ]
   return (
-    <div className="rounded-xl border border-accent/30 p-4 space-y-3" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-accent/30 p-4 space-y-3 glass-panel">
       <div className="flex items-center justify-between">
         <h3 className="text-slate-100 font-bold text-sm">{stock.symbol.replace('.NS', '')} breakdown</h3>
         <button onClick={onClose} className="text-muted text-xs hover:text-white">✕</button>
@@ -184,7 +184,7 @@ function BreakdownPanel({ stock, onClose }) {
 function MFSignals({ mfSignals }) {
   if (!mfSignals?.length) return null
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="px-4 py-3 border-b border-border flex items-center gap-2">
         <Wallet size={14} className="text-emerald-400" />
         <h3 className="text-slate-200 font-semibold text-sm">Mutual Fund Signals</h3>
@@ -244,14 +244,14 @@ export default function IntelligenceDashboard() {
             <div className="space-y-4">
               {selected
                 ? <BreakdownPanel stock={selected} onClose={() => setSelected(null)} />
-                : <div className="rounded-xl border border-border p-6 text-center text-muted text-sm" style={{ background: '#0F1829' }}>Click a stock to see its score breakdown</div>}
+                : <div className="rounded-xl border border-border p-6 text-center text-muted text-sm glass-panel">Click a stock to see its score breakdown</div>}
               <MFSignals mfSignals={mfSignals} />
             </div>
           </div>
 
           {/* Cycle history */}
           {cycleLog.length > 0 && (
-            <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+            <div className="rounded-xl border border-border overflow-hidden glass-panel">
               <div className="px-4 py-3 border-b border-border">
                 <h3 className="text-slate-200 font-semibold text-sm">Recent Cycles</h3>
               </div>

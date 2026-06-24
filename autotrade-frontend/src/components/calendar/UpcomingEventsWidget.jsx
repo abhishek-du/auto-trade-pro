@@ -37,7 +37,7 @@ export default function UpcomingEventsWidget({ events: propEvents, compact = fal
 
   if (displayEvents.length === 0) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-4">
+      <div className="glass-panel border border-border rounded-xl p-4">
         <p className="text-slate-200 font-semibold text-sm mb-2">Upcoming Events</p>
         <p className="text-muted text-xs text-center py-4">No upcoming events in the next 14 days</p>
       </div>
@@ -52,7 +52,7 @@ export default function UpcomingEventsWidget({ events: propEvents, compact = fal
   })
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <p className="text-slate-200 font-semibold text-sm">Upcoming Events</p>
         <button

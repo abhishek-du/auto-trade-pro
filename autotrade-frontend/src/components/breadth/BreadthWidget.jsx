@@ -80,7 +80,7 @@ export function BreadthWidget({ compact = false }) {
   const losers   = (breadth.top_losers  || []).slice(0, 3)
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-4">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-slate-200 text-sm font-semibold">Market Breadth</h3>
         <MarketMoodBadge mood={nse.market_mood || 'NEUTRAL'} size="sm" />
