@@ -87,6 +87,7 @@ import StockDetail        from './pages/StockDetail';
 import FundDetail            from './pages/FundDetail';
 import PortfolioAnalytics   from './pages/PortfolioAnalytics';
 import FloatingChatButton from './components/chat/FloatingChatButton';
+import { LivePricesProvider } from './contexts/LivePricesContext';
 
 export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -107,6 +108,7 @@ export default function App() {
   }, []);
 
   return (
+    <LivePricesProvider>
     <BrowserRouter>
       <div className="flex h-screen bg-surface text-slate-100 overflow-hidden">
         <Sidebar />
@@ -174,5 +176,6 @@ export default function App() {
         }}
       />
     </BrowserRouter>
+    </LivePricesProvider>
   );
 }
