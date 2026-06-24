@@ -640,7 +640,7 @@ class DecisionEngine:
                 hard.append(f"news_negative({news_raw:.2f})")
             if earnings_tone == "NEGATIVE":
                 hard.append("earnings_NEGATIVE")
-            if fii_bias <= -1:  # fii_bias < -0.5 → integer equivalent is <= -1
+            if fii_bias <= -2:  # only hard-block on heavy FII selling (>₹2000cr/3d)
                 hard.append(f"fii_bearish({fii_bias})")
 
             if hard:

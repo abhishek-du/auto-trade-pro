@@ -2299,6 +2299,10 @@ def run_master_intelligence_cycle():
                             } for c in cs])
                             df.set_index("timestamp", inplace=True)
 
+                            # Bridge hub score → features so HubSignalStrategy fires
+                            if stock.features is not None:
+                                stock.features.hub_composite_score = stock.master_score
+                                stock.features.hub_signal          = stock.signal
                             candidate = selector.propose(
                                 stock.symbol, df, stock.features,
                                 macro_bias=ctx.macro.total_macro_bias,
