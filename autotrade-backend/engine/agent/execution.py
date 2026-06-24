@@ -49,7 +49,11 @@ class AgentExecutionManager:
             return ""
 
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        trade_value = round(decision.qty * decision.entry, 2)
+        qty = int(decision.qty)   # enforce whole shares — NSE/BSE don't allow fractional orders
+        if qty < 1:
+            logger.warning(f"[agent] PAPER BUY blocked for {decision.symbol}: qty={decision.qty} rounds to 0")
+            return ""
+        trade_value = round(qty * decision.entry, 2)
         now = datetime.utcnow()
 
         # ── Attribution snapshot at entry ─────────────────────────────────────
@@ -63,7 +67,7 @@ class AgentExecutionManager:
             _segment = "EQUITY_MIS"
         else:
             _segment = "EQUITY_CNC"
-        _initial_r   = round(abs(decision.entry - decision.stop) * decision.qty, 2)
+        _initial_r   = round(abs(decision.entry - decision.stop) * qty, 2)
         _conf_bucket = str((decision.confidence // 10) * 10)
         _entry_rsn   = (decision.reasons[0] if decision.reasons else "")[:40]
 
@@ -89,7 +93,7 @@ class AgentExecutionManager:
             entry_price=decision.entry,
             stop_loss=decision.stop,
             take_profit=decision.target,
-            size_units=decision.qty,
+            size_units=qty,
             size_usd=trade_value,
             instrument_type="EQUITY",
             lot_size=1,
@@ -117,7 +121,7 @@ class AgentExecutionManager:
             current_price=decision.entry,
             stop_loss=decision.stop,
             take_profit=decision.target,
-            size_units=decision.qty,
+            size_units=qty,
             size_usd=trade_value,
             instrument_type="EQUITY",
             lot_size=1,
@@ -133,7 +137,7 @@ class AgentExecutionManager:
             symbol=decision.symbol, action=decision.action,
             confidence=decision.confidence, regime=decision.regime,
             strategy=decision.strategy, entry=decision.entry, stop=decision.stop,
-            target=decision.target, qty=decision.qty, risk_pct=decision.risk_pct,
+            target=decision.target, qty=qty, risk_pct=decision.risk_pct,
             reasons=decision.reasons, macro_bias=decision.macro_bias,
             fund_score=decision.fund_score,
             master_score=getattr(decision, "master_score", None),
@@ -143,7 +147,7 @@ class AgentExecutionManager:
         session.add(db_dec)
         session.add(AgentTrade(
             decision_id=db_dec.id, symbol=decision.symbol, side=decision.action,
-            qty=decision.qty, product=getattr(decision, "product", "CNC"),
+            qty=qty, product=getattr(decision, "product", "CNC"),
             entry_price=decision.entry, stop_price=decision.stop,
             target_price=decision.target, entry_ts=now,
             strategy=decision.strategy, regime=decision.regime, is_paper=True,
@@ -151,7 +155,7 @@ class AgentExecutionManager:
         await session.commit()
 
         logger.info(
-            f"[PAPER] {decision.action} {decision.qty} {decision.symbol} "
+            f"[PAPER] {decision.action} {qty} {decision.symbol} "
             f"@ ₹{decision.entry:.2f} | size ₹{trade_value:,.0f} | "
             f"conf={decision.confidence}% RR={decision.risk_reward} | {decision.strategy}"
         )
