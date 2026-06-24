@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../api/client';
 import CandlestickChart from '../components/chart/CandlestickChart';
+import { useLivePrice } from '../contexts/LivePricesContext';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -399,6 +400,8 @@ export default function StockDetail() {
     ? symbol : symbol + '.NS';
   const display  = symbol?.replace('.NS', '').replace('.BO', '').toUpperCase();
 
+  const wsLive   = useLivePrice(nsSymbol);   // real-time from shared WebSocket
+
   const [price,         setPrice]         = useState(null);
   const [deep,          setDeep]          = useState(null);
   const [intel,         setIntel]         = useState(null);
@@ -535,7 +538,9 @@ export default function StockDetail() {
   const aw         = reasoning.active_weights ?? {};
   const ts         = deep?.trade_setup ?? {};
   const indicators = deep?.indicators ?? {};
-  const ltp        = deep?.ltp ?? price?.price ?? null;
+  // wsLive overrides REST price for real-time tick — falls back gracefully
+  const ltp        = wsLive?.price ?? deep?.ltp ?? price?.price ?? null;
+  const ltpChange  = wsLive?.change_pct ?? price?.change_pct ?? deep?.change_pct ?? null;
 
   // Build "What changed today" events from real data + synthetic indicator events.
   // This ensures the section is never blank even when there's no news for this stock.
@@ -660,9 +665,9 @@ export default function StockDetail() {
           {loading && !price ? <Skel w="w-28" h="h-8" /> : (
             <>
               <span className="font-mono text-2xl font-bold text-slate-100">{ltp ? `₹${fmt(ltp)}` : price?.price ? `₹${fmt(price.price)}` : '—'}</span>
-              {price?.change_pct != null && (
-                <span className={`font-mono text-sm font-semibold ${price.change_pct >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  {pct(price.change_pct)}
+              {ltpChange != null && (
+                <span className={`font-mono text-sm font-semibold ${ltpChange >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {pct(ltpChange)}
                 </span>
               )}
             </>

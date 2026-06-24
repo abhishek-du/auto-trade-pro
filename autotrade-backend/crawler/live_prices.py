@@ -299,13 +299,16 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
 
 
 async def refresh_all_prices() -> dict[str, dict]:
-    """Refresh PRICE_CACHE for all configured symbols. Returns updated cache."""
-    t0      = time.monotonic()
-    symbols = [cfg["symbol"] for cfg in SYMBOLS_CONFIG]
-    updated = await fetch_prices_batch(symbols)
+    """Refresh PRICE_CACHE for configured symbols + any dynamically added ones."""
+    t0         = time.monotonic()
+    configured = [cfg["symbol"] for cfg in SYMBOLS_CONFIG]
+    # Include symbols added on-demand (e.g. open positions, stock detail page views)
+    dynamic    = [s for s in PRICE_CACHE if s not in configured]
+    symbols    = configured + dynamic
+    updated    = await fetch_prices_batch(symbols)
     PRICE_CACHE.update(updated)
-    elapsed = int((time.monotonic() - t0) * 1000)
-    logger.info(f"[live_prices] Cache refreshed — {len(updated)} symbols — {elapsed}ms")
+    elapsed    = int((time.monotonic() - t0) * 1000)
+    logger.info(f"[live_prices] Cache refreshed — {len(updated)} symbols ({len(dynamic)} dynamic) — {elapsed}ms")
     return PRICE_CACHE
 
 
