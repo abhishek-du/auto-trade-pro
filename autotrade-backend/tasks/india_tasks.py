@@ -312,6 +312,7 @@ def india_fundamental_update():
 # Hub score moved meaningfully OR the news subscore changed — not on a fixed timer.
 # Maps bare symbol → {"score": float, "news": float, "ts": datetime} of the last alert.
 _shortlist_alerted_loop: dict[str, dict] = {}
+_exit_alerted_trade_ids: set[int] = set()   # dedup: never send exit Telegram twice for same trade
 _SHORTLIST_SCORE_DELTA   = 5.0   # re-alert if |Δ master score| ≥ this
 _SHORTLIST_MIN_REALERT_M = 30    # anti-spam floor: never re-alert within this many minutes
 _MAX_SHORTLIST_PER_CYCLE = 5
@@ -1069,6 +1070,7 @@ async def _fast_sl_check() -> None:
                 trade = await close_paper_trade(pos, price, reason, session)
                 await session.commit()
                 closed.append({
+                    "trade_id":    trade.id,
                     "symbol":      trade.symbol,
                     "direction":   pos.direction.value,
                     "entry_price": trade.entry_price,
@@ -1085,12 +1087,16 @@ async def _fast_sl_check() -> None:
                 logger.warning(f"[fast_sl] close failed for {pos.symbol}: {exc}")
                 await session.rollback()
 
-        # Telegram alerts for live exits
+        # Telegram alerts for live exits — deduplicated by trade_id
         from utils.config import settings as _cfg
         if closed and _cfg.telegram_available:
             try:
                 from integrations.telegram_service import send, fmt_exit
                 for c in closed:
+                    tid = c.get("trade_id")
+                    if tid and tid in _exit_alerted_trade_ids:
+                        logger.debug(f"[fast_sl] exit alert already sent for trade {tid} ({c['symbol']}) — skipping")
+                        continue
                     await send(fmt_exit(
                         symbol=c["symbol"],
                         side=c["direction"],
@@ -1100,6 +1106,8 @@ async def _fast_sl_check() -> None:
                         pnl=c["pnl"],
                         reason=c["reason"],
                     ))
+                    if tid:
+                        _exit_alerted_trade_ids.add(tid)
             except Exception as exc:
                 logger.debug(f"[fast_sl] Telegram notify failed: {exc}")
 
