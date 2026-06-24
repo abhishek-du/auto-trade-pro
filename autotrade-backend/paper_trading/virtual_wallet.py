@@ -249,11 +249,21 @@ class VirtualWallet:
             if wallet.total_trades > 0 else 0.0
         )
 
+        # Derive realised P&L from paper_trades directly (same source as agent/status)
+        # so the header, trades page, and agent status all agree. Reading from
+        # wallet.realised_pnl can drift when a partial close or corporate-action
+        # phantom triggers a wallet debit without a matching closed trade record.
+        from sqlalchemy import func as sqlfunc
+        from db.models import PaperTrade
+        realised_row = (await session.execute(
+            select(sqlfunc.coalesce(sqlfunc.sum(PaperTrade.pnl), 0.0))
+            .where(PaperTrade.exit_price != None, PaperTrade.pnl != None)
+        )).scalar()
+        realised = float(realised_row or 0.0)
+
         # Compute unrealised P&L LIVE from open positions — the SAME compute_live_pnl
         # path the /positions page uses — so the navbar summary matches it instead of
-        # lagging on the last periodic mark-to-market snapshot. Equity is then derived
-        # from the leak-immune identity equity = start + realised + unrealised (not
-        # balance + holdings, whose cash side can carry tiny entry-slippage drift).
+        # lagging on the last periodic mark-to-market snapshot.
         try:
             from paper_trading.position_tracker import PositionTracker
             from paper_trading.trade_simulator import compute_live_pnl
@@ -266,13 +276,13 @@ class VirtualWallet:
         except Exception:
             unrealised = wallet.unrealised_pnl  # fall back to last stored snapshot
 
-        equity = start + wallet.realised_pnl + unrealised
+        equity = start + realised + unrealised
         roi = (equity - start) / start * 100 if start else 0.0
 
         return {
             "balance":        round(wallet.balance, 2),
             "equity":         round(equity, 2),
-            "realised_pnl":   round(wallet.realised_pnl, 2),
+            "realised_pnl":   round(realised, 2),
             "unrealised_pnl": round(unrealised, 2),
             "total_trades":   wallet.total_trades,
             "winning_trades": wallet.winning_trades,
