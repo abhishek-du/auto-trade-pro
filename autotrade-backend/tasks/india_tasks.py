@@ -697,17 +697,6 @@ async def _india_trade_loop():
             except Exception as exc:
                 logger.debug(f"[india_trade_loop] {signal.symbol} level calc failed: {exc}")
 
-        # Step 4c: shortlist Telegram alerts — top-N BUY candidates with
-        # score >= 40, regardless of whether a trade can be placed this cycle.
-        _alerted_count = 0
-        for sig in level_pool:
-            if _alerted_count >= _MAX_SHORTLIST_PER_CYCLE:
-                break
-            if sig.action != "BUY" or sig.final_score < 40:
-                continue
-            await _send_loop_shortlist_alert(sig)
-            _alerted_count += 1
-
         # Step 4d: pre-trade research gate — run Tavily web search + LLM verdict
         # concurrently for all BUY signals in the pool, then remove any vetoed ones.
         # 8-second hard timeout per symbol; failures default to ALLOW so research

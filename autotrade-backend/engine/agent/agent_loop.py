@@ -472,33 +472,6 @@ async def _process_symbol(
         if getattr(candidate, "strategy", "") != "TREND_BREAKOUT_LONG":
             return None
 
-    # 4c. SHORTLIST ALERT — send to Telegram for every high-scoring Hub BUY
-    #     candidate regardless of whether execution ultimately proceeds.
-    #     Threshold: any Hub BUY signal with |master_score| >= 40 OR signal is
-    #     STRONG_BUY. The alert fires here (before risk/fund gates) so the
-    #     channel receives intelligence on ALL good setups, not just traded ones.
-    _shortlist_score_threshold = 40
-    if (
-        hub_override
-        and candidate is not None
-        and candidate.side == "BUY"
-        and _shortlist_alerts_this_cycle < _MAX_SHORTLIST_ALERTS_PER_CYCLE
-        and (
-            (candidate.master_score or 0) >= _shortlist_score_threshold
-            or (getattr(candidate, "hub_subscores", {}) or {}).get("signal") == "STRONG_BUY"
-        )
-        and symbol not in portfolio.open_positions  # skip symbols already held
-    ):
-        # Check cooldown before incrementing counter (avoids wasting a slot on duplicates)
-        bare = symbol.replace(".NS", "")
-        _last = _shortlist_alerted.get(bare)
-        _now  = datetime.utcnow()
-        if not _last or (_now - _last).total_seconds() >= _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
-            _shortlist_alerts_this_cycle += 1
-            asyncio.create_task(
-                _send_shortlist_alert(candidate, df=df, executed=False)
-            )
-
     # 4d. News Sentiment Circuit Breaker — BUY candidates only.
     #
     # Blocks TREND_BREAKOUT_LONG and RANGE_REVERSAL_LONG entries (and Hub BUY
