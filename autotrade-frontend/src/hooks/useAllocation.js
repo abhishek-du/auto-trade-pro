@@ -31,9 +31,7 @@ export function useAllocation(portfolioId, sipGoalIds = []) {
       if (portfolioId) params.set('portfolio_id', portfolioId)
       if (age)         params.set('age', age)
       sipGoalIds.forEach(id => params.append('sip_goal_ids', id))
-      const res  = await apiFetch(`/api/v1/allocation/analysis?${params}`)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || 'Failed to load analysis')
+      const data = await apiFetch(`/api/v1/allocation/analysis?${params}`)
       setAnalysis(data)
     } catch (e) {
       setError(e.message)

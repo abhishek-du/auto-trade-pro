@@ -445,6 +445,12 @@ async def _process_symbol(
         if candidate is not None:
             candidate.regime = features.regime
 
+    # ── VARSITY BACKTEST FIX ──────────────────────────────────────────────────
+    # Re-enabling TREND_BREAKOUT_LONG and RANGE_REVERSAL_LONG as per expert 
+    # trading rules.
+    if candidate is not None:
+        candidate.regime = features.regime
+
     # 4b-2. LIVE entry price — the candidate's entry comes from the latest candle
     # close (can be minutes old). With Zerodha connected, snap it to the live Kite
     # LTP and shift stop/targets by the same delta so R:R is preserved. This makes

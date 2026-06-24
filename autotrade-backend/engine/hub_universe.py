@@ -90,12 +90,11 @@ async def rebuild_hub_universe(
         # Top-49 are index heavyweights (intraday/positional dominated).
         # Breakout-injected stocks are also set is_swing=True by the screener.
         # Zerodha Varsity: swing works best on liquid mid/large-caps → rank 50-1500.
-        is_swing = 50 <= rank <= 1500
         session.add(HubUniverse(
             symbol=r.symbol,
             turnover_cr=round(float(r.turnover) / 1e7, 2),
             rank=rank,
-            is_swing=is_swing,
+            is_swing=True,
         ))
     await session.commit()
 

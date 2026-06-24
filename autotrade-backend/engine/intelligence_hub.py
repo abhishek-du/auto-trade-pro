@@ -270,10 +270,22 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
     breadth_bias = _MOOD_BIAS.get(mood, 0)
     total = max(-5, min(5, fii_bias + dii_bias + vix_bias + breadth_bias))
 
-    # Varsity Ch 16.5: infer market regime from composite macro signals.
-    # BULL when at least 2 net positive signals; BEAR when ≤-2 (persistent FII selling
-    # + weak breadth + elevated VIX → downtrend → suppress momentum swing buys).
-    nifty_regime = "BULL" if total >= 2 else ("BEAR" if total <= -2 else "NEUTRAL")
+    # Varsity Ch 16.5: infer market regime from Nifty 50 200-EMA
+    # If Nifty 50 is below its 200-EMA, the market is in a downtrend (BEAR regime),
+    # which suppresses momentum swing buys to protect capital.
+    from crawler.price_feed import get_latest_candles
+    try:
+        df_nifty = await get_latest_candles(session, "^NSEI", "1d", 300)
+        if len(df_nifty) >= 200:
+            ema200 = df_nifty["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+            last_close = df_nifty["close"].iloc[-1]
+            nifty_regime = "BEAR" if last_close < ema200 else "BULL"
+        else:
+            nifty_regime = "BULL" if total >= 2 else ("BEAR" if total <= -2 else "NEUTRAL")
+    except Exception as exc:
+        logger.warning(f"[hub] Nifty EMA calc failed: {exc}")
+        nifty_regime = "BULL" if total >= 2 else ("BEAR" if total <= -2 else "NEUTRAL")
+
 
     return MacroContext(
         fii_net_1d=round(fii_net_1d, 1), fii_net_3d=round(fii_net_3d, 1),

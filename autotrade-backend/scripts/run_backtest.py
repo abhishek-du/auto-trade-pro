@@ -202,7 +202,8 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             and r["vol_spike"]
             and 55 <= r["rsi14"] <= 75
             and r["adx14"] > 20
-            and r["ema20"] > r["ema50"]):
+            and r["ema20"] > r["ema50"]
+            and r["macd"] > r["macd_signal"]):
         stop   = max(r["swing_high_20"] - 1.5 * atr, r["ema20"] - 0.5 * atr)
         risk   = close - stop
         if risk > 0:
@@ -233,11 +234,12 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
     # Fix: require EMA50 > EMA200 (medium-term not in downtrend) and ADX < 25
     # (confirming genuine range, not a trending decline). Without these gates
     # this strategy fires 36% of all trades with only 37% win rate — catching
-    # falling knives in bear trends.
+    # falling knives in bear trends. Added candlestick pattern check.
     if (regime in ("RANGE", "HIGH_VOL_RANGE", "LOW_VOL_RANGE", "UNKNOWN")
             and close <= r["bb_lower"] and r["rsi14"] <= 35
             and r["ema50"] > r["ema200"]       # medium-term trend not down
-            and r["adx14"] < 25):              # confirmed range, not trending
+            and r["adx14"] < 25
+            and len(r["patterns"]) > 0):       # confirmed by bullish candlestick
         stop = r["low"] - 0.5 * atr
         risk = close - stop
         tgt  = r["bb_mid"]

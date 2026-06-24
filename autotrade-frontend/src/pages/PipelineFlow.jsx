@@ -230,9 +230,9 @@ export default function PipelineFlow() {
     try {
       const [mkt, ag, ctx, sc] = await Promise.allSettled([
         getIndiaMarketStatus(),
-        apiFetch('/api/v1/agent/status').then(r => r.ok ? r.json() : null),
-        apiFetch('/api/v1/intelligence/context').then(r => r.ok ? r.json() : null),
-        apiFetch('/api/v1/intelligence/scores?limit=200').then(r => r.ok ? r.json() : []),
+        apiFetch('/api/v1/agent/status'),
+        apiFetch('/api/v1/intelligence/context'),
+        apiFetch('/api/v1/intelligence/scores?limit=200'),
       ])
       if (mkt.status === 'fulfilled')  setMarket(mkt.value)
       if (ag.status  === 'fulfilled')  setAgent(ag.value)
