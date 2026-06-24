@@ -730,6 +730,11 @@ async def fetch_hub_candidate(
 
     side = "BUY" if master_score > 0 else "SELL"
 
+    # ── Short-selling gate ────────────────────────────────────────────────────
+    if side == "SELL" and not getattr(settings, "EQUITY_SHORT_ENABLED", False):
+        logger.debug(f"[hub_override] {symbol} SELL skipped — EQUITY_SHORT_ENABLED=False")
+        return None
+
     # ── Regime restriction ────────────────────────────────────────────────────
     if regime == "HIGH_VOL_RANGE":
         reason = "regime:HIGH_VOL_RANGE_blocks_all"
