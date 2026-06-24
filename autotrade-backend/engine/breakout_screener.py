@@ -218,7 +218,7 @@ async def inject_breakouts_to_universe(
     candidates: list[BreakoutCandidate],
     session: AsyncSession,
     *,
-    send_telegram: bool = True,
+    send_telegram: bool = False,
 ) -> dict:
     """
     Inject breakout stocks into hub_universe (for scoring) and user_watchlist
