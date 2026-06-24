@@ -1031,16 +1031,22 @@ async def _fast_sl_check() -> None:
             if price <= 0 or not pos.stop_loss:
                 continue
 
-            # Sanity check: if price is >50% different from entry, it's almost
-            # certainly a corporate action (split/bonus/demerger) or a bad tick —
-            # not a real market move. Skip to avoid false P&L.
+            # Sanity check: if price dropped >40% from entry, it's almost
+            # certainly a corporate action (split/bonus/demerger) or a bad tick.
+            # Trigger the corporate action handler immediately instead of a false stop.
             entry_ref = float(pos.entry_price or 0)
-            if entry_ref > 0 and abs(price - entry_ref) / entry_ref > 0.50:
+            if entry_ref > 0 and (entry_ref - price) / entry_ref > 0.40:
                 logger.warning(
-                    f"[fast_sl] {pos.symbol} price ₹{price:.2f} deviates "
-                    f">50% from entry ₹{entry_ref:.2f} — likely corp action, skipping"
+                    f"[fast_sl] {pos.symbol} price ₹{price:.2f} dropped "
+                    f">40% from entry ₹{entry_ref:.2f} — triggering corp action check"
                 )
-                continue
+                try:
+                    from crawler.corporate_actions import check_and_handle_corporate_actions
+                    await check_and_handle_corporate_actions(session)
+                    await session.commit()
+                except Exception as _ca_exc:
+                    logger.warning(f"[fast_sl] corp action handler failed: {_ca_exc}")
+                continue  # Never fire a stop on a suspected corp-action price
 
             is_buy = pos.direction == TradeDirection.BUY
             sl_hit = (is_buy and price <= pos.stop_loss) or (
@@ -1103,6 +1109,39 @@ async def _fast_sl_check() -> None:
 def fast_sl_check():
     """Stop-loss / take-profit check on live PRICE_CACHE ticks every 5 s."""
     _run_async(_fast_sl_check())
+
+
+# ── 6b. Corporate action check — 09:05 IST daily ─────────────────────────────
+
+async def _corporate_action_check() -> None:
+    """Detect stock splits/bonus issues for open positions and auto-adjust them.
+
+    Runs once at 09:05 IST each trading day — after the first 1m candle lands
+    but before the fast-SL check has a chance to fire a false stop.
+    Compares yesterday's 1d close vs today's first 1m open; if price dropped
+    >30%, adjusts units, entry, stop and target proportionally.
+    """
+    if not _is_india_trading_window():
+        return
+
+    from tasks._db import celery_session
+    from crawler.corporate_actions import check_and_handle_corporate_actions
+
+    async with celery_session() as session:
+        events = await check_and_handle_corporate_actions(session)
+        if events:
+            logger.info(
+                f"[corp_action] {len(events)} corporate action(s) handled: "
+                + ", ".join(f"{e.symbol}(×{e.ratio:.2f})" for e in events)
+            )
+        else:
+            logger.debug("[corp_action] no corporate actions detected today")
+
+
+@celery_app.task(name="tasks.corporate_action_check")
+def corporate_action_check():
+    """Detect stock splits/bonus issues for open positions and auto-adjust. 09:05 IST."""
+    _run_async(_corporate_action_check())
 
 
 # ── 7. Intraday MIS burst: morning entry + EOD squareoff ─────────────────────

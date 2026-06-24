@@ -196,6 +196,14 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 20},
     },
 
+    # Daily 03:35 UTC (09:05 IST): detect stock splits/bonus issues for open positions.
+    # Runs just after first 1m candle lands; adjusts units + entry/stop/target + fires news alert.
+    "corporate-action-check-daily": {
+        "task":     "tasks.india_tasks.corporate_action_check",
+        "schedule": crontab(hour=3, minute=35),
+        "options":  {"expires": 300},
+    },
+
     # Daily 03:05 UTC (08:35 IST): refresh NFO contracts (NIFTY/BANKNIFTY/FINNIFTY only).
     # Applies smart filters: nearest 2-3 expiries + 15% OTM strike window.
     # NSE/BSE equity instruments are NOT synced — Hub uses candles for its universe.
