@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useLivePrices } from '../contexts/LivePricesContext';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { formatINR } from '../utils/indianFormat';
@@ -520,8 +521,8 @@ export default function Trades() {
   const [wallet,        setWallet]        = useState(null);
   const [positions,     setPositions]     = useState([]);
   const [agentStatus,   setAgentStatus]   = useState(null);
-  const [livePrices,    setLivePrices]    = useState({});
   const [agentActivity, setAgentActivity] = useState(null); // last agent event
+  const { prices: livePrices, connected, lastAgentEvent } = useLivePrices();
 
   /* ── HTTP fallback — refresh every 30 s (WebSocket is primary) ── */
   useEffect(() => {
@@ -550,23 +551,17 @@ export default function Trades() {
   }, []);
   useWebSocket('/ws/portfolio', { onMessage: onPortfolioMsg });
 
-  /* ── /ws/live-prices — prices + trade events + agent events ── */
-  const onLivePricesMsg = useCallback((msg) => {
-    if (msg.type === 'full_snapshot' && msg.data) {
-      setLivePrices(msg.data);
-    } else if (msg.type === 'price_update' && msg.data) {
-      setLivePrices(prev => ({ ...prev, ...msg.data }));
-    } else if (msg.type === 'agent_event') {
-      setAgentActivity(msg);
-      // New trade opened or closed → refresh positions + trades immediately
-      if (msg.event === 'TRADE_OPENED' || msg.event === 'TRADE_CLOSED') {
-        refetchTrades();
-        getPortfolioPositions().then(setPositions).catch(() => {});
-        getPortfolio().then(setWallet).catch(() => {});
-      }
+  /* ── agent events from shared WebSocket context ── */
+  useEffect(() => {
+    if (!lastAgentEvent) return;
+    setAgentActivity(lastAgentEvent);
+    if (lastAgentEvent.event === 'TRADE_OPENED' || lastAgentEvent.event === 'TRADE_CLOSED') {
+      refetchTrades();
+      getPortfolioPositions().then(setPositions).catch(() => {});
+      getPortfolio().then(setWallet).catch(() => {});
     }
-  }, [refetchTrades]);
-  const { status: wsStatus } = useWebSocket('/ws/live-prices', { onMessage: onLivePricesMsg });
+  }, [lastAgentEvent, refetchTrades]);
+  const wsStatus = connected ? 'open' : 'closed';
 
   /* build symbol → position map for fast lookup.
      Agent trades use id="agent_N" which never matches OpenPosition.trade_id

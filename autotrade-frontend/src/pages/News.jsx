@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getNews } from '../api/client';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useLivePrices } from '../contexts/LivePricesContext';
 
 /* ── Sentiment helpers ──────────────────────────────────────── */
 
@@ -99,25 +99,20 @@ export default function News() {
       .finally(() => setLoading(false));
   }, []);
 
-  // ── Live WS feed — prepend each `news_item` event in real time ─────────────
-  // The crawler broadcasts after every successful save (see crawler/news_crawler.py
-  // run_news_crawl). Payload shape matches the REST response, so we can drop
-  // straight into `articles` state without further mapping. Dedup on URL to
-  // handle the rare case where the WS broadcast arrives before the REST fetch
-  // settled, or two tabs prepend the same item back-to-back.
-  const onMessage = useCallback((data) => {
-    if (!data || data.type !== 'news_item') return;
+  // ── Live feed via shared WebSocket context ────────────────────────────────
+  const { connected, lastNewsItem } = useLivePrices();
+  const wsStatus = connected ? 'open' : 'closed';
+
+  useEffect(() => {
+    if (!lastNewsItem) return;
     setArticles((prev) => {
-      const url = data.url;
+      const url = lastNewsItem.url;
       if (url && prev.some((a) => a.url === url)) return prev;
-      const next = [{ ...data, _live: true }, ...prev];
-      // Cap memory so an open tab doesn't accumulate weeks of headlines.
+      const next = [{ ...lastNewsItem, _live: true }, ...prev];
       return next.length > MAX_ARTICLES ? next.slice(0, MAX_ARTICLES) : next;
     });
     setLiveCount((n) => n + 1);
-  }, []);
-
-  const { status: wsStatus } = useWebSocket('/ws/live-prices', { onMessage });
+  }, [lastNewsItem]);
 
   // Normalise backend shape: headline→title, tickers_affected→symbols, score→sentiment_score
   const normalised = useMemo(() =>
