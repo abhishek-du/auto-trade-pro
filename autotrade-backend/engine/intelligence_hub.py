@@ -232,7 +232,14 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
     fii_net_5d = sum(f.fii_net_buy for f in rows[:5]) if rows else 0.0
     dii_net_3d = sum(f.dii_net_buy for f in rows[:3]) if rows else 0.0
 
-    if   fii_net_3d > 2000:  fii_bias = 2
+    # Staleness guard: if FII data is >5 days old, treat as neutral — stale
+    # data should not permanently block new entries.
+    import datetime as _dt
+    _fii_stale = rows and ((_dt.date.today() - rows[0].date).days > 5)
+    if _fii_stale:
+        logger.debug(f"[hub] FII data stale ({rows[0].date}), using neutral bias")
+        fii_bias = 0
+    elif fii_net_3d > 2000:  fii_bias = 2
     elif fii_net_3d > 500:   fii_bias = 1
     elif fii_net_3d < -2000: fii_bias = -2
     elif fii_net_3d < -500:  fii_bias = -1
