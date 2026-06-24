@@ -251,6 +251,7 @@ async def inject_breakouts_to_universe(
                 symbol=sym,
                 turnover_cr=0.0,   # unknown for new breakouts; will be updated next daily rebuild
                 rank=next_rank,
+                is_swing=True,
             ).on_conflict_do_nothing(index_elements=["symbol"])
             result = await session.execute(stmt)
             if result.rowcount:

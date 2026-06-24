@@ -82,8 +82,7 @@ export default function IndiaFundamentals() {
     <div className="space-y-5 fade-in">
 
       {/* ── Filter bar ─────────────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border px-4 py-3 flex flex-wrap items-center gap-3"
-        style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border px-4 py-3 flex flex-wrap items-center gap-3 glass-panel">
         {/* Search */}
         <div className="flex items-center gap-2 flex-1 min-w-[160px]">
           <Search size={13} className="text-muted shrink-0" />
@@ -115,7 +114,7 @@ export default function IndiaFundamentals() {
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border overflow-hidden glass-panel">
         {all.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-48 gap-2">
             <p className="text-muted text-sm">No fundamental data in database</p>
@@ -132,7 +131,7 @@ export default function IndiaFundamentals() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-muted text-[10px] uppercase tracking-wider">
-                  <th className="text-left  px-5 py-3 sticky left-0 bg-[#0F1829]">Symbol</th>
+                  <th className="text-left  px-5 py-3 sticky left-0 glass-panel">Symbol</th>
                   <th className="text-right px-4 py-3">PE</th>
                   <th className="text-right px-4 py-3">ROE %</th>
                   <th className="text-right px-4 py-3">ROCE %</th>
@@ -146,7 +145,7 @@ export default function IndiaFundamentals() {
               <tbody className="divide-y divide-border">
                 {filtered.map((r, i) => (
                   <tr key={i} className="hover:bg-white/2 transition-colors">
-                    <td className="px-5 py-3 sticky left-0 bg-[#0F1829]">
+                    <td className="px-5 py-3 sticky left-0 glass-panel">
                       <p className="font-semibold text-slate-200">
                         {r.symbol?.replace('.NS', '')}
                       </p>

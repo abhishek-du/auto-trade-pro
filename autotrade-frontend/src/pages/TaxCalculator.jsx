@@ -85,7 +85,7 @@ export default function TaxCalculator() {
       )}
 
       {/* ── Tax rules info box ── */}
-      <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border overflow-hidden glass-panel">
         <button
           onClick={() => setShowRules(!showRules)}
           className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-white/2 transition-colors"
@@ -130,7 +130,7 @@ export default function TaxCalculator() {
       </div>
 
       {/* ── Tabs ── */}
-      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
+      <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit max-w-full overflow-x-auto scrollbar-none">
         {TABS.map(t => {
           const Icon = t.icon
           return (
@@ -172,7 +172,7 @@ export default function TaxCalculator() {
           )}
 
           {tab === 'breakdown' && portfolioId && (
-            <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+            <div className="rounded-xl border border-border p-5 glass-panel">
               <TradeBreakdownTable breakdown={breakdown} />
             </div>
           )}
@@ -184,7 +184,7 @@ export default function TaxCalculator() {
           )}
 
           {tab === 'harvesting' && (
-            <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+            <div className="rounded-xl border border-border p-5 glass-panel">
               {portfolioId ? (
                 <HarvestingPanel harvesting={harvesting} loading={loading} />
               ) : (
@@ -196,7 +196,7 @@ export default function TaxCalculator() {
           )}
 
           {tab === 'calculator' && (
-            <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+            <div className="rounded-xl border border-border p-5 glass-panel">
               <StandaloneCalculator />
             </div>
           )}

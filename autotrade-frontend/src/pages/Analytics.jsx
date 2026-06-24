@@ -20,7 +20,7 @@ const CHART_THEME = {
 function ChartTooltip({ active, payload, label, prefix = '' }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="bg-panel border border-border rounded-lg p-3 text-xs shadow-lg">
+    <div className="glass-panel border border-border rounded-lg p-3 text-xs shadow-lg">
       <p className="text-muted mb-1">{label}</p>
       {payload.map((p) => (
         <p key={p.dataKey} style={{ color: p.color }} className="font-semibold">
@@ -86,7 +86,7 @@ export default function Analytics() {
       </div>
 
       {/* Equity curve */}
-      <div className="bg-panel border border-border rounded-xl p-5 space-y-3">
+      <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
         <div className="flex items-center gap-2">
           <TrendingUp size={16} className="text-accent" />
           <h3 className="text-slate-200 font-semibold text-sm">Equity Curve</h3>
@@ -126,7 +126,7 @@ export default function Analytics() {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
 
         {/* Bar chart — P&L by symbol */}
-        <div className="xl:col-span-2 bg-panel border border-border rounded-xl p-5 space-y-3">
+        <div className="xl:col-span-2 glass-panel border border-border rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2">
             <BarChart2 size={16} className="text-accent" />
             <h3 className="text-slate-200 font-semibold text-sm">P&L by Symbol</h3>
@@ -153,7 +153,7 @@ export default function Analytics() {
         </div>
 
         {/* Pie chart — Win/Loss */}
-        <div className="bg-panel border border-border rounded-xl p-5 space-y-3">
+        <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
           <div className="flex items-center gap-2">
             <PieIcon size={16} className="text-accent" />
             <h3 className="text-slate-200 font-semibold text-sm">Win / Loss Breakdown</h3>

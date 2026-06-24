@@ -24,7 +24,7 @@ function SortIcon({ field, sortBy, sortDir }) {
 export default function WatchlistTableHeader({ sortBy, sortDir, onSort }) {
   return (
     <thead>
-      <tr className="border-b border-border bg-panel/80 sticky top-0 z-10">
+      <tr className="border-b border-border glass-panel/80 sticky top-0 z-10">
         {COLUMNS.map(({ label, field, align, width, title }) => (
           <th
             key={field}

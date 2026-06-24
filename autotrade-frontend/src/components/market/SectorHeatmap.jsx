@@ -30,7 +30,7 @@ function sectorText(pct) {
 
 export default function SectorHeatmap({ prices }) {
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <p className="text-slate-200 text-sm font-semibold">Sector Heatmap</p>
       <div className="grid grid-cols-3 gap-2">
         {SECTORS.map(({ label, symbol }) => {

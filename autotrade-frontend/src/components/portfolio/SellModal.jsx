@@ -45,7 +45,7 @@ export default function SellModal({ holding, onClose, onSell }) {
   return (
     <>
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 h-full w-full max-w-sm z-50 flex flex-col bg-panel border-l border-border shadow-2xl">
+      <div className="fixed right-0 top-0 h-full w-full max-w-sm z-50 flex flex-col glass-panel border-l border-border shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-slate-100 font-bold text-base flex items-center gap-2">
             <TrendingDown size={16} className="text-loss" /> Sell {holding.symbol?.replace('.NS', '')}

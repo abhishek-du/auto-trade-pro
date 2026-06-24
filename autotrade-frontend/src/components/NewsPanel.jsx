@@ -11,7 +11,7 @@ function sentimentCls(s) {
 
 export default function NewsPanel({ articles = [] }) {
   if (!articles.length) return (
-    <div className="rounded-xl border border-border p-8 text-center" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border p-8 text-center glass-panel">
       <p className="text-muted text-sm">No news articles loaded yet</p>
     </div>
   );
@@ -20,8 +20,7 @@ export default function NewsPanel({ articles = [] }) {
     <div className="space-y-2">
       {articles.map((a, i) => (
         <div key={i}
-          className="rounded-xl border border-border px-4 py-3.5 flex gap-4 items-start hover:border-accent/25 transition-all duration-150 group cursor-default"
-          style={{ background: 'linear-gradient(135deg,#0F1829,#131E30)' }}>
+          className="rounded-xl border border-border px-4 py-3.5 flex gap-4 items-start hover:border-accent/25 transition-all duration-150 group cursor-default glass-panel">
           <div className="flex-1 min-w-0">
             <p className="text-slate-200 text-sm font-medium leading-snug group-hover:text-white transition-colors line-clamp-2">
               {a.headline ?? a.title}

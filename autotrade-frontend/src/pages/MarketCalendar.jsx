@@ -88,7 +88,7 @@ export default function MarketCalendar() {
 
         <div className="flex items-center gap-2 flex-wrap">
           {/* View toggle */}
-          <div className="flex items-center gap-0.5 bg-panel border border-border rounded-lg p-0.5">
+          <div className="flex items-center gap-0.5 glass-panel border border-border rounded-lg p-0.5">
             <button
               title="Calendar view"
               onClick={() => setViewMode('calendar')}
@@ -129,7 +129,7 @@ export default function MarketCalendar() {
       </div>
 
       {/* ── Row 3: Filter bar ── */}
-      <div className="bg-panel border border-border rounded-xl px-4 py-3">
+      <div className="glass-panel border border-border rounded-xl px-4 py-3">
         <FilterBar
           activeFilters={activeFilters}
           onToggle={toggleFilter}
@@ -142,7 +142,7 @@ export default function MarketCalendar() {
 
         {/* Calendar / List — 75% */}
         <div className="lg:col-span-3">
-          <div className="bg-panel border border-border rounded-xl p-4">
+          <div className="glass-panel border border-border rounded-xl p-4">
 
             {/* Month navigation */}
             <div className="flex items-center justify-between mb-4">
@@ -183,7 +183,7 @@ export default function MarketCalendar() {
           </div>
 
           {/* Legend */}
-          <div className="bg-panel border border-border rounded-xl px-4 py-3 mt-3">
+          <div className="glass-panel border border-border rounded-xl px-4 py-3 mt-3">
             <div className="flex items-center gap-4 flex-wrap">
               <span className="text-muted text-[10px] font-semibold uppercase tracking-wider shrink-0">Legend:</span>
               {['IPO','EARNINGS','RBI_MPC','FNO_EXPIRY','HOLIDAY'].map(type => {

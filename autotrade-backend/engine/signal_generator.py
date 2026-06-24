@@ -71,6 +71,11 @@ class TradingSignal:
     risk_reward_ratio:  float            = 0.0
     regime:             str              = ""
     hub_subscores:      dict             = field(default_factory=dict)  # 7-factor breakdown + indicator detail
+    # Varsity checklist item 2: nearest S&R levels backing the stop-loss.
+    # Populated when IndicatorSignals are available (hub path).  0.0 = unknown;
+    # validate_signal() skips the S&R gate when either field is 0.
+    sr_support:         float            = 0.0
+    sr_resistance:      float            = 0.0
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

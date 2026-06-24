@@ -94,7 +94,7 @@ function FundSearchBox({ onAdd }) {
       </div>
 
       {results.length > 0 && (
-        <div className="absolute top-full mt-1 left-0 right-0 z-50 bg-panel border border-border rounded-xl shadow-2xl overflow-hidden max-h-72 overflow-y-auto">
+        <div className="absolute top-full mt-1 left-0 right-0 z-50 glass-panel border border-border rounded-xl shadow-2xl overflow-hidden max-h-72 overflow-y-auto">
           {results.map(r => (
             <button
               key={r.scheme_code}
@@ -133,7 +133,7 @@ function FundCard({ fund, onRemove, onRefresh, onAddSip }) {
   }
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <p className="text-slate-100 font-semibold text-sm leading-snug line-clamp-2">{fund.scheme_name}</p>
@@ -220,7 +220,7 @@ function AddSIPModal({ fund, onClose, onSave }) {
   return (
     <>
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 h-full w-full max-w-sm z-50 flex flex-col bg-panel border-l border-border shadow-2xl">
+      <div className="fixed right-0 top-0 h-full w-full max-w-sm z-50 flex flex-col glass-panel border-l border-border shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 className="text-slate-100 font-bold text-sm">Add SIP</h2>
           <button onClick={onClose} className="p-1.5 rounded text-muted hover:text-white hover:bg-white/10">
@@ -344,7 +344,7 @@ function SIPRow({ sip, onToggle, onDelete }) {
 
 function AnalysisPanel({ analysis, analyzing, onRun }) {
   return (
-    <div className="rounded-xl border border-border bg-panel overflow-hidden">
+    <div className="rounded-xl border border-border glass-panel overflow-hidden">
       <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
         <div className="flex items-center gap-2">
           <Brain size={14} className="text-accent" />
@@ -449,7 +449,7 @@ export default function MyMutualFunds() {
             { label: 'Monthly SIP',   value: totalMonthly,  fmt: v => `₹${v.toLocaleString('en-IN')}` },
             { label: 'Total Invested', value: totalInvested, fmt: v => `₹${Math.round(v).toLocaleString('en-IN')}` },
           ].map(({ label, value, fmt }) => (
-            <div key={label} className="bg-panel border border-border rounded-xl px-4 py-3">
+            <div key={label} className="glass-panel border border-border rounded-xl px-4 py-3">
               <p className="text-muted text-[10px] uppercase tracking-wider mb-1">{label}</p>
               <p className="text-slate-100 font-bold text-lg tabular-nums">{fmt(value)}</p>
             </div>

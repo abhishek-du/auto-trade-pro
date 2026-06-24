@@ -40,7 +40,7 @@ export default function HealthScoreCard({ score, grade, summary, generatedAt, qu
     grade === 'D' ? '#F97316' : '#EF4444'
 
   return (
-    <div className="rounded-xl border border-border p-5 space-y-4" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border p-5 space-y-4 glass-panel">
       <div className="flex items-center gap-6">
         {/* Score ring */}
         <div className="relative shrink-0">

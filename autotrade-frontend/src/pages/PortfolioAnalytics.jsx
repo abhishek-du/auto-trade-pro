@@ -3,7 +3,7 @@ import {
   RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   PieChart, Pie, Cell,
   BarChart, Bar,
-  LineChart, Line,
+  LineChart, Line, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   ReferenceLine,
 } from 'recharts'
@@ -33,7 +33,7 @@ const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-dig
 
 function StatCard({ label, value, sub, highlight, icon: Icon, tooltip }) {
   return (
-    <div className="rounded-xl border border-border p-4 space-y-1 relative group" style={{ background: '#0F1829' }}>
+    <div className="glass-panel rounded-xl p-4 space-y-1 relative group hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300">
       {tooltip && (
         <div className="hidden group-hover:block absolute top-2 right-2 z-10 w-56 bg-slate-800 border border-border text-xs text-slate-300 p-2 rounded-lg shadow-xl">
           {tooltip}
@@ -62,8 +62,8 @@ function SectionHeader({ title, sub }) {
 function ChartTooltipCustom({ active, payload, label }) {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-panel border border-border rounded-lg p-3 text-xs shadow-xl">
-      <p className="text-muted mb-1">{label}</p>
+    <div className="glass-panel rounded-lg p-3 text-xs shadow-2xl border-white/5">
+      <p className="text-slate-300 mb-1 font-semibold">{label}</p>
       {payload.map((p) => (
         <p key={p.dataKey} style={{ color: p.color }} className="font-semibold">
           {p.name}: {typeof p.value === 'number' ? p.value.toFixed(3) : p.value}
@@ -100,8 +100,8 @@ function PolicyEditor({ policy, onSave, onClose }) {
   )
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-panel border border-border rounded-2xl p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md slide-in-right" onClick={onClose}>
+      <div className="glass-panel rounded-2xl p-6 w-[calc(100vw-2rem)] max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-slate-100 font-semibold mb-4">Portfolio Policy</h3>
         <div className="grid grid-cols-2 gap-4">
           {field('max_single_stock_weight', 'Max Stock Weight (%)', 1, 50)}
@@ -140,15 +140,15 @@ function PolicyEditor({ policy, onSave, onClose }) {
 function RebalanceTable({ signals }) {
   if (!signals?.length) {
     return (
-      <div className="rounded-xl border border-border p-6 text-center" style={{ background: '#0F1829' }}>
-        <CheckCircle size={20} className="text-emerald-400 mx-auto mb-2" />
-        <p className="text-muted text-sm">Portfolio is balanced — no rebalance needed</p>
+      <div className="glass-panel rounded-xl p-6 text-center">
+        <CheckCircle size={24} className="text-emerald-400 mx-auto mb-3 drop-shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
+        <p className="text-slate-300 text-sm font-medium">Portfolio is balanced — no rebalance needed</p>
       </div>
     )
   }
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
-      <div className="overflow-x-auto">
+    <div className="glass-panel rounded-xl overflow-hidden">
+      <div className="overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border">
@@ -376,32 +376,48 @@ export default function PortfolioAnalytics() {
       {/* Charts row: historical metrics + portfolio vs benchmark */}
       {perfData.length > 1 && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="rounded-xl border border-border p-4" style={{ background: '#0F1829' }}>
+          <div className="glass-panel rounded-xl p-4">
             <SectionHeader title="Portfolio vs NIFTY 50" sub="Annualized return (%)" />
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={perfData}>
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={perfData}>
+                <defs>
+                  <linearGradient id="colorPort" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2979FF" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#2979FF" stopOpacity={0}/>
+                  </linearGradient>
+                  <linearGradient id="colorBench" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#00E676" stopOpacity={0.4}/>
+                    <stop offset="95%" stopColor="#00E676" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
                 <CartesianGrid {...CHART_THEME.grid} />
                 <XAxis dataKey="date" tick={CHART_THEME.tick} axisLine={CHART_THEME.axis} tickLine={false} />
                 <YAxis tick={CHART_THEME.tick} axisLine={CHART_THEME.axis} tickLine={false} width={40} unit="%" />
                 <Tooltip content={<ChartTooltipCustom />} />
                 <ReferenceLine y={0} stroke="#475569" strokeDasharray="4 4" />
-                <Line type="monotone" dataKey="Portfolio" stroke="#6366F1" strokeWidth={2} dot={false} name="Portfolio" connectNulls />
-                <Line type="monotone" dataKey="Benchmark" stroke="#10B981" strokeWidth={1.5} dot={false} name="NIFTY 50" connectNulls />
+                <Area type="monotone" dataKey="Portfolio" stroke="#2979FF" strokeWidth={3} fillOpacity={1} fill="url(#colorPort)" name="Portfolio" connectNulls />
+                <Area type="monotone" dataKey="Benchmark" stroke="#00E676" strokeWidth={2} fillOpacity={1} fill="url(#colorBench)" name="NIFTY 50" connectNulls />
                 <Legend wrapperStyle={{ fontSize: 11, color: '#94A3B8' }} />
-              </LineChart>
+              </AreaChart>
             </ResponsiveContainer>
           </div>
 
-          <div className="rounded-xl border border-border p-4" style={{ background: '#0F1829' }}>
+          <div className="glass-panel rounded-xl p-4">
             <SectionHeader title="Sharpe Ratio History" sub="Rolling Sharpe (annualized)" />
-            <ResponsiveContainer width="100%" height={200}>
+            <ResponsiveContainer width="100%" height={220}>
               <BarChart data={perfData}>
+                <defs>
+                  <linearGradient id="colorSharpe" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2979FF" stopOpacity={0.8}/>
+                    <stop offset="95%" stopColor="#00B0FF" stopOpacity={0.2}/>
+                  </linearGradient>
+                </defs>
                 <CartesianGrid {...CHART_THEME.grid} />
                 <XAxis dataKey="date" tick={CHART_THEME.tick} axisLine={CHART_THEME.axis} tickLine={false} />
                 <YAxis tick={CHART_THEME.tick} axisLine={CHART_THEME.axis} tickLine={false} width={40} />
                 <Tooltip content={<ChartTooltipCustom />} />
                 <ReferenceLine y={1} stroke="#F59E0B" strokeDasharray="4 4" label={{ value: 'Good (1.0)', fill: '#F59E0B', fontSize: 9 }} />
-                <Bar dataKey="Sharpe" fill="#6366F1" radius={[3, 3, 0, 0]} name="Sharpe" />
+                <Bar dataKey="Sharpe" fill="url(#colorSharpe)" radius={[4, 4, 0, 0]} name="Sharpe" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -411,7 +427,7 @@ export default function PortfolioAnalytics() {
       {/* Weights charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Position weights */}
-        <div className="rounded-xl border border-border p-4" style={{ background: '#0F1829' }}>
+        <div className="glass-panel rounded-xl p-4">
           <SectionHeader
             title="Position Weights"
             sub={`Max per stock: ${policy.max_single_stock_weight ?? 10}%`}
@@ -444,7 +460,7 @@ export default function PortfolioAnalytics() {
         </div>
 
         {/* Sector weights */}
-        <div className="rounded-xl border border-border p-4" style={{ background: '#0F1829' }}>
+        <div className="glass-panel rounded-xl p-4">
           <SectionHeader
             title="Sector Concentration"
             sub={`Max per sector: ${policy.max_sector_weight ?? 25}%`}
@@ -474,7 +490,7 @@ export default function PortfolioAnalytics() {
       </div>
 
       {/* Policy summary strip */}
-      <div className="rounded-xl border border-border p-4 flex flex-wrap gap-6" style={{ background: '#0F1829' }}>
+      <div className="glass-panel rounded-xl p-4 flex flex-wrap gap-6">
         <div>
           <p className="text-muted text-[10px] uppercase tracking-widest font-semibold">Risk Tolerance</p>
           <p className="text-slate-100 text-sm font-semibold mt-0.5">{policy.risk_tolerance ?? '—'}</p>

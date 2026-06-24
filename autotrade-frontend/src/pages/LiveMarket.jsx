@@ -98,7 +98,7 @@ export default function LiveMarket() {
         <div className="lg:col-span-2 space-y-4">
           {/* VIX card */}
           {vix && (
-            <div className="bg-panel border border-border rounded-xl p-4">
+            <div className="glass-panel border border-border rounded-xl p-4">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-slate-200 text-sm font-semibold">India VIX</p>
                 <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
@@ -124,7 +124,7 @@ export default function LiveMarket() {
           <BreadthWidget compact={false} />
         </div>
         <div className="lg:col-span-3">
-          <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+          <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
             <p className="text-slate-200 text-sm font-semibold">Sector Heatmap</p>
             <SectorHeatmapWidget compact={false} maxSectors={10} />
           </div>
@@ -135,7 +135,7 @@ export default function LiveMarket() {
       <TopMoversPanel topMovers={topMovers} />
 
       {/* 5 — Full stocks table */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel border border-border rounded-xl overflow-hidden">
 
         {/* Table header */}
         <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border">

@@ -32,7 +32,7 @@ export default function SummarySection({ title, emoji, items = [], color = 'blue
   const remaining = items.length - maxVisible
 
   return (
-    <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border glass-panel">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
         {emoji && <span className="text-sm">{emoji}</span>}
         <h3 className={`font-semibold text-sm ${cfg.header}`}>{title}</h3>

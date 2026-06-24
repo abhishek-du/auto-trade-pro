@@ -88,7 +88,7 @@ export default function MutualFunds() {
     <div className="space-y-5 fade-in">
 
       {/* ── Tab bar ── */}
-      <div className="flex items-center gap-0.5 bg-panel border border-border rounded-xl p-1 w-fit">
+      <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit">
         <button
           onClick={() => setActiveTab('market')}
           className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
@@ -112,7 +112,7 @@ export default function MutualFunds() {
       {activeTab === 'market' && (<>
 
       {/* ── SIP Calculator ─────────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border p-5 space-y-4" style={{ background: '#0F1829' }}>
+      <div className="glass-panel rounded-xl p-6 space-y-5 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300">
         <div className="flex items-center gap-2">
           <Calculator size={16} className="text-cyan" />
           <h2 className="text-slate-100 font-semibold text-sm">SIP Calculator</h2>
@@ -158,22 +158,22 @@ export default function MutualFunds() {
         </div>
 
         {result && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-border">
-            <div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-5 border-t border-white/10 mt-5">
+            <div className="bg-white/5 p-3 rounded-lg border border-white/5">
               <p className="text-muted text-[10px] uppercase tracking-widest mb-1">Total Invested</p>
-              <p className="text-slate-100 font-bold text-xl tabular-nums">{fmtINR(result.total_invested)}</p>
+              <p className="text-slate-100 font-bold text-2xl tabular-nums">{fmtINR(result.total_invested)}</p>
             </div>
-            <div>
-              <p className="text-muted text-[10px] uppercase tracking-widest mb-1">Projected Value</p>
-              <p className="text-profit font-bold text-xl tabular-nums">{fmtINR(result.projected_value)}</p>
+            <div className="bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+              <p className="text-emerald-400 text-[10px] uppercase tracking-widest mb-1">Projected Value</p>
+              <p className="text-emerald-400 font-bold text-2xl tabular-nums">{fmtINR(result.projected_value)}</p>
             </div>
-            <div>
-              <p className="text-muted text-[10px] uppercase tracking-widest mb-1">Absolute Return</p>
-              <p className="text-profit font-bold text-xl tabular-nums">{fmtINR(result.absolute_return)}</p>
+            <div className="bg-emerald-500/5 p-3 rounded-lg border border-emerald-500/10">
+              <p className="text-emerald-400/80 text-[10px] uppercase tracking-widest mb-1">Absolute Return</p>
+              <p className="text-emerald-400/90 font-bold text-xl tabular-nums">+{fmtINR(result.absolute_return)}</p>
             </div>
-            <div>
-              <p className="text-muted text-[10px] uppercase tracking-widest mb-1">Return %</p>
-              <p className="text-accent font-bold text-xl tabular-nums">
+            <div className="bg-cyan-500/10 p-3 rounded-lg border border-cyan-500/20">
+              <p className="text-cyan text-[10px] uppercase tracking-widest mb-1">Return %</p>
+              <p className="text-cyan font-bold text-xl tabular-nums drop-shadow-sm">
                 {result.absolute_return_pct != null
                   ? `+${(+result.absolute_return_pct).toFixed(1)}%`
                   : '—'}
@@ -184,8 +184,8 @@ export default function MutualFunds() {
       </div>
 
       {/* ── Fund table ─────────────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
-        <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+      <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+        <div className="px-5 py-3.5 border-b border-white/5 bg-black/20 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Wallet size={14} className="text-cyan" />
             <h2 className="text-slate-100 font-semibold text-sm">Tracked Funds</h2>
@@ -202,7 +202,7 @@ export default function MutualFunds() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border text-muted text-[10px] uppercase tracking-wider">
+                <tr className="border-b border-white/5 bg-white/5 text-muted text-[10px] uppercase tracking-wider">
                   <th className="text-left px-5 py-3">Fund Name</th>
                   <th className="text-left px-4 py-3">Category</th>
                   <th className="text-right px-4 py-3">NAV</th>
@@ -212,15 +212,15 @@ export default function MutualFunds() {
                   <th className="text-center px-5 py-3">Signal</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border">
+              <tbody className="divide-y divide-white/5">
                 {funds.map((f, i) => (
                   <tr key={i}
                     onClick={() => handleFundChange(f.scheme_code)}
-                    className={`hover:bg-white/2 transition-colors cursor-pointer ${
-                      f.scheme_code === calc.schemeCode ? 'bg-accent/5' : ''
+                    className={`hover:bg-white/10 transition-colors cursor-pointer group ${
+                      f.scheme_code === calc.schemeCode ? 'bg-cyan-500/10' : ''
                     }`}>
-                    <td className="px-5 py-3">
-                      <p className="font-semibold text-slate-200 line-clamp-1">{f.name}</p>
+                    <td className="px-5 py-3.5">
+                      <p className="font-semibold text-slate-200 line-clamp-1 group-hover:text-cyan transition-colors">{f.name}</p>
                       <p className="text-muted text-[10px] mt-0.5">{f.scheme_code}</p>
                     </td>
                     <td className="px-4 py-3 text-muted text-xs">{f.category}</td>

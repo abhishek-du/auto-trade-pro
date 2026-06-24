@@ -102,7 +102,7 @@ export default function ChatSidebar({ activeContexts, onSuggestionClick }) {
           <Activity size={12} className="text-cyan" />
           <span className="text-[10px] font-semibold uppercase tracking-widest text-muted">Market Pulse</span>
         </div>
-        <div className="rounded-xl border border-border px-3 py-1" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border px-3 py-1 glass-panel">
           <MarketTicker symbol="^NSEI"    label="NIFTY 50" />
           <MarketTicker symbol="^NSEBANK" label="BANKNIFTY" />
           <MarketTicker symbol="^CNXIT"   label="NIFTY IT" />

@@ -24,7 +24,7 @@ const MODES = ['FV Calculator', 'Required SIP', 'Time to Target']
 const DonutTooltip = ({ active, payload }) => {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-panel border border-border rounded-lg px-3 py-2 text-xs">
+    <div className="glass-panel border border-border rounded-lg px-3 py-2 text-xs">
       <p style={{ color: payload[0].payload.fill }}>{payload[0].name}</p>
       <p className="text-slate-200 font-semibold">{fmtINR(payload[0].value)}</p>
     </div>
@@ -34,7 +34,7 @@ const DonutTooltip = ({ active, payload }) => {
 const ChartTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-panel border border-border rounded-lg px-3 py-2 text-xs space-y-1">
+    <div className="glass-panel border border-border rounded-lg px-3 py-2 text-xs space-y-1">
       <p className="text-muted">{label}</p>
       {payload.map(p => (
         <p key={p.dataKey} style={{ color: p.color }}>{p.name}: ₹{(p.value||0).toLocaleString('en-IN',{maximumFractionDigits:0})}</p>

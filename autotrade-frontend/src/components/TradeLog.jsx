@@ -6,14 +6,14 @@ const fmtDate = (s) => {
 
 export default function TradeLog({ trades = [] }) {
   if (!trades.length) return (
-    <div className="rounded-xl border border-border p-10 flex flex-col items-center gap-2" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border p-10 flex flex-col items-center gap-2 glass-panel">
       <p className="text-muted text-sm">No trades recorded yet</p>
       <p className="text-muted/50 text-xs">Executed trades will appear here</p>
     </div>
   );
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>

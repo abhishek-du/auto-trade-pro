@@ -11,7 +11,7 @@ function CustomTooltip({ active, payload, targetAllocation }) {
   const targetPct = targetAllocation?.[name] ?? null
   const dev       = targetPct !== null ? pct - targetPct : null
   return (
-    <div className="rounded-xl border border-border px-3 py-2 text-xs" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border px-3 py-2 text-xs glass-panel">
       <p className="text-slate-200 font-semibold mb-1">{ASSET_CLASSES[name]?.label || name}</p>
       <p className="text-muted">Value: <span className="text-slate-200">{formatINR(value, 0)}</span></p>
       <p className="text-muted">Weight: <span className="text-slate-200">{pct.toFixed(1)}%</span></p>

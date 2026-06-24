@@ -59,47 +59,40 @@ export default function FloatingChatButton() {
   }
 
   return (
-    <div className="fixed bottom-20 right-4 md:bottom-6 md:right-6 z-50 flex flex-col items-end gap-3">
+    <div className="fixed bottom-20 right-4 md:bottom-6 md:right-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
       {/* Mini chat drawer */}
       {open && (
-        <div className="w-80 rounded-2xl border border-border overflow-hidden shadow-2xl fade-in"
-          style={{ background: '#0A1120' }}>
-
+        <div className="w-[calc(100vw-2rem)] md:w-80 max-w-sm rounded-2xl overflow-hidden glass-panel slide-in-right pointer-events-auto flex flex-col shadow-[0_8px_30px_rgb(0,0,0,0.5)]">
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border"
-            style={{ background: 'linear-gradient(135deg,rgba(29,78,216,0.4),rgba(8,145,178,0.2))' }}>
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-white/5 backdrop-blur-md">
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold"
-                style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>A</div>
+              <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-[0_0_15px_rgba(41,121,255,0.4)] glass-panel">A</div>
               <div>
-                <p className="text-xs font-bold text-slate-100">Avishk AI</p>
-                <p className="text-[10px] text-muted">NSE Stock Analyst</p>
+                <p className="text-sm font-bold text-slate-100 tracking-tight">Avishk AI</p>
+                <p className="text-[10px] text-cyan uppercase tracking-widest font-semibold opacity-90">NSE Stock Analyst</p>
               </div>
             </div>
-            <button onClick={() => setOpen(false)} className="text-muted hover:text-slate-300 transition-colors">
-              <X size={14} />
+            <button onClick={() => setOpen(false)} className="text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 p-1.5 rounded-full transition-all">
+              <X size={16} />
             </button>
           </div>
 
           {/* Messages */}
-          <div className="h-64 overflow-y-auto px-3 py-3 space-y-2" style={{ scrollbarWidth: 'thin' }}>
+          <div className="h-72 overflow-y-auto px-4 py-4 space-y-3 relative" style={{ scrollbarWidth: 'thin' }}>
             {messages.length === 0 ? (
-              <p className="text-[11px] text-muted/60 text-center mt-8 leading-relaxed">
-                Ask me anything about NSE stocks.<br />
-                <span className="text-muted/40">Try: "Is HDFC Bank a BUY?"</span>
-              </p>
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
+                <div className="w-12 h-12 rounded-full mb-3 flex items-center justify-center opacity-30 shadow-[0_0_20px_rgba(41,121,255,0.3)] glass-panel">
+                  <MessageSquare size={20} className="text-white" />
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed font-medium">
+                  Ask me anything about NSE stocks.
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1">Try: "Is HDFC Bank a BUY?"</p>
+              </div>
             ) : (
               messages.map(m => (
                 <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] text-[11px] leading-relaxed px-3 py-2 rounded-xl ${
-                    m.role === 'user'
-                      ? 'text-white rounded-br-sm'
-                      : 'text-slate-200 rounded-bl-sm border border-border'
-                  }`}
-                    style={m.role === 'user'
-                      ? { background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }
-                      : { background: '#0F1829' }
-                    }>
+                  <div className={`max-w-[85%] text-xs leading-relaxed px-3.5 py-2.5 ${m.role === 'user' ? 'chat-bubble-user text-white' : 'chat-bubble-bot text-slate-200'}`}>
                     {m.content}
                   </div>
                 </div>
@@ -107,9 +100,10 @@ export default function FloatingChatButton() {
             )}
             {loading && (
               <div className="flex justify-start">
-                <div className="px-3 py-2 rounded-xl rounded-bl-sm border border-border text-[10px] text-muted"
-                  style={{ background: '#0F1829' }}>
-                  Avishk is thinking…
+                <div className="chat-bubble-bot px-3 py-2">
+                  <div className="typing-indicator">
+                    <span></span><span></span><span></span>
+                  </div>
                 </div>
               </div>
             )}
@@ -117,7 +111,7 @@ export default function FloatingChatButton() {
           </div>
 
           {/* Input */}
-          <div className="px-3 py-3 border-t border-border flex items-center gap-2">
+          <div className="px-3 py-3 border-t border-white/5 bg-black/20 backdrop-blur-md flex items-center gap-2">
             <input
               ref={inputRef}
               value={input}
@@ -125,46 +119,45 @@ export default function FloatingChatButton() {
               onKeyDown={handleKey}
               placeholder="Ask about a stock…"
               disabled={loading}
-              className="flex-1 text-xs rounded-lg border border-border px-3 py-2 text-slate-200 placeholder-muted/50 outline-none focus:border-accent/50 disabled:opacity-50"
-              style={{ background: '#080D1A' }}
+              className="flex-1 text-xs rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-slate-200 placeholder-slate-500 outline-none focus:border-accent/50 focus:bg-white/10 transition-all disabled:opacity-50"
             />
             <button onClick={send} disabled={loading || !input.trim()}
-              className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-all disabled:opacity-40"
-              style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
+              className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all disabled:opacity-40 hover:scale-105 active:scale-95 shadow-[0_0_10px_rgba(41,121,255,0.3)] glass-panel">
               {loading
-                ? <Loader2 size={12} className="text-white animate-spin" />
-                : <Send size={12} className="text-white" />
+                ? <Loader2 size={14} className="text-white animate-spin" />
+                : <Send size={14} className="text-white ml-0.5" />
               }
             </button>
           </div>
 
           {/* Link to full page */}
-          <div className="px-3 pb-2 text-center">
-            <a href="/chat" className="text-[10px] text-accent/60 hover:text-accent transition-colors">
-              Open full Avishk chat →
+          <div className="px-3 pb-3 bg-black/20 text-center">
+            <a href="/chat" className="text-[10px] text-cyan hover:text-white font-medium tracking-wide transition-colors inline-flex items-center gap-1">
+              Open full Avishk chat <span className="text-xs">→</span>
             </a>
           </div>
         </div>
       )}
 
       {/* FAB */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="relative w-14 h-14 rounded-full shadow-xl flex items-center justify-center transition-all hover:scale-105 active:scale-95"
-        style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}
-        title="Ask Avishk AI"
-      >
-        {open ? <X size={22} className="text-white" /> : <MessageSquare size={22} className="text-white" />}
-        {!open && unread > 0 && (
-          <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-loss flex items-center justify-center text-[10px] font-bold text-white">
-            {unread}
-          </span>
-        )}
+      <div className="pointer-events-auto relative">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="relative w-14 h-14 md:w-16 md:h-16 rounded-full shadow-[0_8px_25px_rgba(41,121,255,0.4)] flex items-center justify-center transition-transform duration-300 hover:scale-110 active:scale-95 z-10 glass-panel"
+          title="Ask Avishk AI"
+        >
+          {open ? <X size={24} className="text-white drop-shadow-md" /> : <MessageSquare size={24} className="text-white drop-shadow-md" />}
+          {!open && unread > 0 && (
+            <span className="absolute -top-1 -right-1 w-5 h-5 md:w-6 md:h-6 rounded-full bg-loss flex items-center justify-center text-[10px] md:text-xs font-bold text-white shadow-lg border-2 border-[#040812]">
+              {unread}
+            </span>
+          )}
+        </button>
         {/* Avishk pulse ring */}
         {!open && (
-          <span className="absolute inset-0 rounded-full arjun-pulse pointer-events-none" />
+          <div className="absolute inset-0 rounded-full arjun-pulse pointer-events-none z-0" />
         )}
-      </button>
+      </div>
     </div>
   )
 }

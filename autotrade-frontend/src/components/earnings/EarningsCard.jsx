@@ -14,8 +14,7 @@ export default function EarningsCard({ summary, compact = false }) {
   return (
     <div
       onClick={() => nav(`/earnings?symbol=${symbol}`)}
-      className="rounded-xl border border-border p-4 space-y-3 cursor-pointer hover:border-accent/30 hover:bg-white/[0.02] transition-all"
-      style={{ background: '#0F1829' }}
+      className="rounded-xl border border-border p-4 space-y-3 cursor-pointer hover:border-accent/30 hover:bg-white/[0.02] transition-all glass-panel"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">

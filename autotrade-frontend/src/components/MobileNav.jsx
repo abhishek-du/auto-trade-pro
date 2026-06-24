@@ -42,7 +42,7 @@ function MoreSheet({ open, onClose }) {
         style={{ background: '#0B1121' }}
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-5 border-b border-white/5 sticky top-0 bg-[#0B1121]/95 backdrop-blur z-10">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-white/5 sticky top-0 glass-panel/95 backdrop-blur z-10">
           <span className="text-slate-100 font-bold text-lg tracking-wide">Menu</span>
           <button onClick={onClose} className="bg-white/5 hover:bg-white/10 rounded-full p-2 transition-colors text-muted hover:text-slate-200">
             <X size={20} />
@@ -86,7 +86,7 @@ export default function MobileNav({ onSearchOpen }) {
       <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} />
       <div className="md:hidden fixed bottom-4 left-4 right-4 z-[9996] pb-[env(safe-area-inset-bottom)] pointer-events-none">
         <nav
-          className="flex items-stretch justify-around bg-[#0A1120]/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl pointer-events-auto"
+          className="flex items-stretch justify-around glass-panel/80 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl pointer-events-auto"
         >
           {TABS.map(tab => {
             if (tab.type === 'search') {
@@ -96,8 +96,7 @@ export default function MobileNav({ onSearchOpen }) {
                   onClick={onSearchOpen}
                   className="flex-1 flex flex-col items-center justify-center gap-1 py-2.5 relative group"
                 >
-                  <span className="w-12 h-12 -mt-6 rounded-full grid place-items-center shadow-lg transform group-hover:scale-105 transition-transform"
-                    style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
+                  <span className="w-12 h-12 -mt-6 rounded-full grid place-items-center shadow-lg transform group-hover:scale-105 transition-transform glass-panel">
                     <Search size={22} className="text-white" />
                   </span>
                   <span className="text-[10px] font-medium text-slate-400">Search</span>

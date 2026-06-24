@@ -168,6 +168,10 @@ class OpenPosition(Base):
 
     # CNC = delivery positional; MIS = intraday (must squareoff by 15:20 IST)
     product: Mapped[str] = mapped_column(String(10), nullable=False, default="CNC")
+    
+    # Swing trading fields
+    trade_style: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNC")
+    swing_min_hold: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     unrealised_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     unrealised_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -1377,6 +1381,7 @@ class HubUniverse(Base):
     symbol:      Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)
     turnover_cr: Mapped[float]    = mapped_column(Float, nullable=False, default=0.0)
     rank:        Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    is_swing:    Mapped[bool]     = mapped_column(Boolean, nullable=False, server_default='false')
     updated_at:  Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     def __repr__(self) -> str:

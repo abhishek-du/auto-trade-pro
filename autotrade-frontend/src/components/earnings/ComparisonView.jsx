@@ -23,7 +23,7 @@ export default function ComparisonView({ summaries = [] }) {
   ]
 
   return (
-    <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border overflow-hidden glass-panel">
       <div className="px-5 py-3 border-b border-border">
         <h3 className="text-slate-200 font-semibold text-sm">Quarter Comparison</h3>
       </div>

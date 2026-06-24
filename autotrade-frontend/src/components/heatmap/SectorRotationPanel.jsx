@@ -3,7 +3,7 @@ import { getChangePctLabel } from '../../utils/heatmapColors'
 export default function SectorRotationPanel({ rotation }) {
   if (!rotation) {
     return (
-      <div className="bg-panel border border-border rounded-xl p-4">
+      <div className="glass-panel border border-border rounded-xl p-4">
         <div className="text-muted text-xs text-center py-8">No rotation data yet</div>
       </div>
     )
@@ -12,7 +12,7 @@ export default function SectorRotationPanel({ rotation }) {
   const { nifty_change_pct, outperforming = [], underperforming = [], rotation_note } = rotation
 
   return (
-    <div className="bg-panel border border-border rounded-xl overflow-hidden">
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-border flex items-center gap-3 flex-wrap">
         <h3 className="text-slate-200 text-sm font-semibold">Sector Rotation vs NIFTY 50</h3>
         <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${

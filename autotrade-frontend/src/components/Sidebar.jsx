@@ -510,12 +510,11 @@ export default function Sidebar() {
 
   return (
     <aside
-      className="hidden md:flex flex-col w-60 shrink-0 h-screen border-r border-border"
-      style={{ background: 'linear-gradient(180deg,#0A1120 0%,#080D1A 100%)' }}
+      className="hidden md:flex flex-col w-60 shrink-0 h-screen border-r border-border glass-panel"
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-5 py-5 border-b border-border">
-        <div className="p-2 rounded-xl" style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
+        <div className="p-2 rounded-xl glass-panel">
           <TrendingUp size={18} className="text-white" />
         </div>
         <div className="leading-tight">

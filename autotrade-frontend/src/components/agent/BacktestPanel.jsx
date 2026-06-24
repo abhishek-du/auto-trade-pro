@@ -25,7 +25,7 @@ export default function BacktestPanel({ runBacktest }) {
   }
 
   return (
-    <div className="rounded-xl border border-border" style={{ background: '#0F1829' }}>
+    <div className="rounded-xl border border-border glass-panel">
       <div className="px-5 py-3 border-b border-border flex items-center justify-between">
         <h3 className="text-slate-200 font-semibold text-sm">Backtest</h3>
         <span className="text-muted text-[10px]">Varsity M7 cost model + 1.5:1 R:R gate</span>

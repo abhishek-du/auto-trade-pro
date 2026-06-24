@@ -76,6 +76,7 @@ class Settings(BaseSettings):
 
     INDIAN_MARKET_MAX_RISK: float = 0.015
     INDIAN_INTRADAY_SL_PCT: float = 0.005
+    SWING_CONFIDENCE_THRESHOLD: int = 40
 
     # ── News ──────────────────────────────────────────────────────────────────
     # India-first stack: free RSS (ET/MC/BS/Mint) is primary and needs no key.

@@ -31,7 +31,7 @@ function Tooltip({ text }) {
         <Info size={11} />
       </button>
       {show && (
-        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 rounded-lg border border-border bg-panel p-2 text-[10px] text-muted shadow-xl">
+        <div className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 rounded-lg border border-border glass-panel p-2 text-[10px] text-muted shadow-xl">
           {text}
         </div>
       )}
@@ -48,7 +48,7 @@ export default function TaxInputBar({
   const slab   = getSlabLabel(annualIncome)
 
   return (
-    <div className="flex flex-wrap items-end gap-4 rounded-xl border border-border px-5 py-4" style={{ background: '#0F1829' }}>
+    <div className="flex flex-wrap items-end gap-4 rounded-xl border border-border px-5 py-4 glass-panel">
       {/* FY selector */}
       <div className="space-y-1">
         <label className="text-muted text-[10px] uppercase tracking-widest">Financial Year</label>

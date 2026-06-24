@@ -16,7 +16,7 @@ export default function WatchlistToolbar({
   const extraSectors   = sectors.slice(6)
 
   return (
-    <div className="bg-panel border border-border rounded-xl px-4 py-3 space-y-3">
+    <div className="glass-panel border border-border rounded-xl px-4 py-3 space-y-3">
       {/* Row 1 — search + status + refresh */}
       <div className="flex items-center gap-3 flex-wrap">
         {/* Search */}
@@ -89,7 +89,7 @@ export default function WatchlistToolbar({
               <button className="px-2.5 py-1 rounded-full text-[11px] font-medium border border-border text-muted hover:text-slate-300">
                 +{extraSectors.length} more
               </button>
-              <div className="absolute top-full left-0 mt-1 bg-panel border border-border rounded-lg p-2 z-20 hidden group-hover:flex flex-col gap-1 min-w-24 shadow-lg">
+              <div className="absolute top-full left-0 mt-1 glass-panel border border-border rounded-lg p-2 z-20 hidden group-hover:flex flex-col gap-1 min-w-24 shadow-lg">
                 {extraSectors.map(s => (
                   <button
                     key={s}

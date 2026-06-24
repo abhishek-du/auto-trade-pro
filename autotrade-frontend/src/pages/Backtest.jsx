@@ -196,8 +196,7 @@ export default function Backtest() {
             <button
               onClick={handleRun}
               disabled={loading}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-50"
-              style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-50 glass-panel">
               <PlayCircle size={15} />
               {loading ? 'Running…' : 'Run Backtest'}
             </button>

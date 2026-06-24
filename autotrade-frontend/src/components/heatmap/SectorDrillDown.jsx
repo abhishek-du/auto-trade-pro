@@ -50,8 +50,7 @@ export default function SectorDrillDown({ sector, onClose }) {
         style={{ background: '#0A1120', boxShadow: '-4px 0 24px rgba(0,0,0,0.4)' }}>
 
         {/* Header */}
-        <div className="sticky top-0 z-10 border-b border-border px-5 py-4"
-          style={{ background: '#0A1120' }}>
+        <div className="sticky top-0 z-10 border-b border-border px-5 py-4 glass-panel">
           <div className="flex items-start justify-between">
             <div>
               <h2 className="text-slate-100 text-lg font-bold">{sector.name}</h2>

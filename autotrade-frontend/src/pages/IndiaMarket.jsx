@@ -167,8 +167,7 @@ export default function IndiaMarket() {
     <div className="space-y-5 fade-in">
 
       {/* ── Top status bar ─────────────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border px-5 py-3 flex items-center justify-between"
-        style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border px-5 py-3 flex items-center justify-between glass-panel">
         <div className="flex items-center gap-3">
           <Globe size={15} className="text-cyan shrink-0" />
           <span className="text-slate-200 font-bold text-sm">Indian Market Dashboard</span>
@@ -206,7 +205,7 @@ export default function IndiaMarket() {
       <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
 
         {/* FII/DII bar chart — 60% */}
-        <div className="xl:col-span-3 rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+        <div className="xl:col-span-3 rounded-xl border border-border p-5 glass-panel">
           <div className="mb-4">
             <h2 className="text-slate-100 font-semibold text-sm">FII / DII Flow — Last 30 Days</h2>
             <p className="text-muted text-xs mt-0.5">
@@ -266,8 +265,7 @@ export default function IndiaMarket() {
         </div>
 
         {/* Signals panel — 40% */}
-        <div className="xl:col-span-2 rounded-xl border border-border flex flex-col overflow-hidden"
-          style={{ background: '#0F1829' }}>
+        <div className="xl:col-span-2 rounded-xl border border-border flex flex-col overflow-hidden glass-panel">
           <div className="px-4 pt-4 pb-3 border-b border-border">
             <div className="flex items-center gap-2 mb-3">
               <Zap size={13} className="text-cyan" />
@@ -326,7 +324,7 @@ export default function IndiaMarket() {
       </div>
 
       {/* ── Row 3 — Sector Heatmap ─────────────────────────────────────────── */}
-      <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+      <div className="rounded-xl border border-border p-5 glass-panel">
         <h2 className="text-slate-100 font-semibold text-sm mb-4">
           Sector Performance — 30 Day
         </h2>
@@ -343,7 +341,7 @@ export default function IndiaMarket() {
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
         {/* PCR panel */}
-        <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border p-5 glass-panel">
           <div className="flex items-center gap-2 mb-4">
             <Activity size={14} className="text-cyan" />
             <h2 className="text-slate-100 font-semibold text-sm">NIFTY Options — PCR</h2>
@@ -381,7 +379,7 @@ export default function IndiaMarket() {
         </div>
 
         {/* Max Pain panel */}
-        <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border p-5 glass-panel">
           <div className="flex items-center gap-2 mb-4">
             <BarChart2 size={14} className="text-cyan" />
             <h2 className="text-slate-100 font-semibold text-sm">Max Pain Strike — NIFTY</h2>

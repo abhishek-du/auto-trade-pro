@@ -16,8 +16,7 @@ function EmptyState({ onSuggestionClick }) {
   ]
   return (
     <div className="flex flex-col items-center justify-center h-full py-12 px-8">
-      <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-black mb-6 shadow-xl"
-        style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>A</div>
+      <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-black mb-6 shadow-xl glass-panel">A</div>
       <h2 className="text-xl font-bold text-slate-100 mb-1">Meet Avishk</h2>
       <p className="text-sm text-muted text-center mb-8 max-w-sm">
         Your AI-powered NSE stock analyst. Ask about prices, technicals, fundamentals, or get buy/sell recommendations backed by live data.
@@ -27,8 +26,7 @@ function EmptyState({ onSuggestionClick }) {
           <button
             key={i}
             onClick={() => onSuggestionClick(c.q)}
-            className="flex items-start gap-2.5 px-4 py-3 rounded-xl border border-border text-left hover:border-accent/40 hover:bg-accent/5 transition-all group"
-            style={{ background: '#0F1829' }}
+            className="flex items-start gap-2.5 px-4 py-3 rounded-xl border border-border text-left hover:border-accent/40 hover:bg-accent/5 transition-all group glass-panel"
           >
             <span className="text-lg shrink-0">{c.icon}</span>
             <div className="min-w-0">
@@ -60,11 +58,9 @@ export default function StockChat() {
       <div className="flex flex-col flex-1 min-w-0">
 
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0"
-          style={{ background: 'linear-gradient(135deg,rgba(29,78,216,0.12),rgba(8,145,178,0.06))' }}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0 glass-panel">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-black"
-              style={{ background: 'linear-gradient(135deg,#1D4ED8,#0891B2)' }}>A</div>
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white text-sm font-black glass-panel">A</div>
             <div>
               <h1 className="text-base font-bold text-slate-100">Avishk — AI Stock Analyst</h1>
               <p className="text-[11px] text-muted">Live NSE data · Technical & fundamental analysis</p>

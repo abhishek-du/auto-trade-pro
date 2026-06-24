@@ -126,7 +126,7 @@ export default function QuestionnaireModal({ isOpen, onClose, onComplete }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-      <div className="w-full max-w-md rounded-2xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+      <div className="w-full max-w-md rounded-2xl border border-border overflow-hidden glass-panel">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <p className="text-slate-100 font-semibold text-sm">Risk Profile Assessment</p>

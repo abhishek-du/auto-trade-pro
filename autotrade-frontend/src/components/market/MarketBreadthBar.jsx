@@ -5,7 +5,7 @@ export default function MarketBreadthBar({ advances = 0, declines = 0, unchanged
   const neuPct = (unchanged / total) * 100;
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-4 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-slate-200 text-sm font-semibold">Market Breadth</p>
         <span className="text-muted text-xs">{advances + declines + unchanged} stocks</span>

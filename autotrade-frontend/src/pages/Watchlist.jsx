@@ -128,7 +128,7 @@ export default function Watchlist() {
       />
 
       {/* Main table */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <WatchlistTableHeader sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} />
@@ -183,7 +183,7 @@ export default function Watchlist() {
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-border flex items-center justify-between flex-wrap gap-2">
+        <div className="px-4 py-3 border-t border-white/5 bg-black/20 flex items-center justify-between flex-wrap gap-2">
           <span className="text-muted text-xs">
             Showing {displayList.length} of {allWatchlist.length} stocks
             {alertFilter ? ` · Alert: ${alertFilter.key.replace(/_/g, ' ')}` : ''}

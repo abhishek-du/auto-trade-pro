@@ -345,7 +345,7 @@ function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
   return (
     <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
       {cards.map(({ label, value, sub, icon: Icon, color, bg }) => (
-        <div key={label} className="bg-panel border border-border rounded-xl p-4">
+        <div key={label} className="glass-panel rounded-xl p-5 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300 group">
           <div className="flex items-center justify-between mb-3">
             <span className="text-muted text-xs font-medium">{label}</span>
             <span className={`w-8 h-8 rounded-lg ${bg} flex items-center justify-center`}>
@@ -429,8 +429,8 @@ function OpenPositionsSection({ positions, livePrices = {} }) {
           return (
             <div
               key={pos.id}
-              className={`bg-panel border rounded-xl p-4 space-y-3 ${
-                isProfit ? 'border-profit/30' : 'border-loss/30'
+              className={`glass-panel rounded-xl p-5 space-y-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300 border ${
+                isProfit ? 'border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.05)]' : 'border-red-500/30 shadow-[0_0_15px_rgba(248,113,113,0.05)]'
               }`}
             >
               {/* Row 1: symbol + direction + timer */}
@@ -642,41 +642,41 @@ export default function Trades() {
 
       {/* ── Secondary stats row ── */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <Activity size={18} className="text-muted shrink-0" />
+        <div className="glass-panel rounded-xl p-5 flex items-center gap-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+          <Activity size={20} className="text-muted shrink-0" />
           <div>
-            <p className="text-muted text-xs">Total Trades</p>
-            <p className="text-slate-100 font-bold text-lg">{trades.length}</p>
+            <p className="text-muted text-xs uppercase tracking-wider font-semibold">Total Trades</p>
+            <p className="text-slate-100 font-bold text-xl">{trades.length}</p>
           </div>
         </div>
-        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <TrendingUp size={18} className={winRate >= 50 ? 'text-profit' : 'text-muted'} />
+        <div className="glass-panel rounded-xl p-5 flex items-center gap-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+          <TrendingUp size={20} className={winRate >= 50 ? 'text-profit' : 'text-muted'} />
           <div>
-            <p className="text-muted text-xs">Win Rate</p>
-            <p className={`font-bold text-lg ${winRate >= 50 ? 'text-profit' : 'text-loss'}`}>
+            <p className="text-muted text-xs uppercase tracking-wider font-semibold">Win Rate</p>
+            <p className={`font-bold text-xl ${winRate >= 50 ? 'text-profit' : 'text-loss'}`}>
               {winRate.toFixed(1)}%
             </p>
-            <p className="text-muted text-xs">{wins.length}W / {closed.length - wins.length}L</p>
+            <p className="text-muted text-[10px]">{wins.length}W / {closed.length - wins.length}L</p>
           </div>
         </div>
-        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <IndianRupee size={18} className="text-profit shrink-0" />
+        <div className="glass-panel rounded-xl p-5 flex items-center gap-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+          <IndianRupee size={20} className="text-profit shrink-0" />
           <div>
-            <p className="text-muted text-xs">Best Trade</p>
-            <p className="text-profit font-bold text-lg">{fmt(bestTrade)}</p>
+            <p className="text-muted text-xs uppercase tracking-wider font-semibold">Best Trade</p>
+            <p className="text-profit font-bold text-xl">{fmt(bestTrade)}</p>
           </div>
         </div>
-        <div className="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
-          <IndianRupee size={18} className="text-loss shrink-0" />
+        <div className="glass-panel rounded-xl p-5 flex items-center gap-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+          <IndianRupee size={20} className="text-loss shrink-0" />
           <div>
-            <p className="text-muted text-xs">Worst Trade</p>
-            <p className="text-loss font-bold text-lg">{fmt(worstTrade)}</p>
+            <p className="text-muted text-xs uppercase tracking-wider font-semibold">Worst Trade</p>
+            <p className="text-loss font-bold text-xl">{fmt(worstTrade)}</p>
           </div>
         </div>
       </div>
 
       {/* ── Filters ── */}
-      <div className="bg-panel border border-border rounded-xl p-4 flex flex-wrap items-center gap-3">
+      <div className="glass-panel rounded-xl p-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-40">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
           <input
@@ -713,7 +713,7 @@ export default function Trades() {
       </div>
 
       {/* ── Trade table ── */}
-      <div className="bg-panel border border-border rounded-xl overflow-hidden">
+      <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>

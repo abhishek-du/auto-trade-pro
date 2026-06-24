@@ -105,7 +105,7 @@ function CreateGoalDrawer({ onClose, onCreate }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl border border-border p-6 space-y-5" style={{ background: '#0F1829' }}>
+      <div className="w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl border border-border p-6 space-y-5 glass-panel">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
@@ -345,7 +345,7 @@ export default function SIPTracker() {
           <button
             onClick={() => setShowCalc(!showCalc)}
             className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border transition-colors ${
-              showCalc ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-panel text-muted hover:text-accent hover:border-accent/40'
+              showCalc ? 'border-accent bg-accent/10 text-accent' : 'border-border glass-panel text-muted hover:text-accent hover:border-accent/40'
             }`}
           >
             <Calculator size={13} /> SIP Calculator
@@ -367,7 +367,7 @@ export default function SIPTracker() {
             { label: 'Current Value',  value: fmtINR(totalValue),    color: 'text-profit' },
             { label: 'Monthly SIPs',   value: fmtINR(totalMonthlySIP), color: 'text-accent' },
           ].map(m => (
-            <div key={m.label} className="rounded-xl border border-border px-4 py-3" style={{ background: '#0F1829' }}>
+            <div key={m.label} className="rounded-xl border border-border px-4 py-3 glass-panel">
               <p className="text-muted text-[9px] uppercase tracking-widest">{m.label}</p>
               <p className={`font-bold text-lg tabular-nums mt-0.5 ${m.color || 'text-slate-100'}`}>{m.value}</p>
             </div>
@@ -377,7 +377,7 @@ export default function SIPTracker() {
 
       {/* ── SIP Calculator (expandable) ── */}
       {showCalc && (
-        <div className="rounded-xl border border-border p-5" style={{ background: '#0F1829' }}>
+        <div className="rounded-xl border border-border p-5 glass-panel">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-slate-100 font-semibold text-sm flex items-center gap-2">
               <Calculator size={14} className="text-cyan-400" /> SIP Calculator
@@ -427,16 +427,16 @@ export default function SIPTracker() {
           {/* Detail panel */}
           <div className="flex-1 min-w-0">
             {!selectedGoalId ? (
-              <div className="rounded-xl border border-border flex flex-col items-center justify-center h-80 gap-3" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border flex flex-col items-center justify-center h-80 gap-3 glass-panel">
                 <Target size={32} className="text-muted/30" />
                 <p className="text-muted text-sm">Select a goal to view details</p>
               </div>
             ) : detailLoading ? (
-              <div className="rounded-xl border border-border flex items-center justify-center h-80" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border flex items-center justify-center h-80 glass-panel">
                 <LoadingSpinner />
               </div>
             ) : activeGoal ? (
-              <div className="rounded-xl border border-border overflow-hidden" style={{ background: '#0F1829' }}>
+              <div className="rounded-xl border border-border overflow-hidden glass-panel">
                 {/* Goal header */}
                 <div className="px-5 py-4 border-b border-border">
                   <h2 className="text-slate-100 font-bold text-base">{activeGoal.goal_name}</h2>
@@ -516,7 +516,7 @@ export default function SIPTracker() {
       {/* ── Delete confirmation ── */}
       {confirmDel && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="rounded-2xl border border-border p-6 space-y-4 max-w-sm w-full mx-4" style={{ background: '#0F1829' }}>
+          <div className="rounded-2xl border border-border p-6 space-y-4 max-w-sm w-full mx-4 glass-panel">
             <h3 className="text-slate-100 font-bold">Delete Goal?</h3>
             <p className="text-muted text-sm">This will permanently delete the goal and all its installment history. This cannot be undone.</p>
             <div className="flex gap-3">

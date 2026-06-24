@@ -17,8 +17,7 @@ export default function MetricCard({ title, value, subtitle, trend, icon: Icon, 
   const sign  = typeof trend === 'number' && trend > 0 ? '+' : '';
 
   return (
-    <div className="relative overflow-hidden rounded-xl border border-border p-5 flex flex-col gap-3 transition-all duration-200 hover:border-accent/30 group"
-      style={{ background: 'linear-gradient(135deg,#0F1829 0%,#131E30 100%)' }}>
+    <div className="relative overflow-hidden rounded-xl border border-border p-5 flex flex-col gap-3 transition-all duration-200 hover:border-accent/30 group glass-panel">
 
       <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none rounded-xl"
         style={{ background: 'radial-gradient(ellipse at top left,rgba(59,130,246,0.07),transparent 70%)' }} />

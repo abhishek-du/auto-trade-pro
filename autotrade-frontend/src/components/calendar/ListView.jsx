@@ -41,7 +41,7 @@ export default function ListView({ eventsByDate }) {
             ].join(' ')}>
               <div className={[
                 'text-xs font-bold px-2.5 py-1 rounded-lg',
-                isToday ? 'bg-cyan/20 text-cyan' : 'bg-panel border border-border text-slate-300',
+                isToday ? 'bg-cyan/20 text-cyan' : 'glass-panel border border-border text-slate-300',
               ].join(' ')}>
                 {formatDate(dateStr)}
                 {isToday && <span className="ml-1.5 text-[9px] text-cyan/70">TODAY</span>}

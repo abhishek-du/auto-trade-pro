@@ -10,7 +10,7 @@ function CustomTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const d = payload[0].payload
   return (
-    <div className="bg-panel border border-border rounded-lg px-3 py-2 text-xs shadow-xl">
+    <div className="glass-panel border border-border rounded-lg px-3 py-2 text-xs shadow-xl">
       <p className="text-slate-200 font-semibold">{d.name || d.sector}</p>
       <p className="text-muted">{formatINR(d.value)} · {d.weight?.toFixed(1)}%</p>
     </div>

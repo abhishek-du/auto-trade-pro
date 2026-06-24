@@ -5,7 +5,7 @@ function Card({ title, value, sub, trend, icon: Icon, highlight }) {
   const pos = trend == null ? null : trend >= 0
   return (
     <div
-      className="bg-panel border border-border rounded-xl p-4 flex flex-col gap-2"
+      className="glass-panel border border-border rounded-xl p-4 flex flex-col gap-2"
       style={highlight ? { borderColor: 'rgba(6,182,212,0.3)', background: 'rgba(6,182,212,0.04)' } : {}}
     >
       <div className="flex items-center justify-between">

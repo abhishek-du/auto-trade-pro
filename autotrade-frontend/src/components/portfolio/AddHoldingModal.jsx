@@ -66,7 +66,7 @@ function StockTab({ onAdd, onClose, searchStocks }) {
               className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-border bg-bg text-sm text-slate-200 placeholder-muted outline-none focus:border-accent/50" />
             {searching && <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 border border-muted border-t-transparent rounded-full animate-spin" />}
             {(results.length > 0 || (!searching && query.trim().length >= 2)) && (
-              <div className="absolute top-full mt-1 left-0 right-0 z-10 bg-panel border border-border rounded-lg shadow-xl overflow-hidden">
+              <div className="absolute top-full mt-1 left-0 right-0 z-10 glass-panel border border-border rounded-lg shadow-xl overflow-hidden">
                 {results.map(r => (
                   <div key={r.symbol} onClick={() => { setSelected(r); setResults([]) }}
                     className="flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-white/5 transition-colors">
@@ -222,7 +222,7 @@ function MFTab({ onAdd, onClose }) {
               className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-border bg-bg text-sm text-slate-200 placeholder-muted outline-none focus:border-accent/50" />
             {searching && <div className="absolute right-3 top-1/2 -translate-y-1/2 w-3 h-3 border border-muted border-t-transparent rounded-full animate-spin" />}
             {results.length > 0 && (
-              <div className="absolute top-full mt-1 left-0 right-0 z-10 bg-panel border border-border rounded-lg shadow-xl overflow-hidden max-h-60 overflow-y-auto">
+              <div className="absolute top-full mt-1 left-0 right-0 z-10 glass-panel border border-border rounded-lg shadow-xl overflow-hidden max-h-60 overflow-y-auto">
                 {results.map(r => (
                   <div key={r.scheme_code} onClick={() => selectFund(r)}
                     className="flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-white/5 transition-colors">
@@ -296,7 +296,7 @@ export default function AddHoldingModal({ onClose, onAdd, searchStocks }) {
   return (
     <>
       <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />
-      <div className="fixed right-0 top-0 h-full w-full max-w-md z-50 flex flex-col bg-panel border-l border-border shadow-2xl">
+      <div className="fixed right-0 top-0 h-full w-full max-w-md z-50 flex flex-col glass-panel border-l border-border shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <h2 className="text-slate-100 font-bold text-base flex items-center gap-2">

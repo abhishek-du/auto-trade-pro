@@ -46,7 +46,7 @@ function SentimentGauge({ articles }) {
   const color   = score > 0.15 ? '#10B981' : score < -0.15 ? '#EF4444' : '#6B7280';
 
   return (
-    <div className="bg-panel border border-border rounded-xl p-5 space-y-3">
+    <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-slate-200 font-semibold text-sm">Market Sentiment Gauge</h3>
         <span className="text-xs font-bold" style={{ color }}>{label}</span>
@@ -153,7 +153,7 @@ export default function News() {
             placeholder="Search news…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-panel border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
+            className="w-full glass-panel border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
           />
         </div>
         <div className="flex rounded-lg overflow-hidden border border-border">
@@ -193,7 +193,7 @@ export default function News() {
 
       {/* Article list */}
       {filtered.length === 0 ? (
-        <div className="bg-panel border border-border rounded-xl p-10 text-center text-muted text-sm">
+        <div className="glass-panel border border-border rounded-xl p-10 text-center text-muted text-sm">
           No news articles match the current filter.
         </div>
       ) : (
@@ -202,7 +202,7 @@ export default function News() {
             <article
               key={a.id ?? a.url ?? i}
               className={[
-                'bg-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
+                'glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
                 a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
               ].join(' ')}
             >
