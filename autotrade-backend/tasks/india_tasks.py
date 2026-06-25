@@ -2900,9 +2900,13 @@ async def _backfill_hub_1d_candles():
     Runs at 3:10 AM daily — after rebuild_hub_universe (2:50 AM) and before
     the first Hub scoring cycle. Ensures the Hub always has today's close
     available regardless of whether the intraday crawl caught all symbols.
+
+    Uses concurrent batches of 20 to complete within Celery's 600s time limit
+    (sequential yfinance calls for 760 symbols would take 15+ min and get killed).
     """
+    import asyncio as _asyncio
     from engine.hub_universe import get_hub_universe
-    from crawler.price_feed import fetch_candles_yfinance, save_candles_to_db
+    from crawler.price_feed import fetch_candles, save_candles_to_db
     from tasks._db import celery_session
 
     async with celery_session() as session:
@@ -2910,18 +2914,30 @@ async def _backfill_hub_1d_candles():
 
     saved_total = 0
     failed = 0
-    for sym in universe:
+    _BATCH = 20  # concurrent fetches per batch
+
+    async def _fetch_and_save(sym: str) -> int:
+        """Fetch 1d candles for one symbol and persist. Returns count saved."""
         try:
-            from crawler.price_feed import fetch_candles
             candles = await fetch_candles(sym, timeframe="1d")
-            if candles:
-                from tasks._db import celery_session as _cs
-                async with _cs() as s2:
-                    saved = await save_candles_to_db(candles, s2)
-                    await s2.commit()
-                    saved_total += saved
+            if not candles:
+                return 0
+            async with celery_session() as s2:
+                saved = await save_candles_to_db(candles, s2)
+                await s2.commit()
+                return saved
         except Exception:
-            failed += 1
+            return -1  # sentinel for failure
+
+    sym_list = list(universe)
+    for i in range(0, len(sym_list), _BATCH):
+        batch = sym_list[i : i + _BATCH]
+        results = await _asyncio.gather(*[_fetch_and_save(s) for s in batch])
+        for r in results:
+            if r < 0:
+                failed += 1
+            else:
+                saved_total += r
 
     logger.info(
         f"[backfill_hub_1d] done — universe={len(universe)} saved={saved_total} failed={failed}"
@@ -2929,7 +2945,7 @@ async def _backfill_hub_1d_candles():
     return {"universe": len(universe), "saved": saved_total, "failed": failed}
 
 
-@celery_app.task(name="tasks.backfill_hub_1d_candles")
+@celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=1800, soft_time_limit=1500)
 def backfill_hub_1d_candles_task():
     """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols."""
     logger.info("[backfill_hub_1d] starting daily 1d candle backfill for Hub universe")

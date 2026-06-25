@@ -123,7 +123,7 @@ def _exchange_token(request_token: str, backend: str) -> bool:
         f"{backend}/api/v1/zerodha/callback",
         params={"request_token": request_token, "action": "login"},
         follow_redirects=True,
-        timeout=15,
+        timeout=60,
         verify=False,
     )
     # The callback returns HTTP 200 + the "Zerodha Connected" success page on

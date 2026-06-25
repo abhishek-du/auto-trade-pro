@@ -367,10 +367,16 @@ async def _process_symbol(
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
+    # SME/Emerge platform guard — symbols ending in -SM are NSE Emerge (illiquid,
+    # delivery-only, not covered by any live price feed). Never trade them.
+    _bare_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
+    if _bare_sym.endswith("-SM"):
+        logger.debug(f"[agent] {symbol}: NSE SME stock — skipping (no live price feed)")
+        return None
+
     # Duplicate position guard — block re-entry for any symbol already held.
     # Normalise both sides (.NS / bare) so "VIJAYA.NS" and "VIJAYA" match the
     # same in-memory key regardless of how the position was originally stored.
-    _bare_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
     _already = any(
         k == symbol or k.replace(".NS", "").replace(".BO", "").upper() == _bare_sym
         for k in portfolio.open_positions
@@ -389,6 +395,24 @@ async def _process_symbol(
     _timeframe_used = settings.AGENT_TIMEFRAME
     candles = await get_latest_candles(symbol, settings.AGENT_TIMEFRAME, 300, session)
     if not candles or len(candles) < settings.AGENT_WARMUP_BARS:
+        return None
+
+    # Candle freshness guard — reject symbols whose DB data is too stale to trade.
+    # 1d candles: latest candle must be from today or yesterday (≤36h).
+    # Intraday: latest candle must be within the last 2 hours.
+    # This catches the case where the crawler never ingested data for a symbol
+    # (e.g. illiquid small-caps) so the agent would use week-old closes as entry.
+    import datetime as _dt
+    _latest_ts = max(c.timestamp for c in candles)
+    if hasattr(_latest_ts, "tzinfo") and _latest_ts.tzinfo:
+        _latest_ts = _latest_ts.replace(tzinfo=None)
+    _candle_age_h = (_dt.datetime.utcnow() - _latest_ts).total_seconds() / 3600
+    _max_age_h = 72 if settings.AGENT_TIMEFRAME == "1d" else 4
+    if _candle_age_h > _max_age_h:
+        logger.warning(
+            f"[agent] {symbol}: latest candle is {_candle_age_h:.0f}h old "
+            f"(max {_max_age_h}h for {settings.AGENT_TIMEFRAME}) — skipping stale data"
+        )
         return None
 
     candles_sorted = sorted(candles, key=lambda c: c.timestamp)
@@ -452,23 +476,56 @@ async def _process_symbol(
         candidate.regime = features.regime
 
     # 4b-2. LIVE entry price — the candidate's entry comes from the latest candle
-    # close (can be minutes old). With Zerodha connected, snap it to the live Kite
-    # LTP and shift stop/targets by the same delta so R:R is preserved. This makes
-    # the entry (and the Telegram alert) reflect the real fill price.
+    # close (can be minutes old). Snap to live price if available.
+    # If the live price diverges >5% from the candle price, the candle data is too
+    # stale to trade safely — reject the candidate rather than fill at a phantom price.
     if candidate is not None:
         try:
             from crawler.live_prices import get_price
             lp = get_price(symbol)
             live_px = float(lp["price"]) if lp and lp.get("price") else None
-            if live_px and candidate.entry and abs(live_px - candidate.entry) / candidate.entry < 0.05:
-                delta = live_px - candidate.entry
-                candidate.entry = round(live_px, 2)
-                if getattr(candidate, "stop", None):
-                    candidate.stop = round(candidate.stop + delta, 2)
-                for attr in ("target", "target_1", "target_2"):
-                    v = getattr(candidate, attr, None)
-                    if v:
-                        setattr(candidate, attr, round(v + delta, 2))
+
+            # WebSocket cache miss for mid-cap symbols — fall back to Kite REST LTP.
+            # If we still can't confirm the price, reject: executing at an unverified
+            # stale candle price is the root cause of the ₹438 vs ₹412 GNA-style bugs.
+            if live_px is None:
+                try:
+                    from crawler.zerodha_market import get_live_prices
+                    _sym_ns = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+                    _quotes = await get_live_prices([_sym_ns])
+                    _q = _quotes.get(_sym_ns) or _quotes.get(symbol)
+                    if _q:
+                        _px = _q.get("price") or _q.get("last_price")
+                        if _px and float(_px) > 0:
+                            live_px = float(_px)
+                except Exception as _exc:
+                    logger.debug(f"[agent] REST LTP fallback failed for {symbol}: {_exc}")
+
+            if live_px is None:
+                logger.warning(
+                    f"[agent] {symbol}: cannot confirm live price — "
+                    f"no WebSocket tick or REST LTP available, skipping trade"
+                )
+                return None
+
+            if candidate.entry:
+                divergence = abs(live_px - candidate.entry) / candidate.entry
+                if divergence < 0.05:
+                    delta = live_px - candidate.entry
+                    candidate.entry = round(live_px, 2)
+                    if getattr(candidate, "stop", None):
+                        candidate.stop = round(candidate.stop + delta, 2)
+                    for attr in ("target", "target_1", "target_2"):
+                        v = getattr(candidate, attr, None)
+                        if v:
+                            setattr(candidate, attr, round(v + delta, 2))
+                else:
+                    logger.warning(
+                        f"[agent] {symbol}: candle price ₹{candidate.entry:.2f} vs "
+                        f"live ₹{live_px:.2f} — {divergence*100:.1f}% divergence, "
+                        f"candle data too stale — skipping trade"
+                    )
+                    return None
         except Exception as exc:
             logger.debug(f"[agent] live entry-price snap failed for {symbol}: {exc}")
 

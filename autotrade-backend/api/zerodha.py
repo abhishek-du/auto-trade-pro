@@ -197,25 +197,38 @@ async def zerodha_callback(
         # throwing 403 Forbidden and the live price feed silently freezes until
         # the whole backend restarts — the root cause of multi-day candle gaps
         # after the daily 6 AM token expiry, even though the refresh "succeeds".
+        # Pre-populate open positions before ticker restart (async context).
         try:
-            from crawler.zerodha_ticker import start_kite_ticker, stop_kite_ticker
-            from crawler.india_price_feed import is_nse_market_open
-            # ALWAYS tear down any existing ticker first — do NOT gate on
-            # is_ticker_running(). A KiteTicker bakes the access_token in at
-            # construction and auto-reconnects on that OLD token after the daily
-            # 6 AM expiry, so a stale ticker keeps 403-looping while intermittently
-            # reporting "connected." Unconditionally destroying it (stop_ticker
-            # nulls the singleton) guarantees the next start builds a fresh ticker
-            # on the renewed token. Then start now if the market is open; otherwise
-            # the 09:15 open task starts it cleanly (singleton is now None).
-            stop_kite_ticker()
-            if is_nse_market_open():
-                start_kite_ticker()
-                logger.info("[zerodha] ticker rebuilt with fresh token (market open)")
-            else:
-                logger.info("[zerodha] stale ticker cleared; open task will start fresh at 09:15")
-        except Exception as exc:
-            logger.warning(f"[zerodha] ticker restart after token refresh failed: {exc}")
+            from sqlalchemy import text
+            from crawler.zerodha_ticker import set_open_position_symbols
+            from db.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as _sess:
+                _r = await _sess.execute(text("SELECT DISTINCT symbol FROM open_positions"))
+                _syms = {row[0] for row in _r.fetchall()}
+            set_open_position_symbols(_syms)
+        except Exception as _exc:
+            logger.debug(f"[zerodha] open position preload failed: {_exc}")
+
+        # Run ticker stop/start in a background thread — KiteTicker.close() and
+        # connect() can block for several seconds, which would starve the event
+        # loop and cause the HTTP response to time out on the caller side.
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        def _restart_ticker() -> None:
+            try:
+                from crawler.zerodha_ticker import start_kite_ticker, stop_kite_ticker
+                from crawler.india_price_feed import is_nse_market_open
+                stop_kite_ticker()
+                if is_nse_market_open():
+                    start_kite_ticker()
+                    logger.info("[zerodha] ticker rebuilt with fresh token (market open)")
+                else:
+                    logger.info("[zerodha] stale ticker cleared; open task will start fresh at 09:15")
+            except Exception as exc:
+                logger.warning(f"[zerodha] ticker restart after token refresh failed: {exc}")
+
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(ThreadPoolExecutor(max_workers=1), _restart_ticker)
 
         return _html_success(user_name, user_id)
     except Exception as exc:
