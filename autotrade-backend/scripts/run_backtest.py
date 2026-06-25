@@ -125,6 +125,7 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
     f = df.copy()
     f["ema20"]   = _ema(c, 20)
     f["ema50"]   = _ema(c, 50)
+    f["ema100"]  = _ema(c, 100)
     f["ema200"]  = _ema(c, 200)
     f["rsi14"]   = _rsi(c, 14)
     f["atr14"]   = _atr(h, l, c, 14)
@@ -144,6 +145,7 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
     f["swing_low_20"]  = c.rolling(20).min().shift(1)
 
     vol_avg          = v.rolling(20).mean()
+    f["vol_avg"]     = vol_avg
     f["vol_spike"]   = v > 1.5 * vol_avg
 
     # Supertrend direction (1=bull, -1=bear) — simplified from basic floor
@@ -203,16 +205,21 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
     # zero — no statistical edge. Keeping it active only dilutes overall expectancy.
 
     # ── PULLBACK_LONG ─────────────────────────────────────────────────────────
-    # Mirrors live PullbackTrendLong: ADX>=20, EMA50>EMA200, RSI<=70 cap.
-    # Phase 5 additions:
-    #   vol_spike required — confirms buyers stepped back in on the bounce bar.
-    #   prev_low >= ema20*0.97 — shallow touch only; deeper breaches are breakdowns.
+    # Phase 6 additions (on top of Phase 5):
+    #   close > ema100 — weekly trend proxy (100d ≈ 20-week EMA); blocks stocks
+    #     in long-term decline even if short-term EMA stack is bullish.
+    #   ema50 >= ema200*1.01 — EMA spread: established trend, not fresh cross.
+    #   prev vol_spike is False — quiet pullback = accumulation; panic = distribution.
+    #   adx not collapsing — trend strength must be holding, not evaporating.
     if (regime == "BULL_TRENDING" and prev_row is not None
-            and r["ema20"] > r["ema50"] and r["ema50"] > r["ema200"]
+            and r["ema20"] > r["ema50"] and r["ema50"] >= r["ema200"] * 1.01
+            and close > r["ema100"]                            # weekly trend proxy
             and 50 <= r["rsi14"] <= 70
             and r["adx14"] >= 20
+            and r["adx14"] >= float(prev_row.get("adx14", r["adx14"])) * 0.85  # ADX not collapsing
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
             and float(prev_row["low"]) >= r["ema20"] * 0.97   # shallow touch, not breakdown
+            and not bool(prev_row.get("vol_spike", False))     # quiet pullback, not panic sell
             and bool(r.get("vol_spike", False))                # volume confirms re-entry
             and close > r["ema20"]):
         stop = float(prev_row["low"]) - 0.5 * atr
@@ -287,12 +294,14 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
                 }
 
         # ── EXHAUSTION_SHORT — overbought in a confirmed downtrend ────────────
-        # Phase 5: loosened from RSI>=65 → RSI>=58 and close>=ema20 → >=ema20*0.93
-        # to capture more dead-cat bounces (Phase 4 only generated n=15 — too few).
+        # Phase 6: removed strict bearish_rejection candle (upper_wick check).
+        # Now just requires close < open (bearish bar) for a simpler, broader filter.
+        # RSI>=58 and within 7% of EMA20 retained from Phase 5.
         if (r["ema20"] < r["ema50"] < r["ema200"]
                 and r["rsi14"] >= 58
                 and close >= r["ema20"] * 0.93        # within 7% of EMA20 resistance
-                and r["adx14"] >= 15):
+                and r["adx14"] >= 15
+                and float(r.get("open", close)) > close):   # bearish close only
             stop = close + 1.0 * atr
             risk = stop - close
             tgt  = r["ema50"] if r["ema50"] < close else close - 2.0 * atr

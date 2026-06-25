@@ -1,0 +1,346 @@
+{
+  "period": "2022-01-01 \u2192 2026-06-25",
+  "symbols_tested": 200,
+  "total_trades": 720,
+  "overall": {
+    "label": "overall",
+    "n": 720,
+    "win_rate": 0.5181,
+    "profit_factor": 1.527,
+    "avg_win": 6519.08,
+    "avg_loss": 4590.58,
+    "net_pnl": 838687.14,
+    "mean_r": 0.1906,
+    "ci_lo_r": 0.1085,
+    "ci_hi_r": 0.2708,
+    "r_verdict": "POSITIVE",
+    "sufficient": true
+  },
+  "by_strategy": {
+    "PULLBACK_LONG": {
+      "label": "PULLBACK_LONG",
+      "n": 681,
+      "win_rate": 0.5257,
+      "profit_factor": 1.583,
+      "avg_win": 6490.19,
+      "avg_loss": 4543.83,
+      "net_pnl": 855834.05,
+      "mean_r": 0.2074,
+      "ci_lo_r": 0.1261,
+      "ci_hi_r": 0.2887,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "EXHAUSTION_SHORT": {
+      "label": "EXHAUSTION_SHORT",
+      "n": 33,
+      "win_rate": 0.3333,
+      "profit_factor": 0.745,
+      "avg_win": 7805.34,
+      "avg_loss": 5236.81,
+      "net_pnl": -29350.99,
+      "mean_r": -0.1913,
+      "ci_lo_r": -0.6089,
+      "ci_hi_r": 0.2552,
+      "r_verdict": "UNCERTAIN",
+      "sufficient": true
+    },
+    "MEAN_REVERSION_SHORT": {
+      "label": "MEAN_REVERSION_SHORT",
+      "n": 4,
+      "win_rate": 0.75,
+      "profit_factor": 3.51,
+      "avg_win": 6965.55,
+      "avg_loss": 5953.71,
+      "net_pnl": 14942.94,
+      "mean_r": 0.7543,
+      "ci_lo_r": -0.4517,
+      "ci_hi_r": 1.838,
+      "r_verdict": "UNCERTAIN",
+      "sufficient": false
+    },
+    "RANGE_REVERSAL_LONG": {
+      "label": "RANGE_REVERSAL_LONG",
+      "n": 2,
+      "win_rate": 0.5,
+      "profit_factor": 0.334,
+      "avg_win": 1372.9,
+      "avg_loss": 4111.76,
+      "net_pnl": -2738.86,
+      "mean_r": -0.336,
+      "ci_lo_r": -1.049,
+      "ci_hi_r": 0.377,
+      "r_verdict": "UNCERTAIN",
+      "sufficient": false
+    }
+  },
+  "year_regimes": {
+    "2022": "bear/correction",
+    "2023": "bull_trend",
+    "2024": "mixed",
+    "2025": "chop/decline",
+    "2026": "chop/decline"
+  },
+  "walk_forward": {
+    "split1_train2022_23_val2024": {
+      "train": {
+        "label": "train(split1_train2022_23_val2024)",
+        "n": 375,
+        "win_rate": 0.5467,
+        "profit_factor": 1.806,
+        "avg_win": 6904.15,
+        "avg_loss": 4610.49,
+        "net_pnl": 631567.78,
+        "mean_r": 0.2676,
+        "ci_lo_r": 0.1552,
+        "ci_hi_r": 0.3791,
+        "r_verdict": "POSITIVE",
+        "sufficient": true
+      },
+      "val": {
+        "label": "val(split1_train2022_23_val2024)",
+        "n": 226,
+        "win_rate": 0.4823,
+        "profit_factor": 1.209,
+        "avg_win": 5900.55,
+        "avg_loss": 4545.95,
+        "net_pnl": 111283.47,
+        "mean_r": 0.0882,
+        "ci_lo_r": -0.0456,
+        "ci_hi_r": 0.227,
+        "r_verdict": "UNCERTAIN",
+        "sufficient": true
+      }
+    },
+    "split2_train2022_24_val2025_26": {
+      "train": {
+        "label": "train(split2_train2022_24_val2025_26)",
+        "n": 601,
+        "win_rate": 0.5225,
+        "profit_factor": 1.565,
+        "avg_win": 6555.77,
+        "avg_loss": 4584.18,
+        "net_pnl": 742851.25,
+        "mean_r": 0.2002,
+        "ci_lo_r": 0.1135,
+        "ci_hi_r": 0.2872,
+        "r_verdict": "POSITIVE",
+        "sufficient": true
+      },
+      "val": {
+        "label": "val(split2_train2022_24_val2025_26)",
+        "n": 119,
+        "win_rate": 0.4958,
+        "profit_factor": 1.346,
+        "avg_win": 6323.84,
+        "avg_loss": 4621.18,
+        "net_pnl": 95835.89,
+        "mean_r": 0.1423,
+        "ci_lo_r": -0.0517,
+        "ci_hi_r": 0.3457,
+        "r_verdict": "UNCERTAIN",
+        "sufficient": true
+      }
+    }
+  },
+  "regime_crosstab": {
+    "EXHAUSTION_SHORT": {
+      "UNKNOWN": {
+        "n": 33,
+        "wr": 0.3333,
+        "pf": 0.745,
+        "mean_r": -0.1913,
+        "verdict": "UNCERTAIN"
+      }
+    },
+    "MEAN_REVERSION_SHORT": {
+      "RANGE": {
+        "n": 4,
+        "wr": 0.75,
+        "pf": 3.51,
+        "mean_r": 0.7543,
+        "verdict": "UNCERTAIN"
+      }
+    },
+    "PULLBACK_LONG": {
+      "BULL_TRENDING": {
+        "n": 681,
+        "wr": 0.5257,
+        "pf": 1.583,
+        "mean_r": 0.2074,
+        "verdict": "POSITIVE"
+      }
+    },
+    "RANGE_REVERSAL_LONG": {
+      "RANGE": {
+        "n": 2,
+        "wr": 0.5,
+        "pf": 0.334,
+        "mean_r": -0.336,
+        "verdict": "UNCERTAIN"
+      }
+    }
+  },
+  "confidence_buckets": {
+    "60-69": {
+      "label": "60-69",
+      "n": 14,
+      "win_rate": 0.3571,
+      "profit_factor": 0.638,
+      "avg_win": 5921.36,
+      "avg_loss": 5155.66,
+      "net_pnl": -16794.1,
+      "mean_r": -0.2589,
+      "ci_lo_r": -0.834,
+      "ci_hi_r": 0.3669,
+      "r_verdict": "UNCERTAIN",
+      "sufficient": false
+    },
+    "70-79": {
+      "label": "70-79",
+      "n": 112,
+      "win_rate": 0.5357,
+      "profit_factor": 1.644,
+      "avg_win": 5760.09,
+      "avg_loss": 4043.21,
+      "net_pnl": 135358.43,
+      "mean_r": 0.2422,
+      "ci_lo_r": 0.0284,
+      "ci_hi_r": 0.4544,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "80-89": {
+      "label": "80-89",
+      "n": 594,
+      "win_rate": 0.5185,
+      "profit_factor": 1.539,
+      "avg_win": 6676.64,
+      "avg_loss": 4672.32,
+      "net_pnl": 720122.81,
+      "mean_r": 0.1915,
+      "ci_lo_r": 0.1042,
+      "ci_hi_r": 0.2782,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    }
+  },
+  "hub_unshadowed": {
+    "label": "HUB_SIGNAL un-shadowed (technical proxy)",
+    "n": 72,
+    "win_rate": 0.25,
+    "profit_factor": 0.49,
+    "avg_win": 5583.57,
+    "avg_loss": 3796.13,
+    "net_pnl": -104486.91,
+    "mean_r": -0.3099,
+    "ci_lo_r": -0.5493,
+    "ci_hi_r": -0.0692,
+    "r_verdict": "NEGATIVE",
+    "sufficient": true
+  },
+  "exit_policies": {
+    "current": {
+      "label": "Old (T1 partial + 1\u00d7ATR trail)",
+      "n": 367,
+      "win_rate": 0.564,
+      "profit_factor": 1.584,
+      "avg_win": 5717.85,
+      "avg_loss": 4670.33,
+      "net_pnl": 436342.61,
+      "mean_r": 0.1957,
+      "ci_lo_r": 0.095,
+      "ci_hi_r": 0.2974,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "full_trail": {
+      "label": "Full trail, no partial (1\u00d7ATR from entry)",
+      "n": 379,
+      "win_rate": 0.285,
+      "profit_factor": 0.671,
+      "avg_win": 3784.47,
+      "avg_loss": 2247.17,
+      "net_pnl": -200259.88,
+      "mean_r": -0.0898,
+      "ci_lo_r": -0.1528,
+      "ci_hi_r": -0.0266,
+      "r_verdict": "NEGATIVE",
+      "sufficient": true
+    },
+    "partial_fixed": {
+      "label": "\u2605 Active (T1 partial + fixed T2, no trail)  \u2190 deployed",
+      "n": 360,
+      "win_rate": 0.5472,
+      "profit_factor": 1.756,
+      "avg_win": 6618.94,
+      "avg_loss": 4556.4,
+      "net_pnl": 561237.94,
+      "mean_r": 0.2551,
+      "ci_lo_r": 0.1396,
+      "ci_hi_r": 0.3708,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "be_after_1r": {
+      "label": "Break-even stop once +1R reached",
+      "n": 356,
+      "win_rate": 0.3961,
+      "profit_factor": 1.435,
+      "avg_win": 6324.72,
+      "avg_loss": 2890.26,
+      "net_pnl": 270380.19,
+      "mean_r": 0.1257,
+      "ci_lo_r": 0.0248,
+      "ci_hi_r": 0.2285,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "trail_150": {
+      "label": "T1 partial + 1.5\u00d7ATR trail",
+      "n": 367,
+      "win_rate": 0.564,
+      "profit_factor": 1.526,
+      "avg_win": 5503.98,
+      "avg_loss": 4666.25,
+      "net_pnl": 392723.61,
+      "mean_r": 0.1759,
+      "ci_lo_r": 0.0754,
+      "ci_hi_r": 0.2784,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    },
+    "trail_075": {
+      "label": "T1 partial + 0.75\u00d7ATR trail",
+      "n": 367,
+      "win_rate": 0.564,
+      "profit_factor": 1.648,
+      "avg_win": 5953.98,
+      "avg_loss": 4673.16,
+      "net_pnl": 484766.76,
+      "mean_r": 0.2177,
+      "ci_lo_r": 0.1122,
+      "ci_hi_r": 0.3227,
+      "r_verdict": "POSITIVE",
+      "sufficient": true
+    }
+  },
+  "caveats": [
+    "Survivorship bias: universe is today's live symbols; delisted stocks excluded",
+    "HUB_SIGNAL un-shadowed uses EMA/ST/RSI proxy, not real 7-factor hub scores",
+    "pattern_direction computed from OHLCV in bridge (hammer/bullish_bar/bearish_bar)",
+    "RANGE_REVERSAL hammer check uses real OHLCV via _bridge_pattern() \u2014 correct",
+    "Cost model: Varsity M7 (STT + exchange + SEBI + stamp + GST + brokerage)",
+    "Slippage: 0.01\u20130.03% adverse on entry (live _SLIP_MIN/_SLIP_MAX matched)"
+  ],
+  "elapsed_minutes": 15.4,
+  "verdict": {
+    "statement": "Out-of-sample, on the live decision path, the system shows mean expectancy of 0.191 R/trade (95% CI [0.108, 0.271]).  OOS (2025-26): 0.142 R (UNCERTAIN).  Strategy MEAN_REVERSION_SHORT carries the edge; RANGE_REVERSAL_LONG is dilutive.",
+    "edge_status": "EDGE CONDITIONAL ON REGIME",
+    "regime_note": "Edge concentrated in BULL_TRENDING; absent/negative in chop/bear.",
+    "strategy_note": "Best: MEAN_REVERSION_SHORT (0.754 R)  Worst: RANGE_REVERSAL_LONG (-0.336 R)",
+    "confidence_note": "Confidence is NOT predictive \u2014 thresholds may be theater.",
+    "oos_note": "OOS (2025-26): mean_R=0.142, UNCERTAIN",
+    "recommendation": "Do NOT deploy in chop/bear.  Enable BULL_TRENDING gate, then extend paper."
+  }
+}

@@ -31,6 +31,7 @@ class MarketFeatures:
     # EMAs
     ema20:          float
     ema50:          float
+    ema100:         float   # 100-day ≈ weekly EMA20 proxy (Phase 6)
     ema200:         float
 
     # Momentum
@@ -77,6 +78,7 @@ class MarketAnalyzerAgent:
 
         e20  = ema(c, 20)
         e50  = ema(c, 50)
+        e100 = ema(c, 100)
         e200 = ema(c, 200)
 
         r = rsi(c, 14)
@@ -127,6 +129,7 @@ class MarketAnalyzerAgent:
             volume=float(last["volume"]),
             ema20=float(e20.iloc[-1]),
             ema50=float(e50.iloc[-1]),
+            ema100=float(e100.iloc[-1]),
             ema200=float(e200.iloc[-1]),
             rsi14=float(r.iloc[-1]),
             macd_hist=float(m_hist.iloc[-1]),

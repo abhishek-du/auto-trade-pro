@@ -24,15 +24,27 @@ class PullbackTrendLong(Strategy):
         if not (f.ema20 > f.ema50):       return None
         # Require actual momentum — ADX < 20 = directionless chop, no follow-through.
         if f.adx14 < 20:                  return None
-        # Only enter when long-term trend is up: EMA50 must be above EMA200.
-        if not (f.ema50 > f.ema200):      return None
+        # Phase 6: EMA spread — EMA50 must be at least 1% above EMA200 to confirm
+        # an established trend (not just a fresh, fragile EMA cross).
+        if not (f.ema50 >= f.ema200 * 1.01): return None
+        # Phase 6: weekly trend proxy — close must be above 100-day EMA (≈ 20-week EMA).
+        # Blocks entries in stocks in a long-term downtrend even if daily stack aligns.
+        ema100 = getattr(f, "ema100", None)
+        if ema100 is not None and f.close < ema100: return None
         # Don't buy into already-overbought territory.
         if f.rsi14 > 70:                  return None
-        # Phase 5: shallow touch only — if prev bar's low is > 3% below EMA20 it's a
-        # breakdown, not a pullback. Filters knife-catch entries in weak stocks.
+        # Phase 5: shallow touch only — prev bar's low must be within 3% of EMA20.
         if float(prev["low"]) < f.ema20 * 0.97: return None
+        # Phase 6: quiet pullback — prev bar must NOT have had a vol_spike (panic sell).
+        # Quiet pullback + high-volume bounce = institutional accumulation pattern.
+        if bool(prev.get("vol_spike", False)): return None
         # Phase 5: require volume confirmation on the bounce bar — buyers must step in.
         if not f.vol_spike:               return None
+        # Phase 6: ADX must not be collapsing — trend strength holding.
+        # In backtest: prev bar has precomputed adx14. In live: raw df has no adx14,
+        # so .get() falls back to current adx14 and the check always passes (safe).
+        prev_adx = float(prev.get("adx14", f.adx14))
+        if prev_adx > 0 and f.adx14 < prev_adx * 0.85: return None
 
         reasons = [
             "bull_trending_regime",
