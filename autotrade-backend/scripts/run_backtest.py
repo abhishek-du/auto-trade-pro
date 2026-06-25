@@ -199,33 +199,21 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
 
     regime = r.get("regime", "UNKNOWN")
 
-    # ── TREND_BREAKOUT_LONG ───────────────────────────────────────────────────
-    if (regime == "BULL_TRENDING"
-            and not np.isnan(r["swing_high_20"])
-            and close > r["swing_high_20"]
-            and r["vol_spike"]
-            and 55 <= r["rsi14"] <= 75
-            and r["adx14"] > 20
-            and r["ema20"] > r["ema50"]
-            and r.get("macd", 0) > r.get("macd_signal", 0)):
-        stop   = max(r["swing_high_20"] - 1.5 * atr, r["ema20"] - 0.5 * atr)
-        risk   = close - stop
-        if risk > 0:
-            return {
-                "side": "BUY", "entry": close,
-                "stop": stop,  "target": close + 2.0 * risk,
-                "strategy": "TREND_BREAKOUT_LONG", "confidence": 65,
-            }
+    # TREND_BREAKOUT_LONG disabled (Phase 5): backtest mean_R=-0.003, CI straddles
+    # zero — no statistical edge. Keeping it active only dilutes overall expectancy.
 
     # ── PULLBACK_LONG ─────────────────────────────────────────────────────────
     # Mirrors live PullbackTrendLong: ADX>=20, EMA50>EMA200, RSI<=70 cap.
-    # EMA50>EMA200 is the key 2025-26 filter: blocks entries in stocks that are
-    # in a broader downtrend even if the short-term regime looks bullish.
+    # Phase 5 additions:
+    #   vol_spike required — confirms buyers stepped back in on the bounce bar.
+    #   prev_low >= ema20*0.97 — shallow touch only; deeper breaches are breakdowns.
     if (regime == "BULL_TRENDING" and prev_row is not None
             and r["ema20"] > r["ema50"] and r["ema50"] > r["ema200"]
             and 50 <= r["rsi14"] <= 70
             and r["adx14"] >= 20
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
+            and float(prev_row["low"]) >= r["ema20"] * 0.97   # shallow touch, not breakdown
+            and bool(r.get("vol_spike", False))                # volume confirms re-entry
             and close > r["ema20"]):
         stop = float(prev_row["low"]) - 0.5 * atr
         risk = close - stop
@@ -299,12 +287,11 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
                 }
 
         # ── EXHAUSTION_SHORT — overbought in a confirmed downtrend ────────────
-        # High-confluence: stock bounced into overbought territory (RSI >= 65)
-        # while medium-term trend is down (EMA50 < EMA200) and short-term
-        # bearish (EMA20 < EMA50). This is the "dead cat bounce" fade.
+        # Phase 5: loosened from RSI>=65 → RSI>=58 and close>=ema20 → >=ema20*0.93
+        # to capture more dead-cat bounces (Phase 4 only generated n=15 — too few).
         if (r["ema20"] < r["ema50"] < r["ema200"]
-                and r["rsi14"] >= 65
-                and close >= r["ema20"]
+                and r["rsi14"] >= 58
+                and close >= r["ema20"] * 0.93        # within 7% of EMA20 resistance
                 and r["adx14"] >= 15):
             stop = close + 1.0 * atr
             risk = stop - close
@@ -343,6 +330,7 @@ def backtest_symbol(
     hub_scores: dict[tuple, dict] | None = None,
     fund_data: dict | None = None,
     news_vetoes: dict[tuple, bool] | None = None,
+    breadth_map: dict[str, float] | None = None,
 ) -> dict:
     warmup = settings.AGENT_WARMUP_BARS
     if len(df) < warmup + 10:
@@ -484,6 +472,8 @@ def backtest_symbol(
             # Symbol cooldown: 20-bar blackout after a stop-hit loss to avoid
             # repeatedly re-entering a weakening stock (e.g. CHOICEIN.NS pattern).
             cooldown_ok = (i >= last_stop_bar + 20)
+            # Daily breadth: used for PULLBACK_LONG gate and dynamic sizing.
+            day_breadth = breadth_map.get(bar_ts) if breadth_map else None
 
             # ── Hub DB Replay ─────────────────────────────────────────────────
             # When a Hub 7-factor score exists in DB for this symbol-date, use
@@ -531,6 +521,11 @@ def backtest_symbol(
                     sig = None
                 elif sig["side"] == "SELL" and nifty_ok is not None and nifty_allow:
                     sig = None
+                # Phase 5 breadth gate: block PULLBACK_LONG when < 45% of hub
+                # stocks are above their 50-day proxy — narrow rally / sector rotation.
+                elif (sig and sig.get("strategy") == "PULLBACK_LONG"
+                        and day_breadth is not None and day_breadth < 45.0):
+                    sig = None
 
             # ── Research gate: apply veto filters ────────────────────────────
             if sig and sig["side"] == "BUY" and _ENABLE_RESEARCH_GATE:
@@ -551,6 +546,17 @@ def backtest_symbol(
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
                     _size_mult = 0.5 if sig["side"] == "SELL" else 1.0
+                    # Dynamic sizing: scale BUY positions by regime quality.
+                    # Breadth >= 60% + strong ADX + high confidence → 1.25×.
+                    # Breadth 35-45% → 0.75×.  Breadth < 35% → 0.5×.
+                    if sig["side"] == "BUY" and day_breadth is not None:
+                        adx_val = float(row.get("adx14", 0))
+                        if day_breadth >= 60 and adx_val >= 25 and sig["confidence"] >= 80:
+                            _size_mult *= 1.25
+                        elif day_breadth < 35:
+                            _size_mult *= 0.5
+                        elif day_breadth < 45:
+                            _size_mult *= 0.75
                     qty = int((equity * _RISK_PCT * _size_mult) / risk_per_share)
                     if qty > 0:
                         atr14 = float(row["atr14"])
@@ -618,6 +624,38 @@ async def load_candles(symbol: str, from_dt: datetime) -> pd.DataFrame:
     for col in ("open", "high", "low", "close", "volume"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["close"])
+
+
+async def compute_daily_breadth(top_n: int = 200, from_dt: datetime | None = None) -> dict[str, float]:
+    """Compute daily market breadth: % of top-N hub symbols above their 50-day close proxy.
+
+    Uses a single SQL window-function query for efficiency. For each trading day,
+    computes close[today] vs close[50-bars-ago] across the hub universe.
+    Returns {date_str: breadth_pct}.
+    """
+    if from_dt is None:
+        from_date_val = date(2022, 1, 1)
+    elif hasattr(from_dt, "date"):
+        from_date_val = from_dt.date()
+    else:
+        from_date_val = from_dt
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(text("""
+            WITH lagged AS (
+                SELECT symbol, timestamp::date AS dt, close,
+                       LAG(close, 50) OVER (PARTITION BY symbol ORDER BY timestamp) AS c50
+                FROM candles
+                WHERE timeframe = '1d'
+                  AND symbol IN (SELECT symbol FROM hub_universe ORDER BY rank LIMIT :n)
+            )
+            SELECT dt,
+                   ROUND(100.0 * COUNT(CASE WHEN close > c50 THEN 1 END)
+                         / NULLIF(COUNT(*), 0), 1) AS breadth_pct
+            FROM lagged
+            WHERE c50 IS NOT NULL AND dt >= :from_d
+            GROUP BY dt ORDER BY dt
+        """), {"n": top_n, "from_d": from_date_val})).all()
+    return {str(r[0]): float(r[1]) for r in rows}
 
 
 async def load_hub_scores_bulk(symbols: list[str], from_dt: datetime) -> dict[tuple, dict]:
@@ -1004,6 +1042,18 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     except Exception as exc:
         print(f"[backtest] WARNING: NIFTYBEES load failed ({exc}) — gate disabled")
 
+    # Precompute daily market breadth (% hub stocks above 50-day proxy).
+    print("[backtest] Precomputing daily market breadth (hub top-200)...")
+    breadth_map: dict[str, float] = {}
+    try:
+        breadth_map = await compute_daily_breadth(top_n=200, from_dt=from_dt)
+        avg_b    = round(sum(breadth_map.values()) / len(breadth_map), 1) if breadth_map else 0
+        below_45 = sum(1 for v in breadth_map.values() if v < 45.0)
+        print(f"[backtest] Breadth: {len(breadth_map)} days | avg={avg_b}% | "
+              f"{below_45} days below 45% (PULLBACK_LONG blocked)")
+    except Exception as exc:
+        print(f"[backtest] WARNING: breadth precompute failed — gate disabled: {exc}")
+
     # ── Pre-load enrichment data (loaded once, shared across all symbols) ──────
     hub_scores:  dict[tuple, dict] = {}
     fund_data:   dict[str, dict]   = {}
@@ -1052,6 +1102,7 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
             hub_scores=hub_scores or None,
             fund_data=fund_data or None,
             news_vetoes=news_vetoes or None,
+            breadth_map=breadth_map or None,
         )
         if "error" in result:
             skip += 1

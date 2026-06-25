@@ -25,11 +25,14 @@ class PullbackTrendLong(Strategy):
         # Require actual momentum — ADX < 20 = directionless chop, no follow-through.
         if f.adx14 < 20:                  return None
         # Only enter when long-term trend is up: EMA50 must be above EMA200.
-        # This blocks entries in stocks that are in a broader downtrend even if
-        # the short-term regime looks bullish.
         if not (f.ema50 > f.ema200):      return None
         # Don't buy into already-overbought territory.
         if f.rsi14 > 70:                  return None
+        # Phase 5: shallow touch only — if prev bar's low is > 3% below EMA20 it's a
+        # breakdown, not a pullback. Filters knife-catch entries in weak stocks.
+        if float(prev["low"]) < f.ema20 * 0.97: return None
+        # Phase 5: require volume confirmation on the bounce bar — buyers must step in.
+        if not f.vol_spike:               return None
 
         reasons = [
             "bull_trending_regime",

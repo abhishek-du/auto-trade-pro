@@ -46,7 +46,7 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
 # ── reuse infrastructure from run_backtest.py ─────────────────────────────────
 from scripts.run_backtest import (
-    precompute, estimate_cost, load_candles, load_hub_symbols,
+    precompute, estimate_cost, load_candles, load_hub_symbols, compute_daily_breadth,
     _EQUITY, _RISK_PCT, _CONF_THRESH, _MIN_BARS,
 )
 from utils.config import settings
@@ -153,6 +153,7 @@ def backtest_corrected(
     hub_only: bool = False,          # if True: run HUB_SIGNAL as the sole strategy
     exit_policy: str = "partial_fixed",  # partial_fixed | current | full_trail | be_after_1r
     trail_atr_mult: float = 1.0,     # for exit_policy variants
+    breadth_map: dict[str, float] | None = None,  # Phase 5: daily breadth for gate + sizing
 ) -> dict:
     """Backtest using REAL Strategy classes via the precomputed-features bridge.
 
@@ -340,6 +341,7 @@ def backtest_corrected(
         if open_pos is None:
             nifty_allow = nifty_ok.get(bar_ts, True) if nifty_ok else True
             cooldown_ok = (i >= last_stop_bar + 20)
+            day_breadth = breadth_map.get(bar_ts) if breadth_map else None
             if not (nifty_allow and cooldown_ok):
                 continue
 
@@ -372,11 +374,27 @@ def backtest_corrected(
                 df_window = df.iloc[max(0, i - 1): i + 1]
                 candidate = selector.propose(symbol, df_window, features, macro_bias=0, fund_grade="WATCHLIST")
 
+            if candidate:
+                # Phase 5: block PULLBACK_LONG when broad market is weak (< 45% above 50d proxy).
+                if (candidate.strategy == "PULLBACK_LONG"
+                        and day_breadth is not None and day_breadth < 45.0):
+                    candidate = None
+
             if candidate and candidate.confidence >= _CONF_THRESH:
                 atr14 = float(row["atr14"])
                 rps   = abs(candidate.entry - candidate.stop)
                 if rps > 0:
-                    qty = int((equity * _RISK_PCT) / rps)
+                    # Dynamic sizing: scale by breadth + ADX quality.
+                    adx_val   = float(row.get("adx14", 0))
+                    size_mult = 1.0
+                    if candidate.side == "BUY" and day_breadth is not None:
+                        if day_breadth >= 60 and adx_val >= 25 and candidate.confidence >= 80:
+                            size_mult = 1.25
+                        elif day_breadth < 35:
+                            size_mult = 0.5
+                        elif day_breadth < 45:
+                            size_mult = 0.75
+                    qty = int((equity * _RISK_PCT * size_mult) / rps)
                     if qty > 0:
                         t1 = (candidate.entry + 2.0 * atr14 if candidate.side == "BUY"
                               else candidate.entry - 2.0 * atr14)
@@ -562,6 +580,7 @@ async def run_exit_comparison(
     from_dt: datetime,
     nifty_ok: dict[str, bool],
     sample_n: int = 100,
+    breadth_map: dict[str, float] | None = None,
 ) -> dict[str, dict]:
     """Run 6 exit policies on the same symbol set.  Uses a sample (default 100) for speed."""
     sample = symbols[:sample_n]
@@ -576,7 +595,8 @@ async def run_exit_comparison(
             continue
         for policy in EXIT_POLICIES:
             try:
-                r = backtest_corrected(df, symbol, nifty_ok=nifty_ok, exit_policy=policy)
+                r = backtest_corrected(df, symbol, nifty_ok=nifty_ok,
+                                       exit_policy=policy, breadth_map=breadth_map)
                 results[policy].extend(r.get("trades", []))
             except Exception:
                 pass
@@ -596,6 +616,7 @@ async def run_hub_unshadowed(
     from_dt: datetime,
     nifty_ok: dict[str, bool],
     sample_n: int = 150,
+    breadth_map: dict[str, float] | None = None,
 ) -> dict:
     trades: list[dict] = []
     for symbol in symbols[:sample_n]:
@@ -606,7 +627,8 @@ async def run_hub_unshadowed(
         if len(df) < _MIN_BARS:
             continue
         try:
-            r = backtest_corrected(df, symbol, nifty_ok=nifty_ok, hub_only=True)
+            r = backtest_corrected(df, symbol, nifty_ok=nifty_ok,
+                                   hub_only=True, breadth_map=breadth_map)
             trades.extend(r.get("trades", []))
         except Exception:
             pass
@@ -621,6 +643,7 @@ async def run_full_backtest(
     symbols: list[str],
     from_dt: datetime,
     nifty_ok: dict[str, bool],
+    breadth_map: dict[str, float] | None = None,
 ) -> list[dict]:
     """Run corrected backtest (real Strategy classes) across the full universe."""
     all_trades: list[dict] = []
@@ -635,7 +658,7 @@ async def run_full_backtest(
         if len(df) < _MIN_BARS:
             skip += 1; continue
         try:
-            r = backtest_corrected(df, symbol, nifty_ok=nifty_ok)
+            r = backtest_corrected(df, symbol, nifty_ok=nifty_ok, breadth_map=breadth_map)
             all_trades.extend(r.get("trades", []))
             ok += 1
         except Exception as exc:
@@ -900,9 +923,21 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     except Exception as exc:
         print(f"[validate] WARNING: Nifty gate disabled: {exc}")
 
+    # Precompute daily market breadth (% hub stocks above 50-day proxy).
+    print("[validate] Precomputing daily market breadth (hub top-200)...")
+    breadth_map: dict[str, float] = {}
+    try:
+        breadth_map = await compute_daily_breadth(top_n=200, from_dt=from_dt)
+        avg_b    = round(sum(breadth_map.values()) / len(breadth_map), 1) if breadth_map else 0
+        below_45 = sum(1 for v in breadth_map.values() if v < 45.0)
+        print(f"[validate] Breadth: {len(breadth_map)} days | avg={avg_b}% | "
+              f"{below_45} days below 45% (PULLBACK_LONG blocked)")
+    except Exception as exc:
+        print(f"[validate] WARNING: breadth compute failed — gate disabled: {exc}")
+
     # 1. Full backtest (corrected path)
     print("\n[1/6] Running corrected backtest (real Strategy classes)...")
-    all_trades = await run_full_backtest(symbols, from_dt, nifty_ok)
+    all_trades = await run_full_backtest(symbols, from_dt, nifty_ok, breadth_map=breadth_map)
 
     # 2. Stats per strategy
     print("[2/6] Computing strategy statistics + bootstrap CI...")
@@ -933,8 +968,8 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
 
     # 6. HUB_SIGNAL + exit variants (on sample for speed)
     print("[6/6] HUB_SIGNAL un-shadowed + exit policy comparison...")
-    hub = await run_hub_unshadowed(symbols, from_dt, nifty_ok)
-    ep  = await run_exit_comparison(symbols, from_dt, nifty_ok)
+    hub = await run_hub_unshadowed(symbols, from_dt, nifty_ok, breadth_map=breadth_map)
+    ep  = await run_exit_comparison(symbols, from_dt, nifty_ok, breadth_map=breadth_map)
 
     report = {
         "period":          f"{from_date} → {to_date}",

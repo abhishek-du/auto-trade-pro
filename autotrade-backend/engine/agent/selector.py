@@ -5,7 +5,6 @@ Varsity Module 10: best setup wins (highest confidence + RR ≥ 1.5).
 """
 from __future__ import annotations
 
-from engine.agent.strategies.trend_breakout   import TrendBreakoutLong
 from engine.agent.strategies.pullback_trend   import PullbackTrendLong
 from engine.agent.strategies.mean_reversion   import MeanReversionShort
 from engine.agent.strategies.range_reversal   import RangeReversalLong
@@ -17,14 +16,11 @@ from utils.logger import logger
 class StrategySelectorAgent:
 
     def __init__(self):
-        # Varsity strategies run first — specific setups with full price-action
-        # confirmation.  HubSignalStrategy is the catch-all fallback: if a stock
-        # ranked in the market shortlist but no specific Varsity setup fired, it
-        # still gets traded based on the 7-factor hub score.
+        # TREND_BREAKOUT_LONG disabled (Phase 5): backtest mean_R=-0.003 over 400+
+        # trades — zero statistical edge; keeping it active dilutes expectancy.
         # Short strategies (MeanReversionShort, ExhaustionShort) require
         # EQUITY_SHORT_ENABLED=True and use MIS product (intraday only — NSE rule).
         self.strategies = [
-            TrendBreakoutLong(),
             PullbackTrendLong(),
             MeanReversionShort(),
             RangeReversalLong(),
