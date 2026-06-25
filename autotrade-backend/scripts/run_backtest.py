@@ -76,7 +76,7 @@ _MIN_BARS     = settings.AGENT_WARMUP_BARS + 50
 _EQUITY       = 500_000.0   # per-symbol notional for position sizing
 _RISK_PCT     = settings.AGENT_MAX_RISK_PER_TRADE   # 1%
 _CONF_THRESH  = max(settings.AGENT_CONFIDENCE_THRESHOLD, 40)  # use 40 minimum in backtest
-_ENABLE_SHORTS = False      # toggled by --shorts; enables the short-selling leg
+_ENABLE_SHORTS = True      # toggled by --shorts; enables the short-selling leg
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,7 +203,7 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             and 55 <= r["rsi14"] <= 75
             and r["adx14"] > 20
             and r["ema20"] > r["ema50"]
-            and r["macd"] > r["macd_signal"]):
+            and r.get("macd", 0) > r.get("macd_signal", 0)):
         stop   = max(r["swing_high_20"] - 1.5 * atr, r["ema20"] - 0.5 * atr)
         risk   = close - stop
         if risk > 0:
@@ -239,7 +239,7 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             and close <= r["bb_lower"] and r["rsi14"] <= 35
             and r["ema50"] > r["ema200"]       # medium-term trend not down
             and r["adx14"] < 25
-            and len(r["patterns"]) > 0):       # confirmed by bullish candlestick
+            and len(r.get("patterns", [])) > 0):       # confirmed by bullish candlestick
         stop = r["low"] - 0.5 * atr
         risk = close - stop
         tgt  = r["bb_mid"]
@@ -929,14 +929,46 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     nifty_ok_by_date: dict[str, bool] = {}
     try:
         nifty_df = await load_candles("NIFTYBEES.NS", from_dt)
+        vix_df = pd.DataFrame()
+        for vix_sym in ("^INDIAVIX", "INDIAVIX.NS", "INDIA_VIX"):
+            try:
+                vdf = await load_candles(vix_sym, from_dt)
+                if not vdf.empty:
+                    vix_df = vdf
+                    break
+            except Exception:
+                pass
+
         if len(nifty_df) >= 55:
             nifty_ema50 = nifty_df["close"].ewm(span=50, adjust=False).mean()
+            nifty_ema20 = nifty_df["close"].ewm(span=20, adjust=False).mean()
+            nifty_adx_series, _, _ = _adx(nifty_df["high"], nifty_df["low"], nifty_df["close"], 14)
             nifty_above = nifty_df["close"] > nifty_ema50
+            nifty_5d_ret = (nifty_df["close"] - nifty_df["close"].shift(5)) / nifty_df["close"].shift(5) * 100
+            
             for ts, ok_flag in nifty_above.items():
-                nifty_ok_by_date[str(ts)[:10]] = bool(ok_flag)
+                ts_str = str(ts)[:10]
+                is_ok = bool(ok_flag)
+                ret_5d = nifty_5d_ret.get(ts, 0)
+                adx_val = nifty_adx_series.get(ts, 0)
+                close_val = nifty_df.at[ts, "close"]
+                ema20_val = nifty_ema20.get(ts, 0)
+                
+                # Chop / Early Weakness Filter
+                if not pd.isna(adx_val) and not pd.isna(ema20_val):
+                    if close_val < ema20_val and adx_val < 20:
+                        is_ok = False
+                        
+                if not pd.isna(ret_5d) and ret_5d < -2.0:
+                    is_ok = False
+                if not vix_df.empty and ts in vix_df.index:
+                    if float(vix_df.loc[ts, "close"]) > 25.0:
+                        is_ok = False
+                nifty_ok_by_date[ts_str] = is_ok
+                
             pct_up = round(100 * sum(nifty_ok_by_date.values()) / len(nifty_ok_by_date), 1)
-            print(f"[backtest] Nifty gate: {sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
-                  f"days above EMA50 ({pct_up}% open)")
+            print(f"[backtest] Regime gate: {sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
+                  f"days open ({pct_up}% open)")
         else:
             print(f"[backtest] WARNING: only {len(nifty_df)} NIFTYBEES.NS bars — gate disabled")
     except Exception as exc:
