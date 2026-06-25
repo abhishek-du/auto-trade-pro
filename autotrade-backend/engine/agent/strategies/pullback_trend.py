@@ -22,15 +22,21 @@ class PullbackTrendLong(Strategy):
         if float(last["close"]) <= f.ema20: return None
         if f.rsi14 < 50:                  return None
         if not (f.ema20 > f.ema50):       return None
-        # Require some actual momentum — ADX < 15 is directionless chop where
-        # pullback entries have no follow-through.
-        if f.adx14 < 15:                  return None
+        # Require actual momentum — ADX < 20 = directionless chop, no follow-through.
+        if f.adx14 < 20:                  return None
+        # Only enter when long-term trend is up: EMA50 must be above EMA200.
+        # This blocks entries in stocks that are in a broader downtrend even if
+        # the short-term regime looks bullish.
+        if not (f.ema50 > f.ema200):      return None
+        # Don't buy into already-overbought territory.
+        if f.rsi14 > 70:                  return None
 
         reasons = [
             "bull_trending_regime",
             "pullback_to_20ema",
             "close_back_above_20ema",
             f"rsi14={f.rsi14:.1f}",
+            "ema50>ema200",
         ]
 
         entry  = float(last["close"])
@@ -40,7 +46,7 @@ class PullbackTrendLong(Strategy):
 
         if risk <= 0 or target <= entry:  return None
 
-        conf = 70
+        conf = 76
         if macro_bias > 0:
             conf += 5;  reasons.append(f"macro_bias:+{macro_bias}")
         if fund_grade in ("INVESTMENT", "WATCHLIST"):

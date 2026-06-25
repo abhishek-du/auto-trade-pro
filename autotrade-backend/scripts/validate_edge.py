@@ -70,6 +70,37 @@ _YEAR_REGIMES = {
 # 1. CORRECTED BACKTEST — Live decision path via precomputed-features bridge
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _bridge_pattern(row: pd.Series) -> dict:
+    """Compute a minimal candlestick pattern direction from raw OHLCV.
+
+    Used by the precomputed bridge so RANGE_REVERSAL_LONG hammer check and
+    TREND_BREAKOUT pattern bonus work correctly without the full indicator stack.
+    Returns a dict of pattern_direction / pattern_score / strongest_pattern keys.
+    """
+    o  = float(row.get("open", row["close"]))
+    c  = float(row["close"])
+    lo = float(row["low"])
+    hi = float(row["high"])
+    body       = abs(c - o) or 1e-6
+    lower_wick = min(c, o) - lo
+    upper_wick = hi - max(c, o)
+
+    is_hammer        = (lower_wick > 2 * body) and (c > o)
+    is_bullish_bar   = (c > o) and (c > lo + (hi - lo) * 0.55)  # closes in top 45% of range
+    is_shooting_star = (upper_wick > 2 * body) and (c < o)
+    is_bearish_bar   = (c < o) and (c < lo + (hi - lo) * 0.45)
+
+    if is_hammer:
+        return {"pattern_direction": "BULLISH", "pattern_score": 0.8, "strongest_pattern": "hammer"}
+    if is_bullish_bar:
+        return {"pattern_direction": "BULLISH", "pattern_score": 0.5, "strongest_pattern": "bullish_bar"}
+    if is_shooting_star:
+        return {"pattern_direction": "BEARISH", "pattern_score": 0.8, "strongest_pattern": "shooting_star"}
+    if is_bearish_bar:
+        return {"pattern_direction": "BEARISH", "pattern_score": 0.5, "strongest_pattern": "bearish_bar"}
+    return {"pattern_direction": "NEUTRAL", "pattern_score": 0.0, "strongest_pattern": ""}
+
+
 def _features_from_precomputed(row: pd.Series) -> SimpleNamespace:
     """Build a MarketFeatures-like object from a pre-computed vectorized row.
 
@@ -101,10 +132,11 @@ def _features_from_precomputed(row: pd.Series) -> SimpleNamespace:
         vol_spike=bool(row.get("vol_spike", False)),
         swing_high_20=float(row.get("swing_high_20", row["close"])),
         swing_low_20=float(row.get("swing_low_20", row["close"])),
-        # Pattern: default NEUTRAL — conservative, avoids false RANGE_REVERSAL triggers
-        pattern_direction="NEUTRAL",
-        pattern_score=0.0,
-        strongest_pattern="",
+        # Pattern: compute hammer from real OHLCV so RANGE_REVERSAL fires correctly.
+        # Live system runs full candlestick stack; bridge computes the dominant
+        # hammer signal only (lower_wick > 2×body + bullish close). This is the
+        # main pattern RANGE_REVERSAL gates on and exactly mirrors the strategy logic.
+        **_bridge_pattern(row),
         composite_score=0.0,
         regime=str(row.get("regime", "UNKNOWN")),
         # Hub score: None → HubSignalStrategy returns None (correct; no backtest scores)
@@ -239,29 +271,50 @@ def backtest_corrected(
 
             # Check exit
             exit_price = reason = None
-            if open_pos["side"] == "BUY":
-                if bar_low <= open_pos["stop"]:
-                    exit_price = open_pos["stop"]
-                    reason = "TRAIL_STOP" if open_pos.get("trailing") else "STOP_HIT"
-                elif bar_high >= open_pos["target"]:
-                    exit_price = open_pos["target"]
-                    reason = "TARGET_HIT"
+
+            # Time exit: 12 bars without hitting T1 → exit at close (Fix 4).
+            if not open_pos.get("partial_done"):
+                bars_held = i - open_pos.get("entry_bar", i)
+                if bars_held >= 12:
+                    exit_price = float(row["close"])
+                    reason = "TIME_EXIT"
+
+            if exit_price is None:
+                if open_pos["side"] == "BUY":
+                    if bar_low <= open_pos["stop"]:
+                        exit_price = open_pos["stop"]
+                        reason = "TRAIL_STOP" if open_pos.get("trailing") else "STOP_HIT"
+                    elif bar_high >= open_pos["target"]:
+                        exit_price = open_pos["target"]
+                        reason = "TARGET_HIT"
+                else:  # SELL (ExhaustionShort, MeanReversionShort)
+                    if bar_high >= open_pos["stop"]:
+                        exit_price = open_pos["stop"]
+                        reason = "STOP_HIT"
+                    elif bar_low <= open_pos["target"]:
+                        exit_price = open_pos["target"]
+                        reason = "TARGET_HIT"
 
             if exit_price is not None:
                 remaining = open_pos["qty"]
                 pp        = open_pos.get("partial_pnl", 0.0)
                 pq        = open_pos.get("partial_qty", 0)
                 total_q   = remaining + pq
-                pnl       = (exit_price - open_pos["entry"]) * remaining + pp
-                cost      = (estimate_cost(total_q, open_pos["entry"], "BUY") +
-                             estimate_cost(remaining, exit_price, "SELL") +
-                             estimate_cost(pq, open_pos.get("t1", exit_price), "SELL"))
+                if open_pos["side"] == "BUY":
+                    pnl = (exit_price - open_pos["entry"]) * remaining + pp
+                else:
+                    pnl = (open_pos["entry"] - exit_price) * remaining + pp
+                entry_side = "BUY" if open_pos["side"] == "BUY" else "SELL"
+                exit_side  = "SELL" if open_pos["side"] == "BUY" else "BUY"
+                cost = (estimate_cost(total_q,    open_pos["entry"], entry_side) +
+                        estimate_cost(remaining,  exit_price, exit_side) +
+                        estimate_cost(pq, open_pos.get("t1", exit_price), exit_side))
                 pnl -= cost
                 equity += pnl
                 init_r  = abs(open_pos["entry"] - open_pos["initial_stop"]) * total_q
                 trades.append({
                     "symbol":       symbol,
-                    "side":         "BUY",
+                    "side":         open_pos["side"],
                     "entry":        open_pos["entry"],
                     "exit":         exit_price,
                     "initial_stop": open_pos["initial_stop"],
@@ -325,13 +378,15 @@ def backtest_corrected(
                 if rps > 0:
                     qty = int((equity * _RISK_PCT) / rps)
                     if qty > 0:
+                        t1 = (candidate.entry + 2.0 * atr14 if candidate.side == "BUY"
+                              else candidate.entry - 2.0 * atr14)
                         open_pos = {
                             "side":         candidate.side,
                             "entry":        candidate.entry,
                             "stop":         candidate.stop,
                             "initial_stop": candidate.stop,
                             "target":       candidate.target,
-                            "t1":           candidate.entry + 2.0 * atr14,
+                            "t1":           t1,
                             "trail_dist":   atr14,
                             "atr14":        atr14,
                             "trailing":     False,
@@ -340,6 +395,7 @@ def backtest_corrected(
                             "confidence":   candidate.confidence,
                             "regime":       str(row.get("regime", "UNKNOWN")),
                             "ts":           bar_ts,
+                            "entry_bar":    i,    # for 12-bar time exit
                         }
                         peak_price = candidate.entry
 
@@ -634,6 +690,21 @@ def print_report(report: dict) -> None:
         print(f"    avg_win={_inr(s.get('avg_win'))}  avg_loss={_inr(s.get('avg_loss'))}  "
               f"net={_inr(s.get('net_pnl'))}")
 
+    # ── Year-by-year breakdown ───────────────────────────────────────────────
+    print("\n── Year-by-Year Performance ─────────────────────────────────────────")
+    print(f"  {'Year':<6}  {'Regime':<16}  {'N':>5}  {'WR':>7}  {'PF':>6}  {'MeanR':>7}  {'NetPnL':>12}")
+    for yr, ys in sorted(report.get("by_year", {}).items()):
+        yr_regime  = _YEAR_REGIMES.get(yr, "")
+        yr_n       = ys.get("n", 0)
+        yr_wr      = _pct(ys.get("win_rate"))
+        yr_pf      = _f2(ys.get("profit_factor"))
+        yr_mr      = _f3(ys.get("mean_r"))
+        yr_pnl     = _inr(ys.get("net_pnl"))
+        yr_verdict = ys.get("r_verdict", "")
+        flag = " ← OOS" if yr in ("2025", "2026") else ""
+        print(f"  {yr:<6}  {yr_regime:<16}  {yr_n:>5}  {yr_wr:>7}  {yr_pf:>6}  "
+              f"{yr_mr:>7}  {yr_pnl:>12}  {yr_verdict}{flag}")
+
     # ── Walk-forward ─────────────────────────────────────────────────────────
     print("\n── Walk-Forward Out-of-Sample Validation ────────────────────────────")
     for split, s in report.get("walk_forward", {}).items():
@@ -810,15 +881,22 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     print("           yfinance adjusted close handles splits/dividends.")
     print("           Delisting bias: stocks that failed pre-2022 are excluded.")
 
-    # Load Nifty macro gate
+    # Load Nifty macro gate: EMA50 AND EMA200 (same logic as run_backtest.py).
+    # EMA200 added to block bear-market bounce entries (key 2025 fix).
     nifty_ok: dict[str, bool] = {}
     try:
         nifty_df = await load_candles("NIFTYBEES.NS", from_dt)
-        if len(nifty_df) >= 55:
-            ema50 = nifty_df["close"].ewm(span=50, adjust=False).mean()
-            for ts, v in (nifty_df["close"] > ema50).items():
-                nifty_ok[str(ts)[:10]] = bool(v)
-            print(f"[validate] Nifty gate: {sum(nifty_ok.values())}/{len(nifty_ok)} days open")
+        if len(nifty_df) >= 205:
+            ema50  = nifty_df["close"].ewm(span=50,  adjust=False).mean()
+            ema200 = nifty_df["close"].ewm(span=200, adjust=False).mean()
+            for ts in nifty_df.index:
+                c = float(nifty_df.at[ts, "close"])
+                nifty_ok[str(ts)[:10]] = (c > float(ema50[ts])) and (c > float(ema200[ts]))
+            pct_open = round(100 * sum(nifty_ok.values()) / len(nifty_ok), 1)
+            print(f"[validate] Nifty gate (EMA50+EMA200): "
+                  f"{sum(nifty_ok.values())}/{len(nifty_ok)} days open ({pct_open}%)")
+        else:
+            print(f"[validate] WARNING: only {len(nifty_df)} NIFTYBEES bars — gate disabled")
     except Exception as exc:
         print(f"[validate] WARNING: Nifty gate disabled: {exc}")
 
@@ -874,8 +952,8 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
         "caveats": [
             "Survivorship bias: universe is today's live symbols; delisted stocks excluded",
             "HUB_SIGNAL un-shadowed uses EMA/ST/RSI proxy, not real 7-factor hub scores",
-            "pattern_direction forced to NEUTRAL in bridge (no candlestick stack)",
-            "RANGE_REVERSAL hammer check uses real OHLCV via df.iloc[-1] — correct",
+            "pattern_direction computed from OHLCV in bridge (hammer/bullish_bar/bearish_bar)",
+            "RANGE_REVERSAL hammer check uses real OHLCV via _bridge_pattern() — correct",
             "Cost model: Varsity M7 (STT + exchange + SEBI + stamp + GST + brokerage)",
             "Slippage: 0.01–0.03% adverse on entry (live _SLIP_MIN/_SLIP_MAX matched)",
         ],

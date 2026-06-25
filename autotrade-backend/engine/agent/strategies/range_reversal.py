@@ -42,7 +42,7 @@ class RangeReversalLong(Strategy):
 
         if risk <= 0 or target <= entry: return None
 
-        conf = 63
+        conf = 72
         if macro_bias > 0:                   conf += 4
         if fund_grade == "INVESTMENT":        conf += 5
 

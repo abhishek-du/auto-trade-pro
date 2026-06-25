@@ -35,7 +35,7 @@ class TrendBreakoutLong(Strategy):
 
         if risk <= 0 or target <= entry:           return None
 
-        conf = 75
+        conf = 65
         if macro_bias > 0:
             conf += 5;  reasons.append(f"macro_bias:+{macro_bias}")
         if fund_grade in ("INVESTMENT", "WATCHLIST"):
