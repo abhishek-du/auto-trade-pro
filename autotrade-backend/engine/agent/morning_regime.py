@@ -26,6 +26,8 @@ def _deterministic_regime(
     nifty_above_ema50: bool | None,
     nifty_5d_ret: float | None,
     vix_val: float | None,
+    breadth_pct: float | None = None,
+    nifty_above_ema200: bool | None = None,
 ) -> str:
     """Compute regime from technicals alone — no LLM, no network.
 
@@ -41,12 +43,25 @@ def _deterministic_regime(
     # Hard WAIT conditions — any one is enough to block new entries.
     if nifty_above_ema50 is False:
         return "WAIT"
+    # Long-term macro filter: if Nifty is below its 200-day EMA, the market
+    # is in a confirmed downtrend — block all new long entries regardless of
+    # short-term signals. Root cause of 2025 losses (bear-market bounce entries).
+    if nifty_above_ema200 is False:
+        return "WAIT"
     if ret is not None and ret < -2.0:
         return "WAIT"
     if vix > 25.0:
         return "WAIT"
+    # Market breadth: if < 35% of hub universe stocks are above their own
+    # 50-day SMA proxy, the broad market is declining — block new longs.
+    if breadth_pct is not None and breadth_pct < 35.0:
+        return "WAIT"
 
-    # Full AGGRESSIVE: all three conditions green.
+    # Selective regime: mixed signals or weak breadth
+    if breadth_pct is not None and breadth_pct < 50.0:
+        return "SELECTIVE"
+
+    # Full AGGRESSIVE: all conditions green.
     if nifty_above_ema50 is True and (ret is None or ret > 0.5) and vix < 18.0:
         return "AGGRESSIVE"
 
@@ -72,13 +87,20 @@ async def get_morning_regime(session: AsyncSession) -> str:
     nifty_5d_ret: float | None     = None
     vix_val: float | None          = None
 
+    breadth_pct:        float | None = None
+    nifty_above_ema200: bool | None = None
     try:
-        nifty_above_ema50, nifty_5d_ret, vix_val = await _fetch_regime_inputs(session)
-        det_regime = _deterministic_regime(nifty_above_ema50, nifty_5d_ret, vix_val)
+        nifty_above_ema50, nifty_5d_ret, vix_val, breadth_pct, nifty_above_ema200 = (
+            await _fetch_regime_inputs(session)
+        )
+        det_regime = _deterministic_regime(
+            nifty_above_ema50, nifty_5d_ret, vix_val, breadth_pct, nifty_above_ema200
+        )
         logger.info(
             f"[morning_regime] deterministic → {det_regime} "
-            f"(nifty_ema50={'above' if nifty_above_ema50 else 'below' if nifty_above_ema50 is False else 'unknown'} "
-            f"5d={nifty_5d_ret}% vix={vix_val})"
+            f"(nifty_ema50={'above' if nifty_above_ema50 else 'below' if nifty_above_ema50 is False else 'unk'} "
+            f"nifty_ema200={'above' if nifty_above_ema200 else 'below' if nifty_above_ema200 is False else 'unk'} "
+            f"breadth={breadth_pct}% 5d={nifty_5d_ret}% vix={vix_val})"
         )
     except Exception as exc:
         logger.warning(f"[morning_regime] DB inputs failed — using SELECTIVE: {exc}")
@@ -104,27 +126,31 @@ async def get_morning_regime(session: AsyncSession) -> str:
 
 async def _fetch_regime_inputs(
     session: AsyncSession,
-) -> tuple[bool | None, float | None, float | None]:
-    """Fetch (nifty_above_ema50, nifty_5d_ret, vix_val) from the candles DB."""
+) -> tuple[bool | None, float | None, float | None, float | None, bool | None]:
+    """Fetch (nifty_above_ema50, nifty_5d_ret, vix_val, breadth_pct, nifty_above_ema200)."""
     from sqlalchemy import text as _text
 
-    # NIFTYBEES last 60 candles — enough for EMA50 + 5-day return.
+    # NIFTYBEES last 210 candles — enough for EMA200 + 5-day return.
     nifty_rows = (await session.execute(_text("""
         SELECT close FROM candles
         WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-        ORDER BY timestamp DESC LIMIT 60
+        ORDER BY timestamp DESC LIMIT 210
     """))).scalars().all()
 
-    nifty_5d_ret: float | None     = None
-    nifty_above_ema50: bool | None = None
+    nifty_5d_ret: float | None      = None
+    nifty_above_ema50: bool | None  = None
+    nifty_above_ema200: bool | None = None
 
     if nifty_rows and len(nifty_rows) >= 5:
         closes = list(reversed(nifty_rows))
         nifty_5d_ret = round((closes[-1] - closes[-5]) / closes[-5] * 100, 2)
     if nifty_rows and len(nifty_rows) >= 50:
-        closes_s  = pd.Series(list(reversed(nifty_rows)), dtype=float)
-        ema50     = closes_s.ewm(span=50, adjust=False).mean().iloc[-1]
+        closes_s = pd.Series(list(reversed(nifty_rows)), dtype=float)
+        ema50    = closes_s.ewm(span=50, adjust=False).mean().iloc[-1]
         nifty_above_ema50 = bool(closes_s.iloc[-1] > ema50)
+        if len(nifty_rows) >= 200:
+            ema200 = closes_s.ewm(span=200, adjust=False).mean().iloc[-1]
+            nifty_above_ema200 = bool(closes_s.iloc[-1] > ema200)
 
     # India VIX — try common symbol variants.
     vix_val: float | None = None
@@ -137,7 +163,41 @@ async def _fetch_regime_inputs(
             vix_val = round(float(vix_rows[0]), 1)
             break
 
-    return nifty_above_ema50, nifty_5d_ret, vix_val
+    # Market breadth: % of hub universe stocks above their ~50-day SMA proxy.
+    # Uses "close today vs close ~50 trading days ago" as a fast, single-query
+    # approximation. If today > 50d-ago the stock is in an upswing.
+    breadth_pct: float | None = None
+    try:
+        breadth_row = (await session.execute(_text("""
+            WITH latest AS (
+                SELECT DISTINCT ON (symbol) symbol, close AS c_now
+                FROM candles
+                WHERE timeframe = '1d'
+                  AND symbol IN (SELECT symbol FROM hub_universe ORDER BY rank LIMIT 200)
+                ORDER BY symbol, timestamp DESC
+            ),
+            past AS (
+                SELECT DISTINCT ON (symbol) symbol, close AS c_past
+                FROM candles
+                WHERE timeframe = '1d'
+                  AND symbol IN (SELECT symbol FROM hub_universe ORDER BY rank LIMIT 200)
+                  AND timestamp <= NOW() - INTERVAL '48 days'
+                  AND timestamp >= NOW() - INTERVAL '56 days'
+                ORDER BY symbol, timestamp DESC
+            )
+            SELECT
+                ROUND(
+                    100.0 * COUNT(CASE WHEN l.c_now > p.c_past THEN 1 END)
+                    / NULLIF(COUNT(*), 0), 1
+                )
+            FROM latest l JOIN past p ON l.symbol = p.symbol
+        """))).scalar_one_or_none()
+        if breadth_row is not None:
+            breadth_pct = float(breadth_row)
+    except Exception as exc:
+        logger.debug(f"[morning_regime] breadth query failed (non-fatal): {exc}")
+
+    return nifty_above_ema50, nifty_5d_ret, vix_val, breadth_pct, nifty_above_ema200
 
 
 async def _classify_regime_llm(

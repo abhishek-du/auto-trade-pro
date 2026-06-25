@@ -161,16 +161,20 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
     f["st_dir"] = st_dir
 
     # Regime: BULL_TRENDING / BEAR_TRENDING / RANGE / UNKNOWN
-    # Threshold matches engine/agent/analyzer.py _classify_regime: ADX >= 25
-    # (was ADX > 20 — that was a bug causing weak-trend bars to be labelled BULL_TRENDING
-    # in the backtest while the live analyzer would classify them as RANGE)
+    # Matches engine/agent/analyzer.py _classify_regime exactly:
+    #   ADX >= 25 (Wilder's trending threshold)
+    #   +DI > -DI for BULL_TRENDING, -DI > +DI for BEAR_TRENDING
+    # Previously missing the DI direction check caused 6-13% of "BULL_TRENDING"
+    # bars to be misclassified (EMA aligned, ADX strong, but DI says bearish).
     bull_ema     = (f["ema20"] > f["ema50"]) & (f["ema50"] > f["ema200"])
     bear_ema     = (f["ema20"] < f["ema50"]) & (f["ema50"] < f["ema200"])
-    strong_trend = f["adx14"] >= 25   # matches live analyzer (Wilder: 25 = trend threshold)
+    strong_trend = f["adx14"] >= 25
+    di_bull      = f["plus_di"] > f["minus_di"]
+    di_bear      = f["minus_di"] > f["plus_di"]
 
     regime = pd.Series("UNKNOWN", index=c.index)
-    regime[bull_ema & strong_trend] = "BULL_TRENDING"
-    regime[bear_ema & strong_trend] = "BEAR_TRENDING"
+    regime[bull_ema & strong_trend & di_bull] = "BULL_TRENDING"
+    regime[bear_ema & strong_trend & di_bear] = "BEAR_TRENDING"
     regime[(~bull_ema) & (~bear_ema) & (~strong_trend)] = "RANGE"
     f["regime"] = regime
 
@@ -210,15 +214,17 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             return {
                 "side": "BUY", "entry": close,
                 "stop": stop,  "target": close + 2.0 * risk,
-                "strategy": "TREND_BREAKOUT_LONG", "confidence": 75,
+                "strategy": "TREND_BREAKOUT_LONG", "confidence": 65,
             }
 
     # ── PULLBACK_LONG ─────────────────────────────────────────────────────────
-    # Fix: require ADX >= 15 — pullback entries have no follow-through in
-    # directionless markets (ADX < 15 = no real trend to pull back into).
+    # Mirrors live PullbackTrendLong: ADX>=20, EMA50>EMA200, RSI<=70 cap.
+    # EMA50>EMA200 is the key 2025-26 filter: blocks entries in stocks that are
+    # in a broader downtrend even if the short-term regime looks bullish.
     if (regime == "BULL_TRENDING" and prev_row is not None
-            and r["ema20"] > r["ema50"] and r["rsi14"] >= 50
-            and r["adx14"] >= 15
+            and r["ema20"] > r["ema50"] and r["ema50"] > r["ema200"]
+            and 50 <= r["rsi14"] <= 70
+            and r["adx14"] >= 20
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
             and close > r["ema20"]):
         stop = float(prev_row["low"]) - 0.5 * atr
@@ -227,7 +233,7 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             return {
                 "side": "BUY", "entry": close,
                 "stop": stop,  "target": close + 2.0 * risk,
-                "strategy": "PULLBACK_LONG", "confidence": 70,
+                "strategy": "PULLBACK_LONG", "confidence": 76,
             }
 
     # ── RANGE_REVERSAL_LONG ───────────────────────────────────────────────────
@@ -247,7 +253,7 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             return {
                 "side": "BUY", "entry": close,
                 "stop": stop,  "target": tgt,
-                "strategy": "RANGE_REVERSAL_LONG", "confidence": 63,
+                "strategy": "RANGE_REVERSAL_LONG", "confidence": 72,
             }
 
     # ── HUB_SIGNAL (catch-all) — EMA20 > EMA50 > EMA200 as proxy for BUY ────
@@ -397,20 +403,31 @@ def backtest_symbol(
             exit_price = None
             reason     = None
 
-            if open_pos["side"] == "BUY":
-                if bar_low <= open_pos["stop"]:
-                    exit_price = open_pos["stop"]
-                    reason     = "STOP_HIT"
-                elif bar_high >= open_pos["target"]:
-                    exit_price = open_pos["target"]
-                    reason     = "TARGET_HIT"
-            else:  # SELL/short: stop ABOVE entry, target BELOW entry
-                if bar_high >= open_pos["stop"]:
-                    exit_price = open_pos["stop"]
-                    reason     = "STOP_HIT"
-                elif bar_low <= open_pos["target"]:
-                    exit_price = open_pos["target"]
-                    reason     = "TARGET_HIT"
+            # Time exit: 12 trading bars without hitting T1 → exit at close.
+            # Prevents capital from sitting in dead trades in chop markets.
+            # Only fires when T1 was never reached (partial_done=False) so winning
+            # trades that cleared T1 are allowed to run to T2.
+            if not open_pos.get("partial_done"):
+                bars_held = i - open_pos.get("entry_bar", i)
+                if bars_held >= 12:
+                    exit_price = float(row["close"])
+                    reason = "TIME_EXIT"
+
+            if exit_price is None:
+                if open_pos["side"] == "BUY":
+                    if bar_low <= open_pos["stop"]:
+                        exit_price = open_pos["stop"]
+                        reason     = "STOP_HIT"
+                    elif bar_high >= open_pos["target"]:
+                        exit_price = open_pos["target"]
+                        reason     = "TARGET_HIT"
+                else:  # SELL/short: stop ABOVE entry, target BELOW entry
+                    if bar_high >= open_pos["stop"]:
+                        exit_price = open_pos["stop"]
+                        reason     = "STOP_HIT"
+                    elif bar_low <= open_pos["target"]:
+                        exit_price = open_pos["target"]
+                        reason     = "TARGET_HIT"
 
             if exit_price is not None:
                 remaining_qty = open_pos["qty"]
@@ -939,36 +956,49 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
             except Exception:
                 pass
 
-        if len(nifty_df) >= 55:
-            nifty_ema50 = nifty_df["close"].ewm(span=50, adjust=False).mean()
-            nifty_ema20 = nifty_df["close"].ewm(span=20, adjust=False).mean()
+        if len(nifty_df) >= 205:   # need 200 bars for EMA200
+            nifty_ema50  = nifty_df["close"].ewm(span=50,  adjust=False).mean()
+            nifty_ema200 = nifty_df["close"].ewm(span=200, adjust=False).mean()
+            nifty_ema20  = nifty_df["close"].ewm(span=20,  adjust=False).mean()
             nifty_adx_series, _, _ = _adx(nifty_df["high"], nifty_df["low"], nifty_df["close"], 14)
-            nifty_above = nifty_df["close"] > nifty_ema50
             nifty_5d_ret = (nifty_df["close"] - nifty_df["close"].shift(5)) / nifty_df["close"].shift(5) * 100
-            
-            for ts, ok_flag in nifty_above.items():
-                ts_str = str(ts)[:10]
-                is_ok = bool(ok_flag)
-                ret_5d = nifty_5d_ret.get(ts, 0)
-                adx_val = nifty_adx_series.get(ts, 0)
-                close_val = nifty_df.at[ts, "close"]
-                ema20_val = nifty_ema20.get(ts, 0)
-                
-                # Chop / Early Weakness Filter
-                if not pd.isna(adx_val) and not pd.isna(ema20_val):
+
+            for ts in nifty_df.index:
+                ts_str    = str(ts)[:10]
+                close_val = float(nifty_df.at[ts, "close"])
+                ema50_val  = float(nifty_ema50.get(ts, 0))
+                ema200_val = float(nifty_ema200.get(ts, 0))
+                ema20_val  = float(nifty_ema20.get(ts, 0))
+                adx_val    = float(nifty_adx_series.get(ts, 0))
+                ret_5d     = nifty_5d_ret.get(ts, 0)
+
+                # Primary macro gate: Nifty must be above BOTH EMA50 and EMA200.
+                # EMA50 alone isn't enough — in 2025, Nifty was above EMA50 during
+                # brief recoveries but below EMA200 (long-term downtrend). Adding
+                # EMA200 blocks those bear-market bounce entries that cost -0.200R.
+                is_ok = (close_val > ema50_val) and (close_val > ema200_val)
+
+                # Short-term chop filter (within a trend): close below EMA20 + weak ADX
+                if is_ok and not pd.isna(ema20_val) and not pd.isna(adx_val):
                     if close_val < ema20_val and adx_val < 20:
                         is_ok = False
-                        
-                if not pd.isna(ret_5d) and ret_5d < -2.0:
+
+                # Momentum failure: 5-day drawdown > 2%
+                if is_ok and not pd.isna(ret_5d) and ret_5d < -2.0:
                     is_ok = False
-                if not vix_df.empty and ts in vix_df.index:
+
+                # Fear spike
+                if is_ok and not vix_df.empty and ts in vix_df.index:
                     if float(vix_df.loc[ts, "close"]) > 25.0:
                         is_ok = False
+
+                # Symmetric: allow SELL signals only when index is weak
                 nifty_ok_by_date[ts_str] = is_ok
-                
+
             pct_up = round(100 * sum(nifty_ok_by_date.values()) / len(nifty_ok_by_date), 1)
-            print(f"[backtest] Regime gate: {sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
-                  f"days open ({pct_up}% open)")
+            print(f"[backtest] Macro gate (EMA50+EMA200+ADX+VIX): "
+                  f"{sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
+                  f"days open ({pct_up}%)")
         else:
             print(f"[backtest] WARNING: only {len(nifty_df)} NIFTYBEES.NS bars — gate disabled")
     except Exception as exc:
