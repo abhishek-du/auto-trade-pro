@@ -159,6 +159,15 @@ class AgentExecutionManager:
             f"@ ₹{decision.entry:.2f} | size ₹{trade_value:,.0f} | "
             f"conf={decision.confidence}% RR={decision.risk_reward} | {decision.strategy}"
         )
+
+        # Subscribe the new position to the Zerodha live ticker immediately so
+        # PnL starts updating from Kite ticks rather than waiting for next reconnect.
+        try:
+            from crawler.zerodha_ticker import subscribe_open_position
+            subscribe_open_position(decision.symbol)
+        except Exception:
+            pass  # non-critical — ticker may not be running
+
         return order_id
 
     async def _live_execute(self, decision, session: AsyncSession) -> str | None:
