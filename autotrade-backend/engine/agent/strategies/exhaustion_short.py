@@ -43,19 +43,17 @@ class ExhaustionShort(Strategy):
         o    = float(last["open"])
         c    = float(last["close"])
         hi   = float(last["high"])
-        body = abs(c - o) or 1e-6
-        upper_wick = hi - max(c, o)
 
-        # Bearish rejection candle: closed below open, upper wick ≥ 1.5× body
-        bearish_rejection = (c < o) and (upper_wick >= 1.5 * body)
-        if not bearish_rejection:
+        # Phase 6: simplified candle requirement — just bearish close (c < o).
+        # Phase 5 required upper_wick >= 1.5×body which was too strict (n=15 only).
+        if c >= o:
             return None
 
         reasons = [
             "ema20<ema50<ema200",
             "dead_cat_bounce_to_ema20",
             f"rsi_exhausted:{f.rsi14:.1f}",
-            "bearish_rejection_candle",
+            "bearish_close",
         ]
 
         entry  = c

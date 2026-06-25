@@ -118,6 +118,7 @@ def _features_from_precomputed(row: pd.Series) -> SimpleNamespace:
         volume=float(row.get("volume", 0)),
         ema20=float(row["ema20"]),
         ema50=float(row["ema50"]),
+        ema100=float(row.get("ema100", row["ema200"])),
         ema200=float(row["ema200"]),
         rsi14=float(row["rsi14"]),
         macd_hist=0.0,
@@ -379,6 +380,21 @@ def backtest_corrected(
                 if (candidate.strategy == "PULLBACK_LONG"
                         and day_breadth is not None and day_breadth < 45.0):
                     candidate = None
+                # Phase 6: breadth-adjusted confidence — strong market boosts confidence,
+                # weak market reduces it, making the confidence buckets more predictive.
+                elif candidate is not None and day_breadth is not None:
+                    adj = 0
+                    if day_breadth >= 65:
+                        adj = +5
+                    elif day_breadth < 50:
+                        adj = -5
+                    if adj:
+                        from dataclasses import replace as _dc_replace
+                        try:
+                            candidate = _dc_replace(candidate,
+                                confidence=max(40, min(95, candidate.confidence + adj)))
+                        except Exception:
+                            pass  # TradeCandidate may not be a dataclass — skip adjustment
 
             if candidate and candidate.confidence >= _CONF_THRESH:
                 atr14 = float(row["atr14"])
