@@ -25,12 +25,14 @@ class ExhaustionShort(Strategy):
         if not (f.ema20 < f.ema50 < f.ema200):
             return None
 
-        # Price bounced up to near EMA20 (dead-cat resistance zone)
-        if f.close < f.ema20 * 0.98:   # allow a small overshoot
+        # Price has bounced up toward EMA20 resistance zone (within 7%).
+        # Phase 5: widened from 2% to 7% — more dead-cat bounces qualify.
+        if f.close < f.ema20 * 0.93:
             return None
 
-        # Overbought on the bounce — momentum exhausted
-        if f.rsi14 < 62:
+        # Momentum shows exhaustion on the bounce — above neutral midpoint.
+        # Phase 5: lowered from 62 to 55 to capture more fades.
+        if f.rsi14 < 55:
             return None
 
         # Trend must still have some strength (not pure chop)
