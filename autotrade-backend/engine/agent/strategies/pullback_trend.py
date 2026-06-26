@@ -45,6 +45,13 @@ class PullbackTrendLong(Strategy):
         # so .get() falls back to current adx14 and the check always passes (safe).
         prev_adx = float(prev.get("adx14", f.adx14))
         if prev_adx > 0 and f.adx14 < prev_adx * 0.85: return None
+        # EMA20 slope filter (Phase 9): the 20-EMA must be RISING — today's EMA20 must
+        # exceed its value 5 bars ago. A flat or declining EMA20 means the pullback may
+        # be a trend reversal, not accumulation. Confirmed by expert sources (Zerodha
+        # Varsity, Swingfolio): "slope filter = 20 MA today above 20 MA 5 bars ago."
+        if len(df) >= 6:
+            ema20_5ago = float(df["close"].ewm(span=20, adjust=False).mean().iloc[-6])
+            if f.ema20 <= ema20_5ago: return None
 
         reasons = [
             "bull_trending_regime",

@@ -143,6 +143,8 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
 
     f["swing_high_20"] = c.rolling(20).max().shift(1)   # exclude current bar
     f["swing_low_20"]  = c.rolling(20).min().shift(1)
+    f["roc20"]         = c.pct_change(20) * 100         # stock's own 20-day ROC (%)
+    f["ema20_5ago"]    = _ema(c, 20).shift(5)           # EMA20 slope check (rising?)
 
     vol_avg          = v.rolling(20).mean()
     f["vol_avg"]     = vol_avg
@@ -211,10 +213,16 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
     #   ema50 >= ema200*1.01 — EMA spread: established trend, not fresh cross.
     #   prev vol_spike is False — quiet pullback = accumulation; panic = distribution.
     #   adx not collapsing — trend strength must be holding, not evaporating.
+    # Expert sources (Zerodha Varsity, Groww, Upstox, Swingfolio):
+    #   RSI 40-60 = sweet spot for pullback entry (50-70 was wrong — RSI>62 means
+    #   stock never actually pulled back, just briefly grazed EMA20).
+    #   EMA20 slope filter: rising EMA20 required (today > 5 bars ago) — prevents
+    #   entries on decelerating/flat trends that look bull but are stalling.
     if (regime == "BULL_TRENDING" and prev_row is not None
             and r["ema20"] > r["ema50"] and r["ema50"] >= r["ema200"] * 1.01
             and close > r["ema100"]                            # weekly trend proxy
-            and 50 <= r["rsi14"] <= 70
+            and 50 <= r["rsi14"] <= 70                        # pullback zone — see live strategy for slope gate
+            and r["ema20"] > r.get("ema20_5ago", 0)           # EMA20 must be rising (slope filter)
             and r["adx14"] >= 20
             and r["adx14"] >= float(prev_row.get("adx14", r["adx14"])) * 0.85  # ADX not collapsing
             and float(prev_row["low"]) <= r["ema20"] <= float(prev_row["high"])
@@ -537,6 +545,17 @@ def backtest_symbol(
                     _close_now  = float(row["close"])
                     _close_past = float(f.iloc[i - 63]["close"])
                     if _close_past > 0 and (_close_now - _close_past) / _close_past <= 0.0:
+                        sig = None
+
+                # Relative Strength filter (Phase 9): only trade stocks that are
+                # outperforming or matching Nifty over the last 20 days (within -3%).
+                # In narrow bull markets (2025: 75% of stocks underperformed the index),
+                # this eliminates sector laggards that generate PULLBACK_LONG signals
+                # but fail because the underlying sector trend is down vs the index.
+                if sig and sig["side"] == "BUY" and i >= 20:
+                    _stock_roc20 = float(row.get("roc20", 0) or 0)
+                    _nifty_roc20 = (regime.signals.get("roc_20d_%", 0) if regime else 0) or 0
+                    if _stock_roc20 < float(_nifty_roc20) - 3.0:
                         sig = None
 
             # ── Research gate: apply veto filters ────────────────────────────

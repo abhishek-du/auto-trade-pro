@@ -273,12 +273,17 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
     # Varsity Ch 16.5: infer market regime from Nifty 50 200-EMA
     # If Nifty 50 is below its 200-EMA, the market is in a downtrend (BEAR regime),
     # which suppresses momentum swing buys to protect capital.
-    from crawler.price_feed import get_latest_candles
     try:
-        df_nifty = await get_latest_candles(session, "^NSEI", "1d", 300)
-        if len(df_nifty) >= 200:
-            ema200 = df_nifty["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-            last_close = df_nifty["close"].iloc[-1]
+        from sqlalchemy import text as _text
+        _rows = (await session.execute(_text("""
+            SELECT close FROM candles
+            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
+            ORDER BY timestamp DESC LIMIT 220
+        """))).scalars().all()
+        if len(_rows) >= 200:
+            _closes = pd.Series(list(reversed(_rows)), dtype=float)
+            ema200     = _closes.ewm(span=200, adjust=False).mean().iloc[-1]
+            last_close = _closes.iloc[-1]
             nifty_regime = "BEAR" if last_close < ema200 else "BULL"
         else:
             nifty_regime = "BULL" if total >= 2 else ("BEAR" if total <= -2 else "NEUTRAL")
