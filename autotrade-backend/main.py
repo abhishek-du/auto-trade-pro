@@ -110,8 +110,12 @@ async def lifespan(app: FastAPI):
 
     _asyncio.create_task(_warmup_info_cache())
 
-    # ── Kite WebSocket ticker (only when connected + market open) ────────────
-    if settings.ZERODHA_ENABLED and is_nse_market_open():
+    # ── Kite WebSocket ticker ────────────────────────────────────────────────
+    # Start whenever Zerodha is enabled + token is present — market-hours check
+    # was removed so a mid-session backend restart auto-reconnects the feed.
+    # The `kite-start-ticker-on-open` Celery cron (03:45 UTC = 09:15 IST) also
+    # fires at market open as a belt-and-suspenders guarantee.
+    if settings.ZERODHA_ENABLED and settings.ZERODHA_ACCESS_TOKEN:
         try:
             from crawler.zerodha_ticker import start_kite_ticker
             await _asyncio.to_thread(start_kite_ticker)
