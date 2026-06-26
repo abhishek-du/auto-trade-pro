@@ -419,24 +419,28 @@ async def _phase9_market_context(session) -> dict:
             if len(closes) >= 21:
                 result["nifty_roc20"] = float((last - closes.iloc[-21]) / closes.iloc[-21] * 100)
 
-        # 5-state regime from the existing engine
+        # 5-state regime — use classify_regime_async which pulls live VIX from
+        # PRICE_CACHE (kite_ws feed) so the score includes all 5 signals.
         try:
-            regime_df_rows = (await session.execute(_text("""
-                SELECT timestamp, open, high, low, close, volume FROM candles
-                WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-                ORDER BY timestamp DESC LIMIT 300
-            """))).all()
-            if len(regime_df_rows) >= 60:
-                import pandas as _pdd
-                rdf = _pdd.DataFrame(regime_df_rows, columns=["timestamp","open","high","low","close","volume"])
-                rdf = rdf.sort_values("timestamp").reset_index(drop=True)
-                regime_map = build_regime_map_from_df(rdf)
-                # regime_map is keyed by integer row index — last row = most recent day
-                last_idx    = str(len(rdf) - 1)   # keys are str(int)
-                last_result = regime_map.get(last_idx)
-                state = last_result.state if last_result else "UNKNOWN"
-                result["regime_allows_buy"] = state in ("STRONG_BULL", "MODERATE_BULL")
-                result["regime_state"] = state
+            from engine.agent.market_regime import get_market_regime as _creg
+            # Breadth: advances/(advances+declines) from DB if available.
+            _breadth: float | None = None
+            try:
+                from sqlalchemy import text as _bt
+                async with session.begin_nested():   # savepoint — failure doesn't poison outer tx
+                    _brow = (await session.execute(_bt("""
+                        SELECT advances, declines FROM market_breadth_snapshots
+                        ORDER BY timestamp DESC LIMIT 1
+                    """))).one_or_none()
+                    if _brow and (_brow[0] + _brow[1]) > 0:
+                        _breadth = float(_brow[0]) / (_brow[0] + _brow[1]) * 100
+            except Exception:
+                pass  # table may not exist; VIX from PRICE_CACHE is still used
+            regime_result = await _creg(session, breadth_pct=_breadth)
+            state = regime_result.state
+            result["regime_allows_buy"] = state in ("STRONG_BULL", "MODERATE_BULL")
+            result["regime_state"] = state
+            result["regime_score"] = regime_result.score
         except Exception as _re:
             logger.debug(f"[phase9] regime engine failed: {_re}")
 
