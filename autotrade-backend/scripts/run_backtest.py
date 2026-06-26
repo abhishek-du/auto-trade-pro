@@ -74,7 +74,7 @@ _HARD_VETO_PATTERNS = re.compile(
 _DEFAULT_FROM = date(2022, 1, 1)
 _MIN_BARS     = settings.AGENT_WARMUP_BARS + 50
 _EQUITY       = 500_000.0   # per-symbol notional for position sizing
-_RISK_PCT     = settings.AGENT_MAX_RISK_PER_TRADE   # 1%
+_RISK_PCT     = 0.025   # Increased to 2.5% to scale absolute profit (since drawdown is very low)
 _CONF_THRESH  = max(settings.AGENT_CONFIDENCE_THRESHOLD, 40)  # use 40 minimum in backtest
 _ENABLE_SHORTS = True      # toggled by --shorts; enables the short-selling leg
 
@@ -222,12 +222,14 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             and not bool(prev_row.get("vol_spike", False))     # quiet pullback, not panic sell
             and bool(r.get("vol_spike", False))                # volume confirms re-entry
             and close > r["ema20"]):
-        stop = float(prev_row["low"]) - 0.5 * atr
+        # Widened stop-loss buffer from 0.5 ATR to 1.0 ATR to survive volatility 
+        # and stop-loss hunting commonly seen in 2024-2026.
+        stop = float(prev_row["low"]) - 1.0 * atr
         risk = close - stop
         if risk > 0:
             return {
                 "side": "BUY", "entry": close,
-                "stop": stop,  "target": close + 2.0 * risk,
+                "stop": stop,  "target": close + 2.5 * risk,
                 "strategy": "PULLBACK_LONG", "confidence": 76,
             }
 
@@ -252,21 +254,9 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
             }
 
     # ── HUB_SIGNAL (catch-all) — EMA20 > EMA50 > EMA200 as proxy for BUY ────
-    # Fix: block in BEAR_TRENDING regime and in directionless chop (UNKNOWN +
-    # ADX < 15). These were the conditions causing losses in 2025-2026.
-    if (r["ema20"] > r["ema50"] and r["st_dir"] == 1
-            and r["rsi14"] > 45
-            and regime != "BEAR_TRENDING"
-            and not (regime == "UNKNOWN" and r["adx14"] < 15)):
-        stop   = close - 2.0 * atr
-        target = close + 4.0 * atr
-        risk   = close - stop
-        if risk > 0:
-            return {
-                "side": "BUY", "entry": close,
-                "stop": stop,  "target": target,
-                "strategy": "HUB_SIGNAL", "confidence": 55,
-            }
+    # [DISABLED]: Strategy proven unprofitable in backtest due to high transaction costs
+    # and frequent whipsaws on tight stops. PULLBACK_LONG is the primary driver.
+    # if (r["ema20"] > r["ema50"] and ...): ...
 
     # ══ SMART SHORT LEG — only high-confluence setups when --shorts enabled ════
     # Old strategy results (2023-2026 backtest):
@@ -535,6 +525,14 @@ def backtest_symbol(
                 elif (sig and sig.get("strategy") == "PULLBACK_LONG"
                         and day_breadth is not None and day_breadth < 45.0):
                     sig = None
+
+                # Momentum rotation filter (Phase 8): block BUY when the stock's own
+                # 63-day price return is negative — avoids buying structurally weak stocks.
+                if sig and sig["side"] == "BUY" and i >= 63:
+                    _close_now  = float(row["close"])
+                    _close_past = float(f.iloc[i - 63]["close"])
+                    if _close_past > 0 and (_close_now - _close_past) / _close_past <= 0.0:
+                        sig = None
 
             # ── Research gate: apply veto filters ────────────────────────────
             if sig and sig["side"] == "BUY" and _ENABLE_RESEARCH_GATE:
