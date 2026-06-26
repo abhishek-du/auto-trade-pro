@@ -143,6 +143,7 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
 
     f["swing_high_20"] = c.rolling(20).max().shift(1)   # exclude current bar
     f["swing_low_20"]  = c.rolling(20).min().shift(1)
+    f["swing_high_50"]  = c.rolling(50).max().shift(1)   # 50-day breakout level (future use)
     f["roc20"]         = c.pct_change(20) * 100         # stock's own 20-day ROC (%)
     f["ema20_5ago"]    = _ema(c, 20).shift(5)           # EMA20 slope check (rising?)
 
@@ -240,6 +241,44 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
                 "stop": stop,  "target": close + 2.5 * risk,
                 "strategy": "PULLBACK_LONG", "confidence": 76,
             }
+
+    # ── BREAKOUT_LONG ─────────────────────────────────────────────────────────
+    # Two-engine system (Zerodha Varsity + Groww expert modules):
+    #   PULLBACK_LONG  = buy the dip  (engine 1, already tuned)
+    #   BREAKOUT_LONG  = buy the strength (engine 2, catches missed rallies)
+    #
+    # Problem it solves: In strong bull runs, stocks blast past EMA20 without
+    # ever pulling back — PULLBACK_LONG sits in cash and misses 100-200% moves.
+    # BREAKOUT_LONG catches those stocks when they breach their 50-day high on
+    # heavy volume (institutional participation confirmed).
+    #
+    # 2025 chop protection: fake breakouts in sideways/choppy markets almost
+    # never come with genuine vol_spike × EMA stack alignment × ADX≥25 — so
+    # the strategy naturally stays quiet when macro is SIDEWAYS/WEAK.
+    #
+    # Conditions (strict — learned from prior TREND_BREAKOUT_LONG failure):
+    #   • Close > 50-day swing high  (multi-week resistance broken)
+    #   • vol_spike on breakout bar  (institutional buying confirmation)
+    #   • RSI 55-78                  (momentum, not extreme overbought)
+    #   • EMA20 > EMA50 > EMA200     (full EMA stack aligned)
+    #   • EMA50 >= EMA200 * 1.01     (established trend, not fresh cross)
+    #   • close > EMA100             (weekly trend proxy — not in long-term decline)
+    #   • ADX >= 25                  (trending — Wilder's strong-trend threshold)
+    #   • EMA20 slope rising         (trend accelerating, not stalling)
+    #   • Target 3:1 R:R             (wider target to capture explosive moves)
+    # BREAKOUT_LONG — strict version, 3 key tightenings vs first attempt:
+    #   1. FIRST breakout day only (prev_close <= swing_high_50) — not a
+    #      continuation; catches the exact session resistance is broken.
+    #   2. 2× average volume (vs 1.5× vol_spike) — genuine institutional surge.
+    #   3. RSI 60-78, ADX>=28, EMA spread 1.02 — only the cleanest setups.
+    # BREAKOUT_LONG — KILLED after 3 attempts in 495-symbol universe:
+    #   50-day high: MaxDD=-26.5%, 2025 FAIL
+    #   52-week high: MaxDD=-21.7%, 2025 FAIL
+    #   52-week + STRONG_BULL + breadth>=60%: MaxDD=-32.6%
+    # Root cause: works only for large-cap Nifty 50/100 stocks (institutional
+    # follow-through). Mid/small caps in our universe make fake 52-week highs
+    # in narrow bull markets (2025: PSU banks soared, rest of market didn't).
+    # FUTURE: implement as a separate Nifty100-only sub-strategy.
 
     # ── RANGE_REVERSAL_LONG ───────────────────────────────────────────────────
     # Fix: require EMA50 > EMA200 (medium-term not in downtrend) and ADX < 25
