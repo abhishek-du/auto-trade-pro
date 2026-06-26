@@ -235,7 +235,9 @@ def backtest_corrected(
                             open_pos["stop"] = ns
 
                 elif exit_policy == "partial_fixed":
-                    # Book 50% at T1, exit remaining at T2 only (no trail)
+                    # Book 50% at T1, move stop to break-even, exit remaining at T2.
+                    # Break-even protects the locked-in profit if the remaining position
+                    # is stopped out before reaching T2 (key fix for 2024-26 losses).
                     if t1 and not open_pos.get("partial_done") and bar_high >= t1:
                         pq = int(open_pos["qty"] * 0.5)
                         if pq > 0:
@@ -243,6 +245,8 @@ def backtest_corrected(
                             open_pos["partial_qty"] = pq
                             open_pos["partial_done"] = True
                             open_pos["qty"] -= pq
+                            # Move stop to break-even so worst case = 0 loss on remainder
+                            open_pos["stop"] = max(open_pos["stop"], open_pos["entry"])
 
                 elif exit_policy == "be_after_1r":
                     # Move stop to break-even once price exceeds entry + 1R
@@ -274,7 +278,7 @@ def backtest_corrected(
             # Check exit
             exit_price = reason = None
 
-            # Time exit: 12 bars without hitting T1 → exit at close (Fix 4).
+            # Time exit: 12 bars without hitting T1 → exit at close.
             if not open_pos.get("partial_done"):
                 bars_held = i - open_pos.get("entry_bar", i)
                 if bars_held >= 12:
