@@ -111,18 +111,21 @@ _NSE_HOLIDAYS: dict[str, str] = {
     "2025-12-25": "Christmas",
     "2026-01-26": "Republic Day",
     "2026-02-18": "Mahashivratri",
-    "2026-03-30": "Holi",
+    "2026-03-20": "Holi",
+    "2026-03-31": "Eid ul-Fitr",
     "2026-04-02": "Ram Navami",
     "2026-04-03": "Good Friday",
     "2026-04-14": "Dr. Ambedkar Jayanti",
     "2026-05-01": "Maharashtra Day",
+    "2026-05-27": "Eid ul-Adha (Bakri Eid)",
+    "2026-07-17": "Muharram",
     "2026-08-15": "Independence Day",
     "2026-09-21": "Ganesh Chaturthi",
     "2026-10-02": "Gandhi Jayanti",
-    "2026-10-21": "Dussehra",
+    "2026-10-20": "Dussehra",
     "2026-11-04": "Diwali Laxmi Puja",
     "2026-11-05": "Diwali Balipratipada",
-    "2026-11-25": "Guru Nanak Jayanti",
+    "2026-11-16": "Guru Nanak Jayanti",
     "2026-12-25": "Christmas",
 }
 
@@ -657,7 +660,7 @@ def _vix_label(vix: float | None) -> str:
     response_model=MarketStatusOut,
     summary="Live NSE market status with index prices and VIX",
 )
-async def get_market_status():
+async def get_market_status(db: AsyncSession = Depends(get_db)):
     """Returns NSE open/closed status, IST time, NIFTY/BANKNIFTY/SENSEX
     last traded prices, India VIX, and today's holiday flag."""
     loop    = asyncio.get_event_loop()
@@ -666,6 +669,27 @@ async def get_market_status():
 
     today_holiday = date_str in _NSE_HOLIDAYS
     holiday_name  = _NSE_HOLIDAYS.get(date_str, "")
+
+    # Also check the market_events DB for HOLIDAY events on today's date —
+    # covers dynamically seeded holidays not in the hardcoded list above.
+    if not today_holiday:
+        try:
+            today_date = now_ist.date()  # Python date object — asyncpg requires this, not a string
+            row = await db.execute(
+                text(
+                    "SELECT title FROM market_events "
+                    "WHERE event_type = 'HOLIDAY' "
+                    "AND event_date = :d LIMIT 1"
+                ),
+                {"d": today_date},
+            )
+            db_holiday = row.fetchone()
+            if db_holiday:
+                today_holiday = True
+                # Strip "NSE Holiday — " prefix that the seeder adds
+                holiday_name = db_holiday.title.replace("NSE Holiday — ", "").replace("NSE Holiday - ", "")
+        except Exception:
+            pass  # DB check is best-effort; hardcoded list is the fallback
 
     nse_open = is_nse_market_open() and not today_holiday
 

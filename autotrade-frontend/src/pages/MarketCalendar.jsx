@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { CalendarDays, List, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react'
+import { CalendarDays, CalendarOff, List, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { useCalendar } from '../hooks/useCalendar'
+import { useNseHoliday } from '../hooks/useNseHoliday'
 import CalendarGrid  from '../components/calendar/CalendarGrid'
 import EventList     from '../components/calendar/EventList'
 import FilterBar     from '../components/calendar/FilterBar'
@@ -42,6 +43,8 @@ export default function MarketCalendar() {
     selectedDate, selectedEvents, selectDate,
   } = useCalendar()
 
+  const { holiday: todayHoliday } = useNseHoliday()
+
   // Handle ?date= param from UpcomingEventsWidget links
   useEffect(() => {
     const d = searchParams.get('date')
@@ -75,6 +78,20 @@ export default function MarketCalendar() {
 
   return (
     <div className="space-y-5 fade-in">
+
+      {/* ── Today's Holiday Banner ── */}
+      {todayHoliday && (
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl border border-amber-500/40 bg-amber-500/10">
+          <CalendarOff size={16} className="text-amber-400 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <span className="text-amber-300 font-semibold text-sm">{todayHoliday.name}</span>
+            <span className="text-amber-500/80 text-xs ml-2">— NSE is closed today. No trading.</span>
+          </div>
+          <span className="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+            CLOSED
+          </span>
+        </div>
+      )}
 
       {/* ── Row 1: Header ── */}
       <div className="flex items-start justify-between flex-wrap gap-3">

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from engine.agent.strategies.pullback_trend   import PullbackTrendLong
 from engine.agent.strategies.mean_reversion   import MeanReversionShort
-from engine.agent.strategies.range_reversal   import RangeReversalLong
 from engine.agent.strategies.exhaustion_short import ExhaustionShort
 from engine.agent.strategies.hub_signal       import HubSignalStrategy
 from utils.logger import logger
@@ -20,10 +19,11 @@ class StrategySelectorAgent:
         # trades — zero statistical edge; keeping it active dilutes expectancy.
         # Short strategies (MeanReversionShort, ExhaustionShort) require
         # EQUITY_SHORT_ENABLED=True and use MIS product (intraday only — NSE rule).
+        # RANGE_REVERSAL_LONG disabled (Phase 7): n=2 in full backtest, mean_R=-0.336
+        # (dilutive, no statistical edge). Removed to keep strategy set clean.
         self.strategies = [
             PullbackTrendLong(),
             MeanReversionShort(),
-            RangeReversalLong(),
             ExhaustionShort(),
             HubSignalStrategy(),   # widest net — always last
         ]

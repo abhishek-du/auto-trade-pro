@@ -87,6 +87,7 @@ import StockDetail        from './pages/StockDetail';
 import FundDetail            from './pages/FundDetail';
 import PortfolioAnalytics   from './pages/PortfolioAnalytics';
 import FloatingChatButton from './components/chat/FloatingChatButton';
+import NseHolidayToast from './components/NseHolidayToast';
 import { LivePricesProvider } from './contexts/LivePricesContext';
 
 export default function App() {
@@ -169,6 +170,7 @@ export default function App() {
       <GlobalSearch open={searchOpen} onClose={closeSearch} />
       <MobileNav onSearchOpen={openSearch} />
       <FloatingChatButton />
+      <NseHolidayToast />
       <Toaster
         position="bottom-right"
         toastOptions={{
