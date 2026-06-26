@@ -390,6 +390,61 @@ async def _send_loop_shortlist_alert(signal) -> None:
         logger.debug(f"[trade_loop/shortlist] send failed {bare}: {exc}")
 
 
+async def _phase9_market_context(session) -> dict:
+    """Compute once-per-cycle market-level Phase 9 inputs.
+
+    Returns:
+        nifty_ema200_ok  — True  if Nifty is ABOVE its 200-day EMA (long-term bull)
+        nifty_roc20      — Nifty's 20-day rate-of-change (%), used for RS filter
+        regime_allows_buy— True if 5-state regime engine is STRONG_BULL or MODERATE_BULL
+    """
+    from sqlalchemy import text as _text
+    import pandas as _pd
+    from engine.agent.market_regime import classify_regime, build_regime_map_from_df
+
+    result = {"nifty_ema200_ok": True, "nifty_roc20": 0.0, "regime_allows_buy": True}
+    try:
+        rows = (await session.execute(_text("""
+            SELECT close FROM candles
+            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
+            ORDER BY timestamp DESC LIMIT 220
+        """))).scalars().all()
+
+        if len(rows) >= 30:
+            closes = _pd.Series(list(reversed(rows)), dtype=float)
+            ema200 = closes.ewm(span=200, adjust=False).mean().iloc[-1]
+            last   = closes.iloc[-1]
+            result["nifty_ema200_ok"] = last >= ema200
+            # ROC20: (today - 20 days ago) / 20 days ago × 100
+            if len(closes) >= 21:
+                result["nifty_roc20"] = float((last - closes.iloc[-21]) / closes.iloc[-21] * 100)
+
+        # 5-state regime from the existing engine
+        try:
+            regime_df_rows = (await session.execute(_text("""
+                SELECT timestamp, open, high, low, close, volume FROM candles
+                WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
+                ORDER BY timestamp DESC LIMIT 300
+            """))).all()
+            if len(regime_df_rows) >= 60:
+                import pandas as _pdd
+                rdf = _pdd.DataFrame(regime_df_rows, columns=["timestamp","open","high","low","close","volume"])
+                rdf = rdf.sort_values("timestamp").reset_index(drop=True)
+                regime_map = build_regime_map_from_df(rdf)
+                # regime_map is keyed by integer row index — last row = most recent day
+                last_idx    = str(len(rdf) - 1)   # keys are str(int)
+                last_result = regime_map.get(last_idx)
+                state = last_result.state if last_result else "UNKNOWN"
+                result["regime_allows_buy"] = state in ("STRONG_BULL", "MODERATE_BULL")
+                result["regime_state"] = state
+        except Exception as _re:
+            logger.debug(f"[phase9] regime engine failed: {_re}")
+
+    except Exception as exc:
+        logger.warning(f"[phase9] market context failed: {exc}")
+    return result
+
+
 async def _india_trade_loop():
     from sqlalchemy import select
 
@@ -651,11 +706,24 @@ async def _india_trade_loop():
         # rejections (dup symbols, budget) — cap the indicator work at 24/cycle.
         level_pool = actionable[: min(len(actionable), max(max_new * 3, 12), 24)]
 
-        # Step 4b: compute REAL dynamic SL/targets for the pool.
+        # ── Phase 9 market context: EMA200 gate + regime + Nifty ROC20 ──────────
+        # Computed once per cycle (one DB read) — attached to every signal in
+        # the pool so the per-signal gate below needs no extra DB round-trip.
+        _p9ctx = await _phase9_market_context(session)
+        logger.info(
+            f"[phase9] EMA200={'OK' if _p9ctx['nifty_ema200_ok'] else 'BELOW'} | "
+            f"regime={_p9ctx.get('regime_state','?')} | "
+            f"nifty_roc20={_p9ctx['nifty_roc20']:+.2f}%"
+        )
+
+        # Step 4b: compute REAL dynamic SL/targets + Phase 9 per-signal indicators.
         from engine.indicators import compute_indicators
         from engine.risk_manager import compute_trade_levels
         import pandas as pd
         for signal in level_pool:
+            # Phase 9 per-signal defaults (safe fallback = gate passes)
+            signal.phase9_roc20        = 0.0
+            signal.phase9_ema20_slope_ok = True
             try:
                 candles = await get_latest_candles(signal.symbol, "1d", 200, session)
                 sig_ind = None
@@ -664,6 +732,18 @@ async def _india_trade_loop():
                         "close": c.close, "volume": c.volume, "timestamp": c.timestamp}
                         for c in candles])
                     sig_ind = compute_indicators(df)
+                    # Phase 9 RS filter: stock's 20-day ROC
+                    closes = df["close"]
+                    if len(closes) >= 21:
+                        signal.phase9_roc20 = float(
+                            (closes.iloc[-1] - closes.iloc[-21]) / closes.iloc[-21] * 100
+                        )
+                    # Phase 9 EMA20 slope filter: EMA20 today vs 5 bars ago
+                    if len(closes) >= 26:
+                        ema20_series    = closes.ewm(span=20, adjust=False).mean()
+                        ema20_today     = float(ema20_series.iloc[-1])
+                        ema20_5ago      = float(ema20_series.iloc[-6])
+                        signal.phase9_ema20_slope_ok = ema20_today > ema20_5ago
                 lv = compute_trade_levels(signal.action, signal.entry_price, sig=sig_ind)
                 signal.stop_loss = lv["stop_loss"]
                 signal.take_profit = lv["target_1"]   # T1 = first checkpoint / trailing trigger
@@ -817,6 +897,65 @@ async def _india_trade_loop():
         for signal in level_pool:
             if opened >= max_new:
                 break
+
+            # ── Phase 9 Quality Gate — mirrors the exact filters proven in backtest ──
+            # All 4 checks must pass for a BUY to proceed. SELLs are not filtered
+            # (the short book is independent of the long-trend Phase 9 logic).
+            if signal.action == "BUY":
+                # Gate 1: EMA200 absolute bear-market gate
+                if not _p9ctx["nifty_ema200_ok"]:
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — Nifty below EMA200 "
+                        f"(structural bear market)"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason="[phase9] Nifty below EMA200 — structural bear gate",
+                    )
+                    continue
+
+                # Gate 2: 5-state regime engine — only STRONG_BULL / MODERATE_BULL
+                if not _p9ctx["regime_allows_buy"]:
+                    _rstate = _p9ctx.get("regime_state", "?")
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — regime={_rstate} "
+                        f"(requires STRONG_BULL or MODERATE_BULL)"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason=f"[phase9] regime={_rstate} — not bull",
+                    )
+                    continue
+
+                # Gate 3: Relative Strength filter — stock must not lag Nifty by >3%
+                _stock_roc20 = getattr(signal, "phase9_roc20", 0.0)
+                _nifty_roc20 = _p9ctx["nifty_roc20"]
+                if _stock_roc20 < _nifty_roc20 - 3.0:
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — RS filter: "
+                        f"stock_roc20={_stock_roc20:+.2f}% < nifty_roc20={_nifty_roc20:+.2f}% - 3%"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason=(
+                            f"[phase9] RS filter: stock {_stock_roc20:+.2f}% "
+                            f"vs Nifty {_nifty_roc20:+.2f}% (lag >{_stock_roc20 - _nifty_roc20:.1f}%)"
+                        ),
+                    )
+                    continue
+
+                # Gate 4: EMA20 slope — must be rising (today > 5 bars ago)
+                if not getattr(signal, "phase9_ema20_slope_ok", True):
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — EMA20 slope flat/declining "
+                        f"(pullback may be reversal)"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason="[phase9] EMA20 slope declining — trend not accelerating",
+                    )
+                    continue
+
             validated, reason = await validate_signal(
                 signal, balance, open_positions, session
             )
