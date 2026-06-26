@@ -723,11 +723,19 @@ async def _india_trade_loop():
         # Step 4b: compute REAL dynamic SL/targets + Phase 9 per-signal indicators.
         from engine.indicators import compute_indicators
         from engine.risk_manager import compute_trade_levels
+        from engine.agent.analyzer import MarketAnalyzerAgent
+        from engine.agent.strategies.pullback_trend import PullbackTrendLong
         import pandas as pd
+        _pullback_strategy = PullbackTrendLong()
+        _market_analyzer   = MarketAnalyzerAgent()
         for signal in level_pool:
             # Phase 9 per-signal defaults (safe fallback = gate passes)
             signal.phase9_roc20        = 0.0
             signal.phase9_ema20_slope_ok = True
+            # Pullback pattern defaults to False — must be positively confirmed.
+            # The Hub score identifies candidate stocks; this gate confirms the
+            # entry timing matches the exact Phase 9 PULLBACK_LONG conditions.
+            signal.phase9_pullback_ok  = False
             try:
                 candles = await get_latest_candles(signal.symbol, "1d", 200, session)
                 sig_ind = None
@@ -748,6 +756,17 @@ async def _india_trade_loop():
                         ema20_today     = float(ema20_series.iloc[-1])
                         ema20_5ago      = float(ema20_series.iloc[-6])
                         signal.phase9_ema20_slope_ok = ema20_today > ema20_5ago
+                    # Phase 9 PULLBACK pattern — mirrors PullbackTrendLong.evaluate()
+                    # exactly: EMA20 touch on prev bar, bounce above EMA20, vol spike,
+                    # RSI 50-70, ADX>20, EMA20>EMA50, EMA50>=EMA200×1.01, shallow touch,
+                    # quiet prev bar, ADX not collapsing. Needs 30+ bars for MarketFeatures.
+                    if len(candles) >= 30:
+                        try:
+                            _f = _market_analyzer.compute_features(df)
+                            _pr = _pullback_strategy.evaluate(signal.symbol, df, _f, 0, "WATCHLIST")
+                            signal.phase9_pullback_ok = (_pr is not None)
+                        except Exception as _pe:
+                            logger.debug(f"[phase9] {signal.symbol} pullback eval error: {_pe}")
                 lv = compute_trade_levels(signal.action, signal.entry_price, sig=sig_ind)
                 signal.stop_loss = lv["stop_loss"]
                 signal.take_profit = lv["target_1"]   # T1 = first checkpoint / trailing trigger
@@ -957,6 +976,21 @@ async def _india_trade_loop():
                     await SimLogger.log_analysis_cycle(
                         session, signal.symbol, signal, rejected=True,
                         reject_reason="[phase9] EMA20 slope declining — trend not accelerating",
+                    )
+                    continue
+
+                # Gate 5: PULLBACK_LONG pattern — prev bar touched EMA20, last bar
+                # bounced above EMA20 with vol spike, RSI 50-70, ADX>20, EMA stack
+                # (20>50, 50>=200×1.01), shallow touch (prev low within 3%), quiet
+                # prev bar, ADX not collapsing. Mirrors PullbackTrendLong.evaluate().
+                if not getattr(signal, "phase9_pullback_ok", False):
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — pullback pattern not confirmed "
+                        f"(needs EMA20 touch + bounce + vol spike + RSI/ADX/EMA stack)"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason="[phase9] PULLBACK_LONG pattern not confirmed — no valid setup",
                     )
                     continue
 
