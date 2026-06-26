@@ -349,14 +349,22 @@ def backtest_corrected(
             candidate = None
 
             if hub_only:
-                # HUB_SIGNAL technical proxy (EMA trend + Supertrend + RSI)
+                # HUB_SIGNAL technical proxy — Phase 7 filters applied
+                # Mirrors live hub_signal.py: EMA50>EMA200, ADX>25, vol_spike,
+                # RSI 45-70, 1×ATR stop, 2×ATR target (2:1 R:R).
                 _r = row
                 _regime = str(_r.get("regime", "UNKNOWN"))
-                if (float(_r["ema20"]) > float(_r["ema50"])
-                        and int(_r.get("st_dir", 0)) == 1
-                        and float(_r["rsi14"]) > 45
-                        and _regime != "BEAR_TRENDING"
-                        and not (_regime == "UNKNOWN" and float(_r["adx14"]) < 15)):
+                _ema50  = float(_r.get("ema50",  0))
+                _ema200 = float(_r.get("ema200", 0))
+                _adx    = float(_r.get("adx14",  0))
+                _rsi    = float(_r.get("rsi14",  50))
+                _vspike = bool(_r.get("vol_spike", False))
+                if (_ema50 > _ema200                      # long-term bull trend
+                        and _adx > 25                      # strong momentum
+                        and int(_r.get("st_dir", 0)) == 1  # supertrend bullish
+                        and _vspike                        # volume confirmation
+                        and 45 <= _rsi <= 70               # healthy RSI
+                        and _regime != "BEAR_TRENDING"):
                     _close = float(_r["close"])
                     _atr   = float(_r["atr14"])
                     if _atr > 0:
@@ -364,9 +372,9 @@ def backtest_corrected(
                         candidate = TradeCandidate(
                             symbol=symbol, side="BUY",
                             entry=round(_close, 2),
-                            stop=round(_close - 2.0 * _atr, 2),
-                            target=round(_close + 4.0 * _atr, 2),
-                            confidence=55, reasons=["hub_proxy"],
+                            stop=round(_close - 1.0 * _atr, 2),   # Phase 7: 1×ATR (was 2×)
+                            target=round(_close + 2.0 * _atr, 2), # 2:1 R:R
+                            confidence=80, reasons=["hub_proxy_p7"],
                             strategy="HUB_SIGNAL",
                         )
             else:

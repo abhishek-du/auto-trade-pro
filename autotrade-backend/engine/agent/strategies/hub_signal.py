@@ -1,18 +1,13 @@
 """Hub Signal Strategy — uses the market_shortlist composite score directly.
 
-This is the widest-net strategy: any stock with a BUY signal and score ≥ min_score
-qualifies. ATR-based stop and 2:1 R:R target are derived from price action.
-
-Why this exists:
-  The four Varsity strategies (TrendBreakout, Pullback, MeanReversion,
-  RangeReversal) require very specific combinations of regime + indicator
-  thresholds. In most market conditions only 0-2 stocks in the large-cap
-  watchlist satisfy all gates simultaneously, so the agent idles.
-
-  HubSignalStrategy uses the 7-factor Master Intelligence Score that the
-  scanner already computed — a stock that cleared 9,600-symbol scoring,
-  volume/price filters, and ranked in the shortlist already passed a
-  high-quality bar. We just need entry/stop/target from price action.
+Phase 7 tightening:
+  - EMA50 > EMA200 required (long-term bull trend confirmed, no dead-cat bounces)
+  - ADX > 25 required (strong momentum, not chop)
+  - Volume spike required (institutional participation)
+  - RSI 45–70 required (not overbought, not dead)
+  - Min hub score raised 10 → 40 (STRONG_BUY only)
+  - Stop tightened 2×ATR → 1×ATR (half the risk, same 2:1 R:R)
+  - Min confidence raised to 80 before returning
 """
 from __future__ import annotations
 
@@ -22,62 +17,62 @@ from .base import Strategy, TradeCandidate
 class HubSignalStrategy(Strategy):
     name = "HUB_SIGNAL"
 
-    # Map hub composite score to confidence %.
-    # score ≥ 50  →  75%+  (strong BUY)
-    # score ≥ 30  →  55%+  (moderate BUY)
-    # score ≥ 10  →  40%+  (weak BUY, passes 30% threshold)
-    _SCORE_TO_CONF = [(50, 75), (30, 55), (10, 40)]
-    _MIN_SCORE = 10   # below this, don't even try
+    _SCORE_TO_CONF = [(70, 82), (55, 78), (40, 74)]
+    _MIN_SCORE = 40   # Phase 7: STRONG_BUY only (was 10)
 
     def evaluate(self, symbol, df, features, macro_bias, fund_grade):
-        # Hub composite score is stored on features by the agent loop
-        hub_score = getattr(features, "hub_composite_score", None)
+        hub_score  = getattr(features, "hub_composite_score", None)
         hub_signal = getattr(features, "hub_signal", "HOLD")
 
         if hub_score is None:
             return None
 
-        is_buy  = "BUY"  in str(hub_signal).upper()
-        is_sell = "SELL" in str(hub_signal).upper()
+        is_buy = "BUY" in str(hub_signal).upper()
+        if not is_buy:
+            return None   # Phase 7: BUY only (SELL requires a separate short review)
 
-        if not (is_buy or is_sell):
-            return None
-
-        side = "BUY" if is_buy else "SELL"
         score_abs = abs(hub_score)
-
         if score_abs < self._MIN_SCORE:
             return None
 
-        # Regime gates: never enter a BUY in a confirmed bear trend or truly
-        # directionless chop (UNKNOWN + weak ADX). These are the conditions
-        # where HUB_SIGNAL fires most often but wins least often.
-        regime = getattr(features, "regime", "UNKNOWN")
-        adx    = getattr(features, "adx14", 0)
-        if side == "BUY" and regime == "BEAR_TRENDING":
-            return None
-        if side == "BUY" and regime == "UNKNOWN" and adx < 15:
+        # ── Phase 7 trend quality gates ──────────────────────────────────────
+        # 1. Long-term bull trend: EMA50 must be above EMA200
+        if not (features.ema50 > features.ema200):
             return None
 
-        # Derive entry/stop/target from recent price action
+        # 2. Strong momentum only — ADX > 25 (trending, not chop)
+        if getattr(features, "adx14", 0) <= 25:
+            return None
+
+        # 3. Per-stock regime: never buy a confirmed bear trend
+        regime = getattr(features, "regime", "UNKNOWN")
+        if regime == "BEAR_TRENDING":
+            return None
+
+        # 4. Volume confirmation — institutional participation on this bar
+        if not getattr(features, "vol_spike", False):
+            return None
+
+        # 5. RSI in a healthy range: not exhausted, not overbought
+        rsi = getattr(features, "rsi14", 50)
+        if not (45 <= rsi <= 70):
+            return None
+
+        # ── Entry / stop / target ─────────────────────────────────────────────
         entry = features.close
         atr   = features.atr14
         if atr <= 0:
             return None
 
-        if side == "BUY":
-            stop   = round(entry - 2.0 * atr, 2)
-            target = round(entry + 4.0 * atr, 2)  # 2:1 R:R on 2-ATR stop
-        else:
-            stop   = round(entry + 2.0 * atr, 2)
-            target = round(entry - 4.0 * atr, 2)
-
-        risk = abs(entry - stop)
+        # Phase 7: 1×ATR stop (was 2×ATR) → tighter losses, same 2:1 R:R
+        stop   = round(entry - 1.0 * atr, 2)
+        target = round(entry + 2.0 * atr, 2)
+        risk   = entry - stop
         if risk <= 0:
             return None
 
-        # Confidence from hub score magnitude
-        conf = 35  # base
+        # ── Confidence ────────────────────────────────────────────────────────
+        conf = 70  # base (higher floor than before)
         for threshold, conf_val in self._SCORE_TO_CONF:
             if score_abs >= threshold:
                 conf = conf_val
@@ -86,33 +81,28 @@ class HubSignalStrategy(Strategy):
         reasons = [
             f"hub_score:{hub_score:.1f}",
             f"hub_signal:{hub_signal}",
-            f"regime:{features.regime}",
+            f"regime:{regime}",
         ]
 
-        # Bonuses
-        if features.regime == "BULL_TRENDING" and side == "BUY":
-            conf += 8
-            reasons.append("bull_regime_confirms_buy")
-        if features.st_dir == 1 and side == "BUY":
-            conf += 4
-            reasons.append("supertrend:bull")
-        if macro_bias > 0 and side == "BUY":
-            conf += 3
-            reasons.append(f"macro_bias:+{macro_bias}")
+        if regime == "BULL_TRENDING":
+            conf += 6;  reasons.append("bull_regime_confirms_buy")
+        if features.st_dir == 1:
+            conf += 4;  reasons.append("supertrend:bull")
+        if macro_bias > 0:
+            conf += 3;  reasons.append(f"macro_bias:+{macro_bias}")
         if fund_grade == "INVESTMENT":
-            conf += 5
-            reasons.append("fund:investment_grade")
+            conf += 5;  reasons.append("fund:investment_grade")
         elif fund_grade == "WATCHLIST":
-            conf += 2
-            reasons.append("fund:watchlist")
+            conf += 2;  reasons.append("fund:watchlist")
+
+        conf = min(conf, 92)
+
+        # Phase 7: hard minimum confidence of 80 — below this, not worth taking
+        if conf < 80:
+            return None
 
         return TradeCandidate(
-            symbol=symbol,
-            side=side,
-            entry=round(entry, 2),
-            stop=stop,
-            target=target,
-            confidence=min(conf, 90),
-            reasons=reasons,
-            strategy=self.name,
+            symbol=symbol, side="BUY",
+            entry=round(entry, 2), stop=stop, target=target,
+            confidence=conf, reasons=reasons, strategy=self.name,
         )
