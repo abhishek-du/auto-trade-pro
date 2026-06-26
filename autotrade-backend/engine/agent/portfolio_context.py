@@ -48,6 +48,15 @@ class AgentPortfolioContext:
             totals[sec] = totals.get(sec, 0.0) + notional / self.equity
         return {k: round(v, 4) for k, v in totals.items()}
 
+    def sector_position_counts(self) -> dict[str, int]:
+        """Return {sector: count} of open positions per sector."""
+        counts: dict[str, int] = {}
+        for p in self.open_positions.values():
+            sec = p.get("sector")
+            if sec:
+                counts[sec] = counts.get(sec, 0) + 1
+        return counts
+
     def to_risk_ctx(self) -> dict:
         return {
             "daily_pnl_pct":       self.daily_pnl_pct,
@@ -59,7 +68,8 @@ class AgentPortfolioContext:
             "cash":                self.cash,
             "open_symbols":        self.open_symbols,
             "symbol_correlations": self.symbol_correlations,
-            "sector_exposure":     self.sector_exposure(),
+            "sector_exposure":        self.sector_exposure(),
+            "sector_position_counts": self.sector_position_counts(),
         }
 
     def add_position(self, decision) -> None:

@@ -189,6 +189,20 @@ class RiskManagerAgent:
                     f"> limit={max_sector_pct*100:.0f}%"
                 )
 
+            # Count-based sector cap — max N positions per sector regardless of size.
+            # Prevents correlated drawdown when an entire sector turns (e.g. all IT stocks
+            # sold off simultaneously). Separate from the notional cap above.
+            max_sector_n = getattr(settings, "AGENT_MAX_SECTOR_POSITIONS", 2)
+            if max_sector_n > 0:
+                sector_counts = ctx.get("sector_position_counts", {})
+                current_count = sector_counts.get(candidate_sector, 0)
+                if current_count >= max_sector_n:
+                    return False, (
+                        f"SECTOR_COUNT_CAP:{candidate_sector} "
+                        f"already={current_count} positions "
+                        f">= limit={max_sector_n}"
+                    )
+
         # ── Confidence gate (Varsity M12 — Innerworth) ───────────────────────
         if candidate.confidence < settings.AGENT_CONFIDENCE_THRESHOLD:
             return False, f"LOW_CONFIDENCE:{candidate.confidence}"

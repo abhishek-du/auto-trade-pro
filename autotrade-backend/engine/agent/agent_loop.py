@@ -11,14 +11,15 @@ from datetime import datetime, time as dtime
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from engine.agent.analyzer        import MarketAnalyzerAgent
-from engine.agent.selector        import StrategySelectorAgent
-from engine.agent.fundamentals    import FundamentalsAgent
-from engine.agent.macro           import MacroSectorAgent
-from engine.agent.risk_manager    import RiskManagerAgent
-from engine.agent.decision_engine import DecisionEngine, apply_reasoning_gate
-from engine.agent.execution       import AgentExecutionManager
+from engine.agent.analyzer          import MarketAnalyzerAgent
+from engine.agent.selector          import StrategySelectorAgent
+from engine.agent.fundamentals      import FundamentalsAgent
+from engine.agent.macro             import MacroSectorAgent
+from engine.agent.risk_manager      import RiskManagerAgent
+from engine.agent.decision_engine   import DecisionEngine, apply_reasoning_gate
+from engine.agent.execution         import AgentExecutionManager
 from engine.agent.portfolio_context import AgentPortfolioContext
+from engine.agent.momentum_filter   import refresh_if_needed as _mom_refresh, is_eligible as _mom_eligible
 from utils.config import settings
 from utils.logger import logger
 
@@ -382,6 +383,12 @@ async def _process_symbol(
         for k in portfolio.open_positions
     )
     if _already:
+        return None
+
+    # Momentum rotation gate — skip stocks ranked in the bottom (1 - AGENT_MOMENTUM_TOP_PCT)
+    # of 63-day price momentum within the scan universe. Fail-open when cache is empty.
+    if not _mom_eligible(symbol):
+        logger.debug(f"[agent] {symbol}: below momentum rank threshold — skipping")
         return None
 
     # 1. Get candle data from DB — single, deterministic timeframe.
@@ -951,6 +958,15 @@ async def _build_scan_universe(session: AsyncSession) -> list[str]:
 
     logger.info(f"[agent] scan universe: {len(universe)} symbols "
                 f"({min(len(universe), 120)} from shortlist)")
+
+    # Refresh momentum rankings for the universe (cached for 6 hours).
+    # Non-blocking: runs in background; first cycle is fail-open.
+    try:
+        top_pct = getattr(settings, "AGENT_MOMENTUM_TOP_PCT", 0.50)
+        await _mom_refresh(universe[:150], session, top_pct)
+    except Exception as _me:
+        logger.debug(f"[agent] momentum_filter refresh error: {_me}")
+
     return universe[:150]
 
 
