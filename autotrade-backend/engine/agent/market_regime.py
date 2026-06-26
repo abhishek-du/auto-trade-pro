@@ -172,6 +172,14 @@ def classify_regime(
         if composite < -5:
             state = WEAK_BEAR   # composite says bad AND price below EMA50 → block
 
+    # ── EMA200 Absolute Gate ──────────────────────────────────────────────────
+    # If Nifty is below its 200-day EMA, the long-term structural trend is broken.
+    # No pullback strategy designed for uptrends has edge in this environment —
+    # "pullbacks" in a long-term downtrend are dead-cat bounces, not re-entries.
+    # Force WEAK_BEAR unconditionally; composite score is irrelevant here.
+    if n >= 210 and price < ema200:
+        state = WEAK_BEAR
+
     signals = {
         "composite":     round(composite, 1),
         "ema_levels":    f"{ema_levels}/4",
