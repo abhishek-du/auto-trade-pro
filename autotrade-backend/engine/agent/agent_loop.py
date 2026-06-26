@@ -20,6 +20,7 @@ from engine.agent.decision_engine   import DecisionEngine, apply_reasoning_gate
 from engine.agent.execution         import AgentExecutionManager
 from engine.agent.portfolio_context import AgentPortfolioContext
 from engine.agent.momentum_filter   import refresh_if_needed as _mom_refresh, is_eligible as _mom_eligible
+from engine.agent.market_regime     import get_market_regime, WEAK_BEAR, STRONG_BEAR, RegimeResult, MODERATE_BULL
 from utils.config import settings
 from utils.logger import logger
 
@@ -139,34 +140,17 @@ def _is_mis_squareoff_window() -> bool:
     return dtime(sq_h, sq_m) <= now <= dtime(end_h, end_m)
 
 
-async def _check_nifty_trend(session: AsyncSession) -> bool:
-    """Returns True if NIFTYBEES.NS is above its 50-day EMA (macro uptrend OK).
-
-    When False, the agent skips new BUY entries for this cycle. This is the
-    primary fix for 2025 losses: the strategy was entering individual-stock
-    longs while Nifty was in a macro downtrend (Jan-Feb and Jul-Aug 2025).
-    Fails open (returns True) if data is unavailable — never silently blocks trading.
-
-    Note: ADX gate on Nifty was tested and reverted — it blocked good individual
-    stock setups in "flat index, trending stock" environments (sector rotation),
-    making 2025 worse not better. EMA50 alone is the correct macro filter.
-    """
+async def _get_breadth_pct(session: AsyncSession) -> float | None:
+    """Return the latest market breadth % (hub stocks above 50d proxy) or None."""
     try:
         from sqlalchemy import text as _text
-        rows = (await session.execute(_text("""
-            SELECT close FROM candles
-            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-            ORDER BY timestamp DESC LIMIT 60
-        """))).scalars().all()
-        if not rows or len(rows) < 50:
-            return True  # insufficient history — fail open
-        closes = pd.Series(list(reversed(rows)), dtype=float)  # oldest → newest
-        ema50  = closes.ewm(span=50, adjust=False).mean().iloc[-1]
-        latest = closes.iloc[-1]
-        return float(latest) > float(ema50)
-    except Exception as exc:
-        logger.warning(f"[agent] Nifty trend check failed — failing open: {exc}")
-        return True
+        row = (await session.execute(_text("""
+            SELECT breadth_pct FROM market_breadth
+            ORDER BY ts DESC LIMIT 1
+        """))).first()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
 
 
 async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
@@ -224,32 +208,53 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
                         f"[agent] MIS squared off {sym} @ ₹{price:.2f} | pnl=₹{pnl:,.2f}"
                     )
 
-    # Nifty macro trend gate — block new BUY entries when NIFTYBEES.NS is below
-    # its 50-day EMA. Root cause of Jan-Feb and Jul-Aug 2025 backtest losses:
-    # individual stocks show BULL_TRENDING on their own EMAs while the index is
-    # in a macro downtrend, so entries fail against the macro headwind.
-    nifty_ok = await _check_nifty_trend(session)
-    if not nifty_ok:
+    # ── 5-State Market Regime Gate ────────────────────────────────────────────
+    # Replaced the old single EMA50 check with a composite regime engine that
+    # uses EMA stack (4 levels) + 20-day ROC (fast correction detector) +
+    # EMA50 slope + market breadth + VIX — the root cause of 2025 losses was
+    # that the old EMA50 gate kept the door open for ~40 days while Nifty was
+    # already in a correction (price still above EMA50 but rapidly falling).
+    _breadth = await _get_breadth_pct(session)
+    market_regime: RegimeResult = await get_market_regime(session, breadth_pct=_breadth)
+
+    _short_enabled = getattr(settings, "EQUITY_SHORT_ENABLED", False)
+    if not market_regime.can_buy:
+        # In BEAR regime: block BUY entries. If SHORT is enabled, continue the
+        # scan to find PULLBACK_SHORT opportunities; otherwise skip entirely.
+        if not _short_enabled:
+            logger.info(
+                f"[agent] Market Regime = {market_regime.state} (score={market_regime.score}) — "
+                f"blocking new BUY entries | SHORT disabled → full skip"
+            )
+            return {
+                "status":          "regime_gate_blocked",
+                "regime_state":    market_regime.state,
+                "regime_score":    market_regime.score,
+                "regime_signals":  market_regime.signals,
+                "cycle_ts":        datetime.utcnow().isoformat(),
+                "paper_mode":      settings.AGENT_PAPER_MODE,
+                "symbols_scanned": 0,
+                "decisions":       0,
+                "fno_opened":      0,
+                "skipped":         0,
+                "portfolio": {
+                    "equity":         portfolio.equity,
+                    "cash":           round(portfolio.cash, 2),
+                    "open_positions": len(portfolio.open_positions),
+                    "daily_pnl_pct":  round(portfolio.daily_pnl_pct * 100, 2),
+                    "weekly_pnl_pct": round(portfolio.weekly_pnl_pct * 100, 2),
+                },
+            }
         logger.info(
-            "[agent] Nifty macro gate ACTIVE — NIFTYBEES below EMA50 — "
-            "skipping new entry scan (existing positions still managed above)"
+            f"[agent] Market Regime = {market_regime.state} (score={market_regime.score}) — "
+            f"BUY blocked | scanning for PULLBACK_SHORT opportunities"
         )
-        return {
-            "status":          "nifty_downtrend_gate",
-            "cycle_ts":        datetime.utcnow().isoformat(),
-            "paper_mode":      settings.AGENT_PAPER_MODE,
-            "symbols_scanned": 0,
-            "decisions":       0,
-            "fno_opened":      0,
-            "skipped":         0,
-            "portfolio": {
-                "equity":         portfolio.equity,
-                "cash":           round(portfolio.cash, 2),
-                "open_positions": len(portfolio.open_positions),
-                "daily_pnl_pct":  round(portfolio.daily_pnl_pct * 100, 2),
-                "weekly_pnl_pct": round(portfolio.weekly_pnl_pct * 100, 2),
-            },
-        }
+
+    logger.info(
+        f"[agent] Market Regime = {market_regime.state} | score={market_regime.score} | "
+        f"min_conf={market_regime.min_conf} | size_mult={market_regime.size_mult}× | "
+        f"signals={market_regime.signals}"
+    )
 
     # Morning regime classification — one LLM call per trading day.
     # WAIT:      no new entries (market downtrend / high fear)
@@ -299,6 +304,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
                 symbol, portfolio, session,
                 hub_info=hub_scores.get(symbol) or hub_scores.get(symbol.replace(".NS", "")),
                 regime_mode=regime_mode,
+                market_regime=market_regime,
             )
             if result:
                 results.append(result)
@@ -344,6 +350,9 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
         "cycle_ts":         datetime.utcnow().isoformat(),
         "paper_mode":       settings.AGENT_PAPER_MODE,
         "regime_mode":      regime_mode,
+        "market_regime":    market_regime.state,
+        "regime_score":     market_regime.score,
+        "regime_signals":   market_regime.signals,
         "symbols_scanned":  len(universe),
         "decisions":        len(results),
         "fno_opened":       len(fno_opened),
@@ -365,6 +374,7 @@ async def _process_symbol(
     session: AsyncSession,
     hub_info: dict | None = None,
     regime_mode: str = "AGGRESSIVE",
+    market_regime: "RegimeResult | None" = None,
 ) -> dict | None:
     global _shortlist_alerts_this_cycle
 
@@ -638,6 +648,22 @@ async def _process_symbol(
                     session=session,
                 )
                 return None
+
+    # 5. Regime confidence gate — SIDEWAYS regime requires higher conviction;
+    # STRONG_BULL allows slightly looser entry (market tailwind doing some work).
+    # This is the extraordinary layer: during multi-month corrections (2025) the
+    # composite regime score falls to SIDEWAYS before price crosses below EMA50,
+    # so candidates must pass a harder confidence bar to survive.
+    if candidate is not None and market_regime is not None:
+        _regime_min = market_regime.min_conf
+        if candidate.confidence < _regime_min:
+            logger.debug(
+                f"[agent] {symbol}: conf={candidate.confidence} < regime_min={_regime_min} "
+                f"({market_regime.state}) — skipping"
+            )
+            return None
+        # Stamp size_mult so executor can scale down position in SIDEWAYS
+        candidate.regime_size_mult = market_regime.size_mult
 
     # 5. Decision fusion (regime factor + conflict detection + multiplicative confidence)
     # Tell the sizer how much capital is already deployed so it respects the
