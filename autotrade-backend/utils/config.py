@@ -277,6 +277,12 @@ class Settings(BaseSettings):
     # Max fraction of equity that can be deployed in any single sector (IT, BANKING, etc.).
     # 20% means at most ₹4L of a ₹20L book can be in, say, Banking at once.
     AGENT_MAX_SECTOR_EXPOSURE:  float = 0.20
+    # Max number of concurrent open positions in the same sector (count-based cap).
+    # 2 means at most 2 IT stocks, 2 Banking stocks, etc. simultaneously.
+    AGENT_MAX_SECTOR_POSITIONS: int   = 2
+    # Momentum rotation: only trade stocks in the top N% by 63-day price momentum
+    # within the scan universe. 0.50 = top half; 0.33 = top third.
+    AGENT_MOMENTUM_TOP_PCT:     float = 0.50
     # Hard per-position cap as a fraction of equity.
     # 5% means at most ₹1L of a ₹20L book in any single stock (prevents a single
     # overnight gap-down from causing catastrophic drawdown).

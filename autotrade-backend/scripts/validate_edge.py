@@ -384,6 +384,17 @@ def backtest_corrected(
                 candidate = selector.propose(symbol, df_window, features, macro_bias=0, fund_grade="WATCHLIST")
 
             if candidate:
+                # Momentum rotation filter (Phase 8): only enter BUY when the stock's
+                # own 63-day price return is positive (in an uptrend over last ~3 months).
+                # Eliminates dead-cat bounce entries in structurally weak stocks —
+                # primary cause of 2024-2026 backtest losses (WR 45%, PF 0.85-1.08).
+                if candidate.side == "BUY" and i >= 63:
+                    _close_now  = float(f_df.iloc[i]["close"])
+                    _close_past = float(f_df.iloc[i - 63]["close"])
+                    if _close_past > 0 and (_close_now - _close_past) / _close_past <= 0.0:
+                        candidate = None   # negative 63-day momentum — skip
+
+            if candidate:
                 # Phase 5: block PULLBACK_LONG when broad market is weak (< 45% above 50d proxy).
                 if (candidate.strategy == "PULLBACK_LONG"
                         and day_breadth is not None and day_breadth < 45.0):
