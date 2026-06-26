@@ -76,7 +76,7 @@ _MIN_BARS     = settings.AGENT_WARMUP_BARS + 50
 _EQUITY       = 500_000.0   # per-symbol notional for position sizing
 _RISK_PCT     = 0.025   # Increased to 2.5% to scale absolute profit (since drawdown is very low)
 _CONF_THRESH  = max(settings.AGENT_CONFIDENCE_THRESHOLD, 40)  # use 40 minimum in backtest
-_ENABLE_SHORTS = True      # toggled by --shorts; enables the short-selling leg
+_ENABLE_SHORTS = False     # toggled by --shorts; remaining short strats (EXHAUSTION, RANGE_REVERSAL)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +326,7 @@ def backtest_symbol(
     symbol: str,
     equity: float = _EQUITY,
     nifty_ok: dict[str, bool] | None = None,
+    nifty_regime: dict | None = None,
     hub_scores: dict[tuple, dict] | None = None,
     fund_data: dict | None = None,
     news_vetoes: dict[tuple, bool] | None = None,
@@ -465,9 +466,11 @@ def backtest_symbol(
 
         # ── Look for entry when flat ──────────────────────────────────────────
         if open_pos is None:
-            # Nifty macro gate: skip new BUY entries when NIFTYBEES is below
-            # its EMA50. Root cause of Jan-Feb and Jul-Aug 2025 losses.
-            nifty_allow = nifty_ok.get(bar_ts, True) if nifty_ok else True
+            # Nifty macro gate
+            regime = nifty_regime.get(bar_ts) if nifty_regime else None
+            nifty_allow = regime.can_buy if regime else (nifty_ok.get(bar_ts, True) if nifty_ok else True)
+            regime_size_mult = regime.size_mult if regime else 1.0
+            regime_min_conf = regime.min_conf if regime else 0
             # Symbol cooldown: 20-bar blackout after a stop-hit loss to avoid
             # repeatedly re-entering a weakening stock (e.g. CHOICEIN.NS pattern).
             cooldown_ok = (i >= last_stop_bar + 20)
@@ -518,6 +521,8 @@ def backtest_symbol(
                 # shorts only when Nifty below EMA50. (No-op when gate disabled.)
                 if sig["side"] == "BUY" and not nifty_allow:
                     sig = None
+                elif sig["side"] == "BUY" and sig.get("confidence", 0) < regime_min_conf:
+                    sig = None
                 elif sig["side"] == "SELL" and nifty_ok is not None and nifty_allow:
                     sig = None
                 # Phase 5 breadth gate: block PULLBACK_LONG when < 45% of hub
@@ -552,7 +557,10 @@ def backtest_symbol(
             if sig and sig["confidence"] >= _CONF_THRESH:
                 risk_per_share = abs(sig["entry"] - sig["stop"])
                 if risk_per_share > 0:
-                    _size_mult = 0.5 if sig["side"] == "SELL" else 1.0
+                    if sig["side"] == "SELL":
+                        _size_mult = 0.5
+                    else:
+                        _size_mult = 1.0 * regime_size_mult
                     # Dynamic sizing: scale BUY positions by regime quality.
                     # Breadth >= 60% + strong ADX + high confidence → 1.25×.
                     # Breadth 35-45% → 0.75×.  Breadth < 35% → 0.5×.
@@ -985,13 +993,18 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     gate_str = " | gates: " + ", ".join(gates) if gates else ""
     print(f"[backtest] {len(symbols)} symbols | from {from_date} | conf threshold {_CONF_THRESH}{gate_str}")
 
-    # Load Nifty index trend gate: NIFTYBEES.NS close vs EMA50 per date.
-    # When Nifty is below its EMA50, all new BUY entries are blocked (macro gate).
-    print("[backtest] Loading NIFTYBEES.NS for macro trend gate...")
+    # ── Macro regime gate using 5-state Market Regime Engine ────────────────────
+    # Replaces the old manual EMA50+EMA200+ADX+VIX loop with the composite engine
+    # that uses EMA stack (4 levels) + 20-day ROC + EMA50 slope + breadth + VIX.
+    # Key fix: old code computed EMAs across the FULL dataset (look-ahead bias).
+    # build_regime_map_from_df uses a sliding window — each date sees only the past.
+    print("[backtest] Loading NIFTYBEES.NS for 5-state Market Regime Engine...")
     nifty_ok_by_date: dict[str, bool] = {}
+    nifty_regime_by_date: dict = {}
+    nifty_df = pd.DataFrame()
+    vix_df   = pd.DataFrame()
     try:
         nifty_df = await load_candles("NIFTYBEES.NS", from_dt)
-        vix_df = pd.DataFrame()
         for vix_sym in ("^INDIAVIX", "INDIAVIX.NS", "INDIA_VIX"):
             try:
                 vdf = await load_candles(vix_sym, from_dt)
@@ -1000,56 +1013,11 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
                     break
             except Exception:
                 pass
-
-        if len(nifty_df) >= 205:   # need 200 bars for EMA200
-            nifty_ema50  = nifty_df["close"].ewm(span=50,  adjust=False).mean()
-            nifty_ema200 = nifty_df["close"].ewm(span=200, adjust=False).mean()
-            nifty_ema20  = nifty_df["close"].ewm(span=20,  adjust=False).mean()
-            nifty_adx_series, _, _ = _adx(nifty_df["high"], nifty_df["low"], nifty_df["close"], 14)
-            nifty_5d_ret = (nifty_df["close"] - nifty_df["close"].shift(5)) / nifty_df["close"].shift(5) * 100
-
-            for ts in nifty_df.index:
-                ts_str    = str(ts)[:10]
-                close_val = float(nifty_df.at[ts, "close"])
-                ema50_val  = float(nifty_ema50.get(ts, 0))
-                ema200_val = float(nifty_ema200.get(ts, 0))
-                ema20_val  = float(nifty_ema20.get(ts, 0))
-                adx_val    = float(nifty_adx_series.get(ts, 0))
-                ret_5d     = nifty_5d_ret.get(ts, 0)
-
-                # Primary macro gate: Nifty must be above BOTH EMA50 and EMA200.
-                # EMA50 alone isn't enough — in 2025, Nifty was above EMA50 during
-                # brief recoveries but below EMA200 (long-term downtrend). Adding
-                # EMA200 blocks those bear-market bounce entries that cost -0.200R.
-                is_ok = (close_val > ema50_val) and (close_val > ema200_val)
-
-                # Short-term chop filter (within a trend): close below EMA20 + weak ADX
-                if is_ok and not pd.isna(ema20_val) and not pd.isna(adx_val):
-                    if close_val < ema20_val and adx_val < 20:
-                        is_ok = False
-
-                # Momentum failure: 5-day drawdown > 2%
-                if is_ok and not pd.isna(ret_5d) and ret_5d < -2.0:
-                    is_ok = False
-
-                # Fear spike
-                if is_ok and not vix_df.empty and ts in vix_df.index:
-                    if float(vix_df.loc[ts, "close"]) > 25.0:
-                        is_ok = False
-
-                # Symmetric: allow SELL signals only when index is weak
-                nifty_ok_by_date[ts_str] = is_ok
-
-            pct_up = round(100 * sum(nifty_ok_by_date.values()) / len(nifty_ok_by_date), 1)
-            print(f"[backtest] Macro gate (EMA50+EMA200+ADX+VIX): "
-                  f"{sum(nifty_ok_by_date.values())}/{len(nifty_ok_by_date)} "
-                  f"days open ({pct_up}%)")
-        else:
-            print(f"[backtest] WARNING: only {len(nifty_df)} NIFTYBEES.NS bars — gate disabled")
     except Exception as exc:
-        print(f"[backtest] WARNING: NIFTYBEES load failed ({exc}) — gate disabled")
+        print(f"[backtest] WARNING: NIFTYBEES load failed ({exc}) — macro gate disabled")
 
     # Precompute daily market breadth (% hub stocks above 50-day proxy).
+    # Done BEFORE the regime map so breadth is fed into the regime classifier.
     print("[backtest] Precomputing daily market breadth (hub top-200)...")
     breadth_map: dict[str, float] = {}
     try:
@@ -1060,6 +1028,28 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
               f"{below_45} days below 45% (PULLBACK_LONG blocked)")
     except Exception as exc:
         print(f"[backtest] WARNING: breadth precompute failed — gate disabled: {exc}")
+
+    # Build the regime map (sliding window, no look-ahead)
+    if not nifty_df.empty and len(nifty_df) >= 60:
+        from engine.agent.market_regime import build_regime_map_from_df as _build_regime_map
+        regime_map = _build_regime_map(
+            nifty_df,
+            breadth_map=breadth_map if breadth_map else None,
+            vix_df=vix_df if not vix_df.empty else None,
+        )
+        # can_buy=False → WEAK_BEAR or STRONG_BEAR; block new long entries
+        nifty_regime_by_date = regime_map
+        nifty_ok_by_date = {d: r.can_buy for d, r in regime_map.items()}
+        bull_days  = sum(1 for r in regime_map.values() if r.state in ("STRONG_BULL", "MODERATE_BULL"))
+        side_days  = sum(1 for r in regime_map.values() if r.state == "SIDEWAYS")
+        bear_days  = sum(1 for r in regime_map.values() if r.state in ("WEAK_BEAR", "STRONG_BEAR"))
+        open_days  = sum(nifty_ok_by_date.values())
+        pct_up     = round(100 * open_days / len(nifty_ok_by_date), 1) if nifty_ok_by_date else 0
+        print(f"[backtest] Regime Engine: "
+              f"BULL={bull_days} | SIDEWAYS={side_days} | BEAR={bear_days} | "
+              f"entry-open={open_days}/{len(nifty_ok_by_date)} ({pct_up}%)")
+    else:
+        print(f"[backtest] WARNING: only {len(nifty_df)} NIFTYBEES.NS bars — macro gate disabled")
 
     # ── Pre-load enrichment data (loaded once, shared across all symbols) ──────
     hub_scores:  dict[tuple, dict] = {}
@@ -1106,6 +1096,7 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
         result = backtest_symbol(
             df, symbol,
             nifty_ok=nifty_ok_by_date or None,
+            nifty_regime=nifty_regime_by_date or None,
             hub_scores=hub_scores or None,
             fund_data=fund_data or None,
             news_vetoes=news_vetoes or None,

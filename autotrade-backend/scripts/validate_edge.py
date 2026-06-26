@@ -943,26 +943,26 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
     print("           yfinance adjusted close handles splits/dividends.")
     print("           Delisting bias: stocks that failed pre-2022 are excluded.")
 
-    # Load Nifty macro gate: EMA50 AND EMA200 (same logic as run_backtest.py).
-    # EMA200 added to block bear-market bounce entries (key 2025 fix).
+    # ── 5-state Market Regime Engine (replaces old EMA50+EMA200 gate) ───────────
+    # Uses sliding window to avoid look-ahead bias; same logic as the live agent.
     nifty_ok: dict[str, bool] = {}
+    nifty_df_g = pd.DataFrame()
+    vix_df_g   = pd.DataFrame()
     try:
-        nifty_df = await load_candles("NIFTYBEES.NS", from_dt)
-        if len(nifty_df) >= 205:
-            ema50  = nifty_df["close"].ewm(span=50,  adjust=False).mean()
-            ema200 = nifty_df["close"].ewm(span=200, adjust=False).mean()
-            for ts in nifty_df.index:
-                c = float(nifty_df.at[ts, "close"])
-                nifty_ok[str(ts)[:10]] = (c > float(ema50[ts])) and (c > float(ema200[ts]))
-            pct_open = round(100 * sum(nifty_ok.values()) / len(nifty_ok), 1)
-            print(f"[validate] Nifty gate (EMA50+EMA200): "
-                  f"{sum(nifty_ok.values())}/{len(nifty_ok)} days open ({pct_open}%)")
-        else:
-            print(f"[validate] WARNING: only {len(nifty_df)} NIFTYBEES bars — gate disabled")
+        nifty_df_g = await load_candles("NIFTYBEES.NS", from_dt)
+        for _vsym in ("^INDIAVIX", "INDIAVIX.NS", "INDIA_VIX"):
+            try:
+                _vdf = await load_candles(_vsym, from_dt)
+                if not _vdf.empty:
+                    vix_df_g = _vdf
+                    break
+            except Exception:
+                pass
     except Exception as exc:
-        print(f"[validate] WARNING: Nifty gate disabled: {exc}")
+        print(f"[validate] WARNING: NIFTYBEES load failed ({exc})")
 
     # Precompute daily market breadth (% hub stocks above 50-day proxy).
+    # Done BEFORE the regime map so breadth feeds into regime classification.
     print("[validate] Precomputing daily market breadth (hub top-200)...")
     breadth_map: dict[str, float] = {}
     try:
@@ -973,6 +973,24 @@ async def run(top_n: int, from_date: date, symbol_limit: int | None, out_path: s
               f"{below_45} days below 45% (PULLBACK_LONG blocked)")
     except Exception as exc:
         print(f"[validate] WARNING: breadth compute failed — gate disabled: {exc}")
+
+    if not nifty_df_g.empty and len(nifty_df_g) >= 60:
+        from engine.agent.market_regime import build_regime_map_from_df as _build_regime_map_v
+        _regime_map_v = _build_regime_map_v(
+            nifty_df_g,
+            breadth_map=breadth_map if breadth_map else None,
+            vix_df=vix_df_g if not vix_df_g.empty else None,
+        )
+        nifty_ok = {d: r.can_buy for d, r in _regime_map_v.items()}
+        _bull = sum(1 for r in _regime_map_v.values() if r.state in ("STRONG_BULL", "MODERATE_BULL"))
+        _side = sum(1 for r in _regime_map_v.values() if r.state == "SIDEWAYS")
+        _bear = sum(1 for r in _regime_map_v.values() if r.state in ("WEAK_BEAR", "STRONG_BEAR"))
+        pct_open = round(100 * sum(nifty_ok.values()) / len(nifty_ok), 1) if nifty_ok else 0
+        print(f"[validate] Regime Engine (5-state, sliding window): "
+              f"BULL={_bull} | SIDEWAYS={_side} | BEAR={_bear} | "
+              f"entry-open={sum(nifty_ok.values())}/{len(nifty_ok)} ({pct_open}%)")
+    else:
+        print(f"[validate] WARNING: only {len(nifty_df_g)} NIFTYBEES bars — macro gate disabled")
 
     # 1. Full backtest (corrected path)
     print("\n[1/6] Running corrected backtest (real Strategy classes)...")

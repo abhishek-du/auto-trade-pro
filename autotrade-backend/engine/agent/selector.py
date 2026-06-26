@@ -17,10 +17,11 @@ class StrategySelectorAgent:
     def __init__(self):
         # TREND_BREAKOUT_LONG disabled (Phase 5): backtest mean_R=-0.003 over 400+
         # trades — zero statistical edge; keeping it active dilutes expectancy.
-        # Short strategies (MeanReversionShort, ExhaustionShort) require
-        # EQUITY_SHORT_ENABLED=True and use MIS product (intraday only — NSE rule).
-        # RANGE_REVERSAL_LONG disabled (Phase 7): n=2 in full backtest, mean_R=-0.336
-        # (dilutive, no statistical edge). Removed to keep strategy set clean.
+        # Short strategies require EQUITY_SHORT_ENABLED=True and use MIS product
+        # (intraday only — NSE/SEBI rule for equity short-selling).
+        # PullbackShort: activates in BEAR_TRENDING stocks during WEAK/STRONG_BEAR
+        # macro regime — the regime-aware mirror of PULLBACK_LONG.
+        # RANGE_REVERSAL_LONG disabled (Phase 7): n=2 in full backtest, mean_R=-0.336.
         self.strategies = [
             PullbackTrendLong(),
             MeanReversionShort(),
