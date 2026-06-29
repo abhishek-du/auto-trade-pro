@@ -1,6 +1,8 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useState, useEffect, useCallback, Component } from 'react';
 import { Toaster } from 'react-hot-toast';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import Login from './pages/Login';
 
 // Catches React rendering errors so the user sees a message instead of a blank page.
 class ErrorBoundary extends Component {
@@ -90,13 +92,14 @@ import FloatingChatButton from './components/chat/FloatingChatButton';
 import NseHolidayToast from './components/NseHolidayToast';
 import { LivePricesProvider } from './contexts/LivePricesContext';
 
-export default function App() {
+// ── Authenticated shell ───────────────────────────────────────────────────────
+function AppShell() {
+  const { isAuthenticated, loading } = useAuth();
   const [searchOpen, setSearchOpen] = useState(false);
 
   const openSearch  = useCallback(() => setSearchOpen(true),  []);
   const closeSearch = useCallback(() => setSearchOpen(false), []);
 
-  // Global ⌘K / Ctrl+K shortcut
   useEffect(() => {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -108,9 +111,22 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  // Blank screen while validating stored token
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#080D1A]">
+        <svg className="w-8 h-8 text-indigo-400 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+
   return (
     <LivePricesProvider>
-    <BrowserRouter>
       <div className="flex h-screen bg-surface text-slate-100 overflow-hidden">
         <Sidebar />
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -171,13 +187,33 @@ export default function App() {
       <MobileNav onSearchOpen={openSearch} />
       <FloatingChatButton />
       <NseHolidayToast />
-      <Toaster
-        position="bottom-right"
-        toastOptions={{
-          style: { background: '#1E293B', color: '#F1F5F9', border: '1px solid #334155' },
-        }}
-      />
-    </BrowserRouter>
     </LivePricesProvider>
   );
+}
+
+// ── Root ──────────────────────────────────────────────────────────────────────
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<LoginGate />} />
+          <Route path="/*"    element={<AppShell />} />
+        </Routes>
+        <Toaster
+          position="bottom-right"
+          toastOptions={{
+            style: { background: '#1E293B', color: '#F1F5F9', border: '1px solid #334155' },
+          }}
+        />
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
+
+// Redirect to dashboard if already logged in
+function LoginGate() {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return null;
+  return isAuthenticated ? <Navigate to="/" replace /> : <Login />;
 }
