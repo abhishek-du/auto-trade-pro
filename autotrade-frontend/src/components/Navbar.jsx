@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { AlertTriangle, TrendingUp, TrendingDown, Zap, Search } from 'lucide-react';
+import { AlertTriangle, TrendingUp, TrendingDown, Zap, Search, LogOut } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { getZerodhaTokenStatus, getZerodhaLoginUrl, apiFetch } from '../api/client';
 import ExpiryCountdown from './calendar/ExpiryCountdown';
+import { useAuth } from '../contexts/AuthContext';
 
 const PAGE_TITLES = {
   '/':                 'Dashboard',
@@ -267,6 +268,7 @@ function TradeModeBadge() {
 export default function Navbar({ onSearchOpen }) {
   const { pathname } = useLocation();
   const { portfolio } = usePortfolio();
+  const { logout } = useAuth();
   const title = PAGE_TITLES[pathname] ?? 'AutoTrade Pro';
 
   return (
@@ -318,6 +320,16 @@ export default function Navbar({ onSearchOpen }) {
           {/* Live clock — tablet and up */}
           <div className="hidden md:block w-px h-8 bg-border" />
           <div className="hidden md:block"><LiveClock /></div>
+          {/* Logout */}
+          <div className="hidden md:block w-px h-8 bg-border" />
+          <button
+            onClick={logout}
+            title="Sign out"
+            className="flex items-center gap-1.5 text-slate-400 hover:text-red-400 transition text-xs font-medium px-2 py-1.5 rounded-lg hover:bg-red-500/10"
+          >
+            <LogOut size={14} />
+            <span className="hidden lg:inline">Sign out</span>
+          </button>
         </div>
       </div>
     </header>

@@ -75,3 +75,5 @@ gspread              # Google Sheets backend (SHEET_LOG_BACKEND="google")
 google-auth          # Google OAuth token refresh
 google-auth-oauthlib # OAuth 2.0 Desktop flow (your own account, no sheet sharing needed)
 pyotp                # TOTP generation for automated Zerodha daily token refresh
+bcrypt>=4.0
+PyJWT>=2.8

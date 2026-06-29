@@ -5,10 +5,20 @@ import axios from 'axios';
 // time with VITE_API_BASE if FastAPI lives on a different host than the SPA.
 const baseURL = (import.meta.env && import.meta.env.VITE_API_BASE) || '';
 
+const TOKEN_KEY = 'atp_admin_token';
+const getToken  = () => localStorage.getItem(TOKEN_KEY);
+
 const api = axios.create({
   baseURL,
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' },
+});
+
+// Attach JWT to every request
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
 });
 
 api.interceptors.response.use(
@@ -20,7 +30,12 @@ api.interceptors.response.use(
 // Throws on non-2xx so callers can rely on a resolved value being valid JSON.
 export async function apiFetch(path, options = {}) {
   const url = (baseURL || '') + path;
-  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers || {}),
+  };
   const res = await fetch(url, { ...options, headers });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
