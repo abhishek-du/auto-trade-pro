@@ -32,7 +32,7 @@ function normalizeAgentTrade(t) {
   };
 }
 
-export function useTrades(pollInterval = 15000) {
+export function useTrades(pollInterval = 2000) {
   const [trades, setTrades]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
