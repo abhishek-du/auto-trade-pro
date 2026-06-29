@@ -27,6 +27,7 @@ const PAGE_TITLES = {
   '/earnings':          'Earnings Analyzer',
   '/agent':             'AI Trading Agent',
   '/intelligence':      'Intelligence Hub',
+  '/buyback':           'Buyback Tracker',
 };
 
 // ── Market status dots ────────────────────────────────────────────────────────

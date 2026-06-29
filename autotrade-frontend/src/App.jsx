@@ -88,6 +88,7 @@ import PipelineFlow      from './pages/PipelineFlow';
 import StockDetail        from './pages/StockDetail';
 import FundDetail            from './pages/FundDetail';
 import PortfolioAnalytics   from './pages/PortfolioAnalytics';
+import BuybackTracker      from './pages/BuybackTracker';
 import FloatingChatButton from './components/chat/FloatingChatButton';
 import NseHolidayToast from './components/NseHolidayToast';
 import { LivePricesProvider } from './contexts/LivePricesContext';
@@ -177,6 +178,7 @@ function AppShell() {
               <Route path="/portfolio-analytics" element={<PortfolioAnalytics />} />
               <Route path="/s/:symbol"    element={<StockDetail />} />
               <Route path="/mf/:scheme"   element={<FundDetail />} />
+              <Route path="/buyback"      element={<BuybackTracker />} />
             </Routes>
             </ErrorBoundary>
           </main>

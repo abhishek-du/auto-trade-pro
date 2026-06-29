@@ -31,6 +31,7 @@ export const SECTIONS = [
       { to: '/sector-heatmap',   label: 'Sector Heatmap', Icon: LayoutGrid, badge: 'sectorHeatmap' },
       { to: '/mutual-funds',     label: 'Mutual Funds',   Icon: Wallet },
       { to: '/ipo',              label: 'IPO Tracker',    Icon: Rocket, badge: 'ipoTracker' },
+      { to: '/buyback',          label: 'Buyback Tracker', Icon: TrendingUp },
     ],
   },
   {

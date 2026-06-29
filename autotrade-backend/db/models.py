@@ -1584,3 +1584,36 @@ class PortfolioThesis(Base):
 
     def __repr__(self) -> str:
         return f"<PortfolioThesis {self.stance} halt={self.halt_new} enforced={self.enforced} @{self.ts}>"
+
+
+# ── Buyback Tracker ──────────────────────────────────────────────────────────
+
+class BuybackOffer(Base):
+    """NSE corporate buyback offers. Refreshed daily from NSE/BSE announcements."""
+    __tablename__ = "buyback_offers"
+    __table_args__ = (
+        UniqueConstraint("symbol", "record_date", name="uq_buyback_symbol_date"),
+        Index("ix_buyback_offers_symbol", "symbol"),
+        Index("ix_buyback_offers_status", "status"),
+    )
+
+    id:              Mapped[int]          = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    symbol:          Mapped[str]          = mapped_column(String(30),  nullable=False)         # e.g. INFY.NS
+    company_name:    Mapped[str]          = mapped_column(String(120), nullable=False)
+    buyback_price:   Mapped[float]        = mapped_column(Float,       nullable=False)         # announced buyback price ₹
+    buyback_type:    Mapped[str]          = mapped_column(String(20),  nullable=False, default="TENDER")  # TENDER | OPEN_MARKET
+    total_shares:    Mapped[int | None]   = mapped_column(BigInteger,  nullable=True)          # max shares to buyback
+    total_size_cr:   Mapped[float | None] = mapped_column(Float,       nullable=True)          # total size in ₹ crore
+    record_date:     Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    open_date:       Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    close_date:      Mapped[date | None]  = mapped_column(Date,        nullable=True)
+    status:          Mapped[str]          = mapped_column(String(20),  nullable=False, default="UPCOMING")  # UPCOMING|OPEN|CLOSED
+    # Live-enriched fields (updated by price refresh)
+    market_price:    Mapped[float | None] = mapped_column(Float,       nullable=True)
+    spread_pct:      Mapped[float | None] = mapped_column(Float,       nullable=True)          # (buyback_price - market_price) / market_price * 100
+    last_refreshed:  Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at:      Mapped[datetime]     = mapped_column(DateTime,    server_default=func.now(), nullable=False)
+    updated_at:      Mapped[datetime]     = mapped_column(DateTime,    server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<BuybackOffer {self.symbol} @₹{self.buyback_price} spread={self.spread_pct}%>"
