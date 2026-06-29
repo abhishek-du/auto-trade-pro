@@ -1,4 +1,4 @@
-# AutoTrade Pro — Main FastAPI application entry point
+# Prajna — Main FastAPI application entry point
 # PAPER TRADING MODE ONLY — No real money is ever involved.
 
 # Load .env into os.environ FIRST so that any module-level os.getenv() calls
@@ -22,11 +22,11 @@ from utils.logger import logger
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     print("=" * 62)
-    print("  AutoTrade Pro — PAPER TRADING MODE ACTIVE — Virtual Balance: $1000")
+    print("  Prajna — PAPER TRADING MODE ACTIVE — Virtual Balance: $1000")
     print("  ⚠  FAKE/VIRTUAL CURRENCY ONLY — Real money is NEVER involved")
     print("=" * 62)
 
-    logger.info("AutoTrade Pro starting — PAPER TRADING MODE")
+    logger.info("Prajna starting — PAPER TRADING MODE")
     logger.info(f"Virtual balance       : ${settings.PAPER_TRADING_BALANCE:,.2f}")
     logger.info(f"Max risk per trade    : {settings.MAX_RISK_PER_TRADE * 100:.1f}%")
     logger.info(f"Max open positions    : {settings.MAX_OPEN_POSITIONS}")
@@ -137,12 +137,12 @@ async def lifespan(app: FastAPI):
         await _bg_task
     except _asyncio.CancelledError:
         pass
-    logger.info("AutoTrade Pro shutting down")
+    logger.info("Prajna shutting down")
     await engine.dispose()
 
 
 app = FastAPI(
-    title="AutoTrade Pro",
+    title="Prajna",
     description=(
         "Paper Trading Simulation System — **VIRTUAL CURRENCY ONLY**. "
         "No real money is ever used or at risk."
@@ -205,7 +205,7 @@ app.include_router(buyback.router,      prefix="/api/v1/buyback")
 async def root():
     """Landing info — confirms paper-trading mode to any caller."""
     return {
-        "app": "AutoTrade Pro",
+        "app": "Prajna",
         "mode": "PAPER TRADING — VIRTUAL CURRENCY ONLY",
         "disclaimer": (
             "This system uses FAKE/VIRTUAL currency. "

@@ -83,7 +83,7 @@ function ProductSelector({ value, onChange }) {
           <AlertTriangle size={13} className="text-amber-400 mt-0.5 shrink-0" />
           <p className="text-amber-300 text-[11px] leading-relaxed">
             <strong>NSE/BSE Rule:</strong> MIS positions are auto-squared off by Zerodha at 3:20 PM IST using market orders.
-            AutoTrade Pro closes them at 3:15 PM with limit orders for better fills.
+            Prajna closes them at 3:15 PM with limit orders for better fills.
             Short selling (SELL without holding shares) is only permitted in MIS — SEBI prohibits delivery shorts.
           </p>
         </div>

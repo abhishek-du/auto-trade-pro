@@ -78,7 +78,7 @@ export default function MarketBreadth() {
           loading={loading}
         />
         <MoodCard
-          title="AutoTrade Watchlist"
+          title="Prajna Watchlist"
           subtitle={`${wl.advances || 0} of ${wl.total || 0} stocks advancing`}
           mood={wl.market_mood}
           loading={loading}
@@ -113,7 +113,7 @@ export default function MarketBreadth() {
               />
             )}
             <AdvanceDeclineBar
-              label="AutoTrade Pro Watchlist (35 stocks)"
+              label="Prajna Watchlist (35 stocks)"
               advances={wl.advances   || 0}
               declines={wl.declines   || 0}
               unchanged={wl.unchanged || 0}

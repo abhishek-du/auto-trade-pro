@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import PrajnaLogo from '../components/PrajnaLogo';
 
 export default function Login() {
   const { login } = useAuth();
@@ -26,13 +27,9 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-[#080D1A] px-4">
       <div className="w-full max-w-sm">
         {/* Logo / brand */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 mb-4">
-            <svg className="w-7 h-7 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 16l4-4 4 4 4-6" />
-            </svg>
-          </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">AutoTrade Pro</h1>
+        <div className="flex flex-col items-center mb-8">
+          <PrajnaLogo size={56} showText={false} />
+          <h1 className="text-2xl font-bold text-white tracking-tight mt-4">Prajna</h1>
           <p className="text-slate-400 text-sm mt-1">Admin Dashboard</p>
         </div>
 
@@ -122,7 +119,7 @@ export default function Login() {
         </div>
 
         <p className="text-center text-xs text-slate-600 mt-6">
-          AutoTrade Pro — Paper trading only. No real money.
+          Prajna — Paper trading only. No real money.
         </p>
       </div>
     </div>

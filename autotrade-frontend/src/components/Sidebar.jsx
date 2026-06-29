@@ -1,5 +1,6 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import { useState, useEffect } from 'react';
+import PrajnaLogo from './PrajnaLogo';
 import {
   LayoutDashboard, ArrowLeftRight, BarChart2,
   Newspaper, FlaskConical, Settings, TrendingUp, BookOpenText,
@@ -514,14 +515,8 @@ export default function Sidebar() {
       className="hidden md:flex flex-col w-60 shrink-0 h-screen border-r border-border glass-panel"
     >
       {/* Logo */}
-      <div className="flex items-center gap-3 px-5 py-5 border-b border-border">
-        <div className="p-2 rounded-xl glass-panel">
-          <TrendingUp size={18} className="text-white" />
-        </div>
-        <div className="leading-tight">
-          <div className="text-slate-300 font-bold text-sm tracking-wide">AutoTrade</div>
-          <div className="gradient-text font-extrabold text-base leading-none">Pro</div>
-        </div>
+      <div className="px-4 py-4 border-b border-border">
+        <PrajnaLogo size={38} subtitle="AI Trading Intelligence" />
       </div>
 
       {/* Navigation — 6 collapsible sections */}

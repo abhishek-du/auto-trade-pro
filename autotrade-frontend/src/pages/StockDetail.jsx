@@ -565,7 +565,7 @@ export default function StockDetail() {
       const isSellEv = String(signal).includes('SELL');
       evts.push({
         headline: `AI Signal: ${signal.replace('_', ' ')} · ${Math.min(100, Math.round(Math.abs(score)))}% confidence`,
-        source: 'AutoTrade AI',
+        source: 'Prajna AI',
         published_at: deep?.as_of ?? now,
         sentiment: isBuyEv ? 'positive' : isSellEv ? 'negative' : 'neutral',
         score: isBuyEv ? score : -Math.abs(score),
