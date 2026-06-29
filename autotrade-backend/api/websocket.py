@@ -418,3 +418,79 @@ async def live_prices_ws(websocket: WebSocket):
         live_price_manager.disconnect(websocket)
     except Exception:
         live_price_manager.disconnect(websocket)
+
+
+@router.websocket("/positions-pnl")
+async def ws_positions_pnl(ws: WebSocket):
+    """Streams live P&L patches for all open positions every 500 ms.
+
+    Reads directly from PRICE_CACHE (populated by KiteTicker on_ticks) so
+    updates are sub-second — no DB read on every tick.
+
+    Message format:
+      { "type": "pnl_patch",
+        "positions": [{ "id": "paper_123", "current_price": 8.51,
+                        "unrealised_pnl": 305.73, "unrealised_pct": 0.79 }] }
+    """
+    await ws.accept()
+    try:
+        last_pos_refresh = 0.0
+        open_positions: list[dict] = []
+
+        while True:
+            loop = asyncio.get_event_loop()
+            now = loop.time()
+
+            # Refresh position list from DB every 30 s (catches new/closed trades)
+            if now - last_pos_refresh > 30:
+                async with AsyncSessionLocal() as db:
+                    from db.models import OpenPosition
+                    rows = (await db.execute(select(OpenPosition))).scalars().all()
+                    open_positions = [
+                        {
+                            "id":          f"paper_{r.trade_id}",
+                            "symbol":      r.symbol,
+                            "entry_price": r.entry_price,
+                            "size_units":  r.size_units,
+                            "direction":   r.direction.value if hasattr(r.direction, "value") else str(r.direction),
+                        }
+                        for r in rows
+                    ]
+                last_pos_refresh = now
+
+            if open_positions:
+                from crawler.live_prices import PRICE_CACHE
+                patches = []
+                for pos in open_positions:
+                    sym = pos["symbol"]
+                    cached = PRICE_CACHE.get(sym) or PRICE_CACHE.get(f"{sym}.NS") or PRICE_CACHE.get(sym.replace(".NS", ""))
+                    if not cached:
+                        continue
+                    cur = float(cached.get("price") or cached.get("last_price") or 0)
+                    if cur <= 0:
+                        continue
+                    entry = pos["entry_price"]
+                    qty   = pos["size_units"]
+                    pnl   = (cur - entry) * qty if pos["direction"] == "BUY" else (entry - cur) * qty
+                    cost  = entry * qty
+                    pct   = round(pnl / cost * 100, 2) if cost else 0.0
+                    patches.append({
+                        "id":             pos["id"],
+                        "current_price":  round(cur, 2),
+                        "unrealised_pnl": round(pnl, 2),
+                        "unrealised_pct": pct,
+                    })
+
+                if patches:
+                    await ws.send_json({
+                        "type":      "pnl_patch",
+                        "positions": patches,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    })
+
+            await asyncio.sleep(0.5)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug(f"[ws/positions-pnl] {exc}")

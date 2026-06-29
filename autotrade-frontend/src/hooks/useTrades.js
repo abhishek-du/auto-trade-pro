@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiFetch } from '../api/client';
+import { useWebSocket } from './useWebSocket';
 
 function normalizeAgentTrade(t) {
   const notional = (t.qty ?? 0) * (t.entry_price ?? 0);
@@ -32,7 +33,7 @@ function normalizeAgentTrade(t) {
   };
 }
 
-export function useTrades(pollInterval = 2000) {
+export function useTrades(pollInterval = 30000) {
   const [trades, setTrades]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
@@ -59,6 +60,25 @@ export function useTrades(pollInterval = 2000) {
     const id = setInterval(fetchAll, pollInterval);
     return () => clearInterval(id);
   }, [fetchAll, pollInterval]);
+
+  // WebSocket: patch current_price + unrealised P&L for open positions in real-time
+  const onPnlPatch = useCallback((msg) => {
+    if (msg.type !== 'pnl_patch' || !Array.isArray(msg.positions)) return;
+    const patchMap = {};
+    for (const p of msg.positions) patchMap[p.id] = p;
+    setTrades(prev => prev.map(t => {
+      const patch = patchMap[t.id];
+      if (!patch) return t;
+      return {
+        ...t,
+        current_price:  patch.current_price,
+        unrealised_pnl: patch.unrealised_pnl,
+        unrealised_pct: patch.unrealised_pct,
+      };
+    }));
+  }, []);
+
+  useWebSocket('/ws/positions-pnl', { onMessage: onPnlPatch });
 
   return { trades, loading, error, refetch: fetchAll };
 }
