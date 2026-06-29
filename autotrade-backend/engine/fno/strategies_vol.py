@@ -166,8 +166,9 @@ async def evaluate_volatility(session: AsyncSession, equity: float) -> list[dict
             if ivr is None:
                 continue
             atm_iv, rank = ivr
-            if rank > _IV_RANK_LOW:        # only buy vol when it's cheap
+            if _IV_RANK_LOW <= rank <= _IV_RANK_HIGH:
                 continue
+                
             # Spot from the latest snapshot.
             spot = (await session.execute(
                 select(OptionContractSnapshot.spot).where(
@@ -176,12 +177,228 @@ async def evaluate_volatility(session: AsyncSession, equity: float) -> list[dict
             )).scalar_one_or_none()
             if not spot:
                 continue
-            res = await open_long_straddle(under, float(spot), equity, session,
-                                           confidence=round(100 - rank, 1))
-            if res:
-                res["iv_rank"] = rank
-                opened.append(res)
+                
+            if rank < _IV_RANK_LOW:
+                res = await open_long_straddle(under, float(spot), equity, session,
+                                               confidence=round(100 - rank, 1))
+                if res:
+                    res["iv_rank"] = rank
+                    opened.append(res)
+            elif rank > _IV_RANK_HIGH:
+                res = await select_iron_condor(under, float(spot), equity, session)
+                if res:
+                    trades = await open_iron_condor_paper_trade(res, session, confidence=round(rank, 1))
+                    if trades:
+                        opened.append({
+                            "strategy": "IRON_CONDOR", "underlying": under,
+                            "legs": len(trades), "net_credit": res.net_credit,
+                            "iv_rank": rank
+                        })
         except Exception as exc:
             logger.warning(f"[fno/vol] {under} failed: {exc}")
 
     return opened
+
+# ── Iron Condor Execution Logic ──────────────────────────────────────────────
+
+from db.models import PaperTrade, TradeDirection, TradeStatus
+
+@dataclass
+class IronCondorSpec:
+    underlying: str
+    expiry: date
+    lot_size: int
+    lots: int
+    qty: int
+    
+    strike_short_ce: float
+    strike_long_ce: float
+    premium_short_ce: float
+    premium_long_ce: float
+    ts_short_ce: str
+    ts_long_ce: str
+    
+    strike_short_pe: float
+    strike_long_pe: float
+    premium_short_pe: float
+    premium_long_pe: float
+    ts_short_pe: str
+    ts_long_pe: str
+    
+    net_credit: float
+    margin_blocked: float
+    dte: int
+
+def get_condor_widths(underlying: str) -> tuple[float, float]:
+    under = underlying.upper()
+    if "BANK" in under or "SENSEX" in under:
+        return (500.0, 1000.0)
+    return (200.0, 400.0)
+
+async def select_iron_condor(
+    underlying: str, spot: float, equity: float, session: AsyncSession
+) -> IronCondorSpec | None:
+    # First get ATM strike for CE
+    contract_atm = await _contracts.resolve_option(underlying, "CE", spot, session)
+    if not contract_atm:
+        contract_atm = await _contracts.resolve_option_from_snapshot(underlying, "CE", spot, session)
+    if not contract_atm:
+        return None
+        
+    atm_strike = contract_atm.strike
+    expiry = contract_atm.expiry
+    lot_size = contract_atm.lot_size or 1
+    
+    w_short, w_long = get_condor_widths(underlying)
+    
+    s_ce = atm_strike + w_short
+    l_ce = atm_strike + w_long
+    s_pe = atm_strike - w_short
+    l_pe = atm_strike - w_long
+    
+    # Resolve all 4 legs
+    c_s_ce = await _contracts.resolve_option(underlying, "CE", s_ce, session)
+    c_l_ce = await _contracts.resolve_option(underlying, "CE", l_ce, session)
+    c_s_pe = await _contracts.resolve_option(underlying, "PE", s_pe, session)
+    c_l_pe = await _contracts.resolve_option(underlying, "PE", l_pe, session)
+    
+    if not all([c_s_ce, c_l_ce, c_s_pe, c_l_pe]):
+        return None
+        
+    p_s_ce = await _latest_premium(underlying, s_ce, "CE", expiry, session)
+    p_l_ce = await _latest_premium(underlying, l_ce, "CE", expiry, session)
+    p_s_pe = await _latest_premium(underlying, s_pe, "PE", expiry, session)
+    p_l_pe = await _latest_premium(underlying, l_pe, "PE", expiry, session)
+    
+    if not all([p_s_ce, p_l_ce, p_s_pe, p_l_pe]):
+        return None
+        
+    net_credit = (p_s_ce + p_s_pe) - (p_l_ce + p_l_pe)
+    if net_credit <= 0:
+        return None
+        
+    # Sizing: risk budget = max loss = (long strike - short strike) - net_credit
+    max_loss_per_qty = (l_ce - s_ce) - net_credit 
+    if max_loss_per_qty <= 0:
+        max_loss_per_qty = 1.0 # just in case
+        
+    risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
+    risk_per_lot = max_loss_per_qty * lot_size
+    lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
+    lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
+    qty = lots * lot_size
+    
+    margin_blocked = max(60000.0 * lots, (l_ce - s_ce) * qty)
+    
+    if margin_blocked > equity:
+        lots = max(1, int(equity // 60000.0))
+        qty = lots * lot_size
+        margin_blocked = max(60000.0 * lots, (l_ce - s_ce) * qty)
+        
+    return IronCondorSpec(
+        underlying=underlying.upper(), expiry=expiry, lot_size=lot_size, lots=lots, qty=qty,
+        strike_short_ce=s_ce, strike_long_ce=l_ce, premium_short_ce=p_s_ce, premium_long_ce=p_l_ce,
+        ts_short_ce=c_s_ce.tradingsymbol, ts_long_ce=c_l_ce.tradingsymbol,
+        strike_short_pe=s_pe, strike_long_pe=l_pe, premium_short_pe=p_s_pe, premium_long_pe=p_l_pe,
+        ts_short_pe=c_s_pe.tradingsymbol, ts_long_pe=c_l_pe.tradingsymbol,
+        net_credit=round(net_credit, 2), margin_blocked=margin_blocked, dte=contract_atm.dte
+    )
+
+async def open_iron_condor_paper_trade(
+    spec: IronCondorSpec, session: AsyncSession, *, confidence: float = 0.0, ai_reason: str = ""
+) -> list[PaperTrade]:
+    from paper_trading.virtual_wallet import VirtualWallet
+    from sqlalchemy import delete
+
+    _max = settings.AGENT_EQUITY * settings.AGENT_MAX_POSITION_WEIGHT
+    if spec.margin_blocked > _max * 1.10:
+        logger.error(f"[fno/condor] HARD GUARD: margin {spec.margin_blocked} > max {_max}")
+        return []
+
+    # Duplicate check
+    existing = (await session.execute(
+        select(OpenPosition.symbol).where(
+            OpenPosition.underlying_symbol == spec.underlying
+        )
+    )).scalars().all()
+    if existing:
+        logger.warning(f"[fno/condor] BLOCKED {spec.underlying} — already have positions")
+        return []
+
+    now = datetime.utcnow()
+    label = f"{spec.underlying} IRON CONDOR {spec.expiry:%d-%b}"
+    ai_reason = ai_reason or f"📊 IRON CONDOR | {spec.lots} lot(s) | Net Credit ₹{spec.net_credit}"
+
+    trades = []
+    positions = []
+    
+    # Helper to add leg
+    def add_leg(ts, strike, opt_type, direction, premium):
+        t = PaperTrade(
+            symbol=ts, direction=direction, status=TradeStatus.OPEN,
+            entry_price=premium, stop_loss=0, take_profit=0, size_units=spec.qty,
+            size_usd=premium * spec.qty, instrument_type=opt_type,
+            underlying_symbol=spec.underlying, strike_price=strike, option_type=opt_type,
+            expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0,
+            margin_blocked=spec.margin_blocked if len(trades) == 0 else 0,
+            signal_confidence=confidence, pattern_name="FNO_IRON_CONDOR",
+            ai_reason=ai_reason, opened_at=now
+        )
+        session.add(t)
+        trades.append(t)
+        
+        p = OpenPosition(
+            symbol=ts, direction=direction, entry_price=premium,
+            current_price=premium, stop_loss=0, take_profit=0, size_units=spec.qty,
+            size_usd=premium * spec.qty, instrument_type=opt_type,
+            underlying_symbol=spec.underlying, strike_price=strike, option_type=opt_type,
+            expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0,
+            margin_blocked=spec.margin_blocked if len(positions) == 0 else 0,
+            unrealised_pnl=0.0, unrealised_pct=0.0, trade_id=None, opened_at=now
+        )
+        session.add(p)
+        positions.append(p)
+        return p
+
+    p1 = add_leg(spec.ts_short_ce, spec.strike_short_ce, "CE", TradeDirection.SELL, spec.premium_short_ce)
+    p2 = add_leg(spec.ts_long_ce, spec.strike_long_ce, "CE", TradeDirection.BUY, spec.premium_long_ce)
+    p3 = add_leg(spec.ts_short_pe, spec.strike_short_pe, "PE", TradeDirection.SELL, spec.premium_short_pe)
+    p4 = add_leg(spec.ts_long_pe, spec.strike_long_pe, "PE", TradeDirection.BUY, spec.premium_long_pe)
+
+    await session.flush()
+    # associate trade_id
+    for t, p in zip(trades, positions):
+        p.trade_id = t.id
+
+    ok, msg = await VirtualWallet.deduct_margin(session, spec.margin_blocked, f"CONDOR_{spec.underlying}")
+    if not ok:
+        for p in positions: await session.execute(delete(OpenPosition).where(OpenPosition.id == p.id))
+        for t in trades: await session.execute(delete(PaperTrade).where(PaperTrade.id == t.id))
+        await session.flush()
+        logger.warning(f"[fno/exec] BLOCKED {label} — {msg}")
+        return []
+
+    await session.commit()
+    logger.info(f"[PAPER-FNO] IRON CONDOR {label} | {spec.lots} lot(s) | Net Credit ₹{spec.net_credit} | Margin ₹{spec.margin_blocked:,.0f}")
+
+    try:
+        if settings.telegram_available:
+            from integrations.telegram_service import send
+            max_profit = spec.net_credit * spec.qty
+            max_loss = ((spec.strike_long_ce - spec.strike_short_ce) - spec.net_credit) * spec.qty
+            await send(
+                f"🦅 <b>F&O IRON CONDOR</b>\n"
+                f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
+                f"SELL {spec.strike_short_ce:.0f}CE @ ₹{spec.premium_short_ce:.1f}\n"
+                f"BUY  {spec.strike_long_ce:.0f}CE @ ₹{spec.premium_long_ce:.1f}\n"
+                f"SELL {spec.strike_short_pe:.0f}PE @ ₹{spec.premium_short_pe:.1f}\n"
+                f"BUY  {spec.strike_long_pe:.0f}PE @ ₹{spec.premium_long_pe:.1f}\n"
+                f"Net Credit: <b>₹{spec.net_credit}</b>  |  {spec.lots} lot(s)\n"
+                f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
+                f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
+                f"IV Rank: {confidence:.0f}% (High IV)"
+            )
+    except Exception as exc:
+        logger.debug(f"[fno/exec] telegram alert failed: {exc}")
+
+    return trades

@@ -517,7 +517,7 @@ async def composite_index_signal(underlying: str, session: AsyncSession) -> dict
 
 
 async def evaluate_index_options(session: AsyncSession, equity: float) -> list[dict]:
-    """Evaluate each index for a directional option BUY and open paper positions.
+    """Evaluate each index for a directional option SPREAD and open paper positions.
 
     Additive to the equity agent — only runs when ENABLE_OPTIONS is set. Skips an
     underlying if a position on it is already open (by tradingsymbol prefix).
@@ -546,21 +546,21 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
             if confidence < threshold:
                 continue
 
-            spec = await select_index_option(under, direction, spot, equity, session)
+            spec = await select_index_spread(under, direction, spot, equity, session)
             if spec is None:
                 continue
             # Carry the factor rationale into the trade note.
             rationale = "; ".join(f"{f['factor']}={f['score']:+.0f}" for f in sig["factors"])
-            trade = await open_option_paper_trade(
+            spread_name = "BULL CALL SPREAD" if spec.option_type == "CE" else "BEAR PUT SPREAD"
+            trades = await open_spread_paper_trade(
                 spec, session, confidence=confidence,
-                ai_reason=f"📥 BUY {spec.underlying} {spec.strike:.0f}{spec.option_type} "
-                          f"| score {sig['score']:+.0f} | {rationale}",
+                ai_reason=f"📊 {spread_name} {spec.underlying} | score {sig['score']:+.0f} | {rationale}",
             )
-            if trade:
+            if trades:
                 opened.append({
                     "underlying": under, "direction": direction,
-                    "tradingsymbol": spec.tradingsymbol, "lots": spec.lots,
-                    "premium": spec.premium, "confidence": confidence,
+                    "tradingsymbol": spec.tradingsymbol_buy, "lots": spec.lots,
+                    "premium": spec.premium_buy, "confidence": confidence,
                     "score": sig["score"], "factors": sig["factors"],
                 })
         except Exception as exc:
@@ -745,3 +745,202 @@ async def evaluate_portfolio_hedge(session: AsyncSession, equity: float) -> dict
     await session.commit()
     logger.info(f"[fno/hedge] bought NIFTY {contract.strike:.0f}PE × {lots} lot(s) | debit ₹{debit:,.0f}")
     return {"tradingsymbol": spec.tradingsymbol, "lots": lots, "debit": debit}
+
+
+# ── Spread Execution Logic ───────────────────────────────────────────────────
+
+@dataclass
+class SpreadTradeSpec:
+    underlying:    str
+    option_type:   str       # CE | PE
+    expiry:        date
+    lot_size:      int
+    strike_buy:    float
+    strike_sell:   float
+    premium_buy:   float
+    premium_sell:  float
+    tradingsymbol_buy: str
+    tradingsymbol_sell: str
+    lots:          int
+    qty:           int
+    net_premium:   float
+    margin_blocked: float
+    dte:           int
+
+def get_spread_width(underlying: str) -> float:
+    under = underlying.upper()
+    if "BANK" in under or "SENSEX" in under:
+        return 500.0
+    return 200.0
+
+async def select_index_spread(
+    underlying: str,
+    direction: str,
+    spot: float,
+    equity: float,
+    session: AsyncSession,
+) -> SpreadTradeSpec | None:
+    """Resolve a directional signal to a Spread (Bull Call / Bear Put) + lot-rounded size."""
+    option_type = "CE" if direction.upper() == "BUY" else "PE"
+    
+    contract_buy = await _contracts.resolve_option(underlying, option_type, spot, session)
+    if contract_buy is None:
+        contract_buy = await _contracts.resolve_option_from_snapshot(underlying, option_type, spot, session)
+    if contract_buy is None:
+        return None
+
+    premium_buy = await _latest_premium(underlying, contract_buy.strike, option_type, contract_buy.expiry, session)
+    if not premium_buy or premium_buy <= 0:
+        return None
+
+    width = get_spread_width(underlying)
+    strike_sell = contract_buy.strike + width if option_type == "CE" else contract_buy.strike - width
+    
+    contract_sell = await _contracts.resolve_option(underlying, option_type, strike_sell, session)
+    if contract_sell is None:
+        contract_sell = await _contracts.resolve_option_from_snapshot(underlying, option_type, strike_sell, session)
+    if contract_sell is None or contract_sell.expiry != contract_buy.expiry:
+        return None
+
+    premium_sell = await _latest_premium(underlying, contract_sell.strike, option_type, contract_sell.expiry, session)
+    if not premium_sell or premium_sell <= 0:
+        return None
+
+    net_premium = premium_buy - premium_sell
+    if net_premium <= 0:
+        return None
+
+    lot_size = contract_buy.lot_size or 1
+    
+    risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
+    risk_per_lot = net_premium * lot_size
+    lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
+    lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
+    qty = lots * lot_size
+    
+    margin_blocked = max(net_premium * qty, 30000.0 * lots)
+    
+    if margin_blocked > equity:
+        lots = max(1, int(equity // 30000.0))
+        qty = lots * lot_size
+        margin_blocked = max(net_premium * qty, 30000.0 * lots)
+
+    return SpreadTradeSpec(
+        underlying=underlying.upper(), option_type=option_type, expiry=contract_buy.expiry,
+        lot_size=lot_size, strike_buy=contract_buy.strike, strike_sell=contract_sell.strike,
+        premium_buy=round(premium_buy, 2), premium_sell=round(premium_sell, 2),
+        tradingsymbol_buy=contract_buy.tradingsymbol, tradingsymbol_sell=contract_sell.tradingsymbol,
+        lots=lots, qty=qty, net_premium=round(net_premium, 2), margin_blocked=margin_blocked,
+        dte=contract_buy.dte
+    )
+
+async def open_spread_paper_trade(
+    spec: SpreadTradeSpec, session: AsyncSession, *, confidence: float = 0.0, ai_reason: str = "",
+) -> list[PaperTrade]:
+    """Open an F&O option spread position (Buy leg + Sell leg)."""
+    from paper_trading.virtual_wallet import VirtualWallet
+
+    _max = settings.AGENT_EQUITY * settings.AGENT_MAX_POSITION_WEIGHT
+    if spec.margin_blocked > _max * 1.10:
+        logger.error(f"[fno/spread] HARD GUARD: margin {spec.margin_blocked} > max {_max}")
+        return []
+
+    existing = (await session.execute(
+        select(OpenPosition.symbol).where(
+            OpenPosition.underlying_symbol == spec.underlying,
+            OpenPosition.option_type == spec.option_type,
+        )
+    )).scalars().all()
+    if existing:
+        logger.warning(f"[fno/spread] BLOCKED {spec.underlying} — already have positions")
+        return []
+
+    now = datetime.utcnow()
+    spread_name = "BULL CALL SPREAD" if spec.option_type == "CE" else "BEAR PUT SPREAD"
+    label = f"{spec.underlying} {spread_name} {spec.expiry:%d-%b}"
+    ai_reason = ai_reason or f"📊 {spread_name} | {spec.lots} lot(s) | Net Debit ₹{spec.net_premium}"
+
+    trades = []
+    positions = []
+
+    trade_buy = PaperTrade(
+        symbol=spec.tradingsymbol_buy, direction=TradeDirection.BUY, status=TradeStatus.OPEN,
+        entry_price=spec.premium_buy, stop_loss=0, take_profit=0, size_units=spec.qty,
+        size_usd=spec.premium_buy * spec.qty, instrument_type=spec.option_type,
+        underlying_symbol=spec.underlying, strike_price=spec.strike_buy, option_type=spec.option_type,
+        expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0,
+        margin_blocked=spec.margin_blocked, signal_confidence=confidence,
+        pattern_name=f"FNO_{spread_name.replace(' ', '_')}", ai_reason=ai_reason, opened_at=now
+    )
+    session.add(trade_buy)
+    await session.flush()
+    trades.append(trade_buy)
+
+    pos_buy = OpenPosition(
+        symbol=spec.tradingsymbol_buy, direction=TradeDirection.BUY, entry_price=spec.premium_buy,
+        current_price=spec.premium_buy, stop_loss=0, take_profit=0, size_units=spec.qty,
+        size_usd=spec.premium_buy * spec.qty, instrument_type=spec.option_type,
+        underlying_symbol=spec.underlying, strike_price=spec.strike_buy, option_type=spec.option_type,
+        expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0,
+        margin_blocked=spec.margin_blocked, unrealised_pnl=0.0, unrealised_pct=0.0,
+        trade_id=trade_buy.id, opened_at=now
+    )
+    session.add(pos_buy)
+    positions.append(pos_buy)
+
+    trade_sell = PaperTrade(
+        symbol=spec.tradingsymbol_sell, direction=TradeDirection.SELL, status=TradeStatus.OPEN,
+        entry_price=spec.premium_sell, stop_loss=0, take_profit=0, size_units=spec.qty,
+        size_usd=spec.premium_sell * spec.qty, instrument_type=spec.option_type,
+        underlying_symbol=spec.underlying, strike_price=spec.strike_sell, option_type=spec.option_type,
+        expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0, margin_blocked=0,
+        signal_confidence=confidence, pattern_name=f"FNO_{spread_name.replace(' ', '_')}",
+        ai_reason=ai_reason, opened_at=now
+    )
+    session.add(trade_sell)
+    await session.flush()
+    trades.append(trade_sell)
+
+    pos_sell = OpenPosition(
+        symbol=spec.tradingsymbol_sell, direction=TradeDirection.SELL, entry_price=spec.premium_sell,
+        current_price=spec.premium_sell, stop_loss=0, take_profit=0, size_units=spec.qty,
+        size_usd=spec.premium_sell * spec.qty, instrument_type=spec.option_type,
+        underlying_symbol=spec.underlying, strike_price=spec.strike_sell, option_type=spec.option_type,
+        expiry_date=spec.expiry, lot_size=spec.lot_size, contract_multiplier=1.0,
+        margin_blocked=0, unrealised_pnl=0.0, unrealised_pct=0.0, trade_id=trade_sell.id, opened_at=now
+    )
+    session.add(pos_sell)
+    positions.append(pos_sell)
+
+    await session.flush()
+
+    ok, msg = await VirtualWallet.deduct_margin(session, spec.margin_blocked, f"SPREAD_{spec.underlying}")
+    if not ok:
+        for p in positions: await session.execute(delete(OpenPosition).where(OpenPosition.id == p.id))
+        for t in trades: await session.execute(delete(PaperTrade).where(PaperTrade.id == t.id))
+        await session.flush()
+        logger.warning(f"[fno/exec] BLOCKED {label} — {msg}")
+        return []
+
+    await session.commit()
+    logger.info(f"[PAPER-FNO] {spread_name} {label} | {spec.lots} lot(s) | Net Debit ₹{spec.net_premium} | Margin ₹{spec.margin_blocked:,.0f}")
+
+    try:
+        if settings.telegram_available:
+            from integrations.telegram_service import send
+            max_profit = (abs(spec.strike_sell - spec.strike_buy) - spec.net_premium) * spec.qty
+            max_loss = spec.net_premium * spec.qty
+            await send(
+                f"🎯 <b>F&O {spread_name}</b>\n"
+                f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
+                f"BUY  {spec.strike_buy:.0f}{spec.option_type} @ ₹{spec.premium_buy}\n"
+                f"SELL {spec.strike_sell:.0f}{spec.option_type} @ ₹{spec.premium_sell}\n"
+                f"Net Premium: <b>₹{spec.net_premium}</b>  |  {spec.lots} lot(s)\n"
+                f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
+                f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
+                f"Conviction: {confidence:.0f}%"
+            )
+    except Exception as exc:
+        logger.debug(f"[fno/exec] telegram alert failed: {exc}")
+
+    return trades
