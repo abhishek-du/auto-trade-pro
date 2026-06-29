@@ -322,7 +322,7 @@ function PaperModeBanner() {
       style={{ background: 'rgba(245,158,11,0.06)' }}>
       <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
       <div>
-        <p className="text-amber-400 font-semibold text-sm">AutoTrade Pro is in PAPER TRADING mode</p>
+        <p className="text-amber-400 font-semibold text-sm">Prajna is in PAPER TRADING mode</p>
         <p className="text-slate-400 text-xs mt-1">
           Your Zerodha account is connected for <strong>viewing only</strong>.
           No real orders will be placed automatically.

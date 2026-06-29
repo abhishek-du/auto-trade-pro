@@ -270,7 +270,7 @@ export default function Navbar({ onSearchOpen }) {
   const { pathname } = useLocation();
   const { portfolio } = usePortfolio();
   const { logout } = useAuth();
-  const title = PAGE_TITLES[pathname] ?? 'AutoTrade Pro';
+  const title = PAGE_TITLES[pathname] ?? 'Prajna';
 
   return (
     <header className="shrink-0 border-b border-white/5 bg-black/40 backdrop-blur-md relative z-40">

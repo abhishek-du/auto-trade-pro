@@ -260,7 +260,7 @@ export default function PipelineFlow() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-slate-100">Pipeline Flow</h1>
-          <p className="text-muted text-sm mt-0.5">Live view of how AutoTrade Pro finds and trades stocks</p>
+          <p className="text-muted text-sm mt-0.5">Live view of how Prajna finds and trades stocks</p>
         </div>
         <div className="flex items-center gap-3">
           {loading && <RefreshCw size={14} className="text-muted animate-spin" />}
