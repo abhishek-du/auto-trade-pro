@@ -15,9 +15,6 @@ export default function FloatingChatButton() {
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
 
-  // Hide on full chat page
-  if (location.pathname === '/chat') return null
-
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, open])
@@ -28,6 +25,9 @@ export default function FloatingChatButton() {
       setTimeout(() => inputRef.current?.focus(), 100)
     }
   }, [open])
+
+  // All hooks must be above this line — hooks cannot be called after an early return
+  if (location.pathname === '/chat') return null
 
   async function send() {
     const txt = input.trim()
