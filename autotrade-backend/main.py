@@ -1,6 +1,11 @@
 # AutoTrade Pro — Main FastAPI application entry point
 # PAPER TRADING MODE ONLY — No real money is ever involved.
 
+# Load .env into os.environ FIRST so that any module-level os.getenv() calls
+# (e.g. api/auth.py hashing the password at import time) see the correct values.
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv()
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
