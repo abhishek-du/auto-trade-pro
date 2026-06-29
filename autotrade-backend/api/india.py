@@ -480,7 +480,7 @@ def _fetch_index_prices() -> dict[str, dict]:
     Zerodha prices as everywhere else (correct SENSEX token, live ticks during
     market hours). Falls back to yfinance only if the resolver has nothing.
     """
-    from crawler.live_prices import get_price
+    from crawler.live_prices import get_price, PRICE_CACHE
     import yfinance as yf
 
     result: dict[str, dict] = {}
@@ -494,6 +494,14 @@ def _fetch_index_prices() -> dict[str, dict]:
                     "change":     round(float(p.get("change", 0) or 0), 2),
                     "change_pct": round(float(p.get("change_pct", 0) or 0), 2),
                 }
+                # get_price() prioritises LIVE_TICKS which carry no day change_pct.
+                # Supplement from PRICE_CACHE which is populated by the 15s yfinance
+                # refresh task and DOES have the correct day change/change_pct.
+                if out["change_pct"] == 0:
+                    cached = PRICE_CACHE.get(ticker, {})
+                    if cached.get("change_pct"):
+                        out["change"]     = round(float(cached.get("change") or out["change"]), 2)
+                        out["change_pct"] = round(float(cached["change_pct"]), 2)
             else:
                 # Fallback: yfinance fast_info
                 fi    = yf.Ticker(ticker).fast_info
