@@ -1780,7 +1780,12 @@ async def _open_index_option_mis(
 
 
 async def _intraday_squareoff_task():
-    """Close all open MIS positions at 15:10 IST before Zerodha auto-squareoff at 15:20."""
+    """Close all open MIS positions at 15:10 IST before Zerodha auto-squareoff at 15:20.
+
+    Always runs regardless of INTRADAY_ENABLED — SELL trades from the main
+    trade loop are tagged MIS and must be squared off daily even when the
+    intraday burst is disabled.
+    """
     from sqlalchemy import select
 
     from db.models import OpenPosition
@@ -1788,10 +1793,6 @@ async def _intraday_squareoff_task():
     from paper_trading.virtual_wallet import VirtualWallet
     from tasks._db import celery_session
     from crawler.live_prices import PRICE_CACHE
-    from utils.config import settings as _cfg
-
-    if not getattr(_cfg, "INTRADAY_ENABLED", True):
-        return
 
     from crawler.live_snapshot import fetch_live_snapshot
     await fetch_live_snapshot()

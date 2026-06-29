@@ -268,6 +268,7 @@ async def open_paper_trade(
         confidence_bucket=_conf_bucket,
         instrument_segment=f"EQUITY_{product}",
         initial_risk_inr=_initial_r,
+        product=product,
     )
     session.add(trade)
     await session.flush()                           # populate trade.id
