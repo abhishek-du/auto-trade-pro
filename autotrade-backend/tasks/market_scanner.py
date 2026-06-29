@@ -207,8 +207,16 @@ async def _run_market_scanner(force: bool = False):
                     "is_user":        True,
                 })
 
-        # Sort: user picks first, then by conviction (|score|) + volume
-        candidates.sort(key=lambda c: (c.get("is_user", False), c["rank_score"]), reverse=True)
+        # Sort: actionable signals (BUY/SELL) always rank above NEUTRAL stubs,
+        # then user picks within each tier, then by conviction score.
+        def _signal_tier(sig: str) -> int:
+            s = (sig or "").upper()
+            return 2 if ("BUY" in s or "SELL" in s) else 0
+
+        candidates.sort(
+            key=lambda c: (_signal_tier(c["signal"]), c.get("is_user", False), c["rank_score"]),
+            reverse=True,
+        )
         shortlist = candidates[:top_n]
 
         # ── 5. Overwrite market_shortlist table ───────────────────────────────
