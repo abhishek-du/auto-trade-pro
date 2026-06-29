@@ -26,6 +26,24 @@ const fmtQty = (q) => {
 
 const fmtDate = (s) => (s ? fmtIST(s) : '—');
 
+// IST time only — e.g. "09:15 am" (uses asUTCDate so naive UTC strings are handled)
+const fmtTimeIST = (s) => {
+  const d = asUTCDate(s);
+  if (!d || isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+};
+
+// Short date in IST — e.g. "29 Jun"
+const fmtDateShort = (s) => {
+  const d = asUTCDate(s);
+  if (!d || isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short',
+  });
+};
+
 function elapsed(openedAt, closedAt = null) {
   if (!openedAt) return '—';
   const end  = closedAt ? asUTCDate(closedAt) : new Date();
@@ -719,7 +737,7 @@ export default function Trades() {
             <thead>
               <tr className="border-b border-border">
                 {[
-                  'Date', 'Symbol', 'Source', 'Direction',
+                  'Time (IST)', 'Symbol', 'Source', 'Direction',
                   'Qty / Invested', 'Entry', 'Current / Exit',
                   'Current Value', 'P&L', 'P&L %', 'Status',
                 ].map((h) => (
@@ -762,10 +780,44 @@ export default function Trades() {
                         isExpanded ? 'border-border/20 bg-surface/30' : 'border-border/50'
                       } ${isOpen ? 'bg-profit/[0.03]' : ''}`}
                     >
-                      {/* Date */}
-                      <td className="px-4 py-3 text-muted text-xs tabular-nums whitespace-nowrap">
-                        {fmtDate(t.closed_at ?? t.opened_at)}
-                      </td>
+                      {/* Time (IST) — entry + exit */}
+                      {(() => {
+                        const isBuyDir = (t.direction ?? '').toUpperCase() === 'BUY';
+                        return (
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="text-[10px] text-muted mb-1 font-medium">
+                              {fmtDateShort(t.opened_at)}
+                            </div>
+                            {/* Entry time — green for BUY entry, red for SELL entry */}
+                            <div className="flex items-center gap-1">
+                              <span className={`text-[9px] ${isBuyDir ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {isBuyDir ? '▲' : '▼'}
+                              </span>
+                              <span className={`text-[11px] tabular-nums font-semibold ${isBuyDir ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {fmtTimeIST(t.opened_at)}
+                              </span>
+                              <span className="text-[9px] text-muted">{isBuyDir ? 'buy' : 'sell'}</span>
+                            </div>
+                            {/* Exit time — opposite colour */}
+                            {!isOpen && t.closed_at ? (
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <span className={`text-[9px] ${isBuyDir ? 'text-rose-400' : 'text-emerald-400'}`}>
+                                  {isBuyDir ? '▼' : '▲'}
+                                </span>
+                                <span className={`text-[11px] tabular-nums font-semibold ${isBuyDir ? 'text-rose-400' : 'text-emerald-400'}`}>
+                                  {fmtTimeIST(t.closed_at)}
+                                </span>
+                                <span className="text-[9px] text-muted">{isBuyDir ? 'sell' : 'cover'}</span>
+                              </div>
+                            ) : isOpen ? (
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <span className="w-1 h-1 rounded-full bg-profit animate-pulse" />
+                                <span className="text-[10px] text-profit">open</span>
+                              </div>
+                            ) : null}
+                          </td>
+                        );
+                      })()}
 
                       {/* Symbol — F&O shows underlying + strike + type + expiry */}
                       <td className="px-4 py-3">
