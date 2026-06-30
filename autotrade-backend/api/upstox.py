@@ -20,6 +20,8 @@ Cross-check (Zerodha primary, Upstox validation):
   GET  /api/v1/upstox/historical/{symbol}
   GET  /api/v1/upstox/option-chain/{symbol}
 """
+import asyncio
+
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, HTMLResponse
 
@@ -193,6 +195,3 @@ async def upstox_historical(
 async def upstox_option_chain(symbol: str, expiry: str | None = None):
     data = await get_option_chain(symbol.upper(), expiry)
     return {"symbol": symbol.upper(), "expiry": expiry, "data": data, "source": "upstox"}
-
-
-import asyncio
