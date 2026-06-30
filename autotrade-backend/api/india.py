@@ -2778,6 +2778,24 @@ async def get_fno_iv_rank(underlying: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+_spread_margin_cache: dict[str, tuple[float, float]] = {}  # key → (margin, ts)
+_SPREAD_MARGIN_TTL = 20.0  # seconds
+
+
+async def _zerodha_basket_margin(orders: list[dict]) -> float:
+    """Call Zerodha basket_order_margins; returns initial.total or 0.0 on failure."""
+    try:
+        from crawler.zerodha_ticker import CONNECTED
+        from utils.config import settings as _s
+        if not (CONNECTED or _s.ZERODHA_ACCESS_TOKEN):
+            return 0.0
+        from crawler.zerodha_kite_lib import get_basket_margins
+        basket = await asyncio.to_thread(get_basket_margins, orders, False)
+        return float((basket.get("initial") or {}).get("total", 0))
+    except Exception:
+        return 0.0
+
+
 @router.get("/fno/positions", summary="Open F&O derivative positions (options + futures)")
 async def get_fno_positions(db: AsyncSession = Depends(get_db)):
     """Open option/future positions with live premium + P&L for the F&O dashboard."""
@@ -2793,6 +2811,16 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
     from sqlalchemy import desc as _desc
     import datetime as _dt
 
+    from engine.fno.selection import _spread_margin_approx
+
+    # Pre-index rows for spread detection: (underlying, expiry, option_type) → directions present
+    spread_keys: dict[tuple, set[str]] = {}
+    for p in rows:
+        if p.instrument_type in ("CE", "PE"):
+            key = (p.underlying_symbol, p.expiry_date, p.option_type)
+            dir_val = p.direction.value if hasattr(p.direction, "value") else p.direction
+            spread_keys.setdefault(key, set()).add(dir_val.upper())
+
     out = []
     total_pnl = 0.0
     total_margin = 0.0
@@ -2803,8 +2831,6 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
         else:
             cur = await current_option_premium(pos, db)
             pnl, pct = option_pnl(pos, cur) if cur else (0.0, 0.0)
-        total_pnl += pnl
-        total_margin += float(pos.margin_blocked or 0.0)
 
         lots = int(pos.size_units / pos.lot_size) if pos.lot_size else None
         qty = pos.size_units
@@ -2830,8 +2856,62 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
                     "theta": g.theta, "vega": g.vega,
                 }
 
+        # Compute live margin (replaces stale stored value).
+        dir_val = pos.direction.value if hasattr(pos.direction, "value") else pos.direction
+        live_margin = float(pos.margin_blocked or 0.0)
+        if pos.instrument_type in ("CE", "PE") and lots and pos.lot_size:
+            key = (pos.underlying_symbol, pos.expiry_date, pos.option_type)
+            dirs = spread_keys.get(key, set())
+            is_spread_buy = dir_val.upper() == "BUY" and "SELL" in dirs
+            is_spread_sell = dir_val.upper() == "SELL" and "BUY" in dirs
+            if is_spread_buy:
+                # BUY leg: try Zerodha basket API (cached 20s), fall back to formula
+                cache_key = f"{pos.underlying_symbol}|{pos.expiry_date}|{pos.option_type}"
+                cached = _spread_margin_cache.get(cache_key)
+                if cached and (_time.time() - cached[1]) < _SPREAD_MARGIN_TTL:
+                    live_margin = cached[0]
+                else:
+                    # Find the matching SELL leg's symbol
+                    sell_sym = next(
+                        (p.symbol for p in rows
+                         if p.underlying_symbol == pos.underlying_symbol
+                         and p.expiry_date == pos.expiry_date
+                         and p.option_type == pos.option_type
+                         and (p.direction.value if hasattr(p.direction, "value") else p.direction).upper() == "SELL"),
+                        None
+                    )
+                    buy_sym = pos.symbol.replace(".NS", "")
+                    sell_sym_bare = (sell_sym or "").replace(".NS", "")
+                    api_margin = 0.0
+                    if sell_sym_bare:
+                        orders = [
+                            {"exchange": "NFO", "tradingsymbol": buy_sym,
+                             "transaction_type": "BUY", "variety": "regular",
+                             "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
+                            {"exchange": "NFO", "tradingsymbol": sell_sym_bare,
+                             "transaction_type": "SELL", "variety": "regular",
+                             "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
+                        ]
+                        api_margin = await _zerodha_basket_margin(orders)
+                    if api_margin > 0:
+                        live_margin = api_margin
+                    elif spot:
+                        live_margin = _spread_margin_approx(
+                            cur or entry, qty, spot, pos.lot_size, lots
+                        )
+                    _spread_margin_cache[cache_key] = (live_margin, _time.time())
+            elif is_spread_sell:
+                # SELL leg margin is captured in the BUY leg
+                live_margin = 0.0
+            elif dir_val.upper() == "BUY":
+                # Standalone long option: max loss = premium paid
+                live_margin = round((cur or entry) * qty, 2)
+
+        total_pnl += pnl
+        total_margin += live_margin
+
         # Derived analytics.
-        premium_paid = round((entry or 0) * (qty or 0), 2)       # = max loss for long option
+        premium_paid = round((entry or 0) * (qty or 0), 2)
         cur_value    = round((cur or entry or 0) * (qty or 0), 2)
         breakeven = None
         moneyness = None
@@ -2850,7 +2930,7 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
             "option_type":     pos.option_type,
             "expiry":          pos.expiry_date.isoformat() if pos.expiry_date else None,
             "dte":             dte,
-            "direction":       pos.direction.value if hasattr(pos.direction, "value") else pos.direction,
+            "direction":       dir_val,
             "lots":            lots,
             "lot_size":        pos.lot_size,
             "qty":             qty,
@@ -2858,7 +2938,7 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
             "current":         cur,
             "pnl":             pnl,
             "pnl_pct":         pct,
-            "margin":          pos.margin_blocked,
+            "margin":          round(live_margin, 2),
             "stop_loss":       pos.stop_loss,
             "take_profit":     pos.take_profit,
             "premium_paid":    premium_paid,
@@ -2877,6 +2957,24 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
         "total_pnl":    round(total_pnl, 2),
         "total_margin": round(total_margin, 2),
     }
+
+
+@router.get("/regime", summary="Current 5-state market regime (STRONG_BULL … STRONG_BEAR)")
+async def get_market_regime_api(db: AsyncSession = Depends(get_db)):
+    """Returns the live market regime state, confidence, and contributing signals."""
+    try:
+        from engine.agent.market_regime import get_market_regime
+        result = await get_market_regime(db)
+        return {
+            "state":      result.state,
+            "confidence": round(abs(result.score), 1),
+            "score":      result.score,
+            "can_buy":    result.can_buy,
+            "size_mult":  result.size_mult,
+            "signals":    result.signals if hasattr(result, "signals") else {},
+        }
+    except Exception as exc:
+        return {"state": "UNKNOWN", "confidence": 0.0, "error": str(exc)[:200]}
 
 
 @router.get("/fno/signals", summary="F&O Buy-CE/Buy-PE signals + predictions per index")

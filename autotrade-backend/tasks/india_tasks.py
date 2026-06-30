@@ -1071,9 +1071,12 @@ async def _india_trade_loop():
                 continue
             balance -= pos_size["usd_value"]
             opened  += 1
-            pos_result     = await session.execute(
-                select(OpenPosition).where(OpenPosition.product != "MIS")
-            )
+            # Commit immediately after each trade so the position is persisted
+            # even if the task hits SoftTimeLimitExceeded while processing
+            # subsequent signals (with 19+ signals + Ollama fallback each cycle
+            # can easily exceed the 300s SoftTimeLimit).
+            await session.commit()
+            pos_result     = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 
             explanation  = await generate_trade_explanation(signal)

@@ -17,21 +17,20 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
-# Celery is normally managed by the always-on systemd user services
-# (autotrade-celery-worker / autotrade-celery-beat) so it survives crashes and
-# reboots. If those are active we leave them alone and only (re)start uvicorn,
-# to avoid two competing celery instances fighting over the beat-schedule lock.
+# Both uvicorn and celery are managed by always-on systemd user services.
+# This script just restarts them cleanly if needed.
 SYSTEMD_CELERY=0
 if systemctl --user is-active --quiet autotrade-celery-worker 2>/dev/null; then
     SYSTEMD_CELERY=1
 fi
+SYSTEMD_UVICORN=0
+if systemctl --user is-active --quiet autotrade-uvicorn 2>/dev/null; then
+    SYSTEMD_UVICORN=1
+fi
 
-# Kill any stale processes from a previous run so port 8000 and the
-# celerybeat-schedule lock are always free before we start.
 echo "[startup] Stopping any previous AutoTrade Pro processes..."
 pkill -f "uvicorn main:app" 2>/dev/null || true
 if [ "$SYSTEMD_CELERY" -eq 0 ]; then
-    pkill -f "celery.*autotrade_pro" 2>/dev/null || true
     pkill -f "celery.*tasks.celery_app" 2>/dev/null || true
     sleep 1
     rm -f "$SCRIPT_DIR/celerybeat-schedule" "$SCRIPT_DIR/celerybeat-schedule.db" 2>/dev/null || true
@@ -49,23 +48,26 @@ echo "  Site-packages: $VENV_SITE"
 echo "============================================================"
 
 if [ "$SYSTEMD_CELERY" -eq 1 ]; then
-    echo "[celery] Managed by systemd (autotrade-celery-worker/beat) — not starting a duplicate."
+    echo "[celery] Managed by systemd — not starting a duplicate."
     CELERY_WORKER_PID=""
     CELERY_BEAT_PID=""
 else
-    # Start Celery worker (background)
     echo "[celery] Starting worker..."
     "$PY" -m celery -A tasks.celery_app worker --loglevel=info --concurrency=2 &
     CELERY_WORKER_PID=$!
-
-    # Start Celery beat (background)
     echo "[celery] Starting beat scheduler..."
     "$PY" -m celery -A tasks.celery_app beat --loglevel=info &
     CELERY_BEAT_PID=$!
 fi
 
-# Trap Ctrl+C — kill background processes cleanly
-trap "echo ''; echo 'Shutting down...'; kill $CELERY_WORKER_PID $CELERY_BEAT_PID 2>/dev/null; exit 0" INT TERM
-
-echo "[uvicorn] Starting API server on http://0.0.0.0:8000 ..."
-"$PY" -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+if [ "$SYSTEMD_UVICORN" -eq 1 ]; then
+    echo "[uvicorn] Managed by systemd — restarting via systemctl..."
+    systemctl --user restart autotrade-uvicorn
+    echo "[uvicorn] Started. Logs: journalctl --user -u autotrade-uvicorn -f"
+    trap "echo ''; echo 'Shutting down celery...'; kill $CELERY_WORKER_PID $CELERY_BEAT_PID 2>/dev/null; exit 0" INT TERM
+    wait
+else
+    trap "echo ''; echo 'Shutting down...'; kill $CELERY_WORKER_PID $CELERY_BEAT_PID 2>/dev/null; exit 0" INT TERM
+    echo "[uvicorn] Starting API server on http://0.0.0.0:8000 ..."
+    "$PY" -m uvicorn main:app --host 0.0.0.0 --port 8000
+fi

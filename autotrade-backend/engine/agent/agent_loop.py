@@ -314,6 +314,16 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             logger.warning(f"[agent] cycle error on {symbol}: {exc}")
             skipped += 1
 
+    # ── F&O spread SL/TP monitor (runs before opening new positions) ─────────
+    if getattr(settings, "ENABLE_OPTIONS", False):
+        try:
+            from engine.fno.selection import monitor_spread_exits
+            closed_spreads = await monitor_spread_exits(session)
+            if closed_spreads:
+                logger.info(f"[agent] spread monitor closed {len(closed_spreads)} spread(s)")
+        except Exception as exc:
+            logger.warning(f"[agent] spread monitor failed: {exc}")
+
     # ── F&O passes (additive; gated by ENABLE_OPTIONS / ENABLE_FUTURES) ───────
     fno_opened: list[dict] = []
     if getattr(settings, "ENABLE_OPTIONS", False):

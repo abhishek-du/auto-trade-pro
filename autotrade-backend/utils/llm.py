@@ -286,11 +286,15 @@ async def call_llm_chat(
     timeout: float | None = None,
     model: str | None = None,
     groq_fallback: bool = True,
+    skip_ollama: bool = False,
 ) -> str | None:
     """Primary Gemini → secondary Groq → tertiary local Ollama.
 
     `groq_fallback=False` (background/batch) skips the cloud providers entirely
     after Gemini and only allows the local Ollama path, to protect cloud quotas.
+    `skip_ollama=True` returns None instead of falling back to Ollama — use in
+    latency-sensitive paths (e.g. shadow-mode reasoning gate) where a 40s Ollama
+    call would push the Celery task past SoftTimeLimitExceeded.
     """
     # 1. Gemini (primary, cloud)
     result = await call_gemini_chat(
@@ -311,6 +315,8 @@ async def call_llm_chat(
             return result
 
     # 3. Ollama (tertiary, local — no quota)
+    if skip_ollama:
+        return None
     logger.info("[llm] falling back to local Ollama")
     return await call_ollama_chat(
         messages, max_tokens=max_tokens, temperature=temperature,

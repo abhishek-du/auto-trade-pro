@@ -139,7 +139,8 @@ async def llm_reason_candidate(symbol: str, candidate, decision) -> dict | None:
             {"role": "system", "content": sys_prompt},
             {"role": "user",   "content": user_prompt},
         ]
-        resp = await call_llm_chat(messages, max_tokens=300, temperature=0.2, groq_fallback=True)
+        resp = await call_llm_chat(messages, max_tokens=300, temperature=0.2, groq_fallback=True,
+                                    skip_ollama=True)
         return _parse_first_json(resp)
     except Exception as exc:
         logger.debug(f"[agent/llm_reason] {symbol} reasoning failed: {exc}")
@@ -165,7 +166,7 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
                 {"role": "user",   "content": context},
             ]
             return (await call_llm_chat(msgs, max_tokens=160, temperature=0.3,
-                                        groq_fallback=True)) or ""
+                                        groq_fallback=True, skip_ollama=True)) or ""
 
         bull_role = ("You are a BULL-side NSE equity analyst. In <=40 words, make the "
                      "strongest concrete case FOR taking this long trade — name the catalyst/edge.")
@@ -192,7 +193,7 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
         resp = await call_llm_chat(
             [{"role": "system", "content": judge_sys},
              {"role": "user",   "content": judge_user}],
-            max_tokens=320, temperature=0.2, groq_fallback=True,
+            max_tokens=320, temperature=0.2, groq_fallback=True, skip_ollama=True,
         )
         data = _parse_first_json(resp)
         if not data:
@@ -316,7 +317,8 @@ async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None
         ]
         used: list[str] = []
         for _ in range(4):  # max 4 LLM rounds (≤3 tool calls + a decide)
-            resp = await call_llm_chat(messages, max_tokens=220, temperature=0.2, groq_fallback=True)
+            resp = await call_llm_chat(messages, max_tokens=220, temperature=0.2, groq_fallback=True,
+                                        skip_ollama=True)
             step = _parse_first_json(resp)
             if not step:
                 return None
