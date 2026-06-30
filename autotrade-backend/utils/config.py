@@ -134,6 +134,17 @@ class Settings(BaseSettings):
         "https://economictimes.indiatimes.com/markets/rss.cms"
     )
 
+    # ── Upstox (data-only: news, fundamentals, corporate actions, shareholding) ──
+    # Trading stays on Zerodha. Upstox is used exclusively for data not available
+    # in Kite Connect: news, company overview, financials, shareholding, events.
+    # For overlapping data (prices, candles, options) Zerodha is primary and
+    # Upstox acts as cross-check / gap-fill fallback.
+    UPSTOX_API_KEY:       str  = ""
+    UPSTOX_API_SECRET:    str  = ""
+    UPSTOX_ACCESS_TOKEN:  str  = ""
+    UPSTOX_REDIRECT_URL:  str  = "http://127.0.0.1:8000/api/v1/upstox/callback"
+    UPSTOX_BASE_URL:      str  = "https://api.upstox.com"
+
     # ── Zerodha Kite (read-only portfolio tracking — legacy kiteconnect lib) ────
     KITE_API_KEY:      str = ""
     KITE_API_SECRET:   str = ""
@@ -412,6 +423,14 @@ class Settings(BaseSettings):
         return bool(self.GOOGLE_SHEETS_ID and (
             self.GOOGLE_OAUTH_CLIENT_SECRET_JSON or self.GOOGLE_SERVICE_ACCOUNT_JSON
         ))
+
+    @property
+    def upstox_available(self) -> bool:
+        return bool(self.UPSTOX_API_KEY and self.UPSTOX_API_SECRET)
+
+    @property
+    def upstox_authenticated(self) -> bool:
+        return bool(self.UPSTOX_ACCESS_TOKEN)
 
     @property
     def kite_available(self) -> bool:
