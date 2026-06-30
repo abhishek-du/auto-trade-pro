@@ -86,26 +86,60 @@ async def list_buybacks(db: AsyncSession = Depends(get_async_db)):
         .order_by(BuybackOffer.spread_pct.desc().nulls_last())
     )).scalars().all()
 
-    # Enrich with live prices from WebSocket cache
-    try:
-        from crawler.live_prices import PRICE_CACHE
-        for b in rows:
-            base = b.symbol.replace(".NS", "").replace(".BO", "")
-            cached = PRICE_CACHE.get(b.symbol) or PRICE_CACHE.get(base)
-            if isinstance(cached, dict):
-                price = float(cached.get("price") or 0)
-            elif cached:
-                price = float(getattr(cached, "price", 0) or 0)
-            else:
-                price = 0
-            if price > 0:
-                b.market_price = round(price, 2)
-                b.spread_pct   = round((b.buyback_price - price) / price * 100, 2)
-                b.last_refreshed = datetime.utcnow()
-    except Exception as e:
-        logger.debug(f"[buyback] price enrichment skipped: {e}")
+    # Enrich with live prices — PRICE_CACHE first, yfinance fallback for any misses
+    await _enrich_prices(rows)
 
     return [_serialize(b) for b in rows]
+
+
+async def _enrich_prices(rows: list) -> None:
+    """Fill market_price + spread_pct on each row.
+
+    1. Try PRICE_CACHE (already subscribed symbols, zero latency).
+    2. For any symbol still missing, fetch via yfinance and populate PRICE_CACHE
+       so subsequent requests are instant.
+    """
+    try:
+        from crawler.live_prices import PRICE_CACHE, fetch_prices_batch
+
+        missing_symbols: list[str] = []
+        for b in rows:
+            base   = b.symbol.replace(".NS", "").replace(".BO", "")
+            cached = PRICE_CACHE.get(b.symbol) or PRICE_CACHE.get(base)
+            price  = _extract_price(cached)
+            if price > 0:
+                _apply_price(b, price)
+            else:
+                missing_symbols.append(b.symbol)
+
+        if missing_symbols:
+            fetched = await fetch_prices_batch(missing_symbols)
+            # Merge into global cache so next call is instant
+            PRICE_CACHE.update(fetched)
+            for b in rows:
+                if b.market_price:
+                    continue  # already set above
+                cached = fetched.get(b.symbol)
+                price  = _extract_price(cached)
+                if price > 0:
+                    _apply_price(b, price)
+
+    except Exception as e:
+        logger.warning(f"[buyback] price enrichment failed: {e}")
+
+
+def _extract_price(cached) -> float:
+    if isinstance(cached, dict):
+        return float(cached.get("price") or cached.get("last_price") or 0)
+    if cached is not None:
+        return float(getattr(cached, "price", 0) or 0)
+    return 0.0
+
+
+def _apply_price(b, price: float) -> None:
+    b.market_price   = round(price, 2)
+    b.spread_pct     = round((b.buyback_price - price) / price * 100, 2) if price > 0 else None
+    b.last_refreshed = datetime.utcnow()
 
 
 @router.post("/refresh")
