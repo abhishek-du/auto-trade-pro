@@ -149,12 +149,13 @@ async def _fetch_and_upsert(db: AsyncSession) -> tuple[int, int]:
 
 
 async def _scrape_nse_buybacks() -> list[dict]:
-    """Fetch live buyback announcements from NSE corporate actions API.
+    """Fetch live buyback announcements.
 
-    Tries two subjects: 'Buy Back of Shares' (tender offers) and 'Buyback'
-    (open-market repurchases). Returns only offers whose close_date is in the
-    future (or unknown). Returns an empty list if NSE is unreachable — never
-    falls back to hardcoded data.
+    Pipeline:
+      1. NSE corporate-announcements API (two subjects)
+      2. ipowatch.in JSON (reliable third-party aggregator, public endpoint)
+    Returns only offers whose close_date is in the future (or unknown).
+    Never falls back to hardcoded data.
     """
     import asyncio
     import httpx
@@ -208,6 +209,10 @@ async def _scrape_nse_buybacks() -> list[dict]:
     except Exception as e:
         logger.warning(f"[buyback] NSE session failed: {e}")
 
+    # If NSE returned nothing, try ipowatch.in as a fallback aggregator
+    if not offers:
+        offers = await _scrape_ipowatch_buybacks()
+
     # Deduplicate by symbol+record_date
     seen: set[tuple] = set()
     unique: list[dict] = []
@@ -221,6 +226,94 @@ async def _scrape_nse_buybacks() -> list[dict]:
     active = [o for o in unique if not _is_closed(o)]
     logger.info(f"[buyback] {len(unique)} total offers → {len(active)} still active")
     return active
+
+
+async def _scrape_ipowatch_buybacks() -> list[dict]:
+    """Fetch current buybacks from ipowatch.in public listing page (HTML scrape).
+    Only parses rows where status is 'Open' or 'Upcoming'.
+    """
+    import httpx
+    from bs4 import BeautifulSoup
+
+    offers: list[dict] = []
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=True) as c:
+            r = await c.get("https://ipowatch.in/share-buyback-offers/")
+            if r.status_code != 200:
+                logger.warning(f"[buyback/ipowatch] status {r.status_code}")
+                return []
+            soup = BeautifulSoup(r.text, "html.parser")
+            table = soup.find("table")
+            if not table:
+                return []
+            rows = table.find_all("tr")[1:]  # skip header
+            for row in rows:
+                cols = [td.get_text(strip=True) for td in row.find_all("td")]
+                if len(cols) < 5:
+                    continue
+                # Expected: Company | Buyback Price | Record Date | Open | Close | Status
+                o = _parse_ipowatch_row(cols)
+                if o:
+                    offers.append(o)
+        logger.info(f"[buyback/ipowatch] scraped {len(offers)} active offers")
+    except ImportError:
+        logger.debug("[buyback/ipowatch] bs4 not installed — skipping")
+    except Exception as e:
+        logger.warning(f"[buyback/ipowatch] scrape failed: {e}")
+    return offers
+
+
+def _parse_ipowatch_row(cols: list[str]) -> dict | None:
+    """Parse one table row from ipowatch.in buyback listing."""
+    try:
+        today = date.today()
+        # Typical columns: Company Name | Buyback Price | Record Date | Open Date | Close Date | Status
+        company   = cols[0].strip()
+        price_str = cols[1].replace("₹", "").replace(",", "").strip()
+        buyback_price = float(price_str) if price_str else 0.0
+
+        def _try_date(s: str) -> date | None:
+            for fmt in ("%d %b %Y", "%d-%b-%Y", "%b %d, %Y", "%d/%m/%Y", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(s.strip(), fmt).date()
+                except ValueError:
+                    continue
+            return None
+
+        record_date = _try_date(cols[2]) if len(cols) > 2 else None
+        open_date   = _try_date(cols[3]) if len(cols) > 3 else None
+        close_date  = _try_date(cols[4]) if len(cols) > 4 else None
+        status_raw  = cols[5].upper() if len(cols) > 5 else ""
+
+        if close_date and close_date < today:
+            return None
+        if "CLOSE" in status_raw or "CLOSED" in status_raw:
+            return None
+
+        status = "OPEN" if "OPEN" in status_raw else "UPCOMING"
+
+        # Try to derive symbol from company name (best-effort)
+        symbol = company.upper().replace(" LIMITED", "").replace(" LTD", "").replace(" LTD.", "")
+        symbol = symbol.replace(" ", "").replace(".", "") + ".NS"
+
+        return {
+            "symbol":        symbol,
+            "company_name":  company[:120],
+            "buyback_price": round(buyback_price, 2),
+            "buyback_type":  "TENDER",
+            "total_size_cr": None,
+            "record_date":   record_date,
+            "open_date":     open_date,
+            "close_date":    close_date,
+            "status":        status,
+        }
+    except Exception as e:
+        logger.debug(f"[buyback/ipowatch] row parse error: {e}")
+        return None
 
 
 def _is_closed(o: dict) -> bool:
