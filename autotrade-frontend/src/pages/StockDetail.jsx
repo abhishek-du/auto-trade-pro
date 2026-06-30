@@ -422,6 +422,9 @@ export default function StockDetail() {
   const [autoFloor,     setAutoFloor]     = useState(30);
   const [inWatchlist,   setInWatchlist]   = useState(false);
   const [wlLoading,     setWlLoading]     = useState(false);
+  const [upstoxData,    setUpstoxData]    = useState(null);
+  const [upstoxStatus,  setUpstoxStatus]  = useState(null);
+  const [upstoxLoading, setUpstoxLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -491,6 +494,21 @@ export default function StockDetail() {
       apiFetch('/api/v1/india/market-scanner/shortlist?limit=1')
         .then(d => { if (d?.auto_trade_threshold != null) setAutoFloor(d.auto_trade_threshold); })
         .catch(() => {});
+
+      // Upstox — check auth first, then fetch overview only when authenticated.
+      // Both calls are non-blocking and silently fail when Upstox is not set up.
+      setUpstoxLoading(true);
+      apiFetch('/api/v1/upstox/status')
+        .then(status => {
+          setUpstoxStatus(status);
+          if (status?.authenticated) {
+            return apiFetch(`/api/v1/upstox/overview/${encodeURIComponent(display)}`);
+          }
+          return null;
+        })
+        .then(d => { if (d) setUpstoxData(d); })
+        .catch(() => {})
+        .finally(() => setUpstoxLoading(false));
     } catch (e) {
       setError(e.message || 'Failed to load');
     } finally {
@@ -2345,6 +2363,271 @@ export default function StockDetail() {
               </div>
             </div>
           </div>
+        </DeepTab>
+
+        {/* ── Upstox Live Data ────────────────────────────────────────────── */}
+        <DeepTab
+          label="Upstox Live Data"
+          subtitle={upstoxStatus?.authenticated ? "News · Ratios · Shareholding · Corporate Actions" : "Authenticate to unlock"}
+          badge={upstoxStatus?.authenticated ? "LIVE" : upstoxStatus?.api_key_set ? "Auth needed" : "Not configured"}
+          badgeColor={upstoxStatus?.authenticated ? "text-profit" : "text-amber-400"}
+          icon={Zap}
+        >
+          {/* Auth guard banner */}
+          {!upstoxStatus?.authenticated && (
+            <div className="mb-4 flex items-start gap-3 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5">
+              <ShieldAlert size={16} className="text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <div className="text-amber-400 font-semibold text-sm mb-1">
+                  {upstoxStatus?.api_key_set
+                    ? "Upstox access token not set — authentication required"
+                    : "Upstox API not configured"}
+                </div>
+                <div className="text-muted text-xs leading-relaxed mb-2">
+                  {upstoxStatus?.api_key_set
+                    ? "Your Upstox API key is configured. Click the button below to open the OAuth login and get your access token. Once authenticated, this tab will show live news, fundamental ratios, detailed shareholding, and corporate actions from Upstox."
+                    : "Add UPSTOX_API_KEY and UPSTOX_API_SECRET to your .env file to enable Upstox data enrichment (news, fundamentals, shareholding, corporate actions)."}
+                </div>
+                {upstoxStatus?.api_key_set && (
+                  <a
+                    href="/api/v1/upstox/login"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    <Zap size={12} /> Authenticate Upstox →
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
+
+          {upstoxLoading && (
+            <div className="flex items-center gap-2 text-muted text-sm py-4">
+              <div className="w-3 h-3 rounded-full border border-cyan/30 border-t-cyan animate-spin" />
+              Loading Upstox data…
+            </div>
+          )}
+
+          {upstoxData && (
+            <div className="space-y-6">
+              {/* Company Profile */}
+              {upstoxData.profile && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Company · Upstox</div>
+                  <div className="bg-surface rounded-lg border border-border p-4">
+                    {upstoxData.profile.description && (
+                      <p className="text-slate-300 text-sm leading-relaxed mb-3">{upstoxData.profile.description}</p>
+                    )}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                      {[
+                        ['Industry',    upstoxData.profile.industry],
+                        ['Sector',      upstoxData.profile.sector],
+                        ['Market Cap',  upstoxData.profile.market_cap ? `₹${fmt(upstoxData.profile.market_cap / 1e7, 0)} Cr` : null],
+                        ['Employees',   upstoxData.profile.employees ? Number(upstoxData.profile.employees).toLocaleString('en-IN') : null],
+                        ['Country',     upstoxData.profile.country],
+                        ['Founded',     upstoxData.profile.founded],
+                      ].filter(([,v]) => v).map(([k, v]) => (
+                        <div key={k}>
+                          <div className="text-muted">{k}</div>
+                          <div className="text-slate-200 font-medium mt-0.5">{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {upstoxData.profile.website && (
+                      <a href={upstoxData.profile.website} target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-cyan text-xs hover:underline mt-2">
+                        {upstoxData.profile.website}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Key Ratios */}
+              {upstoxData.key_ratios && Object.keys(upstoxData.key_ratios).length > 0 && (() => {
+                const r = upstoxData.key_ratios;
+                return (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Key Ratios · Upstox</div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {[
+                        ['PE',       r.pe_ratio,           r.pe_ratio > 40 ? 'text-amber-400' : 'text-profit'],
+                        ['PB',       r.pb_ratio,           'text-slate-200'],
+                        ['ROE',      r.roe != null ? fmt(r.roe)+'%' : null,  r.roe > 15 ? 'text-profit' : 'text-amber-400'],
+                        ['ROCE',     r.roce != null ? fmt(r.roce)+'%' : null, r.roce > 15 ? 'text-profit' : 'text-amber-400'],
+                        ['EPS',      r.eps != null ? `₹${fmt(r.eps)}` : null, 'text-slate-200'],
+                        ['D/E',      r.debt_to_equity != null ? fmt(r.debt_to_equity,2) : null, r.debt_to_equity > 1 ? 'text-loss' : 'text-profit'],
+                        ['Div Yield',r.dividend_yield != null ? fmt(r.dividend_yield)+'%' : null, 'text-cyan'],
+                        ['Beta',     r.beta != null ? fmt(r.beta,2) : null, 'text-slate-200'],
+                      ].filter(([,v]) => v != null).map(([k, v, c]) => (
+                        <div key={k} className="bg-surface rounded border border-border/50 p-2.5">
+                          <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
+                          <div className={`font-mono text-sm font-bold mt-1 ${c}`}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Shareholding Pattern */}
+              {upstoxData.shareholding && (upstoxData.shareholding.promoter != null || upstoxData.shareholding.fii != null) && (() => {
+                const sh = upstoxData.shareholding;
+                const promoter = sh.promoter ?? 0;
+                const fii      = sh.fii ?? sh.foreign_institutions ?? 0;
+                const dii      = sh.dii ?? sh.domestic_institutions ?? 0;
+                const pub      = sh.public ?? sh.retail ?? Math.max(0, 100 - promoter - fii - dii);
+                return (
+                  <div>
+                    <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Shareholding Pattern · Upstox</div>
+                    <div className="space-y-3">
+                      {/* Stacked bar */}
+                      <div className="h-5 rounded-lg overflow-hidden flex gap-px bg-white/5">
+                        {[
+                          { label: 'Promoter', pct: promoter, cls: 'bg-cyan/70' },
+                          { label: 'FII',      pct: fii,      cls: 'bg-violet-400/70' },
+                          { label: 'DII',      pct: dii,      cls: 'bg-amber-400/70' },
+                          { label: 'Public',   pct: pub,      cls: 'bg-slate-500/50' },
+                        ].filter(x => x.pct > 0).map(x => (
+                          <div key={x.label} style={{ width: `${x.pct}%` }} className={`${x.cls} transition-all`} title={`${x.label} ${fmt(x.pct)}%`} />
+                        ))}
+                      </div>
+                      {/* Legend */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        {[
+                          { label: 'Promoter', pct: promoter, dot: 'bg-cyan/70',        note: promoter > 50 ? 'Strong control' : promoter > 30 ? 'Moderate' : 'Low' },
+                          { label: 'FII / Foreign', pct: fii, dot: 'bg-violet-400/70', note: fii > 20 ? 'High FII interest' : '' },
+                          { label: 'DII / MF',  pct: dii,    dot: 'bg-amber-400/70',   note: '' },
+                          { label: 'Public',    pct: pub,    dot: 'bg-slate-500/50',    note: '' },
+                        ].map(x => (
+                          <div key={x.label} className="bg-surface rounded border border-border/50 p-2.5">
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <span className={`w-2 h-2 rounded-full shrink-0 ${x.dot}`} />
+                              <span className="text-muted text-[10px]">{x.label}</span>
+                            </div>
+                            <div className="font-mono text-sm font-bold text-slate-200">{fmt(x.pct)}%</div>
+                            {x.note && <div className="text-muted text-[10px] mt-0.5">{x.note}</div>}
+                          </div>
+                        ))}
+                      </div>
+                      {sh.as_of && <div className="text-muted text-[10px]">As of: {sh.as_of}</div>}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Corporate Actions */}
+              {(upstoxData.corporate_actions?.length > 0) && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Corporate Actions · Upstox</div>
+                  <div className="divide-y divide-border rounded-lg border border-border overflow-hidden">
+                    {upstoxData.corporate_actions.slice(0, 12).map((a, i) => {
+                      const typeColor = a.type === 'DIVIDEND' ? 'text-cyan'
+                        : a.type === 'SPLIT' ? 'text-violet-400'
+                        : a.type === 'BONUS' ? 'text-profit'
+                        : a.type === 'BUYBACK' ? 'text-amber-400'
+                        : 'text-muted';
+                      return (
+                        <div key={i} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02]">
+                          <span className={`text-[10px] font-bold uppercase w-16 shrink-0 ${typeColor}`}>{a.type || 'EVENT'}</span>
+                          <span className="text-muted text-[11px] w-20 shrink-0 font-mono">{a.ex_date || a.record_date || '—'}</span>
+                          <span className="text-slate-300 text-xs flex-1">{a.description || a.purpose || a.remarks}</span>
+                          {a.amount && <span className="text-slate-200 text-xs font-mono shrink-0">₹{a.amount}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Competitor comparison */}
+              {upstoxData.competitors?.length > 0 && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Peer Comparison · Upstox</div>
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-xs min-w-[400px]">
+                      <thead>
+                        <tr className="border-b border-border bg-surface">
+                          <th className="text-left px-3 py-2 text-muted">Company</th>
+                          <th className="text-right px-3 py-2 text-muted">PE</th>
+                          <th className="text-right px-3 py-2 text-muted">Market Cap</th>
+                          <th className="text-right px-3 py-2 text-muted">ROE</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {upstoxData.competitors.map((c, i) => (
+                          <tr key={i} className="border-b border-border/40 hover:bg-white/[0.02]">
+                            <td className="px-3 py-2 text-slate-300 font-medium">{c.name || c.symbol}</td>
+                            <td className="px-3 py-2 text-right font-mono text-slate-200">{c.pe_ratio != null ? fmt(c.pe_ratio) : '—'}</td>
+                            <td className="px-3 py-2 text-right font-mono text-slate-200">{c.market_cap ? `₹${fmt(c.market_cap/1e7,0)} Cr` : '—'}</td>
+                            <td className="px-3 py-2 text-right font-mono text-slate-200">{c.roe != null ? `${fmt(c.roe)}%` : '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* News */}
+              {upstoxData.news?.length > 0 && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Latest News · Upstox</div>
+                  <div className="divide-y divide-border rounded-lg border border-border overflow-hidden">
+                    {upstoxData.news.slice(0, 8).map((n, i) => {
+                      const pos = n.sentiment === 'positive';
+                      const neg = n.sentiment === 'negative';
+                      return (
+                        <div key={i} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                          <span className={`w-1.5 h-1.5 rounded-full mt-2 shrink-0 ${pos ? 'bg-profit' : neg ? 'bg-loss' : 'bg-slate-500'}`} />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-slate-200 text-xs leading-snug">{n.headline || n.title}</div>
+                            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                              {n.source && <span className="text-muted text-[10px]">{n.source}</span>}
+                              {n.published_at && <span className="text-muted text-[10px] font-mono">{n.published_at?.slice(0,10)}</span>}
+                              {n.url && (
+                                <a href={n.url} target="_blank" rel="noopener noreferrer" className="text-cyan text-[10px] hover:underline">Read →</a>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Market Intel (PCR, max pain from Upstox) */}
+              {upstoxData.market_intel && (upstoxData.market_intel.pcr != null || upstoxData.market_intel.max_pain != null) && (
+                <div>
+                  <div className="text-muted text-[10px] uppercase tracking-wider mb-2">Market Intelligence · Upstox</div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      ['PCR', upstoxData.market_intel.pcr, upstoxData.market_intel.pcr > 1.2 ? 'text-profit' : upstoxData.market_intel.pcr < 0.8 ? 'text-loss' : 'text-amber-400'],
+                      ['Max Pain', upstoxData.market_intel.max_pain ? `₹${upstoxData.market_intel.max_pain?.toLocaleString('en-IN')}` : null, 'text-slate-200'],
+                      ['IV', upstoxData.market_intel.iv != null ? `${upstoxData.market_intel.iv}%` : null, upstoxData.market_intel.iv > 40 ? 'text-loss' : 'text-amber-400'],
+                    ].filter(([,v]) => v != null).map(([k, v, c]) => (
+                      <div key={k} className="bg-surface rounded border border-border/50 p-3 text-center">
+                        <div className="text-muted text-[10px] uppercase tracking-wider">{k}</div>
+                        <div className={`font-mono text-base font-bold mt-1 ${c}`}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="text-muted text-[10px] pt-1 border-t border-border">
+                Source: Upstox API v2 · Data cached · Zerodha is primary for all trading operations
+              </div>
+            </div>
+          )}
+
+          {!upstoxLoading && !upstoxData && upstoxStatus?.authenticated && (
+            <div className="text-muted text-sm py-4">
+              No Upstox data returned for {display}. The ISIN may not be in the Upstox instrument list, or the symbol is not yet supported.
+            </div>
+          )}
         </DeepTab>
 
         {/* Compare */}
