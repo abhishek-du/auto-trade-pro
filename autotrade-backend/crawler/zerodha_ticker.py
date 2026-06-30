@@ -50,17 +50,27 @@ def is_ticker_running() -> bool:
     return CONNECTED and _ticker_running()
 
 
+def _normalise_symbol(s: str) -> str:
+    """Equity symbols need .NS suffix; NFO option/future symbols must not get it."""
+    if not s:
+        return s
+    # NFO symbols: end with CE/PE (options) or contain FUT
+    if s.endswith("CE") or s.endswith("PE") or "FUT" in s:
+        return s
+    return s if s.endswith(".NS") else f"{s}.NS"
+
+
 def set_open_position_symbols(symbols: set[str]) -> None:
     """Replace the open-position symbol set and resubscribe if ticker is live."""
     global _OPEN_POSITION_SYMBOLS
-    _OPEN_POSITION_SYMBOLS = {s if s.endswith(".NS") else f"{s}.NS" for s in symbols if s}
+    _OPEN_POSITION_SYMBOLS = {_normalise_symbol(s) for s in symbols if s}
     logger.info(f"[zerodha_ticker] open positions set: {len(_OPEN_POSITION_SYMBOLS)} symbols")
     _resubscribe_open_positions()
 
 
 def subscribe_open_position(symbol: str) -> None:
     """Add a single symbol (new trade opened) and subscribe it immediately."""
-    sym = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+    sym = _normalise_symbol(symbol)
     _OPEN_POSITION_SYMBOLS.add(sym)
     _resubscribe_open_positions(symbols={sym})
     logger.info(f"[zerodha_ticker] subscribed new position: {sym}")
@@ -81,10 +91,14 @@ def _resubscribe_open_positions(symbols: set[str] | None = None) -> None:
         tok = NSE_TOKENS.get(sym) or INDEX_TOKENS.get(sym)
         if not tok and _get_token is not None:
             tok = _get_token(sym)
-            if tok:
-                _TOKEN_TO_SYMBOL[tok] = sym
+        # NFO options/futures: look up token directly from the hydrated NSE_TOKENS
+        # (which includes NFO instruments after hydrate_tokens_from_db runs).
+        # The key is stored without .NS for NFO symbols.
+        if not tok:
+            tok = NSE_TOKENS.get(sym.replace(".NS", "")) or NSE_TOKENS.get(sym)
         if tok:
-            tokens.append(tok)
+            _TOKEN_TO_SYMBOL[int(tok)] = sym
+            tokens.append(int(tok))
     if not tokens:
         return
     try:

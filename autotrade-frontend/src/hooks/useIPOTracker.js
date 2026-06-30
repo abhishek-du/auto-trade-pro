@@ -17,9 +17,7 @@ export function useIPOTracker() {
       if (status)  params.set('status',  status)
       if (ipoType) params.set('type',    ipoType)
       params.set('limit', '100')
-      const res  = await apiFetch(`/api/v1/ipo/?${params}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const data = await res.json()
+      const data = await apiFetch(`/api/v1/ipo/?${params}`)
       setIpos(data.ipos || [])
       setCachedAt(data.cached_at)
     } catch (err) {
@@ -31,8 +29,7 @@ export function useIPOTracker() {
 
   const fetchStats = useCallback(async () => {
     try {
-      const res  = await apiFetch('/api/v1/ipo/stats/summary')
-      const data = await res.json()
+      const data = await apiFetch('/api/v1/ipo/stats/summary')
       setStats(data)
       setDataSource(data.source || null)
     } catch { }
@@ -50,10 +47,7 @@ export function useIPOTracker() {
   }, [fetchIpos, fetchStats])
 
   const fetchAnalysis = useCallback(async (slug, forceRefresh = false) => {
-    const url = `/api/v1/ipo/${slug}/analysis${forceRefresh ? '?refresh=true' : ''}`
-    const res  = await fetch(url)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    return res.json()
+    return apiFetch(`/api/v1/ipo/${slug}/analysis${forceRefresh ? '?refresh=true' : ''}`)
   }, [])
 
   useEffect(() => {

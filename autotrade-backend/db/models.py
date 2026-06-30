@@ -107,6 +107,7 @@ class PaperTrade(Base):
 
     # ── Trade attribution (Phase 1 — added 2026-06-17) ───────────────────────
     # Entry snapshot — populated when the trade opens
+    product:            Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     strategy_name:      Mapped[str | None]   = mapped_column(String(40),  nullable=True)
     regime_at_entry:    Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     entry_reason:       Mapped[str | None]   = mapped_column(String(40),  nullable=True)

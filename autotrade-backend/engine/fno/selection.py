@@ -295,12 +295,19 @@ async def _kite_ltp_nfo(tradingsymbol: str) -> float | None:
 async def current_option_premium(pos: OpenPosition, session: AsyncSession) -> float | None:
     """Current premium for an open option position.
 
-    Order: live Kite LTP (real-time) → latest snapshot premium → Black-Scholes
-    reprice from current spot + entry IV (approximate).
+    Order: WebSocket PRICE_CACHE → Kite REST LTP → latest snapshot → Black-Scholes.
     """
     if not pos.underlying_symbol or not pos.strike_price or not pos.expiry_date:
         return None
-    # 1. Live Kite LTP for the exact contract.
+    # 1. WebSocket live feed — fastest, no API call, already subscribed via zerodha_ticker.
+    try:
+        from crawler.live_prices import PRICE_CACHE
+        cached = PRICE_CACHE.get(pos.symbol) or PRICE_CACHE.get(pos.symbol.replace(".NS", ""))
+        if cached and cached.get("price", 0) > 0:
+            return float(cached["price"])
+    except Exception:
+        pass
+    # 2. Live Kite REST LTP for the exact contract.
     live = await _kite_ltp_nfo(pos.symbol)
     if live is not None:
         return live
@@ -330,9 +337,16 @@ async def current_option_premium(pos: OpenPosition, session: AsyncSession) -> fl
 
 
 def option_pnl(pos: OpenPosition, cur_premium: float) -> tuple[float, float]:
-    """Unrealised P&L for a long option position. Returns (pnl, pct)."""
-    pnl = (cur_premium - pos.entry_price) * pos.size_units      # long: gain when premium rises
-    pct = ((cur_premium - pos.entry_price) / pos.entry_price * 100) if pos.entry_price > 0 else 0.0
+    """Unrealised P&L for an option position (long or short). Returns (pnl, pct)."""
+    from db.models import TradeDirection
+    if pos.direction == TradeDirection.SELL:
+        # Short option: seller profits when premium falls
+        pnl = (pos.entry_price - cur_premium) * pos.size_units
+    else:
+        # Long option: buyer profits when premium rises
+        pnl = (cur_premium - pos.entry_price) * pos.size_units
+    cost_basis = pos.entry_price * pos.size_units
+    pct = (pnl / cost_basis * 100) if cost_basis > 0 else 0.0
     return round(pnl, 2), round(pct, 2)
 
 
@@ -526,12 +540,29 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
     if not (settings.ENABLE_FNO and settings.ENABLE_OPTIONS):
         return []
 
+    # Pre-market / post-market guard: never open F&O outside NSE hours.
+    from crawler.india_price_feed import is_nse_market_open
+    if not is_nse_market_open():
+        logger.info("[fno/evaluate] NSE closed — skipping F&O evaluation")
+        return []
+
+    # Regime gate: fail-CLOSED — unknown/error = treat as WEAK_BEAR, not pass-through.
+    try:
+        from engine.agent.market_regime import get_market_regime
+        regime_result = await get_market_regime(session)
+        regime = regime_result.state.upper()
+    except Exception as _re:
+        logger.warning(f"[fno/evaluate] regime check failed: {_re} — blocking (fail-closed)")
+        regime = "WEAK_BEAR"
+
     # Already-open option underlyings (avoid stacking).
     open_unders = set((await session.execute(
         select(OpenPosition.underlying_symbol).where(OpenPosition.underlying_symbol != None)
     )).scalars().all())
 
-    threshold = float(settings.AGENT_CONFIDENCE_THRESHOLD)
+    # F&O options require higher conviction than equity signals.
+    # Use FNO_CONFIDENCE_THRESHOLD if set, else fall back to 55 (not the equity default of 30).
+    fno_threshold = float(getattr(settings, "FNO_CONFIDENCE_THRESHOLD", None) or 55.0)
     opened: list[dict] = []
 
     for under in settings.fno_index_symbols:
@@ -543,7 +574,16 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
             if sig is None or sig["direction"] == "NEUTRAL":
                 continue
             direction, confidence, spot = sig["direction"], sig["confidence"], sig["spot"]
-            if confidence < threshold:
+            if confidence < fno_threshold:
+                logger.info(f"[fno/evaluate] {under} conf {confidence:.1f} < fno_threshold {fno_threshold} — skipping")
+                continue
+
+            # Regime alignment gate: don't open spreads that fight the market regime.
+            if direction == "BUY" and regime in ("WEAK_BEAR", "STRONG_BEAR"):
+                logger.info(f"[fno/evaluate] {under} BULL CALL SPREAD blocked — regime={regime}")
+                continue
+            if direction == "SELL" and regime in ("MODERATE_BULL", "STRONG_BULL"):
+                logger.info(f"[fno/evaluate] {under} BEAR PUT SPREAD blocked — regime={regime}")
                 continue
 
             spec = await select_index_spread(under, direction, spot, equity, session)
@@ -747,6 +787,135 @@ async def evaluate_portfolio_hedge(session: AsyncSession, equity: float) -> dict
     return {"tradingsymbol": spec.tradingsymbol, "lots": lots, "debit": debit}
 
 
+# ── Spread Net P&L Monitor (SL/TP) ───────────────────────────────────────────
+
+# Fraction of max profit to book at (50% → take half the max gain)
+_SPREAD_TP_FRACTION = 0.50
+# Fraction of net debit to cut at (80% → tolerate 80% loss of premium paid)
+_SPREAD_SL_FRACTION = 0.80
+
+
+async def monitor_spread_exits(session: AsyncSession) -> list[dict]:
+    """Check all open spreads for net P&L SL/TP and close qualifying pairs.
+
+    Groups BUY + SELL legs of the same underlying + option_type as a spread pair.
+    For each pair:
+      - Computes net P&L from current market premiums (same cascade as MTM)
+      - Books profit when net P&L ≥ 50% of max profit
+      - Cuts loss when net P&L ≤ −80% of net premium debit paid
+    Closes both legs atomically and returns margin to the virtual wallet.
+    """
+    from paper_trading.virtual_wallet import VirtualWallet
+    from db.models import TradeStatus
+
+    opt_positions = (await session.execute(
+        select(OpenPosition).where(
+            OpenPosition.instrument_type.in_(["CE", "PE"]),
+        )
+    )).scalars().all()
+
+    # Group by (underlying, option_type) → expect one BUY + one SELL per pair
+    pairs: dict[tuple, dict] = {}
+    for pos in opt_positions:
+        key = (pos.underlying_symbol, pos.option_type)
+        bucket = pairs.setdefault(key, {"buy": None, "sell": None})
+        from db.models import TradeDirection
+        if pos.direction == TradeDirection.BUY:
+            bucket["buy"] = pos
+        elif pos.direction == TradeDirection.SELL:
+            bucket["sell"] = pos
+
+    closed: list[dict] = []
+
+    for (underlying, opt_type), bucket in pairs.items():
+        buy_pos  = bucket["buy"]
+        sell_pos = bucket["sell"]
+        if buy_pos is None or sell_pos is None:
+            continue  # lone leg (naked option) — skip spread monitor
+
+        # Current premiums via same 4-tier cascade
+        cur_buy  = await current_option_premium(buy_pos,  session)
+        cur_sell = await current_option_premium(sell_pos, session)
+        if cur_buy is None or cur_sell is None:
+            continue
+
+        # Net P&L: buy leg gain/loss + sell leg gain/loss (seller profits when premium falls)
+        pnl_buy  = (cur_buy  - buy_pos.entry_price)  *  buy_pos.size_units
+        pnl_sell = (sell_pos.entry_price - cur_sell)  * sell_pos.size_units
+        net_pnl  = round(pnl_buy + pnl_sell, 2)
+
+        # Spread geometry
+        net_debit_per_unit = buy_pos.entry_price - sell_pos.entry_price
+        if net_debit_per_unit <= 0:
+            continue  # credit spread — different logic, skip
+        spread_width = abs(
+            float(buy_pos.strike_price or 0) - float(sell_pos.strike_price or 0)
+        )
+        max_profit_per_unit = spread_width - net_debit_per_unit
+        max_loss_total = round(net_debit_per_unit * buy_pos.size_units, 2)
+        max_profit_total = round(max(0.0, max_profit_per_unit) * buy_pos.size_units, 2)
+
+        tp_trigger = max_profit_total * _SPREAD_TP_FRACTION
+        sl_trigger = -max_loss_total  * _SPREAD_SL_FRACTION
+
+        reason = None
+        if max_profit_total > 0 and net_pnl >= tp_trigger:
+            reason = f"TARGET +₹{net_pnl:,.0f} ≥ {_SPREAD_TP_FRACTION*100:.0f}% of max ₹{max_profit_total:,.0f}"
+        elif net_pnl <= sl_trigger:
+            reason = f"STOP −₹{abs(net_pnl):,.0f} ≥ {_SPREAD_SL_FRACTION*100:.0f}% loss of ₹{max_loss_total:,.0f}"
+
+        if reason is None:
+            continue
+
+        # Close both legs
+        now = datetime.utcnow()
+        margin_to_return = float(buy_pos.margin_blocked or 0.0)
+
+        for pos, cur_prem, leg_pnl in [
+            (buy_pos,  cur_buy,  pnl_buy),
+            (sell_pos, cur_sell, pnl_sell),
+        ]:
+            trade = (await session.execute(
+                select(PaperTrade).where(PaperTrade.id == pos.trade_id)
+            )).scalar_one_or_none()
+            if trade:
+                trade.exit_price  = round(cur_prem, 2)
+                trade.closed_at   = now
+                trade.status      = TradeStatus.CLOSED
+                trade.pnl         = round(leg_pnl, 2)
+                trade.pnl_percent = round(leg_pnl / max(pos.margin_blocked or 1, 1) * 100, 2)
+            await session.execute(delete(OpenPosition).where(OpenPosition.id == pos.id))
+
+        await VirtualWallet.return_margin(session, margin_to_return, net_pnl, f"SPREAD_{underlying}")
+        await session.commit()
+
+        logger.info(
+            f"[fno/spread-exit] {underlying} {opt_type} CLOSED | {reason} | "
+            f"net_pnl ₹{net_pnl:,.0f} | margin returned ₹{margin_to_return:,.0f}"
+        )
+
+        try:
+            if settings.telegram_available:
+                from integrations.telegram_service import send
+                emoji = "✅" if net_pnl >= 0 else "🛑"
+                await send(
+                    f"{emoji} <b>SPREAD EXIT — {underlying} {opt_type}</b>\n"
+                    f"Reason: {reason}\n"
+                    f"BUY  leg: ₹{buy_pos.entry_price} → ₹{cur_buy:.1f}  ({pnl_buy:+,.0f})\n"
+                    f"SELL leg: ₹{sell_pos.entry_price} → ₹{cur_sell:.1f}  ({pnl_sell:+,.0f})\n"
+                    f"<b>Net P&L: ₹{net_pnl:+,.0f}</b>"
+                )
+        except Exception:
+            pass
+
+        closed.append({
+            "underlying": underlying, "option_type": opt_type,
+            "net_pnl": net_pnl, "reason": reason,
+        })
+
+    return closed
+
+
 # ── Spread Execution Logic ───────────────────────────────────────────────────
 
 @dataclass
@@ -772,6 +941,43 @@ def get_spread_width(underlying: str) -> float:
     if "BANK" in under or "SENSEX" in under:
         return 500.0
     return 200.0
+
+
+def _spread_margin_approx(premium_buy: float, qty: int, spot: float, lot_size: int, lots: int) -> float:
+    """Realistic margin for a Bull/Bear spread matching NSE/broker methodology.
+
+    Brokers charge:
+      • BUY leg: full premium paid upfront
+      • SELL leg SPAN (with spread hedge): ~2% of underlying notional
+        (empirically verified against Groww/Zerodha for BANKNIFTY spreads)
+    """
+    buy_cost = premium_buy * qty
+    sell_span = spot * lot_size * lots * 0.02
+    return round(buy_cost + sell_span, 2)
+
+
+async def _kite_spread_margin(sym_buy: str, sym_sell: str, qty: int) -> float:
+    """Get exact spread margin from Zerodha basket_order_margins API.
+
+    Returns 0.0 if Kite is not connected or the call fails.
+    """
+    import asyncio as _asyncio
+    try:
+        from crawler.zerodha_ticker import CONNECTED
+        if not CONNECTED:
+            return 0.0
+        from crawler.zerodha_kite_lib import get_basket_margins
+        orders = [
+            {"exchange": "NFO", "tradingsymbol": sym_buy, "transaction_type": "BUY",
+             "variety": "regular", "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
+            {"exchange": "NFO", "tradingsymbol": sym_sell, "transaction_type": "SELL",
+             "variety": "regular", "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
+        ]
+        basket = await _asyncio.to_thread(get_basket_margins, orders, False)
+        total = float((basket.get("initial") or {}).get("total", 0))
+        return total if total > 0 else 0.0
+    except Exception:
+        return 0.0
 
 async def select_index_spread(
     underlying: str,
@@ -811,19 +1017,29 @@ async def select_index_spread(
         return None
 
     lot_size = contract_buy.lot_size or 1
-    
+
     risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
     risk_per_lot = net_premium * lot_size
     lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
     lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
     qty = lots * lot_size
-    
-    margin_blocked = max(net_premium * qty, 30000.0 * lots)
-    
+
+    # Realistic margin: BUY premium + SELL SPAN with hedge offset (~2% of notional)
+    margin_blocked = _spread_margin_approx(premium_buy, qty, spot, lot_size, lots)
+
+    # If Zerodha is connected, use its exact basket margin (most accurate)
+    kite_margin = await _kite_spread_margin(contract_buy.tradingsymbol, contract_sell.tradingsymbol, qty)
+    if kite_margin > 0:
+        margin_blocked = kite_margin
+
     if margin_blocked > equity:
-        lots = max(1, int(equity // 30000.0))
+        margin_per_lot = _spread_margin_approx(premium_buy, lot_size, spot, lot_size, 1)
+        lots = max(1, int(equity // margin_per_lot))
         qty = lots * lot_size
-        margin_blocked = max(net_premium * qty, 30000.0 * lots)
+        margin_blocked = _spread_margin_approx(premium_buy, qty, spot, lot_size, lots)
+        kite_margin = await _kite_spread_margin(contract_buy.tradingsymbol, contract_sell.tradingsymbol, qty)
+        if kite_margin > 0:
+            margin_blocked = kite_margin
 
     return SpreadTradeSpec(
         underlying=underlying.upper(), option_type=option_type, expiry=contract_buy.expiry,

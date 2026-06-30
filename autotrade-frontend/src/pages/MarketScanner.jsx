@@ -6,11 +6,11 @@
  * The agent scans all 9,600 NSE EQ symbols every 15 min, picks the top 100,
  * and runs full deep-analysis + paper trades on them every 60 s.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   RefreshCw, TrendingUp, TrendingDown, Minus, Zap, Filter,
-  ArrowUpRight, BarChart2, Clock,
+  ArrowUpRight, BarChart2, Clock, Search,
 } from 'lucide-react';
 import { apiFetch } from '../api/client';
 
@@ -81,15 +81,18 @@ function UpperCircuitBadge({ days, surge }) {
 }
 
 export default function MarketScanner() {
-  const [rows,       setRows]      = useState([]);
-  const [loading,    setLoading]   = useState(true);
-  const [running,    setRunning]   = useState(false);
-  const [lastUpdate, setLastUpdate] = useState(null);
-  const [autoFloor,  setAutoFloor]  = useState(40);
-  const [sigFilter,  setSigFilter] = useState('ALL');
-  const [minScore,   setMinScore]  = useState(0);
-  const [search,     setSearch]    = useState('');
-  const [ucOnly,     setUcOnly]    = useState(false);
+  const [rows,         setRows]        = useState([]);
+  const [loading,      setLoading]     = useState(true);
+  const [running,      setRunning]     = useState(false);
+  const [lastUpdate,   setLastUpdate]  = useState(null);
+  const [autoFloor,    setAutoFloor]   = useState(40);
+  const [sigFilter,    setSigFilter]   = useState('ALL');
+  const [minScore,     setMinScore]    = useState(0);
+  const [search,       setSearch]      = useState('');
+  const [ucOnly,       setUcOnly]      = useState(false);
+  const [globalHits,   setGlobalHits]  = useState([]);
+  const [globalLoading,setGlobalLoading] = useState(false);
+  const searchTimer = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -106,6 +109,23 @@ export default function MarketScanner() {
   }, [minScore]);
 
   useEffect(() => { load(); }, [load]);
+
+  // When local filter has no hits, fall back to full-universe search
+  useEffect(() => {
+    clearTimeout(searchTimer.current);
+    if (!search.trim()) { setGlobalHits([]); return; }
+    const localMatch = rows.some(r => r.ticker?.toLowerCase().includes(search.toLowerCase()));
+    if (localMatch) { setGlobalHits([]); return; }
+    setGlobalLoading(true);
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/portfolios/search/stocks?q=${encodeURIComponent(search)}`);
+        setGlobalHits(Array.isArray(res) ? res.slice(0, 8) : []);
+      } catch { setGlobalHits([]); }
+      finally { setGlobalLoading(false); }
+    }, 250);
+    return () => clearTimeout(searchTimer.current);
+  }, [search, rows]);
 
   const triggerScan = async () => {
     setRunning(true);
@@ -254,14 +274,12 @@ export default function MarketScanner() {
             <RefreshCw size={20} className="animate-spin mx-auto mb-3 text-cyan/50" />
             Loading shortlist…
           </div>
-        ) : filtered.length === 0 ? (
+        ) : filtered.length === 0 && !globalLoading && globalHits.length === 0 ? (
           <div className="p-10 text-center">
             <BarChart2 size={32} className="mx-auto mb-3 text-muted/40" />
             <div className="text-muted text-sm font-medium">No results yet</div>
             <div className="text-muted text-xs mt-2 max-w-sm mx-auto">
               Click "Run scan now" to populate the shortlist.
-              The scanner scores all NSE stocks using the Master Intelligence Hub
-              and picks the top 100 candidates for the agent to trade.
             </div>
             <button
               onClick={triggerScan}
@@ -375,6 +393,49 @@ export default function MarketScanner() {
           </>
         )}
       </div>
+
+      {/* Global search fallback — shown when local filter has no hits */}
+      {search && filtered.length === 0 && (globalLoading || globalHits.length > 0) && (
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+            <Search size={13} className="text-cyan" />
+            <span className="text-sm font-semibold text-slate-200">
+              Full NSE/BSE universe results for "{search}"
+            </span>
+            <span className="text-xs text-muted ml-1">— click any row to see full analysis</span>
+          </div>
+          {globalLoading ? (
+            <div className="p-6 text-center text-muted text-sm flex items-center justify-center gap-2">
+              <RefreshCw size={14} className="animate-spin" /> Searching full universe…
+            </div>
+          ) : (
+            <div className="divide-y divide-border/50">
+              {globalHits.map(s => (
+                <Link
+                  key={s.symbol}
+                  to={`/s/${s.ticker}`}
+                  className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.03] transition-colors group"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-cyan/10 grid place-items-center text-xs font-bold text-cyan shrink-0">
+                    {(s.ticker || '?')[0]}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-100 font-semibold font-mono text-sm">{s.ticker}</span>
+                      <span className="text-[10px] text-muted bg-white/5 px-1.5 py-0.5 rounded">{s.exchange}</span>
+                      {s.sector && s.sector !== 'Other' && (
+                        <span className="text-[10px] text-muted">{s.sector}</span>
+                      )}
+                    </div>
+                    <div className="text-muted text-xs truncate">{s.name !== s.ticker ? s.name : 'NSE Listed'}</div>
+                  </div>
+                  <span className="text-xs text-cyan group-hover:underline shrink-0">View analysis →</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Footer */}
       <div className="text-muted text-[11px] text-center pb-2">

@@ -4,17 +4,14 @@ import { apiFetch } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
 import CandlestickChart from '../components/chart/CandlestickChart';
 import { formatINR } from '../utils/indianFormat';
+import { fmtIST } from '../utils/datetime';
 
 const INDICES = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'];
 // Index → yfinance candle symbol the backend stores.
 const INDEX_CANDLE = { NIFTY: '^NSEI', BANKNIFTY: '^NSEBANK', FINNIFTY: '^NSEI' };
 const fmt = (n, d = 2) => formatINR(n ?? 0, d);
 const num = (n, d = 2) => (n == null ? '—' : Number(n).toFixed(d));
-const fmtDateTime = (s) => {
-  if (!s) return '—';
-  try { return new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); }
-  catch { return s; }
-};
+const fmtDateTime = (s) => fmtIST(s, { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 const moodColor = (m) => ({
   BULLISH: 'text-profit', POSITIVE: 'text-profit', CALM: 'text-profit',
   BEARISH: 'text-loss', NEGATIVE: 'text-loss', FEARFUL: 'text-loss',
@@ -69,6 +66,8 @@ function FnOPositionRow({ p }) {
           {p.moneyness && <span className={`ml-1 ${p.moneyness === 'ITM' ? 'text-profit' : 'text-muted'}`}>{p.moneyness}</span>}
         </td>
         <td className="px-4 py-2.5 tabular-nums text-slate-300">{p.lots ?? '—'}</td>
+        <td className="px-4 py-2.5 tabular-nums text-slate-400 text-xs">{p.lot_size ?? '—'}</td>
+        <td className="px-4 py-2.5 tabular-nums text-slate-300">{p.qty != null ? num(p.qty, 0) : (p.lots && p.lot_size ? p.lots * p.lot_size : '—')}</td>
         <td className="px-4 py-2.5 tabular-nums text-slate-300">{num(p.entry)}</td>
         <td className="px-4 py-2.5 tabular-nums text-slate-100">{num(p.current)}</td>
         <td className={`px-4 py-2.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>
@@ -78,7 +77,7 @@ function FnOPositionRow({ p }) {
       </tr>
       {open && (
         <tr className="bg-[#080e1c]">
-          <td colSpan={10} className="px-5 py-4">
+          <td colSpan={12} className="px-5 py-4">
             <div className="space-y-3">
               {/* Contract line */}
               <p className="text-sm text-slate-200 font-semibold">
@@ -155,7 +154,7 @@ function PositionsPanel({ data }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-border text-muted text-xs uppercase tracking-wider">
-              {['Opened', 'Instrument', 'Side', 'Type', 'Strike/Expiry', 'Lots', 'Entry', 'Current', 'P&L', 'Margin'].map((h) => (
+              {['Opened', 'Instrument', 'Side', 'Type', 'Strike/Expiry', 'Lots', 'Lot Size', 'Qty', 'Entry', 'Current', 'P&L', 'Margin'].map((h) => (
                 <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -402,24 +401,30 @@ export default function FnO() {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
+  const loadFast = useCallback(async () => {
     try {
-      const [pos, ch, iv, sig, ana] = await Promise.all([
+      const [pos, ch, iv, sig] = await Promise.all([
         apiFetch('/api/v1/india/fno/positions').catch(() => null),
         apiFetch(`/api/v1/india/fno/chain/${underlying}`).catch(() => null),
         apiFetch(`/api/v1/india/fno/iv-rank/${underlying}`).catch(() => null),
         apiFetch('/api/v1/india/fno/signals').catch(() => null),
-        apiFetch(`/api/v1/india/fno/analysis/${underlying}`).catch(() => null),
       ]);
-      setPositions(pos); setChain(ch); setIvRank(iv); setSignals(sig?.signals ?? null); setAnalysis(ana);
+      setPositions(pos); setChain(ch); setIvRank(iv); setSignals(sig?.signals ?? null);
     } finally { setLoading(false); }
   }, [underlying]);
 
+  const loadAnalysis = useCallback(async () => {
+    const ana = await apiFetch(`/api/v1/india/fno/analysis/${underlying}`).catch(() => null);
+    setAnalysis(ana);
+  }, [underlying]);
+
   useEffect(() => {
-    load();
-    const id = setInterval(load, 15000);
-    return () => clearInterval(id);
-  }, [load]);
+    loadFast();
+    loadAnalysis();
+    const fastId = setInterval(loadFast, 15000);
+    const slowId = setInterval(loadAnalysis, 60000);
+    return () => { clearInterval(fastId); clearInterval(slowId); };
+  }, [loadFast, loadAnalysis]);
 
   if (loading) return <LoadingSpinner />;
 

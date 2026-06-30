@@ -239,6 +239,18 @@ async def get_market_regime(
         except Exception:
             pass
 
+        # Live breadth from market breadth cache (advances / total as %)
+        if breadth_pct is None:
+            try:
+                from crawler.market_breadth import get_breadth_cache
+                nse = (get_breadth_cache() or {}).get("nse", {})
+                adv = nse.get("advances") or 0
+                dec = nse.get("declines") or 0
+                if adv + dec > 0:
+                    breadth_pct = adv / (adv + dec) * 100.0
+            except Exception:
+                pass
+
         result = classify_regime(closes, breadth_pct=breadth_pct, vix=vix)
         logger.info(
             f"[regime] {result.state} | score={result.score} | "

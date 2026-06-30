@@ -1,0 +1,28 @@
+===================================================
+  AutoTrade Pro — Startup Commands
+  Run these in order, each in a separate terminal
+===================================================
+
+STEP 1 — Start PostgreSQL (Docker)
+-----------------------------------
+sudo docker compose -f /home/cis/windows/auto-trade-pro/autotrade-backend/docker-compose.yml up -d postgres
+
+
+STEP 2 — Start Backend (FastAPI + Celery)
+------------------------------------------
+cd /home/cis/windows/auto-trade-pro/autotrade-backend && bash start.sh
+
+
+STEP 3 — Start Frontend (Vite / React)
+----------------------------------------
+cd /home/cis/windows/auto-trade-pro/autotrade-frontend && npm run dev
+
+
+===================================================
+  URLs once running
+===================================================
+  Frontend  →  http://localhost:5173
+  Backend   →  http://localhost:8000
+  API Docs  →  http://localhost:8000/docs
+  Adminer   →  http://localhost:8080
+===================================================
