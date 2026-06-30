@@ -95,7 +95,7 @@ function Timeline({ b }) {
   const steps = [
     {
       label: 'Board Announcement',
-      desc:  'Company's board approves buyback price, size, and schedule',
+      desc:  "Company's board approves buyback price, size, and schedule",
       date:  null,
       done:  true,
     },
