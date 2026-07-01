@@ -2528,12 +2528,23 @@ def run_master_intelligence_cycle():
                     flow = {"candidates": 0, "no_data": 0, "no_candidate": 0,
                             "fuse_drop": 0, "shadow_skip": 0, "risk_veto": 0,
                             "executed": 0, "exec_error": 0}
+                    _intraday_on      = getattr(settings, "INTRADAY_ENABLED", False)
+                    _short_enabled    = getattr(settings, "EQUITY_SHORT_ENABLED", False)
+                    from engine.agent.strategies.hub_short import HubShortStrategy as _HubShort
+                    _hub_short_strat  = _HubShort()
+
                     tried = 0
                     for stock in scored:
                         if stock.is_blocked:
                             continue
-                        if stock.signal not in ("STRONG_BUY", "BUY"):
-                            break
+                        is_buy  = stock.signal in ("STRONG_BUY", "BUY")
+                        is_sell = stock.signal in ("STRONG_SELL", "SELL")
+                        if not is_buy and not is_sell:
+                            continue   # HOLD/unknown — skip
+                        if is_sell and not (_intraday_on and _short_enabled):
+                            continue   # shorts need intraday + short enabled
+                        if is_sell and stock.regime == "STRONG_BULL":
+                            continue   # never short a strong bull market
                         if tried >= 10 or decisions_made >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
                             break
                         tried += 1
@@ -2563,11 +2574,20 @@ def run_master_intelligence_cycle():
                             if stock.features is not None:
                                 stock.features.hub_composite_score = stock.master_score
                                 stock.features.hub_signal          = stock.signal
-                            candidate = selector.propose(
-                                stock.symbol, df, stock.features,
-                                macro_bias=ctx.macro.total_macro_bias,
-                                fund_grade=stock.fund_grade,
-                            )
+                            # SELL signals use HubShortStrategy directly (MIS intraday short).
+                            # BUY signals go through the full StrategySelectorAgent.
+                            if is_sell:
+                                candidate = _hub_short_strat.evaluate(
+                                    stock.symbol, df, stock.features,
+                                    macro_bias=ctx.macro.total_macro_bias,
+                                    fund_grade=stock.fund_grade,
+                                )
+                            else:
+                                candidate = selector.propose(
+                                    stock.symbol, df, stock.features,
+                                    macro_bias=ctx.macro.total_macro_bias,
+                                    fund_grade=stock.fund_grade,
+                                )
                             if candidate is None:
                                 flow["no_candidate"] += 1
                                 continue

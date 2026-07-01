@@ -45,6 +45,7 @@ class RuntimeSettingsOut(BaseModel):
     agent_default_product:      str   # "CNC" | "MIS"
     agent_confidence_threshold: int   # 0–100
     equity_short_enabled:       bool  # allow SELL signals (MIS intraday only)
+    intraday_enabled:           bool  # enable intraday MIS trades (required for shorts)
 
 
 class SettingsPatch(BaseModel):
@@ -72,6 +73,7 @@ class SettingsPatch(BaseModel):
     agent_default_product:      str  | None = None   # "CNC" | "MIS"
     agent_confidence_threshold: int  | None = None   # 0–100
     equity_short_enabled:       bool | None = None   # allow SELL signals
+    intraday_enabled:           bool | None = None   # enable intraday MIS trades
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

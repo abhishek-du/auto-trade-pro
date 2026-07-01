@@ -69,6 +69,8 @@ _KNOWN_KEYS: dict[str, type] = {
     "equity_short_enabled":    bool,
     # Scanner kill-switch: False = agent runs solo, SCAN paper trader is silent.
     "scanner_enabled":         bool,
+    # Enable intraday MIS trades (required for equity short-selling).
+    "intraday_enabled":        bool,
 }
 
 
@@ -224,6 +226,10 @@ class RuntimeConfig:
     def scanner_enabled(self) -> bool:
         return bool(self._get("scanner_enabled", getattr(settings, "SCANNER_ENABLED", False)))
 
+    @property
+    def intraday_enabled(self) -> bool:
+        return bool(self._get("intraday_enabled", getattr(settings, "INTRADAY_ENABLED", False)))
+
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""
         return {
@@ -251,4 +257,5 @@ class RuntimeConfig:
             "agent_confidence_threshold":  self.agent_confidence_threshold,
             "equity_short_enabled":        self.equity_short_enabled,
             "scanner_enabled":             self.scanner_enabled,
+            "intraday_enabled":            self.intraday_enabled,
         }

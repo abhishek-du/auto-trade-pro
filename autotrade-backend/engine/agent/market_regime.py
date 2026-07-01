@@ -66,6 +66,7 @@ class RegimeResult:
     size_mult:      float
     min_conf:       int
     can_buy:        bool
+    can_sell:       bool    # True when regime allows new short entries
     score:          float   # composite score -100..+100
     signals:        dict    # individual signal breakdown for logging
 
@@ -86,7 +87,7 @@ def classify_regime(
     """
     n = len(closes)
     if n < 60:
-        return RegimeResult(MODERATE_BULL, 1.0, 76, True, 0.0,
+        return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
                             {"note": "insufficient_data_fail_open"})
 
     price = float(closes.iloc[-1])
@@ -210,6 +211,10 @@ def classify_regime(
         size_mult = REGIME_SIZE_MULT[state],
         min_conf  = REGIME_MIN_CONF[state],
         can_buy   = REGIME_SIZE_MULT[state] > 0,
+        # Shorts allowed in WEAK_BEAR / STRONG_BEAR / SIDEWAYS — not in bull markets.
+        # STRONG_BULL: don't short a strong uptrend (counter-trend risk).
+        # MODERATE_BULL: allow contrarian shorts on individual stock bear breakdowns.
+        can_sell  = state != STRONG_BULL,
         score     = round(composite, 1),
         signals   = signals,
     )
@@ -236,7 +241,7 @@ async def get_market_regime(
 
         if not rows or len(rows) < 60:
             logger.warning("[regime] Insufficient NIFTYBEES history — fail-open MODERATE_BULL")
-            return RegimeResult(MODERATE_BULL, 1.0, 76, True, 0.0,
+            return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
                                 {"note": "insufficient_nifty_history"})
 
         closes = pd.Series(list(reversed(rows)), dtype=float)   # oldest → newest
@@ -275,7 +280,7 @@ async def get_market_regime(
 
     except Exception as exc:
         logger.warning(f"[regime] Engine failed — fail-open MODERATE_BULL: {exc}")
-        return RegimeResult(MODERATE_BULL, 1.0, 76, True, 0.0,
+        return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
                             {"note": f"error:{exc}"})
 
 
@@ -296,7 +301,7 @@ def build_regime_map_from_df(
     for i, ts in enumerate(nifty_df.index):
         if i < min_bars:
             results[str(ts)[:10]] = RegimeResult(
-                MODERATE_BULL, 1.0, 76, True, 0.0, {"note": "warmup"}
+                MODERATE_BULL, 1.0, 76, True, True, 0.0, {"note": "warmup"}
             )
             continue
 
