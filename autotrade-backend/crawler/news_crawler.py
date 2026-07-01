@@ -261,8 +261,17 @@ async def fetch_free_rss_news() -> list[dict]:
 
     def _parse_feed(url: str) -> list[dict]:
         try:
-            feed = feedparser.parse(url)
-            source = feed.feed.get("title", url.split("/")[2])
+            import httpx
+            # Use a standard user-agent to avoid blocks, and disable SSL verify
+            # because some Indian news sites have misconfigured certs or proxies block them
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            with httpx.Client(verify=False, timeout=10.0) as client:
+                res = client.get(url, headers=headers)
+                res.raise_for_status()
+                feed_data = res.text
+
+            feed = feedparser.parse(feed_data)
+            source = feed.feed.get("title") or url.split("/")[2]
             rows = []
             for entry in feed.entries:
                 title = (entry.get("title") or "").strip()

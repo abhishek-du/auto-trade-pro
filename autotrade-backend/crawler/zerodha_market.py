@@ -262,6 +262,112 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
     return len(batch)
 
 
+async def sync_nse_eq_instruments(session: AsyncSession) -> dict:
+    """Download ALL NSE + BSE equity instruments from Kite and upsert into kite_instruments.
+
+    This is the key function that populates the full ~9,600 NSE EQ universe so that:
+      1. Every NSE stock gets an instrument_token
+      2. india_price_scan / sync_full_nse_universe can fetch candles for ALL stocks
+      3. hub_universe rebuild has complete 30-day turnover data for every symbol
+
+    Called daily at 08:30 IST (3:00 UTC), before market open + before hub rebuild.
+    Uses ON CONFLICT DO UPDATE so it is fully idempotent.
+
+    Returns: {"nse_eq": int, "bse_eq": int, "total": int}
+    """
+    kite = get_kite_client()
+    if not kite.access_token:
+        logger.warning("[zerodha_market] No access token — skipping NSE EQ instrument sync")
+        return {"nse_eq": 0, "bse_eq": 0, "total": 0, "error": "no_access_token"}
+
+    from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+    now = datetime.datetime.utcnow()
+    nse_count = bse_count = 0
+
+    for exchange in ("NSE", "BSE"):
+        try:
+            rows = await kite.get_instruments(exchange)
+        except Exception as exc:
+            logger.error(f"[zerodha_market] {exchange} instrument download failed: {exc}")
+            continue
+
+        batch: list[dict] = []
+        for r in rows:
+            itype = str(r.get("instrument_type") or "")
+            seg   = str(r.get("segment") or "")
+            sym   = str(r.get("tradingsymbol") or "").strip()
+            name  = str(r.get("name") or "").strip()
+            token = int(r.get("instrument_token") or 0)
+
+            # Only EQ (equity) instruments; skip FUT/CE/PE/ETF/others
+            if itype != "EQ" or not sym or not token:
+                continue
+            # NSE segment = "NSE-EQ" or "NSE"; BSE segment = "BSE" or "BSE-EQ"
+            if exchange == "NSE" and seg not in ("NSE", "NSE-EQ"):
+                continue
+            if exchange == "BSE" and seg not in ("BSE", "BSE-EQ"):
+                continue
+
+            batch.append({
+                "instrument_token": token,
+                "exchange_token":   int(r.get("exchange_token") or 0),
+                "tradingsymbol":    sym,
+                "name":             name,
+                "last_price":       float(r.get("last_price") or 0.0),
+                "expiry":           "",      # equity stocks have no expiry; NOT NULL constraint
+                "strike":           0.0,
+                "tick_size":        float(r.get("tick_size") or 0.05),
+                "lot_size":         int(float(r.get("lot_size") or 1)),
+                "instrument_type":  itype,
+                "segment":          exchange,        # normalise to plain "NSE" / "BSE"
+                "exchange":         exchange,
+                "refreshed_at":     now,
+            })
+
+        if not batch:
+            logger.warning(f"[zerodha_market] No {exchange} EQ instruments found")
+            continue
+
+        # Upsert in chunks of 2,000 rows to stay under PostgreSQL's 32,767-parameter limit.
+        # 13 columns × 2,000 rows = 26,000 params — safely under the asyncpg cap.
+        _CHUNK_SIZE = 2000
+        rows_saved = 0
+        for _i in range(0, len(batch), _CHUNK_SIZE):
+            chunk = batch[_i : _i + _CHUNK_SIZE]
+            stmt = _pg_insert(KiteInstrument).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["instrument_token"],
+                set_={
+                    "tradingsymbol": stmt.excluded.tradingsymbol,
+                    "name":          stmt.excluded.name,
+                    "last_price":    stmt.excluded.last_price,
+                    "refreshed_at":  stmt.excluded.refreshed_at,
+                },
+            )
+            await session.execute(stmt)
+            await session.commit()
+            rows_saved += len(chunk)
+            logger.debug(
+                f"[zerodha_market] {exchange} EQ chunk {_i // _CHUNK_SIZE + 1}: "
+                f"{rows_saved}/{len(batch)} upserted"
+            )
+
+        if exchange == "NSE":
+            nse_count = len(batch)
+        else:
+            bse_count = len(batch)
+
+        logger.info(f"[zerodha_market] {exchange} EQ instruments synced: {len(batch):,} rows")
+
+    total = nse_count + bse_count
+    logger.info(
+        f"[zerodha_market] Full equity instrument sync done — "
+        f"NSE={nse_count:,}  BSE={bse_count:,}  total={total:,}"
+    )
+    return {"nse_eq": nse_count, "bse_eq": bse_count, "total": total}
+
+
 async def hydrate_tokens_from_db(session: AsyncSession) -> int:
     """Preload NSE_TOKENS from kite_instruments at startup.
 

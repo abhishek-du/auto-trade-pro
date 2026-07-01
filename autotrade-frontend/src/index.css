@@ -190,3 +190,61 @@ body {
 .arjun-pulse {
   animation: arjun-ring 2s infinite;
 }
+
+/* ── Custom Markdown (.prose-custom) ── */
+.prose-custom {
+  color: #E2EAF4;
+}
+.prose-custom p {
+  margin-bottom: 1em;
+  line-height: 1.6;
+}
+.prose-custom h1, .prose-custom h2, .prose-custom h3 {
+  color: #FFFFFF;
+  margin-top: 1.5em;
+  margin-bottom: 0.75em;
+  font-weight: 700;
+  letter-spacing: 0.025em;
+}
+.prose-custom h1 { font-size: 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.3em; }
+.prose-custom h2 { font-size: 1.15rem; }
+.prose-custom h3 { font-size: 1.05rem; color: var(--color-accent); }
+.prose-custom strong {
+  color: #FFFFFF;
+  font-weight: 700;
+}
+.prose-custom ul, .prose-custom ol {
+  margin-top: 0.5em;
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+.prose-custom ul { list-style-type: disc; }
+.prose-custom ol { list-style-type: decimal; }
+.prose-custom li { margin-bottom: 0.25em; }
+.prose-custom blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 1em;
+  color: #94A3B8;
+  font-style: italic;
+  margin: 1em 0;
+  background: rgba(41, 121, 255, 0.05);
+  border-radius: 0 4px 4px 0;
+  padding: 0.5em 1em;
+}
+.prose-custom table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+}
+.prose-custom th, .prose-custom td {
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 0.5em;
+  text-align: left;
+}
+.prose-custom th {
+  background: rgba(255,255,255,0.05);
+  font-weight: 600;
+}
+.prose-custom *:last-child {
+  margin-bottom: 0;
+}

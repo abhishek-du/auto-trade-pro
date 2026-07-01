@@ -139,10 +139,21 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week="sunday", hour=1, minute=0),
     },
 
-    # Daily 02:50 UTC (08:20 IST): rebuild Hub universe by 30-day avg turnover.
+    # Daily 03:00 UTC (08:30 IST): sync ALL NSE+BSE EQ instruments from Zerodha's
+    # full instrument master. This populates ~9,600 NSE EQ stocks into kite_instruments
+    # so EVERY stock gets automatic candle ingestion — not just the 30 hardcoded ones.
+    # Root fix: small-caps (JTEKTINDIA, SAKSOFT, SIGNPOST etc.) are now auto-tracked.
+    "sync-nse-eq-instruments-daily": {
+        "task":     "tasks.sync_nse_eq_instruments",
+        "schedule": crontab(hour=3, minute=0),
+    },
+
+    # Daily 03:30 UTC (09:00 IST): rebuild Hub universe by 30-day avg turnover.
+    # Runs AFTER instrument sync (03:00) + candle backfill (03:10) so the universe
+    # is rebuilt with fresh candles for ALL 9,600 NSE symbols.
     "rebuild-hub-universe-daily": {
         "task":     "tasks.rebuild_hub_universe",
-        "schedule": crontab(hour=2, minute=50),
+        "schedule": crontab(hour=3, minute=30),
     },
 
     # Daily 03:10 UTC (08:40 IST): backfill yesterday's 1d close for all Hub symbols.
@@ -349,6 +360,17 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.breakout_discovery",
         "schedule": 300,
         "options":  {"countdown": 60},   # 60s after each 5-min mark
+    },
+
+    # Every 30 min: scan ALL NSE symbols for SUSTAINED 30-day momentum (10-100%
+    # gain over 30 days). Complements the 5-min breakout scan — catches the Eagle
+    # Eyes type of slow-grind picks (SAKSOFT +55%, JTEKTINDIA +16%, SIGNPOST +26%)
+    # that never trigger the single-day spike screener. Uses 1d candles so it
+    # works outside market hours too (e.g. catches stocks that backfilled overnight).
+    "momentum-discovery-every-30min": {
+        "task":     "tasks.momentum_discovery",
+        "schedule": 1800,
+        "options":  {"countdown": 90},   # 90s after each 30-min mark
     },
 
     # ── Intraday MIS trading ──────────────────────────────────────────────────

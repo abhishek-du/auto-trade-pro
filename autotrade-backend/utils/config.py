@@ -390,6 +390,16 @@ class Settings(BaseSettings):
     BREAKOUT_RSI_MAX: float = 85.0   # ignore blow-off tops above this RSI
     BREAKOUT_MAX_INJ: int   = 20     # max breakouts injected per 5-min cycle
 
+    # ── Slow-Momentum Discovery (momentum_screener.py) ───────────────────────
+    # Runs every 30 min — finds stocks that have been gradually rising 10-100%
+    # over the past 30 days (the Eagle Eyes / multi-week trend type).
+    # These are missed by breakout_screener which only catches single-day spikes.
+    # Examples: SAKSOFT +55% 30d, JTEKTINDIA +16% 30d, SIGNPOST +26% 30d.
+    MOMENTUM_MIN_RETURN_PCT: float = 10.0   # min % 30-day gain to qualify
+    MOMENTUM_MAX_RETURN_PCT: float = 100.0  # max % 30-day gain (pump&dump guard)
+    MOMENTUM_RSI_MAX:        float = 80.0   # ignore overbought stocks
+    MOMENTUM_MAX_INJ:        int   = 30     # max injections per scan cycle
+
     # ── Trade journal → spreadsheet ──────────────────────────────────────────
     # Logs every trade (why bought, targets, ETA, which target hit, duration,
     # P&L, AI expert note) to a spreadsheet. Backend is pluggable: "local" writes
