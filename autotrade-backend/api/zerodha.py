@@ -620,7 +620,9 @@ async def _candles_from_db(sym_ns: str, from_date: str) -> list[dict]:
     from db.database import AsyncSessionLocal
     from db.models import Candle as _Candle
     from sqlalchemy import select as _select
-    cutoff = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
+    # 7-day cutoff (was 2) — handles UC streaks and SME/illiquid stocks where
+    # no candle is written on days with zero trades (upper/lower circuit locks).
+    cutoff = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(
             _select(_Candle)
@@ -633,9 +635,8 @@ async def _candles_from_db(sym_ns: str, from_date: str) -> list[dict]:
         )).scalars().all()
     if not rows:
         return []
-    # Staleness check: the most recent cached bar must be from within the
-    # last 2 calendar days. NSE is closed on weekends so this won't fire
-    # spuriously across a normal Monday morning.
+    # Staleness check: skip only if the whole dataset is stale (> 7 calendar days).
+    # Normal stocks update daily; UC/LC-locked stocks and SME stocks may have gaps.
     latest = rows[-1].timestamp.date().isoformat()
     if latest < cutoff:
         return []

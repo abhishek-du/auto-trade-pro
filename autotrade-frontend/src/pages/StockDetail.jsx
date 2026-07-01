@@ -930,7 +930,10 @@ export default function StockDetail() {
                 ) : (
                   <div className="col-span-2 bg-white/[0.03] border border-border rounded-lg p-4 text-center">
                     <div className="text-muted text-sm">{deepSettled ? 'Setup data unavailable' : 'Trade setup loading…'}</div>
-                    {!deepSettled && <div className="text-muted text-xs mt-1">deep analysis runs in background</div>}
+                    {deepSettled
+                      ? <div className="text-muted text-xs mt-1">Insufficient price history — SME/illiquid stock or upper-circuit lock streak</div>
+                      : <div className="text-muted text-xs mt-1">deep analysis runs in background</div>
+                    }
                   </div>
                 )}
               </div>
