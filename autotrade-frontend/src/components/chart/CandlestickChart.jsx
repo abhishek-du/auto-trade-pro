@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries,
 } from 'lightweight-charts'
@@ -141,6 +142,81 @@ function SignalPanel({ symbol }) {
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  )
+}
+
+export function AIPredictPanel({ symbol }) {
+  const [prediction, setPrediction] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handlePredict = async () => {
+    setLoading(true)
+    setPrediction('')
+    try {
+      const res = await apiFetch(`/api/v1/chat/predict-chart/${symbol}`)
+      setPrediction(res.prediction || 'No prediction available.')
+    } catch (e) {
+      setPrediction('Failed to load prediction.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="mt-8 mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500/20 to-accent/5 flex items-center justify-center border border-violet-500/20 shadow-lg shadow-violet-500/10">
+            <Zap size={20} className="text-violet-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-slate-100 tracking-tight uppercase">AI Candlestick Prediction</h3>
+            <p className="text-[10px] text-muted mt-0.5 uppercase tracking-widest">Next Candle Forecast</p>
+          </div>
+        </div>
+        <button 
+          onClick={handlePredict} 
+          disabled={loading}
+          className="relative overflow-hidden px-5 py-2.5 text-xs font-bold text-white rounded-lg shadow-lg shadow-violet-500/20 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 transition-all disabled:opacity-70 disabled:cursor-not-allowed group w-full sm:w-auto"
+        >
+          {loading ? (
+            <div className="flex items-center justify-center gap-2">
+              <RefreshCw size={14} className="animate-spin" />
+              <span>Analyzing Price Action...</span>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2">
+              <Zap size={14} className="group-hover:scale-110 transition-transform" />
+              <span>Predict Next Candle</span>
+            </div>
+          )}
+          {!loading && <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out pointer-events-none" />}
+        </button>
+      </div>
+
+      {loading && (
+        <div className="rounded-2xl border border-violet-500/20 bg-black/20 p-8 backdrop-blur-sm animate-pulse flex flex-col items-center justify-center gap-5 min-h-[160px] fade-in">
+          <div className="flex gap-1.5 typing-indicator">
+            <span style={{ backgroundColor: '#A78BFA' }}></span>
+            <span style={{ backgroundColor: '#A78BFA' }}></span>
+            <span style={{ backgroundColor: '#A78BFA' }}></span>
+          </div>
+          <span className="text-[10px] font-bold text-violet-300 uppercase tracking-widest">Simulating thousands of patterns...</span>
+        </div>
+      )}
+
+      {prediction && !loading && (
+        <div className="relative rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-900/20 to-[#0A1121] p-5 sm:p-8 overflow-hidden shadow-2xl shadow-violet-900/10 fade-in slide-in-right">
+          {/* Subtle background glow */}
+          <div className="absolute -top-20 -left-20 w-48 h-48 bg-violet-600/10 rounded-full blur-[60px] pointer-events-none" />
+          <div className="absolute -bottom-20 -right-20 w-48 h-48 bg-accent/10 rounded-full blur-[60px] pointer-events-none" />
+          
+          <div className="prose-custom relative z-10 text-sm text-slate-200 leading-relaxed font-sans">
+            <ReactMarkdown>{prediction}</ReactMarkdown>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -636,7 +712,7 @@ export default function CandlestickChart({
 
       {/* ── Signal panel ──────────────────────────────────────────────────── */}
       {!embedded && showSignal && (
-        <div className="px-4 pb-3 pt-1 border-t border-border/40">
+        <div className="px-4 pb-3 pt-1 border-t border-border/40 flex-col gap-2 flex">
           <SignalPanel symbol={symbol} />
         </div>
       )}

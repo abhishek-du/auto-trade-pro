@@ -254,6 +254,51 @@ def breakout_discovery():
     return _run_async(_run_breakout_discovery())
 
 
+# ── 3d. momentum_discovery — every 30 min ──────────────────────────────────────
+
+async def _run_momentum_discovery():
+    """Scan ALL NSE daily candles for stocks with sustained 30-day uptrends.
+
+    Complements breakout_discovery (which catches single-day spikes). This catches
+    the Eagle Eyes type of picks: stocks that have been gradually rising 10-100%
+    over 30 days with no single explosive day — like SAKSOFT +55%, JTEKTINDIA +16%.
+
+    Runs every 30 min so newly backfilled symbols get discovered quickly.
+    Uses 1d candles so it works any time of day (not only market hours).
+    """
+    from engine.momentum_screener import run_momentum_discovery
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        result = await run_momentum_discovery(session)
+        await session.commit()
+
+    logger.info(
+        f"[momentum_discovery] scanned → {result.get('candidates', 0)} candidates | "
+        f"injected hub={result.get('injected_hub', 0)} watchlist={result.get('injected_watchlist', 0)}"
+    )
+    if result.get("symbols"):
+        for s in result["symbols"][:5]:
+            logger.info(
+                f"[momentum_discovery] 📈 {s['symbol'].replace('.NS', '')}  "
+                f"{s['return_30d']:+.1f}% 30d  vol_trend={s['volume_trend']:.1f}×  RSI={s['rsi']:.0f}"
+            )
+    return result
+
+
+@celery_app.task(name="tasks.momentum_discovery", soft_time_limit=300, time_limit=420)
+def momentum_discovery():
+    """Every 30 min: scan ALL NSE symbols for sustained 30-day uptrends and
+    auto-inject them into hub_universe + user_watchlist.
+
+    This is the fix for the Eagle Eyes / slow-momentum problem:
+    stocks rising 10-100% over 30 days that never trigger the single-day
+    breakout screener because their daily moves are modest.
+    """
+    logger.info("[momentum_discovery] Starting slow-momentum scan")
+    return _run_async(_run_momentum_discovery())
+
+
 # ── 4. india_mutual_fund_nav — daily 14:30 UTC (20:00 IST) ───────────────────
 
 async def _india_mutual_fund_nav():
@@ -3060,6 +3105,52 @@ def purge_old_news_task(days: int = 60):
     return _run_async(_purge_old_news(days))
 
 
+# ── Daily NSE+BSE EQ instrument sync (Zerodha full dump) ────────────────────
+
+async def _sync_nse_eq_instruments():
+    """Download ALL NSE+BSE equity instruments from Zerodha and upsert into kite_instruments.
+
+    This populates the full ~9,600 NSE EQ universe so that every stock
+    automatically gets an instrument_token and daily candle ingestion.
+    Without this, only the 30 hardcoded symbols in NSE_TOKENS are tracked.
+    """
+    from crawler.zerodha_market import sync_nse_eq_instruments
+    from crawler.zerodha_market import hydrate_tokens_from_db
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        result = await sync_nse_eq_instruments(session)
+        # Re-hydrate the in-memory NSE_TOKENS map so this worker
+        # immediately benefits from the new symbols without a restart.
+        await hydrate_tokens_from_db(session)
+
+    logger.info(
+        f"[sync_nse_eq_instruments] done — "
+        f"NSE={result.get('nse_eq', 0):,}  BSE={result.get('bse_eq', 0):,}  "
+        f"total={result.get('total', 0):,}"
+    )
+    return result
+
+
+@celery_app.task(
+    name="tasks.sync_nse_eq_instruments",
+    soft_time_limit=600,
+    time_limit=900,
+)
+def sync_nse_eq_instruments_task():
+    """Daily 03:00 UTC (08:30 IST): sync ALL NSE+BSE EQ instruments from Zerodha's
+    full instrument master into kite_instruments. Runs before hub rebuild (02:50 UTC)
+    is rescheduled after this task so the universe has fresh tokens.
+
+    This is the root fix for small-cap stocks being invisible to the system:
+    once JTEKTINDIA, SAKSOFT, SIGNPOST etc. are in kite_instruments, their
+    candles are automatically fetched every day and they enter hub_universe
+    when their turnover qualifies.
+    """
+    logger.info("[sync_nse_eq_instruments] starting full NSE+BSE EQ instrument sync")
+    return _run_async(_sync_nse_eq_instruments())
+
+
 # ── Weekly full-NSE candle refresh (Zerodha) ─────────────────────────────────
 
 async def _refresh_full_nse_candles(days_back: int = 7):
@@ -3101,26 +3192,64 @@ def rebuild_hub_universe_task(top_n: int | None = None, min_turnover_cr: float |
 
 
 async def _backfill_hub_1d_candles():
-    """Fetch yesterday's 1d candle for every Hub universe symbol.
+    """Fetch yesterday's 1d candle for EVERY NSE EQ symbol in kite_instruments.
 
-    Runs at 3:10 AM daily — after rebuild_hub_universe (2:50 AM) and before
-    the first Hub scoring cycle. Ensures the Hub always has today's close
-    available regardless of whether the intraday crawl caught all symbols.
+    Expanded scope (was: hub_universe only → now: ALL kite_instruments NSE EQ).
+    This ensures EVERY NSE stock — including small-caps outside hub_universe —
+    has fresh daily candles so:
+      • hub_universe rebuild has complete 30-day turnover for ALL symbols
+      • breakout_screener can scan the full NSE universe (currently 9,600 stocks)
+      • small-caps like JTEKTINDIA, SAKSOFT, SIGNPOST get picked up automatically
 
-    Uses concurrent batches of 20 to complete within Celery's 600s time limit
-    (sequential yfinance calls for 760 symbols would take 15+ min and get killed).
+    Runs at 3:10 AM daily — after sync_nse_eq_instruments (3:00 AM) and
+    before hub rebuild (3:30 AM, rescheduled). Skips symbols whose last
+    candle is already today (idempotent). Uses concurrent batches of 30.
     """
     import asyncio as _asyncio
-    from engine.hub_universe import get_hub_universe
+    from sqlalchemy import text as _text
     from crawler.price_feed import fetch_candles, save_candles_to_db
     from tasks._db import celery_session
+    import datetime as _dt
+
+    # Fetch ALL NSE EQ symbols from kite_instruments
+    async with celery_session() as session:
+        rows = (await session.execute(_text("""
+            SELECT tradingsymbol
+            FROM kite_instruments
+            WHERE segment = 'NSE' AND instrument_type = 'EQ'
+              AND name != '' AND instrument_token > 0
+            ORDER BY tradingsymbol
+        """))).scalars().all()
+        all_symbols = [f"{sym}.NS" for sym in rows]
+
+        # Also include hub_universe symbols (covers BSE + any extras)
+        from engine.hub_universe import get_hub_universe
+        hub_syms = await get_hub_universe(session)
+
+    # Union: kite_instruments NSE + hub_universe
+    symbol_set = list(dict.fromkeys(all_symbols + list(hub_syms)))  # preserve order, dedup
+
+    # Filter: skip symbols that already have a candle from today or yesterday
+    today_utc = _dt.datetime.utcnow().date()
+    stale_cutoff = str(today_utc - _dt.timedelta(days=1))  # skip if last candle ≥ yesterday
 
     async with celery_session() as session:
-        universe = await get_hub_universe(session)
+        fresh = (await session.execute(_text(f"""
+            SELECT DISTINCT symbol FROM candles
+            WHERE timeframe = '1d' AND timestamp >= '{stale_cutoff}'
+        """))).scalars().all()
+    fresh_set = set(fresh)
+
+    # Only backfill symbols that are stale (no candle since yesterday)
+    stale_symbols = [s for s in symbol_set if s not in fresh_set]
+    logger.info(
+        f"[backfill_hub_1d] all_syms={len(symbol_set)}  fresh={len(fresh_set)}  "
+        f"need_backfill={len(stale_symbols)}"
+    )
 
     saved_total = 0
     failed = 0
-    _BATCH = 20  # concurrent fetches per batch
+    _BATCH = 30  # concurrent fetches per batch
 
     async def _fetch_and_save(sym: str) -> int:
         """Fetch 1d candles for one symbol and persist. Returns count saved."""
@@ -3135,9 +3264,8 @@ async def _backfill_hub_1d_candles():
         except Exception:
             return -1  # sentinel for failure
 
-    sym_list = list(universe)
-    for i in range(0, len(sym_list), _BATCH):
-        batch = sym_list[i : i + _BATCH]
+    for i in range(0, len(stale_symbols), _BATCH):
+        batch = stale_symbols[i : i + _BATCH]
         results = await _asyncio.gather(*[_fetch_and_save(s) for s in batch])
         for r in results:
             if r < 0:
@@ -3146,9 +3274,15 @@ async def _backfill_hub_1d_candles():
                 saved_total += r
 
     logger.info(
-        f"[backfill_hub_1d] done — universe={len(universe)} saved={saved_total} failed={failed}"
+        f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  stale={len(stale_symbols)}  "
+        f"saved={saved_total}  failed={failed}"
     )
-    return {"universe": len(universe), "saved": saved_total, "failed": failed}
+    return {
+        "total_symbols": len(symbol_set),
+        "stale_backfilled": len(stale_symbols),
+        "saved": saved_total,
+        "failed": failed,
+    }
 
 
 @celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=1800, soft_time_limit=1500)

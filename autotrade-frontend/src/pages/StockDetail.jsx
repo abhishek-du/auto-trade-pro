@@ -20,7 +20,7 @@ import {
   Zap, BookOpen, BarChart2, Users, PieChart, Activity,
 } from 'lucide-react';
 import { apiFetch } from '../api/client';
-import CandlestickChart from '../components/chart/CandlestickChart';
+import CandlestickChart, { AIPredictPanel } from '../components/chart/CandlestickChart';
 import { useLivePrice } from '../contexts/LivePricesContext';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1188,10 +1188,25 @@ export default function StockDetail() {
       {/* ═══════════════════════════════════════════════════════════════
           SECTION 4 — CHART
       ═══════════════════════════════════════════════════════════════ */}
-      <section className="px-5 pb-6 border-t border-border glass-panel">
-        <div className="pt-4">
-          <SectionLabel>Section 4 · Chart</SectionLabel>
-          <div className="rounded-xl border border-border overflow-hidden" style={{ height: 420 }}>
+      <section className="relative px-4 md:px-6 py-8 border-t border-white/5 bg-[#080D1A]/50">
+        <div className="absolute inset-0 bg-gradient-to-b from-accent/5 to-transparent pointer-events-none opacity-40" />
+        <div className="relative z-10 max-w-7xl mx-auto">
+          
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-accent/20 to-accent/5 flex items-center justify-center border border-accent/20 shadow-lg shadow-accent/10">
+                <BarChart2 size={20} className="text-accent" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-slate-100 tracking-tight">Interactive Price Action</h2>
+                <p className="text-xs text-muted mt-0.5 font-medium">Advanced multi-timeframe analysis & technical indicators</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Chart Container */}
+          <div className="rounded-2xl border border-white/10 overflow-hidden bg-[#0A1121] shadow-[0_8px_32px_rgba(0,0,0,0.4)]" style={{ height: 480 }}>
             <CandlestickChart
               symbol={nsSymbol}
               name={fund?.company_name || display}
@@ -1202,39 +1217,80 @@ export default function StockDetail() {
               embedded={false}
             />
           </div>
-          {/* Indicator strip */}
+
+          <AIPredictPanel symbol={nsSymbol} />
+
+          {/* Indicator Strip (Pill Badges) */}
           {indicators.rsi && (
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-muted">
-              <span className={indicators.rsi_signal === 'OVERBOUGHT' ? 'text-loss' : indicators.rsi_signal === 'OVERSOLD' ? 'text-profit' : 'text-muted'}>
-                RSI {fmt(indicators.rsi, 1)} ({indicators.rsi_signal || 'neutral'})
-              </span>
-              {indicators.macd != null && <span>MACD {fmt(indicators.macd, 2)}</span>}
-              {indicators.ema_trend && <span>EMA: <span className={indicators.ema_trend === 'BULLISH' ? 'text-profit' : 'text-loss'}>{indicators.ema_trend}</span></span>}
-              {indicators.supertrend_dir && <span>Supertrend: <span className={indicators.supertrend_dir === 'BEARISH' ? 'text-loss' : 'text-profit'}>{indicators.supertrend_dir}</span></span>}
-              {indicators.bb_position && <span>BB: {indicators.bb_position.replace('_', ' ')}</span>}
-              {indicators.ichimoku_signal && <span>Ichimoku: <span className={indicators.ichimoku_signal?.includes('BUY') ? 'text-profit' : indicators.ichimoku_signal?.includes('SELL') ? 'text-loss' : 'text-muted'}>{indicators.ichimoku_signal.replace('_', ' ')}</span></span>}
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${indicators.rsi_signal === 'OVERBOUGHT' ? 'bg-red-500/10 border-red-500/20 text-red-400' : indicators.rsi_signal === 'OVERSOLD' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-white/5 border-white/10 text-slate-300'}`}>
+                <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">RSI</span>
+                <span className="text-xs font-bold">{fmt(indicators.rsi, 1)}</span>
+              </div>
+              
+              {indicators.macd != null && (
+                <div className="px-3 py-1.5 rounded-lg border bg-white/5 border-white/10 text-slate-300 flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">MACD</span>
+                  <span className="text-xs font-bold">{fmt(indicators.macd, 2)}</span>
+                </div>
+              )}
+              
+              {indicators.ema_trend && (
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${indicators.ema_trend === 'BULLISH' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
+                   <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">EMA</span>
+                   <span className="text-xs font-bold">{indicators.ema_trend}</span>
+                </div>
+              )}
+
+              {indicators.supertrend_dir && (
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${indicators.supertrend_dir === 'BULLISH' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
+                   <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">Supertrend</span>
+                   <span className="text-xs font-bold">{indicators.supertrend_dir}</span>
+                </div>
+              )}
+
+              {indicators.bb_position && (
+                <div className="px-3 py-1.5 rounded-lg border bg-white/5 border-white/10 text-slate-300 flex items-center gap-2">
+                   <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">B-Bands</span>
+                   <span className="text-xs font-bold">{indicators.bb_position.replace('_', ' ')}</span>
+                </div>
+              )}
+
+              {indicators.ichimoku_signal && (
+                <div className={`px-3 py-1.5 rounded-lg border flex items-center gap-2 ${indicators.ichimoku_signal.includes('BUY') ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : indicators.ichimoku_signal.includes('SELL') ? 'bg-red-500/10 border-red-500/20 text-red-400' : 'bg-white/5 border-white/10 text-slate-300'}`}>
+                   <span className="text-[10px] uppercase tracking-wider opacity-70 font-semibold">Ichimoku</span>
+                   <span className="text-xs font-bold">{indicators.ichimoku_signal.replace('_', ' ')}</span>
+                </div>
+              )}
             </div>
           )}
 
           {/* AI Chart Reading */}
           {deepSettled && (deep?.reasoning || deep?.indicators) && (
-            <div className="mt-4 rounded-xl border border-violet-500/20 p-4" style={{ background: 'rgba(139,92,246,0.04)' }}>
-              <div className="flex items-center gap-2 mb-3">
-                <Activity size={13} className="text-violet-400" />
-                <span className="text-violet-400 text-[11px] font-bold uppercase tracking-wider">AI Chart Reading</span>
-                <span className="ml-auto text-muted text-[10px] font-mono">{deep.data_source || 'yfinance'} · {deep.as_of?.slice(0,10) || 'today'}</span>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="mt-6 relative rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/10 to-transparent p-5 overflow-hidden shadow-lg shadow-violet-900/10">
+              <div className="absolute -top-10 -right-10 w-32 h-32 bg-violet-500/20 rounded-full blur-3xl pointer-events-none" />
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                  <Activity size={16} className="text-violet-400" />
+                </div>
                 <div>
-                  <div className="text-[10px] text-muted uppercase tracking-wider mb-2">What the chart is showing</div>
-                  <div className="space-y-1.5">
+                  <div className="text-violet-400 text-sm font-bold tracking-wide">AI CHART READING</div>
+                  <div className="text-muted text-[10px] font-mono">{deep.data_source || 'yfinance'} · {deep.as_of?.slice(0,10) || 'today'}</div>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 relative z-10">
+                {/* Reasoning */}
+                <div>
+                  <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold mb-3 border-b border-white/5 pb-2">What the chart is showing</div>
+                  <div className="space-y-2.5">
                     {[
                       ...(deep.reasoning?.bullish || []).slice(0, 3).map(b => ({ text: b, type: 'bull' })),
                       ...(deep.reasoning?.bearish || []).slice(0, 2).map(b => ({ text: b, type: 'bear' })),
                       ...(deep.reasoning?.neutral || []).slice(0, 1).map(b => ({ text: b, type: 'neut' })),
                     ].map((item, i) => (
-                      <div key={i} className="flex gap-2 text-[11px]">
-                        <span className={`shrink-0 font-bold ${item.type === 'bull' ? 'text-profit' : item.type === 'bear' ? 'text-loss' : 'text-muted'}`}>
+                      <div key={i} className="flex gap-3 text-sm items-start bg-black/20 p-2.5 rounded-lg border border-white/5">
+                        <span className={`shrink-0 mt-0.5 text-[10px] ${item.type === 'bull' ? 'text-emerald-400' : item.type === 'bear' ? 'text-red-400' : 'text-slate-400'}`}>
                           {item.type === 'bull' ? '▲' : item.type === 'bear' ? '▼' : '◦'}
                         </span>
                         <span className="text-slate-300 leading-snug">{item.text}</span>
@@ -1242,66 +1298,71 @@ export default function StockDetail() {
                     ))}
                   </div>
                 </div>
+                
+                {/* Key Levels */}
                 <div>
-                  <div className="text-[10px] text-muted uppercase tracking-wider mb-2">Key price levels</div>
-                  <div className="space-y-1.5 text-[11px]">
+                  <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold mb-3 border-b border-white/5 pb-2">Key price levels</div>
+                  <div className="space-y-2 text-sm bg-black/20 p-4 rounded-xl border border-white/5">
                     {ts.target_2 && (
                       <div className="flex justify-between items-center">
-                        <span className="text-muted">Target 2</span>
-                        <span className="text-profit font-mono font-bold">₹{fmt(ts.target_2)}</span>
+                        <span className="text-slate-400">Target 2</span>
+                        <span className="text-emerald-400 font-mono font-bold">₹{fmt(ts.target_2)}</span>
                       </div>
                     )}
                     {ts.target_1 && (
                       <div className="flex justify-between items-center">
-                        <span className="text-muted">Target 1</span>
-                        <span className="text-profit font-mono font-bold">₹{fmt(ts.target_1)}</span>
+                        <span className="text-slate-400">Target 1</span>
+                        <span className="text-emerald-400 font-mono font-bold">₹{fmt(ts.target_1)}</span>
                       </div>
                     )}
                     {indicators.supertrend && (
                       <div className="flex justify-between items-center">
-                        <span className="text-muted">Supertrend</span>
-                        <span className={`font-mono font-bold ${indicators.supertrend_dir === 'BEARISH' ? 'text-loss' : 'text-profit'}`}>
-                          ₹{fmt(indicators.supertrend)} ({indicators.supertrend_dir})
+                        <span className="text-slate-400">Supertrend</span>
+                        <span className={`font-mono font-bold ${indicators.supertrend_dir === 'BEARISH' ? 'text-red-400' : 'text-emerald-400'}`}>
+                          ₹{fmt(indicators.supertrend)} <span className="text-[10px] tracking-widest text-slate-500">({indicators.supertrend_dir})</span>
                         </span>
                       </div>
                     )}
                     {ltp && (
-                      <div className="flex justify-between items-center border-t border-border/40 pt-1.5 mt-1">
-                        <span className="text-muted font-semibold">CMP</span>
-                        <span className="text-slate-100 font-mono font-bold">₹{fmt(ltp)}</span>
+                      <div className="flex justify-between items-center border-t border-white/10 pt-2 mt-2">
+                        <span className="text-slate-300 font-semibold">CMP</span>
+                        <span className="text-white font-mono font-bold text-base">₹{fmt(ltp)}</span>
                       </div>
                     )}
                     {indicators.ema_50 && (
-                      <div className="flex justify-between items-center">
-                        <span className="text-muted">EMA 50</span>
-                        <span className={`font-mono ${ltp && ltp > indicators.ema_50 ? 'text-profit' : 'text-loss'}`}>₹{fmt(indicators.ema_50)}</span>
+                      <div className="flex justify-between items-center pt-2">
+                        <span className="text-slate-400">EMA 50</span>
+                        <span className={`font-mono ${ltp && ltp > indicators.ema_50 ? 'text-emerald-400' : 'text-red-400'}`}>₹{fmt(indicators.ema_50)}</span>
                       </div>
                     )}
                     {ts.stop_loss && (
                       <div className="flex justify-between items-center">
-                        <span className="text-muted">Stop Loss</span>
-                        <span className="text-loss font-mono font-bold">₹{fmt(ts.stop_loss)}</span>
+                        <span className="text-slate-400">Stop Loss</span>
+                        <span className="text-red-400 font-mono font-bold">₹{fmt(ts.stop_loss)}</span>
                       </div>
                     )}
                     {indicators.bb_lower && (
                       <div className="flex justify-between items-center">
-                        <span className="text-muted">BB Lower</span>
-                        <span className="text-slate-400 font-mono">₹{fmt(indicators.bb_lower)}</span>
+                        <span className="text-slate-400">BB Lower</span>
+                        <span className="text-slate-500 font-mono">₹{fmt(indicators.bb_lower)}</span>
                       </div>
                     )}
                   </div>
-                  <div className="mt-3 pt-2 border-t border-border/30 text-[10px] text-muted leading-relaxed">
-                    <span className="text-cyan font-semibold">Next trigger: </span>
-                    {indicators.rsi_signal === 'OVERSOLD'
-                      ? `RSI oversold at ${fmt(indicators.rsi, 1)} — watch for reversal candle (hammer/engulfing) for bounce entry`
-                      : indicators.bb_position === 'BELOW_LOWER'
-                      ? `Price below lower Bollinger Band ₹${fmt(indicators.bb_lower)} — statistically extreme, mean reversion probable`
-                      : indicators.ichimoku_signal === 'STRONG_BUY'
-                      ? 'Ichimoku fully bullish — all 5 components aligned. Breakout above Supertrend would confirm trend change'
-                      : indicators.macd_cross === 'BULLISH_CROSS'
-                      ? 'MACD bullish crossover confirmed — momentum turning positive'
-                      : `Watch ₹${fmt(ts.resistance || ts.target_1)} resistance for breakout confirmation`
-                    }
+                  <div className="mt-4 p-3 bg-accent/5 rounded-lg border border-accent/10 text-xs text-slate-300 leading-relaxed flex gap-3 items-start">
+                    <Zap size={14} className="text-accent shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-accent font-semibold">Next trigger: </span>
+                      {indicators.rsi_signal === 'OVERSOLD'
+                        ? `RSI oversold at ${fmt(indicators.rsi, 1)} — watch for reversal candle (hammer/engulfing) for bounce entry`
+                        : indicators.bb_position === 'BELOW_LOWER'
+                        ? `Price below lower Bollinger Band ₹${fmt(indicators.bb_lower)} — statistically extreme, mean reversion probable`
+                        : indicators.ichimoku_signal === 'STRONG_BUY'
+                        ? 'Ichimoku fully bullish — all 5 components aligned. Breakout above Supertrend would confirm trend change'
+                        : indicators.macd_cross === 'BULLISH_CROSS'
+                        ? 'MACD bullish crossover confirmed — momentum turning positive'
+                        : `Watch ₹${fmt(ts.resistance || ts.target_1)} resistance for breakout confirmation`
+                      }
+                    </div>
                   </div>
                 </div>
               </div>

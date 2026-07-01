@@ -11,7 +11,8 @@ from db.database import get_db
 from engine.stock_chat import process_chat_message
 from engine.stock_context_builder import resolve_symbol, build_stock_context, SYMBOL_ALIASES
 from crawler.live_prices import PRICE_CACHE
-
+from sqlalchemy import text
+from utils.llm import call_llm_chat
 router = APIRouter(tags=["chat"])
 
 
@@ -118,3 +119,63 @@ async def quick_analysis(
         raise HTTPException(status_code=500, detail=str(exc))
 
     return ctx
+
+
+# ── GET /predict-chart/{symbol} ──────────────────────────────────────────────
+
+@router.get("/predict-chart/{symbol:path}")
+async def predict_chart(
+    symbol: str,
+    session: AsyncSession = Depends(get_db),
+):
+    """Predict next candle and price movement using LLM based on recent candles."""
+    resolved = resolve_symbol(symbol)
+    if not resolved:
+        resolved = symbol if symbol.endswith(".NS") or symbol.endswith(".BO") else f"{symbol}.NS"
+
+    # Fetch last 30 daily candles
+    q = text(
+        "SELECT timestamp, open, high, low, close, volume "
+        "FROM candles WHERE symbol = :sym AND timeframe = '1d' "
+        "ORDER BY timestamp DESC LIMIT 30"
+    )
+    res = await session.execute(q, {"sym": resolved})
+    rows = res.fetchall()
+
+    if not rows:
+        return {"prediction": "Not enough historical candle data available for prediction."}
+
+    # Format data for LLM (chronological order)
+    rows.reverse()
+    
+    # Deduplicate by date (fixes issues where yfinance and upstox sync the same day with different time horizons e.g. 00:00 vs 15:30)
+    unique_candles = {}
+    for r in rows:
+        date_str = r.timestamp.strftime("%Y-%m-%d")
+        unique_candles[date_str] = r
+
+    data_str = "Date | Open | High | Low | Close | Volume\n"
+    for date_str, r in unique_candles.items():
+        data_str += f"{date_str} | {r.open:.2f} | {r.high:.2f} | {r.low:.2f} | {r.close:.2f} | {r.volume}\n"
+
+    system_prompt = (
+        "You are an expert technical analyst specializing in candlestick patterns and market psychology. "
+        "Your task is to analyze the following recent daily OHLCV data for a stock and predict the NEXT candle. "
+        "Use standard technical analysis (support/resistance, candlestick formations, volume analysis). "
+        "Predict whether the next candle will be bullish or bearish, and explain your reasoning step-by-step in professional English. "
+        "CRITICAL: Do NOT repeat the OHLCV data table in your response. Only provide your analysis and prediction. Format nicely with markdown."
+    )
+
+    user_prompt = f"Stock Symbol: {resolved}\nHere is the recent daily candle data:\n{data_str}\n\nPredict the next candle."
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    try:
+        llm_response = await call_llm_chat(messages, max_tokens=4000)
+    except Exception as e:
+        llm_response = f"Failed to generate AI prediction: {str(e)}"
+
+    return {"prediction": llm_response}

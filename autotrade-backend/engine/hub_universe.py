@@ -22,10 +22,14 @@ from utils.logger import logger
 async def rebuild_hub_universe(
     session: AsyncSession,
     *,
-    top_n: int = 1500,
-    min_turnover_cr: float = 2.0,
+    top_n: int = 3000,
+    min_turnover_cr: float = 1.0,
 ) -> dict:
     """Rebuild the hub_universe table: top-N NSE equities by 30-day avg turnover.
+
+    Threshold lowered from ₹5Cr → ₹1Cr to include small-caps:
+    JTEKTINDIA (~₹4Cr), SAKSOFT (~₹4.5Cr), SIGNPOST (~₹3Cr) now qualify.
+    Universe expanded from 1,500 → 3,000 to cover the wider small-cap space.
 
     Excludes government bonds / debt (numeric or -SG names) and anything below
     `min_turnover_cr` (₹ Cr/day). Returns a summary dict.
