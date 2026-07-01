@@ -27,7 +27,9 @@ BREADTH_HISTORY: list[dict] = []
 MAX_HISTORY = 50
 
 _NSE_HOME = "https://www.nseindia.com"
-_ADV_DEC_URL = "https://www.nseindia.com/api/liveanalysis?index=advances"
+# /api/liveanalysis?index=advances was retired by NSE; allIndices has market-wide
+# advances/declines at the top level plus per-index breakdown in the data array.
+_ADV_DEC_URL = "https://www.nseindia.com/api/allIndices"
 _GAINERS_URL = "https://www.nseindia.com/api/live-analysis-variations?index=gainers"
 _LOSERS_URL  = "https://www.nseindia.com/api/live-analysis-variations?index=loosers"
 _ACTIVE_URL  = "https://www.nseindia.com/api/live-analysis-variations?index=active"
@@ -88,49 +90,58 @@ def _map_variation_row(row: dict) -> dict:
 # ── NSE API fetchers ──────────────────────────────────────────────────────────
 
 async def fetch_nse_advances_declines() -> dict:
-    """Fetch advances/declines from NSE API with browser session."""
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
-            await asyncio.sleep(1)
-            r = await client.get(_ADV_DEC_URL, headers=BROWSER_HEADERS)
+    """Fetch advances/declines from NSE API using curl_cffi (Chrome TLS fingerprint).
 
-        if r.status_code != 200:
-            logger.warning(f"[breadth] NSE advances API returned {r.status_code}")
-            return {}
+    NSE's Akamai bot-detection blocks plain httpx requests. curl_cffi with
+    Chrome impersonation bypasses TLS fingerprinting and Brotli encoding.
+    Falls back to plain httpx (gzip-only) when curl_cffi is unavailable.
+    """
+    _curl_headers = {
+        **BROWSER_HEADERS,
+        "Accept-Encoding": "gzip, deflate, br",   # curl_cffi decodes br natively
+    }
 
-        payload = r.json()
-        rows = payload if isinstance(payload, list) else payload.get("data", [])
-
-        total_adv = total_dec = total_unc = 0
-        by_index: dict[str, dict] = {}
-
-        for row in rows:
-            idx_name = row.get("indexSymbol") or row.get("index") or row.get("name") or ""
-            adv = int(_safe_float(row.get("advances")  or row.get("advance")  or 0))
-            dec = int(_safe_float(row.get("declines")  or row.get("decline")  or 0))
-            unc = int(_safe_float(row.get("unchanged") or row.get("noChange") or 0))
-
-            if idx_name:
-                by_index[idx_name] = {"advances": adv, "declines": dec, "unchanged": unc}
-
-            # "NIFTY TOTAL MARKET" or the largest row is the all-NSE aggregate
-            if "TOTAL" in idx_name.upper() or "ALL" in idx_name.upper():
-                total_adv, total_dec, total_unc = adv, dec, unc
-
-        # Fall back to summing per-index if no explicit total row
-        if total_adv == 0 and by_index:
-            for v in by_index.values():
-                total_adv += v["advances"]
-                total_dec += v["declines"]
-                total_unc += v["unchanged"]
+    async def _parse_response(payload) -> dict:
+        # allIndices API: market-wide totals at top level, per-index in data[]
+        if isinstance(payload, dict) and "advances" in payload and "declines" in payload:
+            total_adv = int(_safe_float(payload.get("advances") or 0))
+            total_dec = int(_safe_float(payload.get("declines") or 0))
+            total_unc = int(_safe_float(payload.get("unchanged") or 0))
+            # Per-index breakdown from data array
+            by_index: dict[str, dict] = {}
+            for row in (payload.get("data") or []):
+                idx_name = row.get("indexSymbol") or row.get("index") or ""
+                if idx_name:
+                    by_index[idx_name] = {
+                        "advances":  int(_safe_float(row.get("advances") or 0)),
+                        "declines":  int(_safe_float(row.get("declines") or 0)),
+                        "unchanged": int(_safe_float(row.get("unchanged") or 0)),
+                    }
+        else:
+            # Legacy list-of-rows format (old liveanalysis endpoint)
+            rows = payload if isinstance(payload, list) else []
+            total_adv = total_dec = total_unc = 0
+            by_index = {}
+            for row in rows:
+                idx_name = row.get("indexSymbol") or row.get("index") or row.get("name") or ""
+                adv = int(_safe_float(row.get("advances")  or row.get("advance")  or 0))
+                dec = int(_safe_float(row.get("declines")  or row.get("decline")  or 0))
+                unc = int(_safe_float(row.get("unchanged") or row.get("noChange") or 0))
+                if idx_name:
+                    by_index[idx_name] = {"advances": adv, "declines": dec, "unchanged": unc}
+                if "TOTAL" in idx_name.upper() or "ALL" in idx_name.upper():
+                    total_adv, total_dec, total_unc = adv, dec, unc
+            if total_adv == 0 and by_index:
+                for v in by_index.values():
+                    total_adv += v["advances"]
+                    total_dec += v["declines"]
+                    total_unc += v["unchanged"]
 
         if total_adv == 0 and total_dec == 0:
             return {}
 
         total    = total_adv + total_dec + total_unc
         ad_ratio = total_adv / max(total_dec, 1)
-
         return {
             "advances":     total_adv,
             "declines":     total_dec,
@@ -142,9 +153,36 @@ async def fetch_nse_advances_declines() -> dict:
             "by_index":     by_index,
         }
 
+    # Primary: curl_cffi with Chrome TLS fingerprint
+    try:
+        from curl_cffi.requests import AsyncSession as _CurlSession  # noqa: PLC0415
+        async with _CurlSession(impersonate="chrome124") as curl:
+            await curl.get(_NSE_HOME, headers=_curl_headers, timeout=15)
+            await asyncio.sleep(1)
+            r = await curl.get(_ADV_DEC_URL, headers=_curl_headers, timeout=15)
+        if r.status_code == 200:
+            result = await _parse_response(r.json())
+            if result:
+                logger.debug(f"[breadth] NSE curl_cffi: {result['advances']} adv/{result['declines']} dec")
+                return result
+    except Exception as exc:
+        logger.warning(f"[breadth] curl_cffi fetch failed: {exc}")
+
+    # Fallback: plain httpx (no Brotli — gzip only)
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
+            await asyncio.sleep(1)
+            r = await client.get(_ADV_DEC_URL, headers=BROWSER_HEADERS)
+        if r.status_code == 200:
+            result = await _parse_response(r.json())
+            if result:
+                return result
+        logger.warning(f"[breadth] NSE advances API returned {r.status_code}")
     except Exception as exc:
         logger.warning(f"[breadth] NSE advances/declines fetch failed: {exc}")
-        return {}
+
+    return {}
 
 
 async def fetch_nse_gainers_losers() -> dict:
@@ -193,7 +231,14 @@ def compute_breadth_from_cache() -> dict:
     """Synchronously compute breadth from PRICE_CACHE — always succeeds."""
     from crawler.live_prices import PRICE_CACHE
 
-    stocks = [v for v in PRICE_CACHE.values() if v.get("type") == "stock"]
+    # Kite WebSocket items have type=None; include any entry that has a real price.
+    # Exclude index symbols (start with ^ or match known index names without .NS).
+    _INDEX_PREFIXES = ("^", "NIFTY", "SENSEX", "INDIA VIX", "NIFTYBEES")
+    stocks = [
+        v for v in PRICE_CACHE.values()
+        if v.get("price") is not None
+        and not any(str(v.get("symbol", "")).upper().startswith(p) for p in _INDEX_PREFIXES)
+    ]
 
     if not stocks:
         return {

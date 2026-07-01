@@ -86,6 +86,8 @@ def india_price_scan():
 # ── 2. india_fii_dii_fetch — daily 13:00 UTC (18:30 IST) ─────────────────────
 
 async def _india_fii_dii_fetch():
+    import datetime
+    from zoneinfo import ZoneInfo
     from crawler.fii_dii_crawler import fetch_fii_dii_data, save_fii_dii_to_db
     from tasks._db import celery_session
 
@@ -94,8 +96,11 @@ async def _india_fii_dii_fetch():
         await save_fii_dii_to_db(data, session)
         await session.commit()
 
+    today_ist = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    data_date = data.get("date")
+    freshness = "FRESH" if data_date == today_ist else f"STALE ({data_date} vs today {today_ist})"
     logger.info(
-        f"[india_fii_dii] "
+        f"[india_fii_dii] {freshness}  "
         f"fii_net={data.get('fii_net_buy', 0):+,.0f} Cr  "
         f"dii_net={data.get('dii_net_buy', 0):+,.0f} Cr  "
         f"direction={data.get('market_direction', '?')}"

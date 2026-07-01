@@ -50,7 +50,10 @@ BROWSER_HEADERS: dict[str, str] = {
     ),
     "Accept":          "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Exclude 'br' (Brotli) — httpx can't decompress it without the brotli
+    # package; removing it forces NSE to respond with gzip which httpx handles
+    # natively. curl_cffi (used in fetch_fii_dii_data) handles br natively.
+    "Accept-Encoding": "gzip, deflate",
     "Referer":         "https://www.nseindia.com/",
     "Connection":      "keep-alive",
     "sec-fetch-dest":  "empty",
@@ -257,45 +260,70 @@ async def _last_flow_from_db(session: AsyncSession | None) -> dict:
 async def fetch_fii_dii_data(session: AsyncSession | None = None) -> dict:
     """Fetch today's FII/DII institutional flow from NSE.
 
-    Two-step request pattern (required by NSE):
-      1. GET the NSE homepage to acquire a session cookie.
-      2. GET the FII/DII JSON API endpoint within the same client session.
-
-    Falls back to the most recently stored DB row when:
-      - The HTTP request fails for any reason.
-      - NSE returns a non-200 status code.
-      - The response JSON cannot be parsed.
+    Uses curl_cffi (Chrome browser TLS fingerprint) to bypass NSE's Akamai/
+    Cloudflare bot-detection.  Falls back to the most recently stored DB row
+    when the network fetch fails for any reason.
 
     Parameters
     ----------
-    session : Optional SQLAlchemy async session.  When provided, the DB
-              fallback reuses it (safe in both FastAPI and Celery contexts).
-              When absent, the fallback opens its own ``AsyncSessionLocal`` session.
+    session : Optional SQLAlchemy async session reused by the DB fallback.
 
     Returns
     -------
     dict with keys: date, fii_net_buy, dii_net_buy, fii_gross_buy,
     fii_gross_sell, dii_gross_buy, dii_gross_sell, market_direction.
     """
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            # Step 1 — acquire NSE session cookie
-            await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
-            await asyncio.sleep(2)   # NSE bot-detection requires a pause after homepage hit
+    today_ist = datetime.datetime.now(ZoneInfo(settings.IST_TIMEZONE)).date()
+    data: dict | None = None
 
-            # Step 2 — call the actual JSON API
-            response = await client.get(_FIIDII_URL, headers=BROWSER_HEADERS)
+    # ── Primary: curl_cffi with Chrome impersonation ──────────────────────────
+    try:
+        from curl_cffi.requests import AsyncSession as _CurlSession  # noqa: PLC0415
+
+        _curl_headers = {
+            **BROWSER_HEADERS,
+            "Accept-Encoding": "gzip, deflate, br",   # curl_cffi handles br natively
+        }
+
+        async with _CurlSession(impersonate="chrome124") as curl:
+            await curl.get(_NSE_HOME, headers=_curl_headers, timeout=15)
+            await asyncio.sleep(2)
+            response = await curl.get(_FIIDII_URL, headers=_curl_headers, timeout=15)
 
         if response.status_code != 200:
-            raise ValueError(
-                f"NSE returned HTTP {response.status_code} for FII/DII endpoint"
-            )
+            raise ValueError(f"NSE returned HTTP {response.status_code}")
 
         data = _parse_fii_dii_payload(response.json())
+        logger.info(f"[fii_dii] curl_cffi fetch OK: {data['date']}  FII={data['fii_net_buy']:+,.0f}Cr")
 
     except Exception as exc:
-        logger.warning(f"FII/DII fetch failed: {exc}; using last stored flow")
-        data = await _last_flow_from_db(session)
+        logger.warning(f"[fii_dii] curl_cffi fetch failed: {exc}; falling back to httpx")
+
+    # ── Fallback: plain httpx (gzip-safe, no br) ──────────────────────────────
+    if data is None:
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                await client.get(_NSE_HOME, headers=BROWSER_HEADERS)
+                await asyncio.sleep(2)
+                response = await client.get(_FIIDII_URL, headers=BROWSER_HEADERS)
+
+            if response.status_code != 200:
+                raise ValueError(f"NSE returned HTTP {response.status_code} (httpx fallback)")
+
+            data = _parse_fii_dii_payload(response.json())
+            logger.info(f"[fii_dii] httpx fallback OK: {data['date']}")
+
+        except Exception as exc2:
+            logger.warning(f"[fii_dii] httpx fallback also failed: {exc2}; using last DB row")
+            data = await _last_flow_from_db(session)
+
+    # Warn loudly when data is stale (same date as last saved row means no update)
+    last = await _last_flow_from_db(session)
+    if data["date"] == last.get("date") and data["date"] != today_ist:
+        logger.warning(
+            f"[fii_dii] DATA STALE — returned date {data['date']} matches last DB row "
+            f"(last IST date: {today_ist}).  NSE may be blocking or data not yet published."
+        )
 
     logger.info(
         f"FII net: {data['fii_net_buy']:+,.2f} Cr  │  "
