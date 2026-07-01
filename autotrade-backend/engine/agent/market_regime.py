@@ -43,9 +43,9 @@ STRONG_BEAR   = "STRONG_BEAR"
 
 # Minimum confidence threshold for each regime (overrides AGENT_CONFIDENCE_THRESHOLD)
 REGIME_MIN_CONF: dict[str, int] = {
-    STRONG_BULL:   74,   # slightly looser — market is with us
-    MODERATE_BULL: 76,   # standard
-    SIDEWAYS:      82,   # only high-conviction setups in chop
+    STRONG_BULL:   72,   # slightly looser — market is with us
+    MODERATE_BULL: 74,   # standard
+    SIDEWAYS:      78,   # high-conviction only in chop (was 82 — too high, blocked everything)
     WEAK_BEAR:     999,  # effectively blocked
     STRONG_BEAR:   999,  # blocked
 }
@@ -173,12 +173,23 @@ def classify_regime(
             state = WEAK_BEAR   # composite says bad AND price below EMA50 → block
 
     # ── EMA200 Absolute Gate ──────────────────────────────────────────────────
-    # If Nifty is below its 200-day EMA, the long-term structural trend is broken.
-    # No pullback strategy designed for uptrends has edge in this environment —
-    # "pullbacks" in a long-term downtrend are dead-cat bounces, not re-entries.
-    # Force WEAK_BEAR unconditionally; composite score is irrelevant here.
-    if n >= 210 and price < ema200:
-        state = WEAK_BEAR
+    # If Nifty is clearly below its 200-day EMA, the long-term structural trend
+    # is broken — "pullbacks" are dead-cat bounces, not re-entries.
+    #
+    # Tolerance band: only hard-block when price is >1.5% BELOW EMA200.
+    # A gap of 0–1.5% (market hugging EMA200) is treated as SIDEWAYS ceiling,
+    # not a full bear block — it's within daily noise and doesn't deserve the
+    # same blanket veto as a -5% or -10% correction.
+    EMA200_BLOCK_MARGIN = 0.985   # block only when price < EMA200 × 0.985
+    if n >= 210:
+        if price < ema200 * EMA200_BLOCK_MARGIN:
+            # Clearly below EMA200 (>1.5% gap) — true structural downtrend, block all entries.
+            state = WEAK_BEAR
+        elif price < ema200:
+            # Within 1.5% band: market is at/near EMA200. Cap at SIDEWAYS — don't allow
+            # bullish calls, but don't completely block high-conviction setups.
+            if state in (STRONG_BULL, MODERATE_BULL):
+                state = SIDEWAYS
 
     signals = {
         "composite":     round(composite, 1),
