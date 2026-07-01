@@ -102,6 +102,26 @@ async def lifespan(app: FastAPI):
 
     _bg_task = _asyncio.create_task(_live_price_loop())
 
+    # ── Breadth refresh background task (NSE advances/declines) ─────────────
+    # Celery worker has its own in-memory BREADTH_CACHE that the regime engine
+    # uses. Uvicorn needs its own background loop so the /breadth API endpoint
+    # stays current in this process too.
+    async def _breadth_loop():
+        await _asyncio.sleep(20)   # wait for first price-cache fetch
+        while not _stop_event.is_set():
+            try:
+                from crawler.market_breadth import refresh_breadth_data
+                await refresh_breadth_data()
+            except Exception as exc:
+                logger.warning(f"[breadth] Refresh error: {exc}")
+            try:
+                await _asyncio.wait_for(_stop_event.wait(), timeout=120)
+                break
+            except _asyncio.TimeoutError:
+                pass
+
+    _asyncio.create_task(_breadth_loop())
+
     # Warm up INFO_CACHE (PE, market cap, beta…) in the background so first
     # watchlist page load has fundamental data without waiting 24 h.
     async def _warmup_info_cache():
@@ -132,6 +152,9 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     _stop_event.set()
+    for _task in _asyncio.all_tasks():
+        if _task is not _asyncio.current_task():
+            _task.cancel()
     _bg_task.cancel()
     try:
         await _bg_task
