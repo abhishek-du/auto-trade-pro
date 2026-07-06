@@ -791,12 +791,23 @@ _EARNINGS_SCORE = {"OPTIMISTIC": 30, "NEUTRAL": 0, "CAUTIOUS": -20, "NEGATIVE": 
 
 
 def _intraday_overlay(df_1m: "pd.DataFrame | None") -> tuple[float, dict]:
-    """Compute an intraday score adjustment (−10 to +10) from 1m candles.
+    """Compute an intraday score adjustment (−25 to +25) from 1m candles.
+
+    The core technical_score this feeds into is computed from DAILY (1d)
+    candles, which only get a new data point when today's session closes —
+    so on its own it can't see a reversal happening intraday until tomorrow.
+    This overlay is the only part of the score that reacts same-day.
 
     Resamples 1m bars to 5m and 15m, then evaluates:
-      • 5m  RSI(14): oversold/overbought bias            (±5)
-      • 15m RSI(14): confirms / dampens 5m reading      (±3)
-      • 5m  momentum: close vs 12-bar-ago (≈1 h)        (±2)
+      • 5m  RSI(9): oversold/overbought bias              (±5)
+      • 15m RSI(9): confirms / dampens 5m reading         (±3)
+      • 5m  momentum: close vs 12-bar-ago (≈1 h)          (±2)
+      • Reversal: today's net move so far vs the most recent ~15-20 min move
+        (±15) — fires specifically when they point in OPPOSITE directions
+        (day has been up but the last few bars are rolling over, or vice
+        versa), which is the actual definition of an intraday reversal, not
+        just "RSI is extreme". This is the term that lets the score react to
+        a reversal today instead of waiting for tomorrow's daily candle.
 
     Returns (adjustment, detail_dict).  Returns (0.0, {}) if fewer than 15
     1m bars are available (outside market hours / not enough data yet).
@@ -885,20 +896,54 @@ def _intraday_overlay(df_1m: "pd.DataFrame | None") -> tuple[float, dict]:
         elif mom_pct < -0.3:
             adj -= 1.0
 
-    adj = max(-10.0, min(10.0, adj))
+    # ── Reversal: today's move-so-far vs the last ~15-20 min (±15 points) ──
+    # day_move: open (first 1m bar today) → now. recent_move: ~4 bars of the
+    # 5m series ago (≈15-20 min) → now. A reversal is specifically when these
+    # DISAGREE in sign and the recent move is big enough to matter — e.g. the
+    # stock was up all day but the last 15 min are rolling over hard. Scaled
+    # by how strong the recent move is, capped at ±15.
+    if len(df_1m) >= 2 and len(df5) >= 4:
+        day_open = float(df_1m["open"].iloc[0])
+        cur      = float(df_1m["close"].iloc[-1])
+        day_move_pct = (cur - day_open) / day_open * 100 if day_open else 0.0
+        recent_move_pct = float((df5["close"].iloc[-1] / df5["close"].iloc[-4] - 1.0) * 100)
+        info["day_move_pct"] = round(day_move_pct, 2)
+        info["recent_move_pct"] = round(recent_move_pct, 2)
+        rev_score = 0.0
+        if day_move_pct > 0.5 and recent_move_pct < -0.5:
+            # day's been up, but rolling over now → bearish reversal
+            rev_score = max(-15.0, recent_move_pct * 6.0)
+        elif day_move_pct < -0.5 and recent_move_pct > 0.5:
+            # day's been down, but bouncing now → bullish reversal
+            rev_score = min(15.0, recent_move_pct * 6.0)
+        if rev_score != 0.0:
+            info["reversal_score"] = round(rev_score, 1)
+            adj += rev_score
+
+    adj = max(-25.0, min(25.0, adj))
     info["intraday_adj"] = round(adj, 1)
     return round(adj, 1), info
 
 
-async def score_symbol(
+def _score_symbol_sync(
     symbol: str,
     df: "pd.DataFrame",
     ctx: "MasterContext",
-    session: "AsyncSession",
-    *,
     df_1m: "pd.DataFrame | None" = None,
     swing_mode: bool = False,
 ) -> "ScoredStock":
+    """Pure CPU-bound scoring core — no DB session, no awaits.
+
+    df_1m/swing_mode are positional (not keyword-only) so this can be dispatched
+    via loop.run_in_executor(pool, _score_symbol_sync, symbol, df, ctx, df_1m, swing_mode)
+    — run_in_executor only supports positional args, no kwargs.
+
+    Split out from score_symbol() so score_universe() can dispatch it to a
+    ProcessPoolExecutor for real multi-core parallelism (Ichimoku/ADX/EMA-ribbon/
+    candlestick pattern detection is synchronous pandas math; asyncio.gather only
+    overlaps I/O waits, so running this under asyncio alone is single-core-bound).
+    Must stay a plain, module-level, picklable function — no closures.
+    """
     from engine.indicators import compute_indicators
     from engine.agent.analyzer import MarketAnalyzerAgent
 
@@ -917,8 +962,9 @@ async def score_symbol(
         _intraday_adj, _intraday_info = 0.0, {}
     else:
         technical_score = float(signals.composite_score or 0.0)
-        # Intraday overlay: nudge technical score by up to ±10 based on 5m/15m RSI + momentum.
-        # Active only when 1m candles are available (market hours); zero outside hours.
+        # Intraday overlay: nudge technical score by up to ±25 based on 5m/15m RSI,
+        # momentum, and same-day trend reversals. Active only when 1m candles are
+        # available (market hours); zero outside hours.
         _intraday_adj, _intraday_info = _intraday_overlay(df_1m)
         technical_score = max(-100.0, min(100.0, technical_score + _intraday_adj))
     try:
@@ -1000,6 +1046,19 @@ async def score_symbol(
     mf_sector_adj = ctx.mf_flows.sector_bias.get(sector, 0) * 10  # ±10 from MF flows
     sector_score = max(-50, min(50, sector_bias * 25 + mf_sector_adj))
 
+    # ── Narrative Intelligence Boost (Eagle Eyes style) ───────────────────────
+    # narrative_engine refreshes every 5 min from RSS + Telegram channels.
+    # When a sector has strong thematic momentum (e.g. "India-Japan MoU → Auto"),
+    # it receives a +10 to +25 bonus on top of the price-action sector score.
+    try:
+        from engine.narrative_engine import get_narrative_boost
+        _narrative_boost = get_narrative_boost(sector)
+        if _narrative_boost > 0:
+            sector_score = min(50, sector_score + _narrative_boost)
+            logger.debug(f"[hub] {symbol} narrative boost +{_narrative_boost} for sector={sector}")
+    except Exception:
+        pass  # Fail-open: narrative engine unavailable → no boost applied
+
     # 4. Macro (10%) — apply caution if RBI/Budget event within 7 days
     _macro_caution = -6 if ctx.events.macro_event_7d else 0
     macro_score = max(-50, min(50, ctx.macro.total_macro_bias * 12 + _macro_caution))
@@ -1073,16 +1132,20 @@ async def score_symbol(
         _regime_penalty = -20.0 if _nifty_regime == "BEAR" else 0.0
 
         _w = {
-            "technical":    0.50,
-            "sector":       0.20,
-            "momentum_12m": 0.15,
-            "volume":       0.10,
-            "macro":        0.05,
-            "news":         0.0,
+            "technical":    0.55,
+            "sector":       0.15,
+            "momentum_12m": 0.05,
+            "volume":       0.15,
+            "macro":        0.10,
+            "news":         0.12,
             "earnings":     0.0,
             "fundamental":  0.0,
             "options":      0.0,
         }
+        _total_w = sum(_w.values())
+        if _total_w > 0:
+            _w = {k: v / _total_w for k, v in _w.items()}
+
         volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
         vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
         master_score = (
@@ -1091,27 +1154,32 @@ async def score_symbol(
             momentum_12m_score * _w["momentum_12m"] +
             vol_score          * _w["volume"] +
             macro_score        * _w["macro"] +
+            news_score         * _w["news"] +
             _regime_penalty
         )
     else:
         _w = {
-            "technical":   0.35,
-            "news":        0.15 if _has_news else 0.0,
-            "sector":      0.15,  # always: known sector or market breadth fallback
+            "technical":   0.65,
+            "news":        0.12,
+            "sector":      0.10,
             "macro":       0.10,
-            "earnings":    0.10 if _has_earnings else 0.0,
-            "fundamental": 0.10 if bare in ctx.fundamentals_by_symbol else 0.0,
-            "options":     0.05,
+            "volume":      0.15,
+            "earnings":    0.0,
+            "fundamental": 0.0,
+            "options":     0.0,
         }
         _total_w = sum(_w.values())
         if _total_w > 0:
             _w = {k: v / _total_w for k, v in _w.items()}
     
+        volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
+        vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
         master_score = (
             technical_score   * _w["technical"] +
             news_score        * _w["news"] +
             sector_score      * _w["sector"] +
             macro_score       * _w["macro"] +
+            vol_score         * _w["volume"] +
             earnings_score    * _w["earnings"] +
             fundamental_score * _w["fundamental"] +
             options_score     * _w["options"]
@@ -1129,11 +1197,10 @@ async def score_symbol(
         is_blocked, blocked_reason = True, "EARNINGS_NEGATIVE"
     elif sector_mood == "STRONGLY_BEARISH" and master_score > 0:
         is_blocked, blocked_reason = True, "SECTOR_STRONGLY_BEARISH"
-    elif swing_mode and ctx.macro.nifty_regime == "BEAR" and master_score > 0:
-        # Varsity Ch 16.5: hard-block new swing entries in bear market regime.
-        # The score penalty already reduces most signals below BUY threshold;
-        # this catches edge cases that still score positive despite the -20 haircut.
-        is_blocked, blocked_reason = True, "BEAR_REGIME_SWING_BLOCK"
+    # elif swing_mode and ctx.macro.nifty_regime == "BEAR" and master_score > 0:
+    #    # Disabled per user request: allow BUY trades even in BEAR regimes
+    #    is_blocked, blocked_reason = True, "BEAR_REGIME_SWING_BLOCK"
+
 
     if sector in ctx.portfolio.overweight_sectors:
         master_score *= 0.7
@@ -1271,6 +1338,22 @@ async def score_symbol(
     )
 
 
+async def score_symbol(
+    symbol: str,
+    df: "pd.DataFrame",
+    ctx: "MasterContext",
+    session: "AsyncSession",
+    *,
+    df_1m: "pd.DataFrame | None" = None,
+    swing_mode: bool = False,
+) -> "ScoredStock":
+    """Public async API — unchanged signature (session kept for compatibility;
+    the scoring core never touches it). Used directly by api/intelligence.py's
+    single-symbol rescore endpoint. score_universe() bypasses this wrapper and
+    calls _score_symbol_sync() through a process pool instead."""
+    return _score_symbol_sync(symbol, df, ctx, df_1m=df_1m, swing_mode=swing_mode)
+
+
 async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSession,
                          timeframe: str = "1h") -> list:
     """Score every symbol. Candle fetch is serialized on the shared session
@@ -1362,23 +1445,83 @@ async def score_universe(symbols: list, ctx: MasterContext, session: AsyncSessio
     if dfs_1m:
         logger.debug(f"[hub] intraday overlay active for {len(dfs_1m)}/{len(dfs)} symbols")
 
-    # Phase 2: score in parallel (no session use inside score_symbol)
-    sem = asyncio.Semaphore(10)
+    # Phase 2: score across a process pool for real multi-core parallelism.
+    # score_symbol's underlying work (Ichimoku/ADX/EMA-ribbon/candlestick pattern
+    # detection) is synchronous pandas/numpy compute — asyncio.gather alone only
+    # overlaps I/O waits, so a plain semaphore here ran everything on one core
+    # (measured: ~0.45s/symbol × ~1700 symbols ≈ 13 min, the actual reason this
+    # cycle was blowing its 15-min schedule / 18-min soft time limit).
+    #
+    # MUST use billiard, not stdlib multiprocessing/concurrent.futures. This
+    # task runs inside a celery prefork worker, which is itself a daemonic
+    # process — stdlib multiprocessing hard-refuses to let a daemonic process
+    # spawn children ("daemonic processes are not allowed to have children"),
+    # and that refusal is identical for fork AND spawn start methods (confirmed
+    # in production: both failed 1732/1732 with this exact error). billiard is
+    # celery's own multiprocessing fork that specifically removes this
+    # restriction — it's already a celery dependency, used internally for
+    # celery's own worker pool.
+    import os
+    from billiard.pool import Pool as _BilliardPool
+    from utils.config import settings as _settings
 
-    async def score_one(symbol: str, df: pd.DataFrame):
-        async with sem:
+    loop = asyncio.get_running_loop()
+    max_workers = max(1, min(int(getattr(_settings, "HUB_SCORE_WORKERS", 2)), os.cpu_count() or 2))
+
+    def _dispatch(pool: "_BilliardPool", symbol: str, df: pd.DataFrame) -> "asyncio.Future":
+        fut = loop.create_future()
+
+        def _ok(result):
+            if not fut.done():
+                loop.call_soon_threadsafe(fut.set_result, result)
+
+        def _err(exc):
+            if not fut.done():
+                loop.call_soon_threadsafe(fut.set_exception, exc)
+
+        pool.apply_async(
+            _score_symbol_sync,
+            (symbol, df, ctx, dfs_1m.get(symbol), swing_flags.get(symbol, False)),
+            callback=_ok, error_callback=_err,
+        )
+        return fut
+
+    async def score_one(pool, symbol: str, df: pd.DataFrame):
+        try:
+            return await _dispatch(pool, symbol, df)
+        except Exception as exc:
+            logger.warning(f"[hub] score error on {symbol}: {exc}")
+            return None
+
+    scored: list = []
+    try:
+        pool = _BilliardPool(processes=max_workers)
+        try:
+            results = await asyncio.gather(*[score_one(pool, s, d) for s, d in dfs.items()])
+        finally:
+            pool.terminate()
+            pool.join()
+        scored = [r for r in results if r is not None]
+        if not scored and dfs:
+            # Every single symbol failed — something is wrong with the pool
+            # itself (not a per-symbol issue), so don't silently return an
+            # empty scoreboard. Fall through to the in-process fallback below.
+            raise RuntimeError("billiard pool returned 0/%d scores — pool itself is broken" % len(dfs))
+    except Exception as exc:
+        # Safety net: never let a broken pool silently zero out the Hub's
+        # scoreboard (this happened twice in production while landing this
+        # feature). Fall back to plain single-core scoring — slower, but
+        # correct — rather than feeding india_trade_loop nothing.
+        logger.error(f"[hub] process-pool scoring failed ({exc}) — falling back to single-core scoring")
+        scored = []
+        for symbol, df in dfs.items():
             try:
-                return await score_symbol(
-                    symbol, df, ctx, session,
-                    df_1m=dfs_1m.get(symbol),
-                    swing_mode=swing_flags.get(symbol, False)
-                )
-            except Exception as exc:
-                logger.debug(f"[hub] score error on {symbol}: {exc}")
-                return None
+                scored.append(_score_symbol_sync(
+                    symbol, df, ctx, dfs_1m.get(symbol), swing_flags.get(symbol, False)
+                ))
+            except Exception as sym_exc:
+                logger.debug(f"[hub] score error on {symbol}: {sym_exc}")
 
-    results = await asyncio.gather(*[score_one(s, d) for s, d in dfs.items()])
-    scored = [r for r in results if r is not None]
     scored.sort(key=lambda x: (not x.is_blocked, x.master_score), reverse=True)
     return scored
 

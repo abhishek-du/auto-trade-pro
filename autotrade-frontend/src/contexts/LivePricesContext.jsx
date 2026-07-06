@@ -98,7 +98,16 @@ export function LivePricesProvider({ children }) {
       clearInterval(pingRef.current);
       if (!mountedRef.current) return;
       setConnected(false);
-      reconnectRef.current = setTimeout(connect, RECONNECT_MS);
+      
+      const retries = reconnectRef.current?.retries || 0;
+      if (retries < 3) {
+        reconnectRef.current = setTimeout(() => {
+          reconnectRef.current.retries = retries + 1;
+          connect();
+        }, RECONNECT_MS);
+      } else {
+        console.warn('WebSocket failed 3 times. Falling back to REST polling entirely.');
+      }
     };
 
     ws.onerror = () => {

@@ -58,14 +58,20 @@ function useAdaptiveFetch(path, fastMs, slowMs, isFast, transform = (x) => x) {
   }, [path]);
   useEffect(() => {
     let timer;
+    let cancelled = false;
     const tick = async () => {
       await fetchIt();
+      if (cancelled) return;
       const ms = isFast(dataRef.current) ? fastMs : slowMs;
       timer = setTimeout(tick, ms);
     };
     tick();
-    return () => clearTimeout(timer);
-  }, [fetchIt, fastMs, slowMs, isFast]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchIt, fastMs, slowMs]);
   return data;
 }
 

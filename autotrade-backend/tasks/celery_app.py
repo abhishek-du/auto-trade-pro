@@ -30,6 +30,7 @@ celery_app = Celery(
     include=[
         "tasks.market_scan",
         "tasks.news_scan",
+        "tasks.narrative_scan",
         "tasks.paper_trade_loop",
         "tasks.india_tasks",
         "tasks.market_scanner",
@@ -83,6 +84,14 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_price_scan",
         "schedule": 30,
         "options":  {"countdown": 5},
+    },
+
+    # Every 5 min during NSE hours: refresh narrative intelligence cache
+    # (RSS + Telegram → LLM decoder → sector boost scores for the Hub)
+    "narrative-intelligence-every-5min": {
+        "task":     "tasks.refresh_narrative_intelligence",
+        "schedule": 300,
+        "options":  {"countdown": 20},
     },
 
     # Daily 13:00 UTC = 6:30 PM IST: FII/DII flow from NSE

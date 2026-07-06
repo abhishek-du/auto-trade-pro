@@ -68,6 +68,24 @@ class VirtualWallet:
         await session.flush()
 
     @staticmethod
+    def _update_drawdown(wallet: WalletRow) -> None:
+        """Update high-water mark / max drawdown from EQUITY, not cash `balance`.
+
+        `balance` is free cash and swings every time margin is deducted/returned
+        on open/close — that's capital being parked, not lost. Tracking drawdown
+        off `balance` produces a false "crash" any time a lot of margin is
+        deployed at once (was reading ~49% off a book that only cost ~1.8% of
+        real equity). `peak_balance`/`max_drawdown` keep their existing field
+        names (avoiding a schema/API rename) but now track peak EQUITY.
+        """
+        if wallet.equity > wallet.peak_balance:
+            wallet.peak_balance = wallet.equity
+        if wallet.peak_balance > 0:
+            current_dd = (wallet.peak_balance - wallet.equity) / wallet.peak_balance * 100
+            if current_dd > wallet.max_drawdown:
+                wallet.max_drawdown = current_dd
+
+    @staticmethod
     async def _start_balance(session: AsyncSession) -> float:
         """Return the configured paper-trading starting balance from RuntimeSettings.
 
@@ -186,18 +204,9 @@ class VirtualWallet:
         if pnl > 0:
             wallet.winning_trades += 1
 
-        # Update high-water mark
-        if wallet.balance > wallet.peak_balance:
-            wallet.peak_balance = wallet.balance
-
-        # Recalculate max drawdown
-        if wallet.peak_balance > 0:
-            current_dd = (wallet.peak_balance - wallet.balance) / wallet.peak_balance * 100
-            if current_dd > wallet.max_drawdown:
-                wallet.max_drawdown = current_dd
-
         start = await VirtualWallet._start_balance(session)
         wallet.equity = start + wallet.realised_pnl + wallet.unrealised_pnl
+        VirtualWallet._update_drawdown(wallet)
         await session.flush()
 
         sign = "+" if pnl >= 0 else ""
@@ -234,6 +243,7 @@ class VirtualWallet:
         start  = await VirtualWallet._start_balance(session)
         wallet.unrealised_pnl = total_unrealised
         wallet.equity = start + wallet.realised_pnl + total_unrealised
+        VirtualWallet._update_drawdown(wallet)
         await session.flush()
 
     # ─────────────────────────────────────────────────────────────────────────

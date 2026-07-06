@@ -609,6 +609,22 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
 
     auto_closed: list[dict] = []
 
+    # ── Sector-mood reversal exit ──────────────────────────────────────────────
+    # Pure price-based SL/TP (below) only reacts once a move has already
+    # happened — bad sector/market news doesn't get ahead of it. build_sector_context()
+    # is a cheap in-memory cache read (no DB/API call), safe to call every cycle.
+    # A prior version of this check existed (tasks/india_tasks.py's
+    # run_master_intelligence_cycle) but operated on AgentPosition — a parallel
+    # portfolio object that has never held a real position (confirmed empty,
+    # 2026-07-06) — so it never actually protected anything. This is the same
+    # check wired into the loop that manages the real, live positions.
+    try:
+        from engine.intelligence_hub import build_sector_context, _get_sector_for_symbol
+        _sector_moods = build_sector_context().sector_moods
+    except Exception as exc:
+        logger.debug(f"update_positions: sector context unavailable: {exc}")
+        _sector_moods = {}
+
     for pos in positions:
         # ── F&O positions: mark to live option/future price (not candles) ──────
         if getattr(pos, "instrument_type", "EQUITY") in ("CE", "PE", "FUTURE"):
@@ -645,6 +661,40 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             price = candle.close
 
         is_buy = pos.direction == TradeDirection.BUY
+
+        # ── Sector-mood reversal exit ──────────────────────────────────────────
+        # Exit ahead of the stop-loss when this position's sector has turned
+        # hard against it — a long whose sector just went STRONGLY_BEARISH, or
+        # a short whose sector just went STRONGLY_BULLISH. Proactive, not
+        # reactive: doesn't wait for price to travel all the way to the SL.
+        if _sector_moods:
+            _sec = _get_sector_for_symbol(pos.symbol)
+            _mood = _sector_moods.get(_sec)
+            _sector_hit = (
+                (is_buy and _mood == "STRONGLY_BEARISH") or
+                (not is_buy and _mood == "STRONGLY_BULLISH")
+            )
+            if _sector_hit:
+                try:
+                    async with session.begin_nested():
+                        closed_trade = await close_paper_trade(pos, price, "SECTOR_REVERSAL", session)
+                    auto_closed.append({
+                        "trade_id":    closed_trade.id,
+                        "symbol":      closed_trade.symbol,
+                        "reason":      "SECTOR_REVERSAL",
+                        "exit_price":  price,
+                        "pnl":         closed_trade.pnl,
+                        "entry_price": closed_trade.entry_price,
+                        "size_units":  closed_trade.size_units,
+                        "direction":   pos.direction.value,
+                    })
+                    logger.warning(
+                        f"[sector_exit] {pos.symbol}: sector {_sec} turned {_mood} "
+                        f"against {'long' if is_buy else 'short'} — exited @ ₹{price:.2f}"
+                    )
+                except Exception as exc:
+                    logger.warning(f"update_positions: {pos.symbol} sector-exit close failed: {exc}")
+                continue
 
         # ── Trailing stop after Target 1 ──────────────────────────────────────
         # Once price touches T1, ratchet the stop to trail the high-water mark by
@@ -722,17 +772,28 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             is_trailing = bool(tm.get("trailing")) if tm else False
             reason = ("TRAIL_STOP" if hit_sl and is_trailing
                       else "STOP_LOSS" if hit_sl else "TAKE_PROFIT")
-            closed_trade = await close_paper_trade(pos, price, reason, session)
-            auto_closed.append({
-                "trade_id":    closed_trade.id,
-                "symbol":      closed_trade.symbol,
-                "reason":      reason,
-                "exit_price":  price,
-                "pnl":         closed_trade.pnl,
-                "entry_price": closed_trade.entry_price,
-                "size_units":  closed_trade.size_units,
-                "direction":   pos.direction.value,
-            })
+            try:
+                # SAVEPOINT: isolate this close so a deadlock/DB error here can't
+                # poison the shared session and silently break SL/TP monitoring
+                # for every other open position in this cycle (this is the exact
+                # bug class that let 29 MIS shorts run unmonitored for 3 days on
+                # 2026-07-03 — that failure was in intraday_squareoff, but this
+                # loop is the actual per-minute SL/TP watcher and had zero
+                # per-position isolation at all).
+                async with session.begin_nested():
+                    closed_trade = await close_paper_trade(pos, price, reason, session)
+                auto_closed.append({
+                    "trade_id":    closed_trade.id,
+                    "symbol":      closed_trade.symbol,
+                    "reason":      reason,
+                    "exit_price":  price,
+                    "pnl":         closed_trade.pnl,
+                    "entry_price": closed_trade.entry_price,
+                    "size_units":  closed_trade.size_units,
+                    "direction":   pos.direction.value,
+                })
+            except Exception as exc:
+                logger.warning(f"update_positions: {pos.symbol} SL/TP close failed: {exc}")
             continue
 
         # ── Time-based stale exit ─────────────────────────────────────────────
@@ -751,21 +812,25 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 )
                 upct_now = (upnl_now / notional_now * 100) if notional_now > 0 else 0.0
                 if upct_now < -2.0:  # only exit if actually losing (not just slow)
-                    closed_trade = await close_paper_trade(pos, price, "STALE_EXIT", session)
-                    auto_closed.append({
-                        "trade_id":    closed_trade.id,
-                        "symbol":      closed_trade.symbol,
-                        "reason":      "STALE_EXIT",
-                        "exit_price":  price,
-                        "pnl":         closed_trade.pnl,
-                        "entry_price": closed_trade.entry_price,
-                        "size_units":  closed_trade.size_units,
-                        "direction":   pos.direction.value,
-                    })
-                    logger.info(
-                        f"[stale] {pos.symbol}: {days_held}d held, "
-                        f"upct={upct_now:.1f}% — stale loser exit at ₹{price:.2f}"
-                    )
+                    try:
+                        async with session.begin_nested():   # see SAVEPOINT note above
+                            closed_trade = await close_paper_trade(pos, price, "STALE_EXIT", session)
+                        auto_closed.append({
+                            "trade_id":    closed_trade.id,
+                            "symbol":      closed_trade.symbol,
+                            "reason":      "STALE_EXIT",
+                            "exit_price":  price,
+                            "pnl":         closed_trade.pnl,
+                            "entry_price": closed_trade.entry_price,
+                            "size_units":  closed_trade.size_units,
+                            "direction":   pos.direction.value,
+                        })
+                        logger.info(
+                            f"[stale] {pos.symbol}: {days_held}d held, "
+                            f"upct={upct_now:.1f}% — stale loser exit at ₹{price:.2f}"
+                        )
+                    except Exception as exc:
+                        logger.warning(f"update_positions: {pos.symbol} stale-exit close failed: {exc}")
                     continue
 
         # ── Update unrealised PnL ──────────────────────────────────────────────

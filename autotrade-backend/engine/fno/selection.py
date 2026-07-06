@@ -296,9 +296,18 @@ async def current_option_premium(pos: OpenPosition, session: AsyncSession) -> fl
     """Current premium for an open option position.
 
     Order: WebSocket PRICE_CACHE → Kite REST LTP → latest snapshot → Black-Scholes.
+
+    The symbol-based lookups (1, 2) only need pos.symbol — they must run even
+    when underlying_symbol/strike_price/expiry_date are missing. Only the
+    strike/expiry-dependent snapshot lookup (3) and Black-Scholes reprice (4)
+    actually require those fields. A prior version returned None up front
+    whenever expiry_date was empty, which silently blocked ALL pricing —
+    including the cheap by-symbol lookups — for the position's entire life.
+    Observed in production: two BANKNIFTY option positions with a null
+    expiry_date never got a single price update in 4 days, so the eventual
+    squareoff fell back to a stale current_price equal to the entry price,
+    reporting a fake ₹0.00 P&L on what was actually a ~₹59,490 loss.
     """
-    if not pos.underlying_symbol or not pos.strike_price or not pos.expiry_date:
-        return None
     # 1. WebSocket live feed — fastest, no API call, already subscribed via zerodha_ticker.
     try:
         from crawler.live_prices import PRICE_CACHE
@@ -311,6 +320,10 @@ async def current_option_premium(pos: OpenPosition, session: AsyncSession) -> fl
     live = await _kite_ltp_nfo(pos.symbol)
     if live is not None:
         return live
+
+    if not pos.underlying_symbol or not pos.strike_price or not pos.expiry_date:
+        return None
+
     prem = await _latest_premium(
         pos.underlying_symbol, pos.strike_price, pos.option_type, pos.expiry_date, session
     )
@@ -485,13 +498,34 @@ async def composite_index_signal(underlying: str, session: AsyncSession) -> dict
     except Exception:
         pass
 
-    # 6. News mood (10)
+    # 6. News mood (10) — amplified when a real narrative-engine catalyst backs it
     news = (await session.execute(
         select(NewsItem.score).order_by(_desc(NewsItem.crawled_at)).limit(20)
     )).scalars().all()
     if news:
         avg = sum(float(x or 0) for x in news) / len(news)
         news_s = max(-1, min(1, avg * 2)) * 10
+
+        # Narrative boost cache — same "Eagle Eyes style" RSS+Telegram-derived
+        # sector-heat signal used for equity scoring. BANKNIFTY maps directly
+        # to the Banking sector; NIFTY/FINNIFTY use the strongest currently-hot
+        # sector as a market-wide narrative-heat proxy. Only strengthens an
+        # already-positive reading (a hot narrative shouldn't invent a signal
+        # that isn't there) — this is what lets a genuine catalyst day (e.g.
+        # an MoU, a PLI announcement) actually push the index-option
+        # confidence score higher instead of the news factor staying muted at
+        # raw sentiment-average noise levels.
+        try:
+            from engine.narrative_engine import NARRATIVE_BOOST_CACHE, get_narrative_boost
+            if underlying.upper() == "BANKNIFTY":
+                boost = get_narrative_boost("Banking")
+            else:
+                boost = max((d.get("boost", 0) for d in NARRATIVE_BOOST_CACHE.values()), default=0.0)
+            if boost > 0 and news_s > 0:
+                news_s = min(10.0, news_s + boost / 40.0 * 4.0)  # up to +4 extra at boost=40
+        except Exception:
+            pass
+
         score += news_s
         factors.append({"factor": "news", "score": round(news_s, 1), "detail": f"avg sentiment {avg:+.2f}"})
 

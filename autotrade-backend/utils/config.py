@@ -23,12 +23,25 @@ class Settings(BaseSettings):
     WATCHLIST_FOREX:  str = "USD/INR,EUR/INR,GBP/INR,JPY/INR"
     WATCHLIST_STOCKS: str = "RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,SBIN.NS,BHARTIARTL.NS,KOTAKBANK.NS,LT.NS,ITC.NS"
 
+    # Public Telegram channel usernames (no @ / no t.me prefix) to scrape for
+    # narrative/theme signals via the public t.me/s/<channel> web preview — no
+    # bot token or login needed, works for any public channel. Comma-separated.
+    # Investigated 2026-07-06: narrative_engine.py's docstring always described
+    # Telegram as a source, but only RSS was ever actually implemented.
+    NARRATIVE_TELEGRAM_CHANNELS: str = "eagleeyesmarketanalysis"
+
     # ── Indian market watchlists ──────────────────────────────────────────────
     WATCHLIST_NSE_LARGE_CAP: list[str] = [
         "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR",
         "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK", "LT", "AXISBANK",
         "ASIANPAINT", "MARUTI", "BAJFINANCE", "WIPRO", "HCLTECH",
         "ULTRACEMCO", "NESTLEIND", "POWERGRID", "SUNPHARMA", "DRREDDY",
+        # NIFTYBEES: not a stock, but the market_regime.py 5-state engine and
+        # intelligence_hub's macro context both read NIFTYBEES.NS daily candles
+        # as the Nifty proxy. It's outside the 8200-symbol Hub universe backfill
+        # (which routinely times out before reaching most symbols), so it needs
+        # a spot in this small, reliably-completing daily sync to stay fresh.
+        "NIFTYBEES",
     ]
     WATCHLIST_NSE_MID_CAP: list[str] = [
         "PIDILITIND", "VOLTAS", "MUTHOOTFIN", "PERSISTENT", "COFORGE",
@@ -378,6 +391,13 @@ class Settings(BaseSettings):
     CONVICTION_HIGH:       float = 70.0    # confidence at which risk hits RISK_PER_TRADE_MAX
     MAX_NEW_ENTRIES_PER_CYCLE: int = 8     # don't fill the whole budget in one 60s cycle
 
+    # Worker processes for score_universe's per-symbol scoring (Ichimoku/ADX/EMA-ribbon/
+    # candlestick pattern detection is CPU-bound — asyncio.gather gives no real parallelism
+    # for it, only a process pool does). Kept conservative on a 4-core box: this task shares
+    # the machine with 4 other celery worker processes, so leave headroom rather than using
+    # every core for this one job.
+    HUB_SCORE_WORKERS: int = 2
+
     # ── Risk / trade sizing ───────────────────────────────────────────────────
     ATR_MULTIPLIER: float = 2.0       # stop = entry ± ATR × this
     MIN_RISK_REWARD: float = 2.0      # take-profit = entry ± risk × this
@@ -515,6 +535,10 @@ class Settings(BaseSettings):
     @property
     def stock_symbols(self) -> list[str]:
         return [s.strip() for s in self.WATCHLIST_STOCKS.split(",") if s.strip()]
+
+    @property
+    def narrative_telegram_channels(self) -> list[str]:
+        return [s.strip().lstrip("@") for s in self.NARRATIVE_TELEGRAM_CHANNELS.split(",") if s.strip()]
 
     @property
     def nse_symbols(self) -> list[str]:
