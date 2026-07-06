@@ -183,11 +183,19 @@ async def sync_full_nse_universe(
     import datetime as _d
     from sqlalchemy import text as _text
 
+    # Excludes GOI/SDL government bonds & T-bills — Zerodha tags them
+    # instrument_type='EQ' same as real equities with no other distinguishing
+    # field, they're ~55% of this query's rows, and their numeric-coded
+    # tradingsymbols (e.g. "182D100926-TB") sort alphabetically ahead of nearly
+    # every real ticker — wasting the bulk of this rate-limited Kite historical
+    # API budget on non-equity instruments. See _backfill_hub_1d_candles for
+    # the full writeup (same bug, found in production 2026-07-06).
     rows = (await session.execute(_text("""
         SELECT tradingsymbol, instrument_token
         FROM kite_instruments
         WHERE segment='NSE' AND instrument_type='EQ'
           AND name != '' AND instrument_token > 0
+          AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
         ORDER BY tradingsymbol
     """))).all()
 

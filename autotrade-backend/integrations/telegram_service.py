@@ -226,6 +226,7 @@ def fmt_entry(decision, qty: float | None = None) -> str:
     expert_note = next((r for r in reasons if not r.startswith("[web]") and len(r) > 60), "")
 
     lines = [
+        f"🧪 <b>[PAPER TRADE] VIRTUAL EXECUTION</b> 🧪",
         f"{side_emoji} <b>TRADE EXECUTED — {side}</b> {side_emoji}",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"📌 <b>{sym}</b>  ·  Hub Score {score_str}  ·  <code>{regime}</code>",
@@ -318,6 +319,7 @@ def fmt_exit(
     reason_str = reason.replace("_", " ").replace(":", " · ")
 
     return (
+        f"🧪 <b>[PAPER TRADE] VIRTUAL EXECUTION</b> 🧪\n"
         f"{icon} <b>TRADE CLOSED</b> {icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 <b>{sym}</b>  ·  {side}\n"

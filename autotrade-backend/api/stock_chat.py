@@ -178,4 +178,7 @@ async def predict_chart(
     except Exception as e:
         llm_response = f"Failed to generate AI prediction: {str(e)}"
 
+    if not llm_response:
+        llm_response = "Prediction is currently unavailable because the AI service is experiencing rate limits (quotas exhausted during testing). Please try again in a few minutes."
+
     return {"prediction": llm_response}

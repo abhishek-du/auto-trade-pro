@@ -68,3 +68,39 @@ async def get_symbol_sentiment(symbol: str, db: AsyncSession = Depends(get_db)):
         avg_score=round(score, 4),
         description=description,
     )
+
+
+@router.get(
+    "/narrative",
+    summary="Live sector narrative boost cache (Eagle Eyes style top-down themes)",
+)
+async def get_narrative_intelligence():
+    """Returns the current sector narrative boost cache built from RSS + Telegram.
+    Auto-refreshes on first call or if cache is stale (>10 min).
+    """
+    import time
+    import datetime
+    import engine.narrative_engine as _ne  # import module, not variables
+
+    # Auto-refresh if cache is empty or stale (>10 min)
+    age = time.time() - _ne._LAST_REFRESH if _ne._LAST_REFRESH else 99999
+    if not _ne.NARRATIVE_BOOST_CACHE or age > 600:
+        await _ne.refresh_narrative_cache(force=True)
+
+    cache       = _ne.NARRATIVE_BOOST_CACHE
+    lr          = _ne._LAST_REFRESH
+    age_seconds = int(time.time() - lr) if lr else None
+    last_updated = (
+        datetime.datetime.utcfromtimestamp(lr).isoformat() + "Z" if lr else None
+    )
+
+    return {
+        "hot_sectors":       cache,
+        "summary":           _ne.get_narrative_summary(),
+        "last_updated":      last_updated,
+        "cache_age_seconds": age_seconds,
+        "total_hot_sectors": len(cache),
+    }
+
+
+

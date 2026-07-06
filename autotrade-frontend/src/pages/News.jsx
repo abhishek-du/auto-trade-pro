@@ -1,19 +1,16 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff } from 'lucide-react';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { getNews } from '../api/client';
+import { getNews, apiFetch } from '../api/client';
 import { useLivePrices } from '../contexts/LivePricesContext';
 
 /* ── Sentiment helpers ──────────────────────────────────────── */
-
 function sentimentMeta(raw) {
   const s = (raw ?? '').toString().toUpperCase();
-  if (s === 'POSITIVE' || s === 'BULLISH' || Number(raw) > 0.2) {
+  if (s === 'POSITIVE' || s === 'BULLISH' || Number(raw) > 0.2)
     return { label: 'Bullish', cls: 'bg-profit/15 text-profit border-profit/30', Icon: TrendingUp };
-  }
-  if (s === 'NEGATIVE' || s === 'BEARISH' || Number(raw) < -0.2) {
+  if (s === 'NEGATIVE' || s === 'BEARISH' || Number(raw) < -0.2)
     return { label: 'Bearish', cls: 'bg-loss/15 text-loss border-loss/30', Icon: TrendingDown };
-  }
   return { label: 'Neutral', cls: 'bg-neutral/15 text-neutral border-neutral/30', Icon: Minus };
 }
 
@@ -21,13 +18,11 @@ function SentimentBadge({ sentiment }) {
   const { label, cls, Icon } = sentimentMeta(sentiment);
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${cls}`}>
-      <Icon size={11} />
-      {label}
+      <Icon size={11} />{label}
     </span>
   );
 }
 
-/* overall sentiment gauge (–100 to +100 mapped from avg score) */
 function SentimentGauge({ articles }) {
   const score = useMemo(() => {
     if (!articles.length) return 0;
@@ -41,9 +36,9 @@ function SentimentGauge({ articles }) {
     return Math.max(-1, Math.min(1, sum / articles.length));
   }, [articles]);
 
-  const pct     = ((score + 1) / 2) * 100;
-  const label   = score > 0.15 ? 'Overall Bullish' : score < -0.15 ? 'Overall Bearish' : 'Neutral Sentiment';
-  const color   = score > 0.15 ? '#10B981' : score < -0.15 ? '#EF4444' : '#6B7280';
+  const pct   = ((score + 1) / 2) * 100;
+  const label = score > 0.15 ? 'Overall Bullish' : score < -0.15 ? 'Overall Bearish' : 'Neutral Sentiment';
+  const color = score > 0.15 ? '#10B981' : score < -0.15 ? '#EF4444' : '#6B7280';
 
   return (
     <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
@@ -52,36 +47,147 @@ function SentimentGauge({ articles }) {
         <span className="text-xs font-bold" style={{ color }}>{label}</span>
       </div>
       <div className="relative h-4 bg-gradient-to-r from-loss via-neutral to-profit rounded-full overflow-hidden">
-        <div
-          className="absolute top-0 bottom-0 w-1 bg-white rounded-full shadow-lg transition-all"
-          style={{ left: `calc(${pct}% - 2px)` }}
-        />
+        <div className="absolute top-0 bottom-0 w-1 bg-white rounded-full shadow-lg transition-all"
+          style={{ left: `calc(${pct}% - 2px)` }} />
       </div>
       <div className="flex justify-between text-xs text-muted">
-        <span>Bearish</span>
-        <span>Neutral</span>
-        <span>Bullish</span>
+        <span>Bearish</span><span>Neutral</span><span>Bullish</span>
       </div>
     </div>
   );
 }
 
-/* format relative time */
+/* ── Narrative Intelligence Panel (Eagle Eyes style) ─────────── */
+function NarrativePanel() {
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = () => {
+    setLoading(true);
+    apiFetch('/api/v1/news/narrative')
+      .then(d => setData(d))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const boostColor = (boost) => {
+    if (boost >= 20) return 'text-profit border-profit/40 bg-profit/10';
+    if (boost >= 12) return 'text-yellow-400 border-yellow-400/40 bg-yellow-400/10';
+    return 'text-blue-400 border-blue-400/40 bg-blue-400/10';
+  };
+
+  return (
+    <div className="glass-panel border border-accent/30 rounded-xl p-5 space-y-4 relative overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 via-transparent to-orange-500/5 pointer-events-none" />
+      <div className="flex items-center justify-between relative">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-orange-500/20 to-violet-500/20 border border-orange-500/30 flex items-center justify-center">
+            <Flame size={16} className="text-orange-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-100 font-bold text-sm">🦅 Narrative Intelligence</h3>
+            <p className="text-[10px] text-muted uppercase tracking-widest">Eagle Eyes · Live Sector Themes from RSS + Telegram</p>
+          </div>
+        </div>
+        <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-surface text-muted hover:text-accent transition-colors" title="Refresh narrative cache">
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="text-xs text-muted animate-pulse py-2">Scanning RSS + Telegram feeds…</div>
+      ) : !data || data.total_hot_sectors === 0 ? (
+        <div className="text-xs text-muted py-2">
+          No strong sector narratives detected right now.
+          <span className="ml-1 text-accent">Cache refreshes every 5 minutes during market hours.</span>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(data.hot_sectors).map(([sector, info]) => (
+              <div key={sector}
+                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold ${boostColor(info.boost)}`}>
+                <Zap size={11} />
+                <span>{sector}</span>
+                <span className="opacity-70">+{info.boost}pts</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-1.5 bg-surface/40 rounded-lg p-3">
+            {Object.entries(data.hot_sectors).map(([sector, info]) => (
+              <div key={sector} className="flex items-start gap-2 text-xs">
+                <span className="text-orange-400 font-semibold shrink-0 w-24">{sector}</span>
+                <span className="text-muted">{info.reason}</span>
+              </div>
+            ))}
+          </div>
+          {data.last_updated && (
+            <div className="flex items-center gap-1.5 text-[10px] text-muted border-t border-border/50 pt-2">
+              <Radio size={9} className="text-profit animate-pulse" />
+              <span>
+                Last refreshed: {new Date(data.last_updated).toLocaleTimeString('en-IN')}
+                {data.cache_age_seconds != null ? ` · ${Math.floor(data.cache_age_seconds / 60)}m ${data.cache_age_seconds % 60}s ago` : ''}
+              </span>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── Source breakdown ─────────────────────────────────────────── */
+function SourceBreakdown({ articles }) {
+  const counts = useMemo(() => {
+    const map = {};
+    for (const a of articles) {
+      const src = a.source || 'Unknown';
+      map[src] = (map[src] || 0) + 1;
+    }
+    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  }, [articles]);
+
+  if (!counts.length) return null;
+  const total = articles.length;
+
+  return (
+    <div className="glass-panel border border-border rounded-xl p-4">
+      <h3 className="text-slate-300 font-semibold text-xs uppercase tracking-widest mb-3 flex items-center gap-1.5">
+        <Radio size={11} className="text-accent" />
+        News Sources
+      </h3>
+      <div className="space-y-1.5">
+        {counts.map(([src, cnt]) => {
+          const pct = Math.round((cnt / total) * 100);
+          return (
+            <div key={src} className="flex items-center gap-2 text-xs">
+              <span className="text-muted w-36 truncate" title={src}>{src}</span>
+              <div className="flex-1 h-1.5 bg-surface rounded-full overflow-hidden">
+                <div className="h-full bg-accent/60 rounded-full transition-all" style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-muted w-6 text-right font-mono">{cnt}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function relTime(dateStr) {
   if (!dateStr) return '';
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
-  if (mins < 1)   return 'Just now';
-  if (mins < 60)  return `${mins}m ago`;
+  if (mins < 1)  return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
-  if (hrs  < 24)  return `${hrs}h ago`;
+  if (hrs  < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-/* ── Page ───────────────────────────────────────────────────── */
-
 const SENTIMENT_FILTERS = ['All', 'Bullish', 'Bearish', 'Neutral'];
-
 const MAX_ARTICLES = 200;
 
 export default function News() {
@@ -91,7 +197,6 @@ export default function News() {
   const [search,    setSearch]    = useState('');
   const [liveCount, setLiveCount] = useState(0);
 
-  // ── Initial REST fetch — load the existing feed on mount ───────────────────
   useEffect(() => {
     getNews()
       .then((d) => setArticles(Array.isArray(d) ? d : d?.articles ?? []))
@@ -99,7 +204,6 @@ export default function News() {
       .finally(() => setLoading(false));
   }, []);
 
-  // ── Live feed via shared WebSocket context ────────────────────────────────
   const { connected, lastNewsItem } = useLivePrices();
   const wsStatus = connected ? 'open' : 'closed';
 
@@ -114,12 +218,11 @@ export default function News() {
     setLiveCount((n) => n + 1);
   }, [lastNewsItem]);
 
-  // Normalise backend shape: headline→title, tickers_affected→symbols, score→sentiment_score
   const normalised = useMemo(() =>
     articles.map((a) => ({
       ...a,
-      title:          a.title   ?? a.headline ?? 'Untitled',
-      symbols:        a.symbols ?? a.tickers_affected ?? [],
+      title:           a.title   ?? a.headline ?? 'Untitled',
+      symbols:         a.symbols ?? a.tickers_affected ?? [],
       sentiment_score: a.sentiment_score ?? a.score ?? 0,
     })),
   [articles]);
@@ -141,8 +244,13 @@ export default function News() {
   return (
     <div className="space-y-6">
 
-      {/* Gauge — pass normalised articles so score field is consistent */}
-      <SentimentGauge articles={normalised} />
+      {/* Two-col: sentiment gauge + source breakdown */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="md:col-span-2">
+          <SentimentGauge articles={normalised} />
+        </div>
+        <SourceBreakdown articles={normalised} />
+      </div>
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
@@ -158,32 +266,24 @@ export default function News() {
         </div>
         <div className="flex rounded-lg overflow-hidden border border-border">
           {SENTIMENT_FILTERS.map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={[
-                'px-3 py-2 text-xs font-medium transition-colors',
+            <button key={f} onClick={() => setFilter(f)}
+              className={['px-3 py-2 text-xs font-medium transition-colors',
                 filter === f ? 'bg-accent text-white' : 'text-muted hover:text-slate-300 hover:bg-surface',
-              ].join(' ')}
-            >
+              ].join(' ')}>
               {f}
             </button>
           ))}
         </div>
         <span className="text-muted text-xs">{filtered.length} articles</span>
-        {/* Live-feed indicator — also acts as a passive WS health check */}
         <span
-          className={[
-            'inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full border',
+          className={['inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full border',
             wsStatus === 'connected'
               ? 'text-profit border-profit/30 bg-profit/10'
               : 'text-muted border-border bg-surface',
           ].join(' ')}
-          title={
-            wsStatus === 'connected'
-              ? `Live feed connected${liveCount ? ` · ${liveCount} new since open` : ''}`
-              : 'Live feed disconnected — using last fetch'
-          }
+          title={wsStatus === 'connected'
+            ? `Live feed connected${liveCount ? ` · ${liveCount} new since open` : ''}`
+            : 'Live feed disconnected — using last fetch'}
         >
           {wsStatus === 'connected' ? <Wifi size={11} /> : <WifiOff size={11} />}
           {wsStatus === 'connected' ? 'Live' : 'Offline'}
@@ -199,17 +299,19 @@ export default function News() {
       ) : (
         <div className="space-y-3">
           {filtered.map((a, i) => (
-            <article
-              key={a.id ?? a.url ?? i}
-              className={[
-                'glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
+            <article key={a.id ?? a.url ?? i}
+              className={['glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
                 a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
-              ].join(' ')}
-            >
+              ].join(' ')}>
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0 space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <SentimentBadge sentiment={a.sentiment} />
+                    {a._live && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-accent border border-accent/30 bg-accent/10 px-1.5 py-0.5 rounded-full animate-pulse">
+                        <Radio size={8} />LIVE
+                      </span>
+                    )}
                     {a.source && (
                       <span className="text-muted text-xs font-medium">{a.source}</span>
                     )}
@@ -231,17 +333,13 @@ export default function News() {
                   )}
                   <div className="flex items-center gap-1.5 text-muted text-xs">
                     <Clock size={11} />
-                    <span>{relTime(a.published_at ?? a.date)}</span>
+                    <span>{relTime(a.published_at ?? a.crawled_at ?? a.date)}</span>
                   </div>
                 </div>
                 {a.url && (
-                  <a
-                    href={a.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <a href={a.url} target="_blank" rel="noopener noreferrer"
                     className="p-2 text-muted hover:text-accent rounded-lg hover:bg-surface transition-colors shrink-0 opacity-0 group-hover:opacity-100"
-                    title="Open article"
-                  >
+                    title="Open article">
                     <ExternalLink size={14} />
                   </a>
                 )}

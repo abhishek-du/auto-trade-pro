@@ -447,12 +447,17 @@ async def _phase9_market_context(session) -> dict:
         nifty_ema200_ok  — True  if Nifty is ABOVE its 200-day EMA (long-term bull)
         nifty_roc20      — Nifty's 20-day rate-of-change (%), used for RS filter
         regime_allows_buy— True if 5-state regime engine is STRONG_BULL or MODERATE_BULL
+        regime_allows_sell— True unless 5-state regime engine is STRONG_BULL (mirrors
+                             RegimeResult.can_sell — don't short into a strong uptrend)
     """
     from sqlalchemy import text as _text
     import pandas as _pd
     from engine.agent.market_regime import classify_regime, build_regime_map_from_df
 
-    result = {"nifty_ema200_ok": True, "nifty_roc20": 0.0, "regime_allows_buy": True}
+    result = {
+        "nifty_ema200_ok": True, "nifty_roc20": 0.0,
+        "regime_allows_buy": True, "regime_allows_sell": True,
+    }
     try:
         rows = (await session.execute(_text("""
             SELECT close FROM candles
@@ -489,6 +494,7 @@ async def _phase9_market_context(session) -> dict:
             regime_result = await _creg(session, breadth_pct=_breadth)
             state = regime_result.state
             result["regime_allows_buy"] = state in ("STRONG_BULL", "MODERATE_BULL")
+            result["regime_allows_sell"] = regime_result.can_sell
             result["regime_state"] = state
             result["regime_score"] = regime_result.score
         except Exception as _re:
@@ -767,7 +773,9 @@ async def _india_trade_loop():
         logger.info(
             f"[phase9] EMA200={'OK' if _p9ctx['nifty_ema200_ok'] else 'BELOW'} | "
             f"regime={_p9ctx.get('regime_state','?')} | "
-            f"nifty_roc20={_p9ctx['nifty_roc20']:+.2f}%"
+            f"nifty_roc20={_p9ctx['nifty_roc20']:+.2f}% | "
+            f"buy={'OK' if _p9ctx.get('regime_allows_buy', True) else 'BLOCKED'} | "
+            f"sell={'OK' if _p9ctx.get('regime_allows_sell', True) else 'BLOCKED'}"
         )
 
         # Step 4b: compute REAL dynamic SL/targets + Phase 9 per-signal indicators.
@@ -972,8 +980,10 @@ async def _india_trade_loop():
                 break
 
             # ── Phase 9 Quality Gate — mirrors the exact filters proven in backtest ──
-            # All 4 checks must pass for a BUY to proceed. SELLs are not filtered
-            # (the short book is independent of the long-trend Phase 9 logic).
+            # All 4 checks must pass for a BUY to proceed. SELLs get their own
+            # market-regime check below (Gate S1) — the 5-state engine was computed
+            # per-cycle above but previously never consulted for shorts, which let
+            # the short book fire regardless of the broader market's direction.
             if signal.action == "BUY":
                 # Gate 1: EMA200 absolute bear-market gate
                 if not _p9ctx["nifty_ema200_ok"]:
@@ -1041,6 +1051,24 @@ async def _india_trade_loop():
                     await SimLogger.log_analysis_cycle(
                         session, signal.symbol, signal, rejected=True,
                         reject_reason="[phase9] PULLBACK_LONG pattern not confirmed — no valid setup",
+                    )
+                    continue
+
+            elif signal.action == "SELL":
+                # Gate S1: 5-state regime engine — block new shorts when the market
+                # itself is STRONG_BULL. Per-stock BEAR_TRENDING/RANGE labels (from
+                # analyzer._classify_regime) only look at that stock's own EMA/ADX —
+                # they have no idea whether Nifty is rallying underneath them. This
+                # is the gate that was missing.
+                if not _p9ctx.get("regime_allows_sell", True):
+                    _rstate = _p9ctx.get("regime_state", "?")
+                    logger.info(
+                        f"[phase9] BLOCK {signal.symbol} — regime={_rstate} "
+                        f"(STRONG_BULL blocks new shorts)"
+                    )
+                    await SimLogger.log_analysis_cycle(
+                        session, signal.symbol, signal, rejected=True,
+                        reject_reason=f"[phase9] regime={_rstate} — STRONG_BULL blocks shorts",
                     )
                     continue
 
@@ -1874,7 +1902,17 @@ async def _intraday_squareoff_task():
                 close_price = pos.current_price
 
             try:
-                trade = await close_paper_trade(pos, close_price, "MIS_SQUAREOFF", session)
+                # Per-position SAVEPOINT: a deadlock or any other DB error on one
+                # position poisons the whole shared session's transaction — every
+                # later statement fails with "current transaction is aborted"
+                # until a rollback happens. Observed 2026-07-03: a deadlock on the
+                # 8th close cascaded into 29 more silent failures, leaving those
+                # MIS positions open and unmonitored for 3 days. begin_nested()
+                # gives each close its own SAVEPOINT that rolls back on exception
+                # without poisoning the outer session, so one failure can't take
+                # down the rest of the sweep.
+                async with session.begin_nested():
+                    trade = await close_paper_trade(pos, close_price, "MIS_SQUAREOFF", session)
                 pnl = float(trade.pnl or 0)
                 total_pnl += pnl
                 closed += 1
@@ -2502,6 +2540,32 @@ def run_master_intelligence_cycle():
         portfolio   = _get_portfolio()
         cycle_start = datetime.utcnow()
 
+        # ── Overlap guard ──────────────────────────────────────────────────────
+        # This cycle scores ~1,700 symbols and can run close to its own 15-min
+        # schedule interval under CPU contention. Without this guard, a slow
+        # cycle plus beat's next tick stack multiple heavy scoring passes on the
+        # same 4 worker slots, each one making the others slower — a
+        # self-inflicted pile-up (observed: 5 rows stuck "running" back to back
+        # after a cold restart). Skip this tick if the previous one hasn't
+        # finished (or errored/timed-out without updating its row) yet.
+        from datetime import timedelta as _timedelta
+        from sqlalchemy import select as _sel_guard
+        _guard_cutoff = cycle_start - _timedelta(seconds=1200)
+        async for _gsession in get_db():
+            _running = (await _gsession.execute(
+                _sel_guard(HubCycleLog.id).where(
+                    HubCycleLog.status == "running",
+                    HubCycleLog.cycle_start >= _guard_cutoff,
+                ).limit(1)
+            )).scalar_one_or_none()
+            break
+        if _running is not None:
+            logger.warning(
+                "[hub] previous cycle still running — skipping this tick to avoid "
+                "stacking concurrent scoring passes"
+            )
+            return
+
         # ── Live snapshot: hot-patch PRICE_CACHE + SECTOR_CACHE from Kite ─────
         # Celery workers never receive WebSocket ticks — without this every
         # downstream PRICE_CACHE read (macro, VIX, sector mood, entry price)
@@ -2827,7 +2891,7 @@ def zerodha_token_refresh_task():
             _sys.path.insert(0, _root)
 
         from scripts.refresh_zerodha_token import main as _refresh
-        _refresh(backend="http://localhost:8000")
+        _refresh(backend="http://127.0.0.1:8000")
         logger.info("[zerodha_token_refresh] Token refreshed successfully")
 
         # The OAuth exchange happens in the BACKEND process (via the callback), so
@@ -3203,21 +3267,66 @@ async def _backfill_hub_1d_candles():
 
     Runs at 3:10 AM daily — after sync_nse_eq_instruments (3:00 AM) and
     before hub rebuild (3:30 AM, rescheduled). Skips symbols whose last
-    candle is already today (idempotent). Uses concurrent batches of 30.
+    candle is already today (idempotent).
+
+    Uses the Kite historical API, not yfinance. Measured in production:
+    yfinance throughput (even after excluding bond/T-bill dead weight below)
+    sustained only ~0.2-0.25 symbols/sec, and pushing concurrency higher just
+    triggered Yahoo's opaque per-IP throttling (20s stalls per request,
+    net throughput *dropped*). Kite's historical endpoint has a documented,
+    predictable rate limit (~3 req/sec) instead of an unknown one, and it's
+    the same authenticated broker connection already used elsewhere in this
+    codebase for exactly this purpose (see sync_all_nse_candles). Sequential
+    with a 0.35s delay stays safely under 3 req/sec — ~3,500 symbols in one
+    run fits comfortably inside the time budget below.
     """
     import asyncio as _asyncio
     from sqlalchemy import text as _text
-    from crawler.price_feed import fetch_candles, save_candles_to_db
+    from crawler.price_feed import save_candles_to_db
+    from crawler.zerodha_historical import get_kite_candles_for_range
     from tasks._db import celery_session
     import datetime as _dt
 
-    # Fetch ALL NSE EQ symbols from kite_instruments
+    from crawler.zerodha_kite_lib import get_kite
+    kite = get_kite()
+    if not kite.access_token:
+        logger.warning("[backfill_hub_1d] Zerodha not authenticated — skipping")
+        return {"skipped": True, "reason": "not_authenticated"}
+
+    # get_kite_candles_for_range() resolves each symbol's instrument_token via
+    # the in-memory INSTRUMENT_CACHE, which is only populated by an explicit
+    # refresh call elsewhere (e.g. the daily 08:00 IST instrument-token task).
+    # Don't assume some other task already warmed it before this one runs —
+    # that ordering isn't guaranteed after a restart. Idempotent, so safe to
+    # call unconditionally; skip if already populated to avoid a redundant
+    # full-universe download every single run.
+    from crawler.zerodha_instruments import INSTRUMENT_CACHE, refresh_instrument_cache
+    if not INSTRUMENT_CACHE:
+        n = await refresh_instrument_cache()
+        logger.info(f"[backfill_hub_1d] INSTRUMENT_CACHE was empty — refreshed {n} symbols")
+
+    # Fetch ALL NSE EQ symbols from kite_instruments.
+    #
+    # Zerodha's instrument master tags government bonds/T-bills/state loans
+    # (GOI TBILL, GOI LOAN, GOI STRIPS, SDL — State Development Loans) with
+    # instrument_type='EQ' just like real equities, and there is no dedicated
+    # segment/instrument_type to distinguish them. Measured in production: they
+    # are 4,474 of the 8,203 rows this query returned (~55%) — and because their
+    # tradingsymbols are numeric-coded (e.g. "182D100926-TB", "723MZ38-SG") they
+    # sort alphabetically ahead of nearly every real ticker. yfinance can never
+    # return data for them (they don't exist under an NSE equity ticker), so the
+    # backfill spent almost its entire per-run time budget on ~4,474 guaranteed
+    # failures before ever reaching most real stocks — the actual reason 87% of
+    # the tradeable universe was still frozen on a June-30 candle days later.
+    # Their `name` field reliably identifies them (e.g. "GOI TBILL 182D-...",
+    # "SDL MZ 7.23% 2038") — no real NSE company name starts with GOI/SDL.
     async with celery_session() as session:
         rows = (await session.execute(_text("""
             SELECT tradingsymbol
             FROM kite_instruments
             WHERE segment = 'NSE' AND instrument_type = 'EQ'
               AND name != '' AND instrument_token > 0
+              AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
             ORDER BY tradingsymbol
         """))).scalars().all()
         all_symbols = [f"{sym}.NS" for sym in rows]
@@ -3249,12 +3358,19 @@ async def _backfill_hub_1d_candles():
 
     saved_total = 0
     failed = 0
-    _BATCH = 30  # concurrent fetches per batch
+    # Kite historical rate limit is ~3 req/sec, documented and enforced by the
+    # broker itself (unlike yfinance's opaque per-IP throttling). 0.35s spacing
+    # stays safely under that. Sequential, not concurrent — this is the same
+    # broker connection live trading uses; getting it rate-limited or flagged
+    # would risk more than a slow backfill.
+    _DELAY_SEC = 0.35
+    to_date = _dt.date.today()
+    from_date = to_date - _dt.timedelta(days=5)  # covers weekends/holidays
 
     async def _fetch_and_save(sym: str) -> int:
-        """Fetch 1d candles for one symbol and persist. Returns count saved."""
+        """Fetch 1d candles for one symbol via Kite and persist. Returns count saved."""
         try:
-            candles = await fetch_candles(sym, timeframe="1d")
+            candles = await get_kite_candles_for_range(sym, from_date, to_date, interval="1d")
             if not candles:
                 return 0
             async with celery_session() as s2:
@@ -3264,14 +3380,13 @@ async def _backfill_hub_1d_candles():
         except Exception:
             return -1  # sentinel for failure
 
-    for i in range(0, len(stale_symbols), _BATCH):
-        batch = stale_symbols[i : i + _BATCH]
-        results = await _asyncio.gather(*[_fetch_and_save(s) for s in batch])
-        for r in results:
-            if r < 0:
-                failed += 1
-            else:
-                saved_total += r
+    for sym in stale_symbols:
+        r = await _fetch_and_save(sym)
+        if r < 0:
+            failed += 1
+        else:
+            saved_total += r
+        await _asyncio.sleep(_DELAY_SEC)
 
     logger.info(
         f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  stale={len(stale_symbols)}  "
@@ -3285,7 +3400,7 @@ async def _backfill_hub_1d_candles():
     }
 
 
-@celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=1800, soft_time_limit=1500)
+@celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=2700, soft_time_limit=2400)
 def backfill_hub_1d_candles_task():
     """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols."""
     logger.info("[backfill_hub_1d] starting daily 1d candle backfill for Hub universe")
