@@ -45,16 +45,28 @@ from utils.logger import logger
 
 # ── NSE market calendar ───────────────────────────────────────────────────────
 
-NSE_HOLIDAYS_2026 = {
-    "2026-01-26",  # Republic Day
-    "2026-03-25",  # Holi
-    "2026-04-14",  # Dr. Ambedkar Jayanti / Ram Navami
-    "2026-04-17",  # Good Friday
-    "2026-05-01",  # Maharashtra Day
-    "2026-08-15",  # Independence Day
-    "2026-10-02",  # Gandhi Jayanti
-    "2026-12-25",  # Christmas
-}
+import os
+_HOLIDAY_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "nse_holidays.txt")
+def _load_holidays() -> set[str]:
+    try:
+        with open(_HOLIDAY_FILE, "r") as f:
+            days = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+        # B10 fix: warn loudly if the calendar has no entry for the CURRENT year.
+        # A stale file silently degrades to "no holidays" → the bot would trade on
+        # a weekday exchange holiday against stale prices. This makes it visible.
+        import datetime as _dt
+        _yr = str(_dt.date.today().year)
+        if days and not any(d.startswith(_yr) for d in days):
+            logger.warning(
+                f"[nse_calendar] nse_holidays.txt has NO {_yr} dates — holiday "
+                f"detection is STALE. Update {_HOLIDAY_FILE} with the {_yr} NSE "
+                f"holiday list, or the bot may trade on exchange holidays."
+            )
+        return days
+    except Exception:
+        return set()
+
+NSE_HOLIDAYS = _load_holidays()
 
 # Index symbols → human-readable names
 NIFTY_INDEX_SYMBOLS: dict[str, str] = {
@@ -81,7 +93,7 @@ def is_nse_market_open() -> bool:
     if now.weekday() >= 5:          # Saturday or Sunday
         return False
 
-    if now.strftime("%Y-%m-%d") in NSE_HOLIDAYS_2026:
+    if now.strftime("%Y-%m-%d") in NSE_HOLIDAYS:
         return False
 
     market_open = now.replace(

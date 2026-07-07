@@ -1110,30 +1110,6 @@ class AgentTrade(Base):
         return f"<AgentTrade {self.side} {self.symbol} qty={self.qty} @ {self.entry_price}>"
 
 
-class AgentPosition(Base):
-    """Currently open agent positions — one row per symbol."""
-    __tablename__ = "agent_positions"
-    __table_args__ = (
-        UniqueConstraint("symbol", "is_paper", name="uq_agent_position_symbol"),
-    )
-
-    id:             Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    symbol:         Mapped[str]          = mapped_column(String(30), nullable=False)
-    side:           Mapped[str]          = mapped_column(String(10), nullable=False)
-    qty:            Mapped[int]          = mapped_column(Integer,    nullable=False)
-    entry_price:    Mapped[float]        = mapped_column(Float,      nullable=False)
-    stop_price:     Mapped[float]        = mapped_column(Float,      nullable=False)
-    target_price:   Mapped[float]        = mapped_column(Float,      nullable=False)
-    current_price:  Mapped[float | None] = mapped_column(Float,      nullable=True)
-    unrealized_pnl: Mapped[float | None] = mapped_column(Float,      nullable=True)
-    strategy:       Mapped[str]          = mapped_column(String(50), nullable=False, default="")
-    regime:         Mapped[str]          = mapped_column(String(30), nullable=False, default="")
-    entry_ts:       Mapped[datetime]     = mapped_column(DateTime,   nullable=False)
-    is_paper:       Mapped[bool]         = mapped_column(Boolean,    nullable=False, default=True)
-    updated_at:     Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    def __repr__(self) -> str:
-        return f"<AgentPosition {self.side} {self.symbol} qty={self.qty} entry={self.entry_price}>"
 
 
 class AgentPerformance(Base):

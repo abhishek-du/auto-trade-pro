@@ -68,6 +68,6 @@ if [ "$SYSTEMD_UVICORN" -eq 1 ]; then
     wait
 else
     trap "echo ''; echo 'Shutting down...'; kill $CELERY_WORKER_PID $CELERY_BEAT_PID 2>/dev/null; exit 0" INT TERM
-    echo "[uvicorn] Starting API server on http://0.0.0.0:8000 ..."
-    "$PY" -m uvicorn main:app --host 0.0.0.0 --port 8000
+    echo "[uvicorn] Starting API server on http://127.0.0.1:8000 ..."
+    "$PY" -m uvicorn main:app --host 127.0.0.1 --port 8000
 fi

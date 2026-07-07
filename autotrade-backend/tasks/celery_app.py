@@ -31,7 +31,8 @@ celery_app = Celery(
         "tasks.market_scan",
         "tasks.news_scan",
         "tasks.narrative_scan",
-        "tasks.paper_trade_loop",
+        # B16: tasks.paper_trade_loop removed — deprecated duplicate trade loop
+        # that caused oversized/duplicate trades; not scheduled, dead weight.
         "tasks.india_tasks",
         "tasks.market_scanner",
         "tasks.pre_diagnose",

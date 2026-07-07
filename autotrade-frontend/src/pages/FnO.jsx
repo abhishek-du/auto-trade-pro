@@ -168,6 +168,80 @@ function PositionsPanel({ data }) {
   );
 }
 
+// ── F&O Closed Trade History ───────────────────────────────────────────────────
+function FnOHistoryRow({ t }) {
+  const gain = (t.pnl ?? 0) >= 0;
+  const buy = (t.direction ?? '').toUpperCase() === 'BUY';
+  const statusColor = t.status === 'STOPPED' ? 'text-loss' : gain ? 'text-profit' : 'text-slate-300';
+  return (
+    <tr className="border-b border-border/50 hover:bg-surface/40">
+      <td className="px-4 py-2.5 text-muted text-xs tabular-nums whitespace-nowrap">{fmtDateTime(t.opened_at)}</td>
+      <td className="px-4 py-2.5 text-muted text-xs tabular-nums whitespace-nowrap">{fmtDateTime(t.closed_at)}</td>
+      <td className="px-4 py-2.5 font-medium text-slate-200">{t.underlying}</td>
+      <td className="px-4 py-2.5">
+        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${buy ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{buy ? 'BUY' : 'SELL'}</span>
+      </td>
+      <td className="px-4 py-2.5">
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${t.instrument_type === 'FUTURE' ? 'bg-blue-500/20 text-blue-300' : t.option_type === 'CE' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
+          {t.instrument_type === 'FUTURE' ? 'FUT' : t.option_type}
+        </span>
+      </td>
+      <td className="px-4 py-2.5 text-slate-300 text-xs tabular-nums">
+        {t.strike ? `${num(t.strike, 0)} · ` : ''}{t.expiry?.slice(5) ?? '—'}
+      </td>
+      <td className="px-4 py-2.5 tabular-nums text-slate-300">{t.entry != null ? num(t.entry) : '—'}</td>
+      <td className="px-4 py-2.5 tabular-nums text-slate-100">{t.exit != null ? num(t.exit) : '—'}</td>
+      <td className={`px-4 py-2.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>
+        {gain ? '+' : ''}{fmt(t.pnl)} <span className="text-[10px] opacity-70">({num(t.pnl_pct, 1)}%)</span>
+      </td>
+      <td className="px-4 py-2.5 tabular-nums text-muted text-xs">{t.holding_hours != null ? `${num(t.holding_hours, 1)}h` : '—'}</td>
+      <td className={`px-4 py-2.5 text-xs font-semibold ${statusColor}`}>
+        {(t.exit_reason || t.status || '—').replace(/_/g, ' ')}
+      </td>
+    </tr>
+  );
+}
+
+function HistoryPanel({ data }) {
+  if (!data || data.count === 0) {
+    return (
+      <div className="glass-panel border border-border rounded-xl p-6 text-center text-muted text-sm">
+        No closed F&O trades yet.
+      </div>
+    );
+  }
+  return (
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+          <Layers size={15} className="text-cyan" /> F&O Trade History
+          <span className="text-xs text-muted">{data.count} closed</span>
+        </h2>
+        <div className="flex items-center gap-4 text-xs">
+          {data.win_rate != null && <span className="text-muted">Win rate: <span className="text-slate-300">{num(data.win_rate, 0)}%</span></span>}
+          <span className={data.total_pnl >= 0 ? 'text-profit font-semibold' : 'text-loss font-semibold'}>
+            {data.total_pnl >= 0 ? '+' : ''}{fmt(data.total_pnl)} total P&L
+          </span>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted text-xs uppercase tracking-wider">
+              {['Opened', 'Closed', 'Instrument', 'Side', 'Type', 'Strike/Expiry', 'Entry', 'Exit', 'P&L', 'Held', 'Result'].map((h) => (
+                <th key={h} className="text-left px-4 py-2.5 font-semibold whitespace-nowrap">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.trades.map((t, i) => <FnOHistoryRow key={i} t={t} />)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Option Chain ──────────────────────────────────────────────────────────────
 function ChainPanel({ chain, ivRank }) {
   if (!chain || !chain.strikes?.length) {
@@ -395,6 +469,7 @@ function NewsPanel({ news }) {
 export default function FnO() {
   const [underlying, setUnderlying] = useState('NIFTY');
   const [positions, setPositions] = useState(null);
+  const [history, setHistory] = useState(null);
   const [chain, setChain] = useState(null);
   const [ivRank, setIvRank] = useState(null);
   const [signals, setSignals] = useState(null);
@@ -403,13 +478,14 @@ export default function FnO() {
 
   const loadFast = useCallback(async () => {
     try {
-      const [pos, ch, iv, sig] = await Promise.all([
+      const [pos, hist, ch, iv, sig] = await Promise.all([
         apiFetch('/api/v1/india/fno/positions').catch(() => null),
+        apiFetch('/api/v1/india/fno/history').catch(() => null),
         apiFetch(`/api/v1/india/fno/chain/${underlying}`).catch(() => null),
         apiFetch(`/api/v1/india/fno/iv-rank/${underlying}`).catch(() => null),
         apiFetch('/api/v1/india/fno/signals').catch(() => null),
       ]);
-      setPositions(pos); setChain(ch); setIvRank(iv); setSignals(sig?.signals ?? null);
+      setPositions(pos); setHistory(hist); setChain(ch); setIvRank(iv); setSignals(sig?.signals ?? null);
     } finally { setLoading(false); }
   }, [underlying]);
 
@@ -489,6 +565,7 @@ export default function FnO() {
       </div>
 
       <PositionsPanel data={positions} />
+      <HistoryPanel data={history} />
       <ChainPanel chain={chain} ivRank={ivRank} />
       <NewsPanel news={analysis?.news} />
     </div>

@@ -44,7 +44,7 @@ def _settlement_price(pos: OpenPosition, spot: float) -> float:
 
 def _realised_pnl(pos: OpenPosition, settle: float) -> float:
     """Realised P&L at settlement. Long options + long futures: settle − entry."""
-    if pos.instrument_type == "FUTURE" and pos.direction == TradeDirection.SELL:
+    if pos.direction == TradeDirection.SELL:
         return (pos.entry_price - settle) * pos.size_units
     return (settle - pos.entry_price) * pos.size_units
 

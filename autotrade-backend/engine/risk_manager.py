@@ -206,16 +206,20 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
-    # ── Check 2: Daily loss circuit-breaker ───────────────────────────────────
-    today_pnl = await _today_closed_pnl(session)
+    # ── Check 2: Daily loss circuit-breaker (mark-to-market) ──────────────────
+    # P2.11 fix: measure the day's loss as realised-closed P&L PLUS the current
+    # unrealised P&L of open positions. The old check counted only closed trades,
+    # so a book sitting on a large OPEN drawdown never tripped the breaker and the
+    # agent kept adding risk into a losing day. `unrealised` is computed above.
+    today_closed = await _today_closed_pnl(session)
+    today_pnl    = today_closed + unrealised
     if today_pnl < 0:
         limit = wallet_balance * max_dl
         if abs(today_pnl) >= limit:
             reason = (
-                f"Daily loss limit reached "
-                f"(lost ${abs(today_pnl):.2f} today, "
-                f"limit is {max_dl * 100:.0f}% of balance "
-                f"= ${limit:.2f})"
+                f"Daily loss limit reached (mark-to-market ${abs(today_pnl):.2f} "
+                f"= closed ${today_closed:.2f} + open ${unrealised:.2f}; "
+                f"limit {max_dl * 100:.0f}% of balance = ${limit:.2f})"
             )
             _log_rejection(signal.symbol, reason)
             return False, reason

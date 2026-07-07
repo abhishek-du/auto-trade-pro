@@ -31,6 +31,34 @@ async def lifespan(app: FastAPI):
     logger.info(f"Max risk per trade    : {settings.MAX_RISK_PER_TRADE * 100:.1f}%")
     logger.info(f"Max open positions    : {settings.MAX_OPEN_POSITIONS}")
 
+    # ── Safety-bounds check — refuse to boot with dangerous config ────────────
+    _config_errors: list[str] = []
+    if settings.MAX_RISK_PER_TRADE > 0.05:
+        _config_errors.append(
+            f"MAX_RISK_PER_TRADE={settings.MAX_RISK_PER_TRADE} (>{5}%) — "
+            f"max safe value is 0.05 (5%)"
+        )
+    if getattr(settings, "MAX_PORTFOLIO_RISK", 1.0) > 0.50:
+        _config_errors.append(
+            f"MAX_PORTFOLIO_RISK={getattr(settings, 'MAX_PORTFOLIO_RISK', 'N/A')} (>{50}%) — "
+            f"max safe value is 0.50 (50%)"
+        )
+    _rmin = getattr(settings, "RISK_PER_TRADE_MIN", 0.01)
+    _rmax = getattr(settings, "RISK_PER_TRADE_MAX", 0.02)
+    if _rmin > 0.05 or _rmax > 0.05:
+        _config_errors.append(
+            f"RISK_PER_TRADE_MIN={_rmin}/MAX={_rmax} — "
+            f"conviction band must not exceed 0.05 (5%)"
+        )
+    if _config_errors:
+        for _err in _config_errors:
+            logger.critical(f"[SAFETY] CONFIG VIOLATION: {_err}")
+        raise SystemExit(
+            "\n\n🚨 STARTUP BLOCKED — unsafe risk configuration detected.\n"
+            + "\n".join(f"  • {e}" for e in _config_errors)
+            + "\n\nFix the values in .env and restart.\n"
+        )
+
     import asyncio as _asyncio
     for _attempt in range(5):
         try:

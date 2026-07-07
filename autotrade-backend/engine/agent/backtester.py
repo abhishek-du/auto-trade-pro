@@ -10,6 +10,10 @@ import pandas as pd
 
 from engine.agent.analyzer import MarketAnalyzerAgent
 from engine.agent.selector import StrategySelectorAgent
+# position_size (Varsity M9 share sizing) lives in engine.agent.risk_manager,
+# NOT engine.risk_manager — the latter has calculate_position_size. A botched
+# "unify risk managers" refactor pointed this at the wrong module, breaking
+# every import of this backtester with ImportError.
 from engine.agent.risk_manager import position_size
 from utils.config import settings
 from utils.logger import logger

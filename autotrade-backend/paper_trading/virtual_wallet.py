@@ -41,7 +41,7 @@ class VirtualWallet:
 
     @staticmethod
     async def _fetch(session: AsyncSession) -> WalletRow | None:
-        result = await session.execute(select(WalletRow).limit(1))
+        result = await session.execute(select(WalletRow).limit(1).with_for_update())
         return result.scalar_one_or_none()
 
     @staticmethod

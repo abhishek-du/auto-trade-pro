@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
+from api.auth import require_auth
 from utils.config import settings
 from utils.runtime_config import RuntimeConfig, _KNOWN_KEYS
 
@@ -160,6 +161,7 @@ class ModeToggle(BaseModel):
 async def set_trade_mode(
     body: ModeToggle,
     db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_auth),   # security: PAPER↔LIVE switch requires admin JWT
 ):
     # Safety gate — going live requires explicit confirmation string
     if body.paper_mode is False:

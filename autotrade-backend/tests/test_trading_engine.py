@@ -1011,7 +1011,7 @@ class TestRiskManagerAgent:
 
     def test_paper_mode_bypasses_behavioral_locks(self):
         """In paper mode consec_loss and daily_entry limits are ignored."""
-        with patch("engine.agent.risk_manager.settings") as ms:
+        with patch("engine.risk_manager.settings") as ms:
             ms.AGENT_DAILY_DD_STOP        = 0.03
             ms.AGENT_WEEKLY_DD_STOP       = 0.05
             ms.AGENT_MONTHLY_DD_STOP      = 0.10
