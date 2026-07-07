@@ -15,7 +15,7 @@ from engine.agent.analyzer          import MarketAnalyzerAgent
 from engine.agent.selector          import StrategySelectorAgent
 from engine.agent.fundamentals      import FundamentalsAgent
 from engine.agent.macro             import MacroSectorAgent
-from engine.agent.risk_manager      import RiskManagerAgent
+from engine.agent.risk_manager import RiskManagerAgent
 from engine.agent.decision_engine   import DecisionEngine, apply_reasoning_gate
 from engine.agent.execution         import AgentExecutionManager
 from engine.agent.portfolio_context import AgentPortfolioContext
@@ -88,19 +88,21 @@ async def _hydrate_portfolio_from_db(
             sym_key = pos.symbol or sym
             if sym_key not in portfolio.open_positions:
                 risk = abs(pos.entry_price - pos.stop_loss) if pos.stop_loss else pos.entry_price * 0.05
+                side_str = pos.direction.value if hasattr(pos.direction, 'value') else str(pos.direction) if pos.direction else "BUY"
+                sign = -1 if side_str == "SELL" else 1
                 portfolio.open_positions[sym_key] = {
-                    "side":         pos.direction or "BUY",
+                    "side":         side_str,
                     "entry":        float(pos.entry_price),
                     "stop":         float(pos.stop_loss) if pos.stop_loss else 0.0,
                     "target":       float(pos.take_profit) if pos.take_profit else 0.0,
                     "qty":          float(pos.size_units),
                     "strategy":     "HUB_SIGNAL",
-                    "target1":      round(float(pos.entry_price) + risk, 2),
-                    "target2":      round(float(pos.entry_price) + 2 * risk, 2),
+                    "target1":      round(float(pos.entry_price) + sign * risk, 2),
+                    "target2":      round(float(pos.entry_price) + sign * 2 * risk, 2),
                     "partial_done": False,
                     "trailing_sl":  None,
                     "entry_ts":     pos.opened_at.isoformat() if pos.opened_at else None,
-                    "product":      "CNC",
+                    "product":      pos.product if pos.product else "CNC",
                 }
                 capital_locked += float(pos.size_usd)
 
@@ -117,7 +119,10 @@ async def _hydrate_portfolio_from_db(
 
 
 def _is_market_hours() -> bool:
-    now = datetime.now().time()
+    # B15 fix: NSE hours are IST. Using the server-local clock traded at the
+    # wrong hours on any non-IST host. Anchor to the configured IST timezone.
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo(settings.IST_TIMEZONE)).time()
     start_h, start_m = map(int, settings.AGENT_SESSION_START.split(":"))
     end_h,   end_m   = map(int, settings.AGENT_SESSION_END.split(":"))
     return dtime(start_h, start_m) <= now <= dtime(end_h, end_m)
@@ -472,7 +477,10 @@ async def _process_symbol(
     # Fail-open when no hub_info (no AI view) so technical strategies still run.
     if hub_info is not None:
         _hub_abs = abs(hub_info.get("composite_score") or hub_info.get("master_score") or 0)
-        if _hub_abs < 50:
+        # B7 fix: use the SAME threshold the hub-candidate builder uses
+        # (AGENT_CONFIDENCE_THRESHOLD). A hardcoded 50 here contradicted
+        # fetch_hub_candidate's >=30 gate, silently dropping valid candidates.
+        if _hub_abs < settings.AGENT_CONFIDENCE_THRESHOLD:
             return None
 
     # 3. Macro and fundamentals (cached)
@@ -556,10 +564,15 @@ async def _process_symbol(
         except Exception as exc:
             logger.debug(f"[agent] live entry-price snap failed for {symbol}: {exc}")
 
-    # SELECTIVE regime filter — only TREND_BREAKOUT_LONG proceeds (WR=58.8%).
-    # Other strategies are suppressed until the morning LLM upgrades to AGGRESSIVE.
+    # SELECTIVE regime filter — restrict to the high-conviction trend strategies.
+    # B6 fix: the old whitelist named only TREND_BREAKOUT_LONG, which is disabled
+    # in the selector (backtest edge ≈ 0) — so SELECTIVE mode silently traded
+    # NOTHING. Allow the strategies that actually run and carry the validated
+    # edge: PULLBACK_LONG (the primary trend engine) and HUB_7FACTOR (the fresh
+    # hub-score override). Everything else waits for the AGGRESSIVE upgrade.
+    _SELECTIVE_ALLOWED = {"PULLBACK_LONG", "HUB_7FACTOR", "TREND_BREAKOUT_LONG"}
     if regime_mode == "SELECTIVE" and candidate is not None:
-        if getattr(candidate, "strategy", "") != "TREND_BREAKOUT_LONG":
+        if getattr(candidate, "strategy", "") not in _SELECTIVE_ALLOWED:
             return None
 
     # 4d. News Sentiment Circuit Breaker — BUY candidates only.

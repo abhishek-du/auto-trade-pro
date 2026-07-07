@@ -31,6 +31,9 @@ def _is_india_trading_window() -> bool:
     now = datetime.datetime.now(_IST)
     if now.weekday() >= 5:          # Saturday or Sunday
         return False
+    from crawler.india_price_feed import NSE_HOLIDAYS
+    if now.strftime("%Y-%m-%d") in NSE_HOLIDAYS:
+        return False
     h, m = now.hour, now.minute
     return ((h, m) >= (9, 15)) and ((h, m) <= (16, 0))
 
@@ -455,8 +458,8 @@ async def _phase9_market_context(session) -> dict:
     from engine.agent.market_regime import classify_regime, build_regime_map_from_df
 
     result = {
-        "nifty_ema200_ok": True, "nifty_roc20": 0.0,
-        "regime_allows_buy": True, "regime_allows_sell": True,
+        "nifty_ema200_ok": False, "nifty_roc20": 0.0,
+        "regime_allows_buy": False, "regime_allows_sell": False,
     }
     try:
         rows = (await session.execute(_text("""
@@ -537,7 +540,16 @@ async def _india_trade_loop():
     from crawler.live_snapshot import fetch_live_snapshot
     await fetch_live_snapshot()
 
+
     async with celery_session() as session:
+        from paper_trading.virtual_wallet import VirtualWallet
+        await VirtualWallet.check_drawdown_breakers(session)
+        
+        from utils.runtime_config import RuntimeConfig
+        rc = await RuntimeConfig.load(session)
+        if rc.trading_halted:
+            logger.warning("[india_trade_loop] TRADING HALTED — skipping loop")
+            return
 
         # Step 1: close SL/TP hits, refresh unrealised PnL
         auto_closed = await update_positions_with_current_prices(session)
@@ -1262,8 +1274,7 @@ async def _fast_sl_check() -> None:
         # PRICE_CACHE is an in-memory dict in the main/FastAPI process — Celery
         # worker processes have a stale copy.  Kite's LTP endpoint returns the
         # current market price in <100 ms for any number of symbols.
-        symbols = [p.symbol for p in positions
-                   if getattr(p, "instrument_type", "EQUITY") == "EQUITY"]
+        symbols = [p.symbol for p in positions]
         live_px: dict[str, float] = {}
         if symbols:
             try:
@@ -1475,7 +1486,17 @@ async def _intraday_entry_task():
     from crawler.live_snapshot import fetch_live_snapshot
     await fetch_live_snapshot()
 
+
     async with celery_session() as session:
+        from paper_trading.virtual_wallet import VirtualWallet
+        await VirtualWallet.check_drawdown_breakers(session)
+        
+        from utils.runtime_config import RuntimeConfig
+        rc = await RuntimeConfig.load(session)
+        if rc.trading_halted:
+            logger.warning("[intraday_entry] TRADING HALTED — skipping")
+            return
+
         # ── Guard: count MIS positions already opened today ────────────────────
         today_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         mis_today = (await session.execute(
@@ -1847,6 +1868,7 @@ async def _open_index_option_mis(
             f"NIFTY {spec.option_type} {int(spec.strike)} exp {spec.expiry} · "
             f"Hub avg {avg_score:+.0f} · 1 lot MIS"
         ),
+        product="MIS",
     )
     if trade is None:
         return False

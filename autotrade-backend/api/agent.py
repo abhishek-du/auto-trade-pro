@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db.models import AgentDecision, AgentTrade, AgentPerformance, Candle
+from api.auth import require_auth
 from utils.config import settings
 
 router = APIRouter(tags=["Trading Agent"])
@@ -115,11 +116,16 @@ async def agent_status(db: AsyncSession = Depends(get_db)):
 # ── POST /cycle/trigger ───────────────────────────────────────────────────────
 
 @router.post("/cycle/trigger")
-async def trigger_cycle(db: AsyncSession = Depends(get_db)):
-    """Manually trigger one agent evaluation cycle.
+async def trigger_cycle(
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_auth),
+):
+    """Manually trigger one agent evaluation cycle (requires admin JWT).
 
-    Always runs regardless of market hours or the AGENT_ENABLED flag —
-    user explicitly requested it.
+    Re-enabled: Bug B1 (dual-exit double margin credit) is fixed — the agent
+    exit path now closes positions through the single canonical `close_paper_trade`
+    path (engine/agent/execution.py::_record_exit), so a manual cycle no longer
+    corrupts the wallet. Auth is required because this mutates the paper book.
     """
     from engine.agent.agent_loop import run_agent_cycle
     result = await run_agent_cycle(db, force=True)
@@ -664,3 +670,17 @@ async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
     """
     from engine.agent.performance_engine import compute_metrics
     return await compute_metrics(db)
+
+@router.post("/halt", summary="Halt all trading immediately")
+async def halt_trading(db: AsyncSession = Depends(get_db)):
+    from utils.runtime_config import RuntimeConfig
+    await RuntimeConfig.set(db, "trading_halted", True)
+    await db.commit()
+    return {"status": "success", "message": "Trading halted."}
+
+@router.post("/resume", summary="Resume trading")
+async def resume_trading(db: AsyncSession = Depends(get_db)):
+    from utils.runtime_config import RuntimeConfig
+    await RuntimeConfig.set(db, "trading_halted", False)
+    await db.commit()
+    return {"status": "success", "message": "Trading resumed."}

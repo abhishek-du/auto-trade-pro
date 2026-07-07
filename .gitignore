@@ -4,3 +4,8 @@ autotrade-backend/models/*.pkl
 autotrade-backend/data/
 __pycache__/
 *.pyc
+
+# ── Secrets — never commit credentials ────────────────────────────────────────
+.env
+.env.*
+*.bak

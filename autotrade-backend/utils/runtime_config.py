@@ -71,6 +71,8 @@ _KNOWN_KEYS: dict[str, type] = {
     "scanner_enabled":         bool,
     # Enable intraday MIS trades (required for equity short-selling).
     "intraday_enabled":        bool,
+    # Global fail-safe: blocks all new entries across all strategies.
+    "trading_halted":          bool,
 }
 
 
@@ -230,6 +232,10 @@ class RuntimeConfig:
     def intraday_enabled(self) -> bool:
         return bool(self._get("intraday_enabled", getattr(settings, "INTRADAY_ENABLED", False)))
 
+    @property
+    def trading_halted(self) -> bool:
+        return bool(self._get("trading_halted", getattr(settings, "TRADING_HALTED", False)))
+
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""
         return {
@@ -258,4 +264,5 @@ class RuntimeConfig:
             "equity_short_enabled":        self.equity_short_enabled,
             "scanner_enabled":             self.scanner_enabled,
             "intraday_enabled":            self.intraday_enabled,
+            "trading_halted":              self.trading_halted,
         }

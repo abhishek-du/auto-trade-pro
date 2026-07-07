@@ -55,7 +55,7 @@ def _login(client, user_id: str, password: str) -> str:
 def _twofa(client, user_id: str, request_id: str, totp_secret: str) -> None:
     """Submit TOTP — server sets session cookie on success."""
     code = _totp(totp_secret)
-    log.info(f"Generated TOTP: {code}")
+    log.info("TOTP generated (code redacted for security)")
     r = client.post(
         f"{_KITE_BASE}/api/twofa",
         data={

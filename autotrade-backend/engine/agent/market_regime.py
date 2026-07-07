@@ -87,8 +87,11 @@ def classify_regime(
     """
     n = len(closes)
     if n < 60:
-        return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
-                            {"note": "insufficient_data_fail_open"})
+        # P2.12 fix: fail-CLOSED. Too little macro history to judge the market →
+        # block new entries (matches the exception handler below) rather than
+        # defaulting to MODERATE_BULL and trading blind.
+        return RegimeResult(SIDEWAYS, 0.0, 0, False, False, 0.0,
+                            {"note": "insufficient_data_fail_closed"})
 
     price = float(closes.iloc[-1])
 
@@ -240,9 +243,10 @@ async def get_market_regime(
         """))).scalars().all()
 
         if not rows or len(rows) < 60:
-            logger.warning("[regime] Insufficient NIFTYBEES history — fail-open MODERATE_BULL")
-            return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
-                                {"note": "insufficient_nifty_history"})
+            # P2.12 fix: fail-CLOSED — no macro context = block new entries.
+            logger.warning("[regime] Insufficient NIFTYBEES history — fail-CLOSED (block new entries)")
+            return RegimeResult(SIDEWAYS, 0.0, 0, False, False, 0.0,
+                                {"note": "insufficient_nifty_history_fail_closed"})
 
         closes = pd.Series(list(reversed(rows)), dtype=float)   # oldest → newest
 
@@ -279,8 +283,8 @@ async def get_market_regime(
         return result
 
     except Exception as exc:
-        logger.warning(f"[regime] Engine failed — fail-open MODERATE_BULL: {exc}")
-        return RegimeResult(MODERATE_BULL, 1.0, 76, True, True, 0.0,
+        logger.warning(f"[regime] Engine failed — fail-closed SIDEWAYS: {exc}")
+        return RegimeResult(SIDEWAYS, 0.0, 0, False, False, 0.0,
                             {"note": f"error:{exc}"})
 
 

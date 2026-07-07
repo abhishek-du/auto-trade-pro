@@ -2959,6 +2959,71 @@ async def get_fno_positions(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/fno/history", summary="Closed F&O derivative trades (options + futures)")
+async def get_fno_history(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
+    """Closed/stopped option & future trades for the F&O page's history section."""
+    from db.models import PaperTrade, TradeStatus
+
+    rows = (await db.execute(
+        select(PaperTrade)
+        .where(
+            PaperTrade.instrument_type.in_(["CE", "PE", "FUTURE"]),
+            PaperTrade.status.in_([TradeStatus.CLOSED, TradeStatus.STOPPED]),
+        )
+        .order_by(PaperTrade.closed_at.desc())
+        .limit(limit)
+    )).scalars().all()
+
+    out = []
+    for t in rows:
+        dir_val = t.direction.value if hasattr(t.direction, "value") else t.direction
+        qty = t.size_units
+        entry = t.entry_price
+        exit_p = t.exit_price
+        premium_paid = round((entry or 0) * (qty or 0), 2)
+        breakeven = None
+        if t.instrument_type == "CE" and t.strike_price:
+            breakeven = round(t.strike_price + entry, 2)
+        elif t.instrument_type == "PE" and t.strike_price:
+            breakeven = round(t.strike_price - entry, 2)
+
+        out.append({
+            "symbol":          t.symbol,
+            "instrument_type": t.instrument_type,
+            "underlying":      t.underlying_symbol,
+            "strike":          t.strike_price,
+            "option_type":     t.option_type,
+            "expiry":          t.expiry_date.isoformat() if t.expiry_date else None,
+            "direction":       dir_val,
+            "lots":            int(qty / t.lot_size) if t.lot_size else None,
+            "lot_size":        t.lot_size,
+            "qty":             qty,
+            "entry":           entry,
+            "exit":            exit_p,
+            "pnl":             t.pnl,
+            "pnl_pct":         t.pnl_percent,
+            "premium_paid":    premium_paid,
+            "max_loss":        premium_paid if t.instrument_type in ("CE", "PE") else None,
+            "breakeven":       breakeven,
+            "status":          t.status.value if hasattr(t.status, "value") else t.status,
+            "exit_reason":     t.exit_reason,
+            "holding_hours":   t.holding_hours,
+            "opened_at":       t.opened_at.isoformat() if t.opened_at else None,
+            "closed_at":       t.closed_at.isoformat() if t.closed_at else None,
+        })
+
+    wins = sum(1 for t in out if (t["pnl"] or 0) > 0)
+    return {
+        "trades":     out,
+        "count":      len(out),
+        "total_pnl":  round(sum(t["pnl"] or 0 for t in out), 2),
+        "win_rate":   round(wins / len(out) * 100, 1) if out else None,
+    }
+
+
 @router.get("/regime", summary="Current 5-state market regime (STRONG_BULL … STRONG_BEAR)")
 async def get_market_regime_api(db: AsyncSession = Depends(get_db)):
     """Returns the live market regime state, confidence, and contributing signals."""

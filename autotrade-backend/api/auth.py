@@ -60,6 +60,18 @@ def _verify_token(credentials: HTTPAuthorizationCredentials | None) -> str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
+async def require_auth(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> str:
+    """FastAPI dependency: enforce a valid admin JWT on a route.
+
+    Use as `Depends(require_auth)` on sensitive/mutating endpoints (real-order
+    placement, PAPER↔LIVE switch, manual agent trigger). Returns the caller's
+    email or raises 401. The SPA already attaches the token to every request.
+    """
+    return _verify_token(credentials)
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest):

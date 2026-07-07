@@ -120,13 +120,18 @@ async def select_index_option(
     risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
     risk_per_lot = premium * lot_size * _STOP_FRACTION
     lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
-    lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
+    lots = min(lots, settings.FNO_MAX_LOTS_PER_TRADE)
+    if lots <= 0:
+        logger.warning(f"[fno/select] Risk budget (₹{risk_budget:,.0f}) too small for 1 lot of {contract.tradingsymbol}")
+        return None
 
     qty = lots * lot_size
     notional = round(qty * premium, 2)
     # Never deploy more premium than available equity.
     if notional > equity:
-        lots = max(1, int(equity // (premium * lot_size)))
+        lots = int(equity // (premium * lot_size))
+        if lots <= 0:
+            return None
         qty = lots * lot_size
         notional = round(qty * premium, 2)
 
@@ -155,6 +160,7 @@ async def open_option_paper_trade(
     *,
     confidence: float = 0.0,
     ai_reason: str = "",
+    product: str = "CNC",
 ) -> PaperTrade | None:
     """Open an F&O option paper position (PaperTrade + OpenPosition).
 
@@ -210,6 +216,7 @@ async def open_option_paper_trade(
         ai_reason=ai_reason or f"📥 BUY {label} | {spec.lots} lot(s) × {spec.lot_size} @ ₹{spec.premium}",
         news_sentiment_score=0.0,
         slippage_applied=0.0,
+        product=product,
         opened_at=now,
     )
     session.add(trade)
@@ -235,6 +242,7 @@ async def open_option_paper_trade(
         unrealised_pnl=0.0,
         unrealised_pct=0.0,
         trade_id=trade.id,
+        product=product,
         opened_at=now,
     )
     session.add(position)
@@ -547,6 +555,7 @@ async def composite_index_signal(underlying: str, session: AsyncSession) -> dict
     # IV-Rank for sizing/strategy.
     hist = (await session.execute(
         select(IVHistory.atm_iv).where(IVHistory.underlying == underlying.upper())
+        .order_by(IVHistory.trade_date)   # B12 fix: hist[-1] must be the latest day
     )).scalars().all()
     iv_rank = None
     if len(hist) >= 5:
@@ -587,7 +596,7 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
         regime = regime_result.state.upper()
     except Exception as _re:
         logger.warning(f"[fno/evaluate] regime check failed: {_re} — blocking (fail-closed)")
-        regime = "WEAK_BEAR"
+        regime = "SIDEWAYS"
 
     # Already-open option underlyings (avoid stacking).
     open_unders = set((await session.execute(
@@ -689,6 +698,7 @@ async def fno_signal_preview(underlying: str, session: AsyncSession) -> dict | N
     from db.models import IVHistory
     hist = (await session.execute(
         select(IVHistory.atm_iv).where(IVHistory.underlying == underlying.upper())
+        .order_by(IVHistory.trade_date)   # B12 fix: hist[-1] must be the latest day
     )).scalars().all()
     atm_iv = hist[-1] if hist else None
     iv_rank = None
@@ -796,8 +806,10 @@ async def evaluate_portfolio_hedge(session: AsyncSession, equity: float) -> dict
 
     # Lots to cover FNO_HEDGE_RATIO of equity notional.
     hedge_notional = eq_notional * settings.FNO_HEDGE_RATIO
-    lots = max(1, min(settings.FNO_MAX_LOTS_PER_TRADE,
-                      int(hedge_notional // (spot * contract.lot_size))))
+    lots = min(settings.FNO_MAX_LOTS_PER_TRADE,
+               int(hedge_notional // (spot * contract.lot_size)))
+    if lots <= 0:
+        return None
     qty = lots * contract.lot_size
     debit = round(qty * premium, 2)
 
@@ -1055,7 +1067,9 @@ async def select_index_spread(
     risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
     risk_per_lot = net_premium * lot_size
     lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
-    lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
+    lots = min(lots, settings.FNO_MAX_LOTS_PER_TRADE)
+    if lots <= 0:
+        return None
     qty = lots * lot_size
 
     # Realistic margin: BUY premium + SELL SPAN with hedge offset (~2% of notional)
@@ -1068,7 +1082,9 @@ async def select_index_spread(
 
     if margin_blocked > equity:
         margin_per_lot = _spread_margin_approx(premium_buy, lot_size, spot, lot_size, 1)
-        lots = max(1, int(equity // margin_per_lot))
+        lots = int(equity // margin_per_lot)
+        if lots <= 0:
+            return None
         qty = lots * lot_size
         margin_blocked = _spread_margin_approx(premium_buy, qty, spot, lot_size, lots)
         kite_margin = await _kite_spread_margin(contract_buy.tradingsymbol, contract_sell.tradingsymbol, qty)

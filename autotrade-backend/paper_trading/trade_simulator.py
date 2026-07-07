@@ -41,6 +41,23 @@ _SLIP_BPS_MAX = 8
 _MAX_POSITION_PCT = 0.05
 
 
+def estimate_trade_cost(qty: int, price: float, side: str = "BUY") -> float:
+    """Realistic Indian equity delivery transaction cost (Varsity Module 7).
+
+    Brokerage (capped ₹20) + STT + exchange turnover + SEBI + stamp (buy only)
+    + 18% GST. Charged on both legs of every close so paper P&L reflects real
+    round-trip friction instead of an over-optimistic zero-commission fill.
+    """
+    notional  = qty * price
+    brokerage = min(20.0, 0.0003 * notional)
+    stt       = notional * 0.001
+    exchange  = notional * 0.0000345
+    sebi      = notional * 0.000001
+    stamp     = notional * 0.00015 if side == "BUY" else 0.0
+    gst       = (brokerage + exchange + sebi) * 0.18
+    return round(brokerage + stt + exchange + sebi + stamp + gst, 2)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Legacy dataclass + TradeSimulator (kept for position_tracker.py compatibility)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -368,25 +385,39 @@ async def close_paper_trade(
     -------
     The updated PaperTrade record.
     """
-    # Fetch the parent trade
+    # Fetch the parent trade with a row-level lock (Bug B2 fix)
     trade_row = await session.execute(
-        select(PaperTrade).where(PaperTrade.id == position.trade_id)
+        select(PaperTrade)
+        .where(PaperTrade.id == position.trade_id)
+        .where(PaperTrade.status == TradeStatus.OPEN)
+        .with_for_update()
     )
-    trade = trade_row.scalar_one()
-    now   = datetime.utcnow()
+    trade = trade_row.scalar_one_or_none()
+    if trade is None:
+        raise ValueError(f"Trade {position.trade_id} is already closed or does not exist.")
+        
+    now = datetime.utcnow()
 
     # ── Step 1: P&L ───────────────────────────────────────────────────────────
     # If a partial scale-out fired at T1, pos.size_units was reduced to the
     # remaining half. Use position.size_units (remaining) for the final leg,
     # then add the already-realised partial_pnl for the total trade P&L.
+    # NameError fix: estimate_trade_cost was used below but never imported, so
+    # EVERY close raised NameError (silently caught by callers → positions never
+    # closed, SL/TP never fired). Defined locally (module-level `estimate_trade_cost`)
+    # so the live close path has no dependency on the heavy backtester module.
     snap_data   = (trade.indicator_snapshot or {}) if trade.indicator_snapshot else {}
     partial_pnl = float(snap_data.get("trade_mgmt", {}).get("partial_pnl", 0.0))
     remaining   = position.size_units   # may be < trade.size_units after partial
 
     if position.direction == TradeDirection.BUY:
-        pnl = (close_price - trade.entry_price) * remaining + partial_pnl
+        gross_pnl = (close_price - trade.entry_price) * remaining
+        cost = estimate_trade_cost(remaining, trade.entry_price, "BUY") + estimate_trade_cost(remaining, close_price, "SELL")
     else:
-        pnl = (trade.entry_price - close_price) * remaining + partial_pnl
+        gross_pnl = (trade.entry_price - close_price) * remaining
+        cost = estimate_trade_cost(remaining, trade.entry_price, "SELL") + estimate_trade_cost(remaining, close_price, "BUY")
+    
+    pnl = gross_pnl - cost + partial_pnl
 
     notional    = trade.entry_price * trade.size_units   # original full notional
     pnl_percent = (pnl / notional * 100) if notional > 0 else 0.0
@@ -689,6 +720,19 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             candle = candle_row.scalar_one_or_none()
             if candle is None:
                 logger.debug(f"update_positions: no price for {pos.symbol} — skipping")
+                continue
+            # B14 fix: bound the candle-fallback age. Marking a position (and
+            # possibly firing its SL/TP) off a candle days old would "close" it at
+            # a phantom price. Skip this cycle if the newest candle is >4 days old
+            # (covers a long weekend); a live/fresh price will resume it next tick.
+            _c_ts = candle.timestamp
+            if getattr(_c_ts, "tzinfo", None):
+                _c_ts = _c_ts.replace(tzinfo=None)
+            if (now - _c_ts).total_seconds() > 4 * 86400:
+                logger.warning(
+                    f"update_positions: {pos.symbol} newest 1h candle is "
+                    f"{(now - _c_ts).days}d old — skipping (stale, no phantom close)"
+                )
                 continue
             price = candle.close
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from paper_trading.trade_simulator import TradeSimulator
 from paper_trading.pnl_calculator import PnLCalculator
-from engine.risk_manager import RiskManager
+from engine.agent.risk_manager import RiskManagerAgent as RiskManager
 from engine.signal_generator import SignalGenerator
 
 import pandas as pd

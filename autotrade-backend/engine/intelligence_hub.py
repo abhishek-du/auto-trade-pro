@@ -1131,6 +1131,10 @@ def _score_symbol_sync(
         _nifty_regime = ctx.macro.nifty_regime
         _regime_penalty = -20.0 if _nifty_regime == "BEAR" else 0.0
 
+        # B13 note: these are RELATIVE weights — they sum to 1.12, not 1.0, and the
+        # `_w = v/_total_w` line below normalises them, so the EFFECTIVE weights are
+        # each value / 1.12 (e.g. technical is ~49%, not 55%). Behaviour is correct;
+        # only read the post-normalisation values as the true factor weights.
         _w = {
             "technical":    0.55,
             "sector":       0.15,

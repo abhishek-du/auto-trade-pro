@@ -281,18 +281,31 @@ class AgentExecutionManager:
                 try:
                     from db.models import Candle
                     from sqlalchemy import select
-                    row = (await session.execute(
-                        select(Candle.close)
+                    # B14 fix: also read the candle timestamp and reject stale data.
+                    # Firing a stop/target off a candle days old closes the position
+                    # at a phantom price. Only use candles <=4 days old.
+                    crow = (await session.execute(
+                        select(Candle.close, Candle.timestamp)
                         .where(Candle.symbol == symbol, Candle.timeframe == "1h")
                         .order_by(Candle.timestamp.desc())
                         .limit(1)
-                    )).scalar_one_or_none()
-                    if row:
-                        price = float(row)
-                        logger.debug(
-                            f"[exits] {symbol}: PRICE_CACHE empty, "
-                            f"using last 1h candle ₹{price:.2f}"
-                        )
+                    )).first()
+                    if crow:
+                        _c_ts = crow[1]
+                        if getattr(_c_ts, "tzinfo", None):
+                            _c_ts = _c_ts.replace(tzinfo=None)
+                        if (datetime.utcnow() - _c_ts).total_seconds() <= 4 * 86400:
+                            price = float(crow[0])
+                            logger.debug(
+                                f"[exits] {symbol}: PRICE_CACHE empty, "
+                                f"using last 1h candle ₹{price:.2f}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[exits] {symbol}: newest 1h candle "
+                                f"{(datetime.utcnow() - _c_ts).days}d old — "
+                                f"skipping (stale, no phantom close)"
+                            )
                 except Exception as exc:
                     logger.debug(f"[exits] candle fallback failed {symbol}: {exc}")
 
@@ -442,10 +455,20 @@ class AgentExecutionManager:
         pnl: float,
         session: AsyncSession,
     ) -> None:
-        from db.models import AgentTrade
-        from paper_trading.virtual_wallet import VirtualWallet
+        """Record an agent exit in the AgentTrade table and close the canonical
+        PaperTrade + OpenPosition via close_paper_trade (the single source of
+        truth for wallet accounting).
+
+        Bug B1 fix: previously this method called VirtualWallet.return_margin
+        directly WITHOUT closing the PaperTrade or deleting the OpenPosition.
+        The 60-second trade loop would then find the still-open position and
+        close it again, double-crediting the wallet.
+        """
+        from db.models import AgentTrade, OpenPosition as OpenPos
+        from paper_trading.trade_simulator import close_paper_trade
         from sqlalchemy import select
 
+        # ── 1. Update the agent's own trade record ────────────────────────────
         res = await session.execute(
             select(AgentTrade).where(
                 AgentTrade.symbol == symbol,
@@ -459,25 +482,40 @@ class AgentExecutionManager:
             trade.exit_ts     = datetime.utcnow()
             trade.exit_reason = reason
             trade.pnl         = pnl
-            trade_value = round(trade.qty * trade.entry_price, 2)
-            await VirtualWallet.return_margin(session, trade_value, pnl, symbol)
-            await session.commit()
 
-            # WebSocket push — instant trade-closed event to UI
+        # ── 2. Close via the canonical path (PaperTrade + OpenPosition + wallet)
+        pos_res = await session.execute(
+            select(OpenPos).where(OpenPos.symbol == symbol).limit(1)
+        )
+        open_pos = pos_res.scalar_one_or_none()
+        if open_pos:
             try:
-                from api.websocket import broadcast_agent_event
-                import asyncio as _aio
-                _aio.ensure_future(broadcast_agent_event("TRADE_CLOSED", {
-                    "symbol":     symbol,
-                    "exit_price": exit_price,
-                    "pnl":        pnl,
-                    "reason":     reason,
-                }))
-            except Exception:
-                pass
+                await close_paper_trade(open_pos, exit_price, reason, session)
+            except Exception as exc:
+                logger.warning(
+                    f"[agent] close_paper_trade failed for {symbol}: {exc} — "
+                    f"position will be closed by the 60s loop instead"
+                )
+        else:
+            logger.debug(f"[agent] _record_exit: no OpenPosition for {symbol} — already closed")
 
-            # Telegram exit alert
-            if settings.telegram_available:
+        await session.commit()
+
+        # ── 3. Notifications (WebSocket + Telegram) ───────────────────────────
+        try:
+            from api.websocket import broadcast_agent_event
+            import asyncio as _aio
+            _aio.ensure_future(broadcast_agent_event("TRADE_CLOSED", {
+                "symbol":     symbol,
+                "exit_price": exit_price,
+                "pnl":        pnl,
+                "reason":     reason,
+            }))
+        except Exception:
+            pass
+
+        if trade and settings.telegram_available:
+            try:
                 from integrations.telegram_service import send, fmt_exit
                 await send(fmt_exit(
                     symbol=symbol,
@@ -488,3 +526,6 @@ class AgentExecutionManager:
                     pnl=pnl,
                     reason=reason,
                 ))
+            except Exception:
+                pass
+

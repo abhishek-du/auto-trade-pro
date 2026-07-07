@@ -58,7 +58,12 @@ class ExhaustionShort(Strategy):
 
         entry  = c
         stop   = round(hi + 0.5 * f.atr14, 2)
-        target = round(f.ema50, 2)       # mean-reversion to EMA50
+        # B8 fix: this is a SHORT in a confirmed downtrend, so the target MUST be
+        # below entry. The old target (EMA50) sits ABOVE entry by the strategy's
+        # own preconditions (ema20<ema50<ema200 with price near ema20), so
+        # `target >= entry` rejected almost every candidate — the strategy never
+        # fired. Use a measured move down (2×ATR) for a clean ~2:1 short.
+        target = round(entry - 2.0 * f.atr14, 2)
         risk   = stop - entry
 
         if risk <= 0 or target >= entry:

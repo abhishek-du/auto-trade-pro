@@ -65,7 +65,12 @@ async def select_index_future(
     risk_budget = equity * settings.AGENT_MAX_RISK_PER_TRADE
     risk_per_lot = stop_dist * lot_size
     lots = int(risk_budget // risk_per_lot) if risk_per_lot > 0 else 0
-    lots = max(1, min(lots, settings.FNO_MAX_LOTS_PER_TRADE))
+    # B11 fix: no max(1,...) floor. If the risk budget can't afford even one lot,
+    # size 0 and skip the trade rather than force a lot that breaches the per-trade
+    # risk cap. The caller treats lots<=0 as "no trade".
+    lots = min(lots, settings.FNO_MAX_LOTS_PER_TRADE)
+    if lots < 1:
+        return None
 
     qty = lots * lot_size
     notional = round(qty * entry, 2)

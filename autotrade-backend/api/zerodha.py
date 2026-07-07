@@ -42,6 +42,7 @@ from crawler.zerodha_client import clear_kite_token, get_kite_client, update_kit
 import crawler.zerodha_market as _zm
 from crawler.zerodha_market import get_kite_historical, get_live_prices, get_market_depth
 from crawler.zerodha_websocket import LIVE_PRICES
+from api.auth import require_auth
 from db.database import get_db
 from engine.indicators import compute_indicators
 from engine.zerodha_portfolio import (
@@ -411,6 +412,7 @@ async def place_order(
     body: dict,
     x_confirm_real_order: str | None = Header(default=None, alias="x-confirm-real-order"),
     db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_auth),   # security: real order placement requires admin JWT
 ):
     """Place a REAL order through Zerodha — extreme care required.
 

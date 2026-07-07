@@ -141,6 +141,8 @@ def precompute(df: pd.DataFrame) -> pd.DataFrame:
     f["plus_di"]  = plus_di
     f["minus_di"] = minus_di
 
+    f["turnover_30d"] = (v * c).rolling(30).mean()
+
     f["swing_high_20"] = c.rolling(20).max().shift(1)   # exclude current bar
     f["swing_low_20"]  = c.rolling(20).min().shift(1)
     f["swing_high_50"]  = c.rolling(50).max().shift(1)   # 50-day breakout level (future use)
@@ -200,6 +202,8 @@ def _signal_at(row: pd.Series, prev_row: pd.Series | None) -> dict | None:
     close = r["close"]
     atr   = r["atr14"]
     if atr <= 0 or np.isnan(atr) or np.isnan(close):
+        return None
+    if r.get("turnover_30d", 0) < 50_000_000:
         return None
 
     regime = r.get("regime", "UNKNOWN")
@@ -451,14 +455,15 @@ def backtest_symbol(
             if exit_price is None:
                 if open_pos["side"] == "BUY":
                     if bar_low <= open_pos["stop"]:
-                        exit_price = open_pos["stop"]
+                        # Gap-through slippage modeling: worse of (open price) or (stop price with 0.5% slippage)
+                        exit_price = min(float(row["open"]), open_pos["stop"] * 0.995)
                         reason     = "STOP_HIT"
                     elif bar_high >= open_pos["target"]:
                         exit_price = open_pos["target"]
                         reason     = "TARGET_HIT"
                 else:  # SELL/short: stop ABOVE entry, target BELOW entry
                     if bar_high >= open_pos["stop"]:
-                        exit_price = open_pos["stop"]
+                        exit_price = max(float(row["open"]), open_pos["stop"] * 1.005)
                         reason     = "STOP_HIT"
                     elif bar_low <= open_pos["target"]:
                         exit_price = open_pos["target"]
@@ -661,6 +666,10 @@ def backtest_symbol(
 
 async def load_hub_symbols(top_n: int) -> list[str]:
     async with AsyncSessionLocal() as s:
+        if top_n == -1:
+            rows = (await s.execute(text("SELECT DISTINCT symbol FROM candles WHERE symbol LIKE '%.NS' OR symbol LIKE '%.BO'"))).scalars().all()
+            return list(rows)
+            
         rows = (await s.execute(text(
             "SELECT symbol FROM hub_universe ORDER BY rank LIMIT :n"
         ), {"n": top_n})).scalars().all()
