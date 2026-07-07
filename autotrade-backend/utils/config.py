@@ -211,10 +211,15 @@ class Settings(BaseSettings):
     FNO_DEFAULT_DTE:            int   = 21
     # Lot cap per single trade (sanity ceiling on paper sizing).
     FNO_MAX_LOTS_PER_TRADE:     int   = 10
-    # Standard NSE index lot sizes (2026 revision). Used in PAPER mode so the
-    # agent can build contracts from the live NSE chain WITHOUT the Kite
-    # instrument master (which needs the broker login). "SYM:lot,SYM:lot".
-    FNO_INDEX_LOT_SIZES:        str   = "NIFTY:75,BANKNIFTY:35,FINNIFTY:65,MIDCPNIFTY:120,SENSEX:20"
+    # Standard NSE index lot sizes. Used in PAPER mode so the agent can build
+    # contracts from the live NSE chain WITHOUT the Kite instrument master
+    # (which needs the broker login). "SYM:lot,SYM:lot". NSE periodically
+    # revises these as index levels move — cross-checked 2026-07-07 against
+    # NSE circular FAOP70616 (effective Jan 2026 series) and our own live
+    # kite_instruments feed: NIFTY was stale at 75 (now 65), BANKNIFTY was
+    # stale at 35 (now 30), FINNIFTY was stale at 65 (now 60, per our own
+    # Kite feed). MIDCPNIFTY (120) and SENSEX (20) were already correct.
+    FNO_INDEX_LOT_SIZES:        str   = "NIFTY:65,BANKNIFTY:30,FINNIFTY:60,MIDCPNIFTY:120,SENSEX:20"
     # Approximate paper-margin model (NOT exchange-exact SPAN). Used in Phase 4.
     FNO_SPAN_PCT_INDEX:         float = 0.12   # SPAN ≈ 12% of notional for index
     FNO_EXPOSURE_PCT:           float = 0.03   # +3% exposure margin
