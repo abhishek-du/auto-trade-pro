@@ -628,6 +628,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
     for pos in positions:
         # ── F&O positions: mark to live option/future price (not candles) ──────
         if getattr(pos, "instrument_type", "EQUITY") in ("CE", "PE", "FUTURE"):
+            cur = None
             try:
                 if pos.instrument_type == "FUTURE":
                     from engine.fno.futures import current_future_price, future_pnl
@@ -643,6 +644,37 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         pos.unrealised_pnl, pos.unrealised_pct = option_pnl(pos, cur)
             except Exception as exc:
                 logger.debug(f"update_positions: F&O mark failed for {pos.symbol}: {exc}")
+
+            # ── F&O stop-loss / take-profit ─────────────────────────────────
+            # This engine only ever holds long options/futures (BUY) — SL
+            # below entry, TP above. Found 2026-07-07 investigating a NIFTY
+            # option stuck at a fake ₹0.00 P&L: this branch always
+            # `continue`d right after marking to market, before ever
+            # reaching the equity SL/TP check below — so F&O positions were
+            # priced correctly for display but had NO stop-loss/take-profit
+            # enforcement at all. One position ran 26% past its 2.5% SL
+            # untouched. Long-only, so no short-side branch needed here.
+            if cur:
+                is_buy = pos.direction == TradeDirection.BUY
+                hit_sl = bool(pos.stop_loss) and (cur <= pos.stop_loss if is_buy else cur >= pos.stop_loss)
+                hit_tp = bool(pos.take_profit) and (cur >= pos.take_profit if is_buy else cur <= pos.take_profit)
+                if hit_sl or hit_tp:
+                    reason = "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
+                    try:
+                        async with session.begin_nested():
+                            closed_trade = await close_paper_trade(pos, cur, reason, session)
+                        auto_closed.append({
+                            "trade_id":    closed_trade.id,
+                            "symbol":      closed_trade.symbol,
+                            "reason":      reason,
+                            "exit_price":  cur,
+                            "pnl":         closed_trade.pnl,
+                            "entry_price": closed_trade.entry_price,
+                            "size_units":  closed_trade.size_units,
+                            "direction":   pos.direction.value,
+                        })
+                    except Exception as exc:
+                        logger.warning(f"update_positions: {pos.symbol} F&O SL/TP close failed: {exc}")
             continue
 
         # Prefer the LIVE Kite price; fall back to the latest 1h candle.

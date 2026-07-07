@@ -1781,10 +1781,11 @@ async def _open_index_option_mis(
 
     Returns True if a trade was placed, False otherwise.
     """
-    from sqlalchemy import select, func as _func, and_, text as _text
+    import dataclasses
+    from sqlalchemy import select, func as _func
     from db.models import MasterIntelligenceScore
-    from paper_trading.trade_simulator import open_paper_trade
-    from engine.signal_generator import TradingSignal as _TS
+    from engine.fno.expiry import _spot_for
+    from engine.fno.selection import select_index_option, open_option_paper_trade
 
     # Determine market direction from Hub scores (use latest batch, up to 2 h old)
     _latest_subq = (
@@ -1800,63 +1801,60 @@ async def _open_index_option_mis(
     if abs(avg_score) < 10:
         return False   # market too ambiguous for directional option
 
-    option_type = "CE" if avg_score > 0 else "PE"
+    direction = "BUY" if avg_score > 0 else "SELL"   # select_index_option: BUY->CE, SELL->PE
 
-    # Get latest NIFTY spot + ATM option LTP from option_contract_snapshots
-    row = (await session.execute(_text("""
-        SELECT strike, ltp, spot, expiry_date
-        FROM option_contract_snapshots
-        WHERE underlying = 'NIFTY'
-          AND option_type = :ot
-          AND ltp > 0
-          AND ABS(strike - spot) = (
-              SELECT MIN(ABS(strike - spot))
-              FROM option_contract_snapshots
-              WHERE underlying = 'NIFTY' AND option_type = :ot AND ltp > 0
-          )
-        ORDER BY id DESC LIMIT 1
-    """), {"ot": option_type})).one_or_none()
-
-    if row is None or row.ltp <= 0:
+    spot = await _spot_for("NIFTY", session)
+    if not spot:
         return False
 
-    ltp       = float(row.ltp)
-    strike    = float(row.strike)
-    expiry    = row.expiry_date
-    lot_size  = 75   # NIFTY lot size
-    cost      = ltp * lot_size
-    if cost > balance * 0.5:
+    # Reuse the same contract-resolution (Kite master -> live snapshot
+    # fallback) used by the main F&O system, instead of a bespoke raw query.
+    #
+    # A prior version of this function built a plain TradingSignal here with
+    # a hardcoded symbol="NIFTY.NS" — ignoring the real option contract
+    # symbol it had just computed one line above — and never set
+    # instrument_type/underlying_symbol/strike_price/option_type/expiry_date
+    # at all (TradingSignal has no such fields). The resulting OpenPosition
+    # looked like a plain equity called "NIFTY.NS", which no live-price feed
+    # can ever resolve (it isn't a real tradable instrument) — so
+    # current_price stayed frozen at entry_price forever, showing a
+    # permanent ₹0.00 P&L no matter how the real option premium moved.
+    # Found + fixed 2026-07-07 investigating exactly that symptom live.
+    spec = await select_index_option("NIFTY", direction, spot, balance, session)
+    if spec is None:
+        return False
+
+    # This entry path is a lightweight 1-lot intraday scalp with a tighter
+    # premium stop/target than the main F&O system's 50%/100% swing —
+    # override sizing and levels accordingly.
+    qty      = spec.lot_size
+    notional = round(qty * spec.premium, 2)
+    if notional > balance * 0.5:
         return False   # option too expensive relative to remaining cash
-
-    stop_loss   = round(ltp * (1 - sl_pct * 5), 2)  # 2.5% SL on premium
-    take_profit = round(ltp * (1 + tp_pct * 5), 2)  # 5% TP on premium
-
-    symbol = f"NIFTY{expiry.strftime('%d%b%y').upper()}{int(strike)}{option_type}"
-
-    signal = _TS(
-        symbol=f"NIFTY.NS",
-        action="BUY",
-        confidence=abs(avg_score),
-        final_score=avg_score,
-        pattern_score=0.0,
-        indicator_score=abs(avg_score),
-        sentiment_score=0.0,
-        entry_price=ltp,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        risk_reward_ratio=tp_pct * 5 / (sl_pct * 5),
-        patterns_detected=[],
-        reasoning_points=[
-            f"Trade levels [intraday-fno]: SL ₹{stop_loss} · T1 ₹{take_profit}",
-            f"NIFTY {option_type} {int(strike)} exp {expiry} · Hub avg {avg_score:+.0f} · 1 lot MIS",
-        ],
-        regime="INTRADAY_FNO",
-        timeframe="1m",
+    spec = dataclasses.replace(
+        spec,
+        lots=1,
+        qty=qty,
+        notional=notional,
+        stop=round(spec.premium * (1 - sl_pct * 5), 2),
+        target=round(spec.premium * (1 + tp_pct * 5), 2),
     )
-    pos_size = {"units": lot_size, "usd_value": cost}
-    await open_paper_trade(signal, pos_size, session, product="MIS")
-    opened_syms.append(f"NIFTY-{option_type}")
-    logger.info(f"[intraday_entry] ✓ MIS {option_type} {symbol} @₹{ltp:.2f} (1 lot)")
+
+    trade = await open_option_paper_trade(
+        spec, session, confidence=abs(avg_score),
+        ai_reason=(
+            f"Trade levels [intraday-fno]: SL ₹{spec.stop} · T1 ₹{spec.target} | "
+            f"NIFTY {spec.option_type} {int(spec.strike)} exp {spec.expiry} · "
+            f"Hub avg {avg_score:+.0f} · 1 lot MIS"
+        ),
+    )
+    if trade is None:
+        return False
+    opened_syms.append(f"NIFTY-{spec.option_type}")
+    logger.info(
+        f"[intraday_entry] ✓ MIS {spec.option_type} {spec.tradingsymbol} "
+        f"@₹{spec.premium:.2f} (1 lot)"
+    )
     return True
 
 
