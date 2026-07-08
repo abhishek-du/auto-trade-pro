@@ -45,6 +45,16 @@ _portfolio: AgentPortfolioContext | None = None
 _portfolio_hydrated: bool = False
 
 
+async def _yfinance_last_price(symbol: str) -> float | None:
+    """Process-independent yfinance last price for the live-entry snap.
+
+    Thin wrapper over the shared crawler.live_prices.yfinance_ltp_batch helper
+    (which the fast SL/TP loop uses too) so both paths share one price source.
+    """
+    from crawler.live_prices import yfinance_ltp_batch
+    return (await yfinance_ltp_batch([symbol])).get(symbol)
+
+
 def _get_portfolio() -> AgentPortfolioContext:
     global _portfolio
     if _portfolio is None:
@@ -515,14 +525,21 @@ async def _process_symbol(
     # If the live price diverges >5% from the candle price, the candle data is too
     # stale to trade safely — reject the candidate rather than fill at a phantom price.
     if candidate is not None:
+        # ── Resolve a CONFIRMED live price (fail closed) ─────────────────────
+        # Only the price *fetch* is wrapped in try/except. The old code wrapped
+        # the whole block — including the "skip if unconfirmed" and divergence
+        # guards — in one broad `except` that logged at debug (suppressed in the
+        # INFO file log) and then FELL THROUGH, filling the order at the stale
+        # candle close. That is exactly how TBZ booked at yesterday's ₹198.71
+        # close while the live price was ₹208.60 (2026-07-08). Any fetch error
+        # must skip the trade, never fill at an unverified price.
+        live_px = None
         try:
             from crawler.live_prices import get_price
             lp = get_price(symbol)
             live_px = float(lp["price"]) if lp and lp.get("price") else None
 
             # WebSocket cache miss for mid-cap symbols — fall back to Kite REST LTP.
-            # If we still can't confirm the price, reject: executing at an unverified
-            # stale candle price is the root cause of the ₹438 vs ₹412 GNA-style bugs.
             if live_px is None:
                 try:
                     from crawler.zerodha_market import get_live_prices
@@ -536,33 +553,48 @@ async def _process_symbol(
                 except Exception as _exc:
                     logger.debug(f"[agent] REST LTP fallback failed for {symbol}: {_exc}")
 
+            # Last resort — direct yfinance quote. get_price()/KiteTicker caches
+            # are per-process and are usually EMPTY inside a forked Celery worker,
+            # and Kite LTP needs a live broker session, so without this the
+            # fail-closed guard below would skip EVERY trade in the worker.
             if live_px is None:
+                _yf_sym = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+                _yf_px = await _yfinance_last_price(_yf_sym)
+                if _yf_px and _yf_px > 0:
+                    live_px = _yf_px
+        except Exception as exc:
+            logger.warning(
+                f"[agent] {symbol}: live entry-price confirmation errored ({exc}) — "
+                f"skipping trade instead of filling at the stale candle price"
+            )
+            return None
+
+        if live_px is None:
+            logger.warning(
+                f"[agent] {symbol}: cannot confirm live price — no WebSocket tick, "
+                f"Kite LTP or yfinance quote available, skipping trade"
+            )
+            return None
+
+        # ── Snap entry/stop/targets to the confirmed live price ──────────────
+        if candidate.entry:
+            divergence = abs(live_px - candidate.entry) / candidate.entry
+            if divergence < 0.05:
+                delta = live_px - candidate.entry
+                candidate.entry = round(live_px, 2)
+                if getattr(candidate, "stop", None):
+                    candidate.stop = round(candidate.stop + delta, 2)
+                for attr in ("target", "target_1", "target_2"):
+                    v = getattr(candidate, attr, None)
+                    if v:
+                        setattr(candidate, attr, round(v + delta, 2))
+            else:
                 logger.warning(
-                    f"[agent] {symbol}: cannot confirm live price — "
-                    f"no WebSocket tick or REST LTP available, skipping trade"
+                    f"[agent] {symbol}: candle price ₹{candidate.entry:.2f} vs "
+                    f"live ₹{live_px:.2f} — {divergence*100:.1f}% divergence, "
+                    f"candle data too stale — skipping trade"
                 )
                 return None
-
-            if candidate.entry:
-                divergence = abs(live_px - candidate.entry) / candidate.entry
-                if divergence < 0.05:
-                    delta = live_px - candidate.entry
-                    candidate.entry = round(live_px, 2)
-                    if getattr(candidate, "stop", None):
-                        candidate.stop = round(candidate.stop + delta, 2)
-                    for attr in ("target", "target_1", "target_2"):
-                        v = getattr(candidate, attr, None)
-                        if v:
-                            setattr(candidate, attr, round(v + delta, 2))
-                else:
-                    logger.warning(
-                        f"[agent] {symbol}: candle price ₹{candidate.entry:.2f} vs "
-                        f"live ₹{live_px:.2f} — {divergence*100:.1f}% divergence, "
-                        f"candle data too stale — skipping trade"
-                    )
-                    return None
-        except Exception as exc:
-            logger.debug(f"[agent] live entry-price snap failed for {symbol}: {exc}")
 
     # SELECTIVE regime filter — restrict to the high-conviction trend strategies.
     # B6 fix: the old whitelist named only TREND_BREAKOUT_LONG, which is disabled
