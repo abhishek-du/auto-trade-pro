@@ -41,17 +41,8 @@ _LEVEL_NAME = {SHOCK_NONE: "NONE", SHOCK_TIGHTEN: "TIGHTEN", SHOCK_FLATTEN: "FLA
 # constant to avoid config sprawl — the trigger thresholds are the tunable part.
 _TIGHTEN_TRAIL_PCT = 0.5
 
-# Negative headlines matching these stems mark a market-wide shock (geopolitics
-# or panic selling) rather than routine single-stock news.
-_SHOCK_KEYWORDS = (
-    # geopolitical catalysts
-    "war", "strike", "missile", "attack", "invasion", "ceasefire", "nuclear",
-    "emergency", "sanction", "terror", "bomb", "escalat", "conflict",
-    "airstrike", "retaliat", "hostilit",
-    # market-panic language
-    "crash", "plunge", "collapse", "tumble", "slump", "selloff", "sell-off",
-    "rout", "bloodbath", "tank", "sink", "nosediv", "freefall",
-)
+# Shared shock keyword list (also drives the /news high-impact alert + surfacing).
+from engine.news_impact import SHOCK_KEYWORDS as _SHOCK_KEYWORDS
 
 
 @dataclass

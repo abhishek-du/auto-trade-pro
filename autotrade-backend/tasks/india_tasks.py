@@ -1494,6 +1494,82 @@ def market_shock_guard():
     _run_async(_market_shock_guard())
 
 
+# ── 6b. High-impact news alert — every 5 min (incl. after-hours) ─────────────
+
+async def _market_news_alert() -> None:
+    """Push a Telegram alert when a crash-capable headline lands.
+
+    Fixes the gap where a market-moving event (e.g. the Iran ceasefire news) was
+    captured but silently buried in the chronological /news feed with no alert.
+    Runs regardless of market hours — such news often breaks after close. A DB
+    watermark (last_news_alert_at) dedupes so each headline alerts at most once.
+    """
+    from utils.config import settings
+    if not settings.ENABLE_NEWS_ALERTS:
+        return
+
+    from datetime import datetime, timedelta
+    from sqlalchemy import select
+    from db.models import NewsItem
+    from utils.runtime_config import RuntimeConfig
+    from engine.news_impact import is_high_impact_news
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        rc  = await RuntimeConfig.load(session)
+        raw = rc._get("last_news_alert_at", "")
+        try:
+            since = datetime.fromisoformat(raw) if raw else datetime.utcnow() - timedelta(minutes=10)
+        except (ValueError, TypeError):
+            since = datetime.utcnow() - timedelta(minutes=10)
+
+        rows = (await session.execute(
+            select(
+                NewsItem.headline, NewsItem.source, NewsItem.sentiment,
+                NewsItem.score, NewsItem.crawled_at,
+            )
+            .where(NewsItem.crawled_at > since)
+            .order_by(NewsItem.crawled_at.desc())
+            .limit(200)
+        )).all()
+        if not rows:
+            return
+
+        # Advance the watermark past everything scanned this cycle (even non-hits)
+        # so the same news is never re-evaluated / re-alerted.
+        newest = max(r.crawled_at for r in rows)
+        await RuntimeConfig.set(session, "last_news_alert_at", newest.isoformat())
+        await session.commit()
+
+        hits = [
+            r for r in rows
+            if is_high_impact_news(r.headline, r.sentiment, r.score,
+                                   settings.NEWS_ALERT_MIN_ABS_SCORE)
+        ]
+        if not hits:
+            return
+
+        logger.warning(f"[news_alert] {len(hits)} high-impact headline(s) detected")
+        if settings.telegram_available:
+            try:
+                from integrations.telegram_service import send
+                cap = int(settings.NEWS_ALERT_MAX_PER_CYCLE)
+                lines = [f"🔴 HIGH-IMPACT MARKET NEWS ({len(hits)})"]
+                for r in hits[:cap]:
+                    lines.append(f"• {r.headline[:120]}  [{r.source}]")
+                if len(hits) > cap:
+                    lines.append(f"…+{len(hits) - cap} more")
+                await send("\n".join(lines))
+            except Exception as exc:
+                logger.debug(f"[news_alert] telegram notify failed: {exc}")
+
+
+@celery_app.task(name="tasks.market_news_alert")
+def market_news_alert():
+    """High-impact news alert — Telegram push on crash-capable headlines."""
+    _run_async(_market_news_alert())
+
+
 # ── 6b. Corporate action check — 09:05 IST daily ─────────────────────────────
 
 async def _corporate_action_check() -> None:

@@ -76,6 +76,9 @@ _KNOWN_KEYS: dict[str, type] = {
     # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
     # entries are blocked after a shock FLATTEN. Cleared automatically once past.
     "shock_cooldown_until":    str,
+    # Watermark for the high-impact news alert: ISO-8601 crawled_at of the newest
+    # headline already scanned, so we never re-alert the same news.
+    "last_news_alert_at":      str,
 }
 
 
