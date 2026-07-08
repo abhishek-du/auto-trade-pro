@@ -370,7 +370,7 @@ class Settings(BaseSettings):
     # the chronological /news feed. Runs every 5 min, ALSO outside market hours
     # (news breaks after-hours). Conservative by default to avoid Telegram spam.
     ENABLE_NEWS_ALERTS:         bool  = True
-    NEWS_ALERT_MIN_ABS_SCORE:   float = 0.6    # min |sentiment| to alert (balanced)
+    NEWS_ALERT_MIN_ABS_SCORE:   float = 0.75   # min |sentiment| to flag/alert (strict)
     NEWS_ALERT_MAX_PER_CYCLE:   int   = 5      # cap headlines per alert message
 
     # Universe / timing

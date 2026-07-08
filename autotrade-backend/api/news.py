@@ -10,6 +10,7 @@ from crawler.news_crawler import get_market_sentiment
 from db.database import get_db
 from db.models import NewsItem
 from engine.news_impact import is_high_impact_news
+from utils.config import settings
 
 router = APIRouter(tags=["News"])
 
@@ -25,7 +26,10 @@ def _item_out(item: NewsItem) -> NewsItemOut:
         tickers_affected=item.tickers_affected,
         published_at=item.published_at,
         crawled_at=item.crawled_at,
-        high_impact=is_high_impact_news(item.headline, item.sentiment, item.score),
+        high_impact=is_high_impact_news(
+            item.headline, item.sentiment, item.score,
+            settings.NEWS_ALERT_MIN_ABS_SCORE,
+        ),
     )
 
 
@@ -67,7 +71,8 @@ async def get_high_impact_news(
     )).scalars().all()
     hits = [
         item for item in rows
-        if is_high_impact_news(item.headline, item.sentiment, item.score)
+        if is_high_impact_news(item.headline, item.sentiment, item.score,
+                               settings.NEWS_ALERT_MIN_ABS_SCORE)
     ]
     return [_item_out(item) for item in hits[:limit]]
 
