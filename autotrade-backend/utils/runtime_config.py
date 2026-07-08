@@ -73,6 +73,9 @@ _KNOWN_KEYS: dict[str, type] = {
     "intraday_enabled":        bool,
     # Global fail-safe: blocks all new entries across all strategies.
     "trading_halted":          bool,
+    # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
+    # entries are blocked after a shock FLATTEN. Cleared automatically once past.
+    "shock_cooldown_until":    str,
 }
 
 
@@ -235,6 +238,18 @@ class RuntimeConfig:
     @property
     def trading_halted(self) -> bool:
         return bool(self._get("trading_halted", getattr(settings, "TRADING_HALTED", False)))
+
+    @property
+    def shock_cooldown_active(self) -> bool:
+        """True while a market-shock FLATTEN cooldown is still in effect."""
+        raw = self._get("shock_cooldown_until", "")
+        if not raw:
+            return False
+        try:
+            from datetime import datetime as _dt
+            return _dt.utcnow() < _dt.fromisoformat(raw)
+        except (ValueError, TypeError):
+            return False
 
     def to_dict(self) -> dict[str, Any]:
         """Return all current values (DB overrides merged with .env defaults)."""

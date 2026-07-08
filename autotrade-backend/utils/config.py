@@ -343,6 +343,27 @@ class Settings(BaseSettings):
     # this many minutes during NSE hours (catches a frozen/stale live feed).
     CANDLE_STALENESS_ALERT_MIN: int   = 20
 
+    # ── Fast market-shock guard ───────────────────────────────────────────────
+    # A geopolitical/news shock (e.g. war headline) can gap the index down in
+    # minutes — far faster than the 15-min hub cycle or score-based exits react.
+    # This guard runs every 30 s: if NIFTY/BANKNIFTY falls sharply over a short
+    # window (or a burst of high-severity market news lands), it proactively
+    # de-risks open longs BEFORE the price-based stop is reached. Gated OFF by
+    # default; enable once the thresholds are tuned to your risk appetite.
+    ENABLE_SHOCK_GUARD:         bool  = False
+    # Index tickers whose intraday drop defines a market-wide shock (yfinance).
+    SHOCK_INDEX_SYMBOLS:        str   = "^NSEI,^NSEBANK"
+    SHOCK_INDEX_WINDOW_MIN:     int   = 15     # look-back window for the index drop
+    SHOCK_TIGHTEN_PCT:          float = 1.0    # index −X% in window → tighten stops to lock
+    SHOCK_FLATTEN_PCT:          float = 2.0    # index −X% in window → flatten all open longs
+    # High-severity market news: count negative market-shock headlines in the
+    # last N minutes; at/above the threshold escalates the shock one level.
+    SHOCK_NEWS_WINDOW_MIN:      int   = 20
+    SHOCK_NEWS_MIN_HITS:        int   = 3
+    # After a FLATTEN, block new entries for this many minutes (don't re-buy the
+    # crash on the next 60 s trade-loop / 15-min hub cycle).
+    SHOCK_COOLDOWN_MIN:         int   = 30
+
     # Universe / timing
     # Daily bars: this is the basis the strategies were designed on and the ONLY
     # basis validated by the backtest (scripts/run_backtest.py runs on 1d). ATR,

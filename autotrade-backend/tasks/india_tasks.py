@@ -579,6 +579,12 @@ async def _india_trade_loop():
             logger.warning("[india_trade_loop] TRADING HALTED — exits done, no new entries")
             return
 
+        # Transient market-shock cooldown — after a FLATTEN the shock guard blocks
+        # new entries for a few minutes so this loop doesn't re-buy into the crash.
+        if (await RuntimeConfig.load(session)).shock_cooldown_active:
+            logger.warning("[india_trade_loop] SHOCK COOLDOWN active — exits done, no new entries")
+            return
+
         # Step 2: read actionable signals from market_shortlist — the SINGLE source of
         # truth produced by the market scanner (compute_indicators → composite_score →
         # signal). This is exactly what the scanner UI and the /s/:symbol page show, so
@@ -1444,6 +1450,48 @@ async def _fast_sl_check() -> None:
 def fast_sl_check():
     """Stop-loss / take-profit check on live PRICE_CACHE ticks every 5 s."""
     _run_async(_fast_sl_check())
+
+
+# ── 6a. Fast market-shock guard — every 30 s ─────────────────────────────────
+
+async def _market_shock_guard() -> None:
+    """Tighten/flatten open longs on a sudden index or high-severity news shock.
+
+    Reacts in ~30 s instead of waiting for the 15-min hub cycle. Gated OFF by
+    default (settings.ENABLE_SHOCK_GUARD).
+    """
+    from utils.config import settings
+    if not _is_india_trading_window() or not settings.ENABLE_SHOCK_GUARD:
+        return
+
+    from engine.agent.shock_guard import run_shock_guard
+    from tasks._db import celery_session
+
+    async with celery_session() as session:
+        summary = await run_shock_guard(session)
+
+    if not summary or not (summary.get("closed") or summary.get("tightened")):
+        return
+
+    if settings.telegram_available:
+        try:
+            from integrations.telegram_service import send
+            lines = [f"⚠️ MARKET SHOCK — {summary['level']}"]
+            if summary.get("reason"):
+                lines.append(summary["reason"])
+            for c in summary.get("closed", []):
+                lines.append(f"FLATTEN {c['symbol']} @ ₹{c['price']:.2f} (pnl ₹{c['pnl']:,.0f})")
+            if summary.get("tightened"):
+                lines.append(f"Tightened stops on {len(summary['tightened'])} long(s)")
+            await send("\n".join(lines))
+        except Exception as exc:
+            logger.debug(f"[shock] telegram notify failed: {exc}")
+
+
+@celery_app.task(name="tasks.market_shock_guard")
+def market_shock_guard():
+    """Fast market-shock guard — tighten/flatten longs on an index/news shock."""
+    _run_async(_market_shock_guard())
 
 
 # ── 6b. Corporate action check — 09:05 IST daily ─────────────────────────────
