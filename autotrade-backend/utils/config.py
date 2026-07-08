@@ -364,6 +364,15 @@ class Settings(BaseSettings):
     # crash on the next 60 s trade-loop / 15-min hub cycle).
     SHOCK_COOLDOWN_MIN:         int   = 30
 
+    # High-impact news alert — push a Telegram alert when a market-shock headline
+    # (geopolitics / panic) with strong negative sentiment lands, so a crash-
+    # capable event (e.g. the Iran ceasefire news) is never silently buried in
+    # the chronological /news feed. Runs every 5 min, ALSO outside market hours
+    # (news breaks after-hours). Conservative by default to avoid Telegram spam.
+    ENABLE_NEWS_ALERTS:         bool  = True
+    NEWS_ALERT_MIN_ABS_SCORE:   float = 0.6    # min |sentiment| to alert (balanced)
+    NEWS_ALERT_MAX_PER_CYCLE:   int   = 5      # cap headlines per alert message
+
     # Universe / timing
     # Daily bars: this is the basis the strategies were designed on and the ONLY
     # basis validated by the backtest (scripts/run_backtest.py runs on 1d). ATR,

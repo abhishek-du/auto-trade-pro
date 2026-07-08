@@ -9,6 +9,7 @@ from api.schemas import NewsItemOut, SentimentOut
 from crawler.news_crawler import get_market_sentiment
 from db.database import get_db
 from db.models import NewsItem
+from engine.news_impact import is_high_impact_news
 
 router = APIRouter(tags=["News"])
 
@@ -24,6 +25,7 @@ def _item_out(item: NewsItem) -> NewsItemOut:
         tickers_affected=item.tickers_affected,
         published_at=item.published_at,
         crawled_at=item.crawled_at,
+        high_impact=is_high_impact_news(item.headline, item.sentiment, item.score),
     )
 
 
@@ -44,6 +46,30 @@ async def get_recent_news(
         query = query.where(NewsItem.sentiment == sentiment.lower())
     result = await db.execute(query)
     return [_item_out(item) for item in result.scalars().all()]
+
+
+@router.get(
+    "/alerts",
+    response_model=list[NewsItemOut],
+    summary="High-impact market-shock headlines only (for the Market Alerts strip)",
+)
+async def get_high_impact_news(
+    limit: int = Query(15, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return recent crash-capable headlines (market-shock catalyst + strong
+    negative sentiment), newest first — the same signal that fires the Telegram
+    alert. Lets the /news page surface these on top instead of burying them in
+    the chronological feed. Scans a recent window so the DB filter stays cheap.
+    """
+    rows = (await db.execute(
+        select(NewsItem).order_by(desc(NewsItem.crawled_at)).limit(300)
+    )).scalars().all()
+    hits = [
+        item for item in rows
+        if is_high_impact_news(item.headline, item.sentiment, item.score)
+    ]
+    return [_item_out(item) for item in hits[:limit]]
 
 
 @router.get(

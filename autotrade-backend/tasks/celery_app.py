@@ -198,6 +198,14 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 8},
     },
 
+    # Every 5 min (incl. after-hours): alert on high-impact market-shock news so
+    # a crash-capable headline is never silently buried in the /news feed.
+    "market-news-alert-every-5min": {
+        "task":     "tasks.market_news_alert",
+        "schedule": 300,
+        "options":  {"countdown": 25},
+    },
+
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",

@@ -146,6 +146,7 @@ class NewsItemOut(BaseModel):
     tickers_affected: Optional[list]
     published_at:     Optional[datetime]
     crawled_at:       datetime
+    high_impact:      bool = False   # market-shock catalyst + strong negative sentiment
 
 
 class SentimentOut(BaseModel):
