@@ -77,6 +77,45 @@ def get_prices_batch(symbols: list[str]) -> dict[str, dict]:
     """Batch wrapper around get_price()."""
     return {s: p for s in symbols if (p := get_price(s)) is not None}
 
+
+async def yfinance_ltp_batch(symbols: list[str]) -> dict[str, float]:
+    """Direct yfinance last-traded price for symbols — a process-INDEPENDENT
+    price source.
+
+    get_price()/KiteTicker caches live in other processes and are usually empty
+    inside a forked Celery worker, and Kite LTP needs a live broker session that
+    can 403/disconnect exactly when volatility spikes. yfinance is a plain HTTP
+    call that works in any worker and in paper-without-broker mode, so it is the
+    reliable backstop for the agent's live-entry snap and the fast SL/TP loop.
+
+    Returns {symbol: price} only for symbols that resolved to a positive price
+    (e.g. NFO option symbols yfinance can't price are simply omitted).
+    """
+    if not symbols:
+        return {}
+    loop = asyncio.get_event_loop()
+
+    def _fetch() -> dict[str, float]:
+        out: dict[str, float] = {}
+        try:
+            tickers = yf.Tickers(" ".join(symbols))
+        except Exception as exc:
+            logger.debug(f"[live_prices] yfinance_ltp_batch init failed: {exc}")
+            return out
+        for sym in symbols:
+            try:
+                t = tickers.tickers.get(sym)
+                if t is None:
+                    continue
+                px = float(getattr(t.fast_info, "last_price", 0) or 0)
+                if px > 0:
+                    out[sym] = px
+            except Exception:
+                continue
+        return out
+
+    return await loop.run_in_executor(None, _fetch)
+
 # ── Symbol catalogue ──────────────────────────────────────────────────────────
 
 SYMBOLS_CONFIG: list[dict] = [

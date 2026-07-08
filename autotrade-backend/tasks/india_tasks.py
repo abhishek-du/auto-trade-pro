@@ -366,6 +366,7 @@ def india_fundamental_update():
 # Maps bare symbol → {"score": float, "news": float, "ts": datetime} of the last alert.
 _shortlist_alerted_loop: dict[str, dict] = {}
 _exit_alerted_trade_ids: set[int] = set()   # dedup: never send exit Telegram twice for same trade
+_fast_sl_heartbeat_ts: float = 0.0          # throttle the fast-SL "alive" heartbeat log
 _SHORTLIST_SCORE_DELTA   = 5.0   # re-alert if |Δ master score| ≥ this
 _SHORTLIST_MIN_REALERT_M = 30    # anti-spam floor: never re-alert within this many minutes
 _MAX_SHORTLIST_PER_CYCLE = 5
@@ -542,16 +543,9 @@ async def _india_trade_loop():
 
 
     async with celery_session() as session:
-        from paper_trading.virtual_wallet import VirtualWallet
-        await VirtualWallet.check_drawdown_breakers(session)
-        
-        from utils.runtime_config import RuntimeConfig
-        rc = await RuntimeConfig.load(session)
-        if rc.trading_halted:
-            logger.warning("[india_trade_loop] TRADING HALTED — skipping loop")
-            return
-
         # Step 1: close SL/TP hits, refresh unrealised PnL
+        # (runs BEFORE the halt gate — a halted book must still be de-risked,
+        # and the breaker below needs the freshly marked equity)
         auto_closed = await update_positions_with_current_prices(session)
         if auto_closed:
             logger.info(
@@ -570,6 +564,20 @@ async def _india_trade_loop():
                         pnl=c["pnl"],
                         reason=c["reason"],
                     ))
+
+        # Circuit breaker + halt gate — AFTER exit management, BEFORE any entry.
+        # check_drawdown_breakers trips the sticky trading_halted flag on a
+        # >max_daily_loss mark-to-market day loss (audit P2.11).
+        from paper_trading.virtual_wallet import VirtualWallet
+        from utils.runtime_config import RuntimeConfig
+        try:
+            halted = await VirtualWallet.check_drawdown_breakers(session)
+        except Exception as _brk_exc:
+            logger.error(f"[india_trade_loop] breaker check failed: {_brk_exc}")
+            halted = (await RuntimeConfig.load(session)).trading_halted
+        if halted:
+            logger.warning("[india_trade_loop] TRADING HALTED — exits done, no new entries")
+            return
 
         # Step 2: read actionable signals from market_shortlist — the SINGLE source of
         # truth produced by the market scanner (compute_indicators → composite_score →
@@ -1286,7 +1294,44 @@ async def _fast_sl_check() -> None:
                         live_px[sym] = float(px)
             except Exception as exc:
                 logger.debug(f"[fast_sl] Kite LTP fetch failed: {exc}")
-                return  # No fresh prices — skip this tick entirely
+
+            # yfinance backstop — Kite LTP can return {} (disconnect / 403 / token
+            # expiry) EXACTLY when volatility spikes (e.g. a geopolitical shock).
+            # Without a fallback the fast SL/TP loop goes blind mid-crash and
+            # leaves stops unenforced. Recover any symbol Kite couldn't price via
+            # a direct yfinance quote so live protection survives a broker hiccup.
+            missing = [s for s in symbols if s not in live_px]
+            if missing:
+                try:
+                    from crawler.live_prices import yfinance_ltp_batch
+                    yf_px = await yfinance_ltp_batch(missing)
+                    live_px.update(yf_px)
+                    if yf_px:
+                        logger.info(
+                            f"[fast_sl] Kite LTP missing {len(missing)} symbol(s) — "
+                            f"recovered {len(yf_px)} via yfinance backstop"
+                        )
+                except Exception as exc:
+                    logger.debug(f"[fast_sl] yfinance backstop failed: {exc}")
+
+            if not live_px:
+                logger.warning(
+                    "[fast_sl] no live price from Kite OR yfinance for "
+                    f"{len(symbols)} open position(s) — stops UNENFORCED this tick"
+                )
+                return
+
+        # Heartbeat (throttled to ~1/min) so operators can confirm the 5 s loop
+        # is actually alive and watching positions — it is otherwise silent
+        # unless it closes a trade, which hid whether it was running at all.
+        global _fast_sl_heartbeat_ts
+        import time as _time
+        if _time.time() - _fast_sl_heartbeat_ts >= 60:
+            _fast_sl_heartbeat_ts = _time.time()
+            logger.info(
+                f"[fast_sl] alive — watching {len(positions)} position(s), "
+                f"{len(live_px)} priced live"
+            )
 
         closed: list[dict] = []
         for pos in positions:
@@ -1488,12 +1533,16 @@ async def _intraday_entry_task():
 
 
     async with celery_session() as session:
+        # Circuit breaker + halt gate — this task only opens NEW positions,
+        # so it is safe to bail out entirely when halted.
         from paper_trading.virtual_wallet import VirtualWallet
-        await VirtualWallet.check_drawdown_breakers(session)
-        
         from utils.runtime_config import RuntimeConfig
-        rc = await RuntimeConfig.load(session)
-        if rc.trading_halted:
+        try:
+            halted = await VirtualWallet.check_drawdown_breakers(session)
+        except Exception as _brk_exc:
+            logger.error(f"[intraday_entry] breaker check failed: {_brk_exc}")
+            halted = (await RuntimeConfig.load(session)).trading_halted
+        if halted:
             logger.warning("[intraday_entry] TRADING HALTED — skipping")
             return
 
