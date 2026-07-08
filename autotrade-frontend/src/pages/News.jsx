@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw } from 'lucide-react';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { getNews, apiFetch } from '../api/client';
+import { getNews, getNewsAlerts, apiFetch } from '../api/client';
 import { useLivePrices } from '../contexts/LivePricesContext';
 
 /* ── Sentiment helpers ──────────────────────────────────────── */
@@ -52,6 +52,72 @@ function SentimentGauge({ articles }) {
       </div>
       <div className="flex justify-between text-xs text-muted">
         <span>Bearish</span><span>Neutral</span><span>Bullish</span>
+      </div>
+    </div>
+  );
+}
+
+/* ── Market Alerts strip (high-impact shock/geopolitical news) ─── */
+function MarketAlertsStrip() {
+  const [alerts, setAlerts]   = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // setState only inside async callbacks (not synchronously in the effect body)
+  const fetchAlerts = () =>
+    getNewsAlerts()
+      .then((d) => setAlerts(Array.isArray(d) ? d : []))
+      .catch(() => setAlerts([]))
+      .finally(() => setLoading(false));
+
+  useEffect(() => {
+    fetchAlerts();
+    const id = setInterval(fetchAlerts, 120000); // re-check every 2 min
+    return () => clearInterval(id);
+  }, []);
+
+  const refresh = () => { setLoading(true); fetchAlerts(); };
+
+  // Calm state — slim, non-intrusive bar so the feature stays discoverable.
+  if (!loading && alerts.length === 0) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted glass-panel border border-border rounded-xl px-4 py-2.5">
+        <ShieldAlert size={13} className="text-profit" />
+        <span className="text-slate-300 font-medium">No high-impact market alerts right now.</span>
+        <span className="opacity-60">Monitoring for shock / geopolitical headlines.</span>
+      </div>
+    );
+  }
+  if (loading && alerts.length === 0) return null;
+
+  return (
+    <div className="glass-panel border border-loss/40 rounded-xl p-4 space-y-3 relative overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-br from-loss/10 via-transparent to-transparent pointer-events-none" />
+      <div className="flex items-center justify-between relative">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-loss/15 border border-loss/40 flex items-center justify-center">
+            <AlertTriangle size={16} className="text-loss animate-pulse" />
+          </div>
+          <div>
+            <h3 className="text-loss font-bold text-sm">🔴 Market Alerts</h3>
+            <p className="text-[10px] text-muted uppercase tracking-widest">
+              High-impact shock headlines · {alerts.length} active
+            </p>
+          </div>
+        </div>
+        <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-surface text-muted hover:text-loss transition-colors" title="Refresh alerts">
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+      <div className="space-y-1.5 relative">
+        {alerts.map((a, i) => (
+          <a key={a.id ?? a.url ?? i}
+            href={a.url || undefined} target="_blank" rel="noopener noreferrer"
+            className="flex items-start gap-2 text-xs bg-loss/5 hover:bg-loss/10 border border-loss/20 rounded-lg px-3 py-2 transition-colors">
+            <TrendingDown size={13} className="text-loss shrink-0 mt-0.5" />
+            <span className="text-slate-200 flex-1 leading-snug">{a.headline}</span>
+            <span className="text-muted shrink-0 whitespace-nowrap hidden sm:inline">{a.source}</span>
+          </a>
+        ))}
       </div>
     </div>
   );
@@ -244,6 +310,9 @@ export default function News() {
   return (
     <div className="space-y-6">
 
+      {/* High-impact market alerts (shock / geopolitical news) — surfaced on top */}
+      <MarketAlertsStrip />
+
       {/* Two-col: sentiment gauge + source breakdown */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="md:col-span-2">
@@ -301,12 +370,18 @@ export default function News() {
           {filtered.map((a, i) => (
             <article key={a.id ?? a.url ?? i}
               className={['glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
-                a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
+                a.high_impact ? 'border-loss/40 shadow-[0_0_0_1px_rgba(239,68,68,0.15)]'
+                  : a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
               ].join(' ')}>
               <div className="flex items-start justify-between gap-4">
                 <div className="flex-1 min-w-0 space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <SentimentBadge sentiment={a.sentiment} />
+                    {a.high_impact && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-loss border border-loss/40 bg-loss/10 px-1.5 py-0.5 rounded-full">
+                        <AlertTriangle size={9} />HIGH IMPACT
+                      </span>
+                    )}
                     {a._live && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold text-accent border border-accent/30 bg-accent/10 px-1.5 py-0.5 rounded-full animate-pulse">
                         <Radio size={8} />LIVE
