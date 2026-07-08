@@ -189,6 +189,15 @@ celery_app.conf.beat_schedule = {
         "schedule": 5,
     },
 
+    # Every 30 s during NSE hours: fast market-shock guard. Tightens/flattens
+    # open longs on a sudden index drop or high-severity news burst — reacts far
+    # faster than the 15-min hub cycle. Gated OFF by default (ENABLE_SHOCK_GUARD).
+    "market-shock-guard-every-30s": {
+        "task":     "tasks.market_shock_guard",
+        "schedule": 30,
+        "options":  {"countdown": 8},
+    },
+
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",
