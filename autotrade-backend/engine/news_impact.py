@@ -19,8 +19,10 @@ SHOCK_KEYWORDS: tuple[str, ...] = (
     "rout", "bloodbath", "tank", "sink", "nosediv", "freefall",
 )
 
-# Balanced default: a headline must carry at least this |sentiment| to alert.
-HIGH_IMPACT_MIN_ABS_SCORE = 0.6
+# Fallback threshold when a caller doesn't pass one. The live knob is
+# settings.NEWS_ALERT_MIN_ABS_SCORE (the alert task and the /news API both pass
+# it), so this only applies to direct calls without an explicit override.
+HIGH_IMPACT_MIN_ABS_SCORE = 0.75
 
 
 def matches_shock_keyword(headline: str | None) -> bool:

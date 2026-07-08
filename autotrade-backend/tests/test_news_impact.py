@@ -42,8 +42,13 @@ class TestHighImpact:
         assert not is_high_impact_news("war escalates in the region", "negative", None)
 
     def test_threshold_boundary(self):
-        assert is_high_impact_news("Nifty crash deepens", "negative", -0.6)
-        assert not is_high_impact_news("Nifty crash deepens", "negative", -0.59)
+        # default threshold is the strict 0.75
+        assert is_high_impact_news("Nifty crash deepens", "negative", -0.75)
+        assert not is_high_impact_news("Nifty crash deepens", "negative", -0.74)
+
+    def test_explicit_threshold_override(self):
+        assert is_high_impact_news("Nifty crash deepens", "negative", -0.65, 0.6)
+        assert not is_high_impact_news("Nifty crash deepens", "negative", -0.65, 0.75)
 
 
 def test_api_item_out_sets_high_impact_flag():
