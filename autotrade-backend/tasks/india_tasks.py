@@ -3648,3 +3648,89 @@ def backfill_hub_1d_candles_task():
     """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols."""
     logger.info("[backfill_hub_1d] starting daily 1d candle backfill for Hub universe")
     return _run_async(_backfill_hub_1d_candles())
+
+
+async def _refresh_priority_1d_candles():
+    """Evening (17:30 IST) refresh of TODAY's 1d candle for the symbols that
+    actually matter: OPEN POSITIONS + hub universe + market shortlist.
+
+    Why this exists: the full-universe backfill runs at 03:10 UTC (08:40 IST),
+    BEFORE Kite finalizes the previous day's daily candle (verified 2026-07-09:
+    at 03:41 UTC Kite still only had through 7-Jul; by 14:05 IST it had 8-Jul).
+    Its stale-skip (`candle >= yesterday`) also treats a symbol as fresh once it
+    has *yesterday's* bar, so it never fetches *today's*. Net effect: the daily
+    view for tradeable stocks ran ~2 days behind, which is what filled entries at
+    stale daily closes (e.g. TBZ bought 8-Jul at the 6-Jul close of ₹198.71).
+
+    This pass runs AFTER market close + Kite finalisation, on a SMALL priority set
+    (~hundreds, not ~9,600), so it finishes fast and gets the *current* day's close
+    same-day. Idempotent (save_candles_to_db upserts); no stale-skip — the set is
+    small enough to always refresh.
+    """
+    import asyncio as _asyncio
+    from sqlalchemy import text as _text
+    from crawler.price_feed import save_candles_to_db
+    from crawler.zerodha_historical import get_kite_candles_for_range
+    from crawler.zerodha_kite_lib import get_kite
+    from crawler.zerodha_instruments import INSTRUMENT_CACHE, refresh_instrument_cache
+    from engine.hub_universe import get_hub_universe
+    from tasks._db import celery_session
+    import datetime as _dt
+
+    kite = get_kite()
+    if not kite.access_token:
+        logger.warning("[refresh_1d_priority] Zerodha not authenticated — skipping")
+        return {"skipped": True, "reason": "not_authenticated"}
+    if not INSTRUMENT_CACHE:
+        await refresh_instrument_cache()
+
+    # Priority symbols: open positions FIRST (must never be stale), then hub
+    # universe, then today's shortlist. Dedup preserving that priority order.
+    async with celery_session() as session:
+        open_syms = (await session.execute(_text(
+            "SELECT DISTINCT symbol FROM open_positions"
+        ))).scalars().all()
+        shortlist = (await session.execute(_text(
+            "SELECT DISTINCT symbol FROM market_shortlist "
+            "WHERE created_at > now() - interval '2 days'"
+        ))).scalars().all()
+        hub_syms = list(await get_hub_universe(session))
+
+    def _ns(s: str) -> str:
+        return s if (s.endswith(".NS") or s.endswith(".BO")) else f"{s}.NS"
+
+    priority: list[str] = []
+    seen: set[str] = set()
+    for group in (open_syms, hub_syms, shortlist):
+        for s in group:
+            k = _ns(s)
+            if k not in seen:
+                seen.add(k); priority.append(k)
+
+    to_date = _dt.date.today()
+    from_date = to_date - _dt.timedelta(days=6)   # covers a long weekend
+    saved = failed = 0
+    for sym in priority:
+        try:
+            candles = await get_kite_candles_for_range(sym, from_date, to_date, interval="1d")
+            if candles:
+                async with celery_session() as s2:
+                    saved += await save_candles_to_db(candles, s2)
+                    await s2.commit()
+        except Exception:
+            failed += 1
+        await _asyncio.sleep(0.35)   # stay under Kite's ~3 req/sec limit
+
+    logger.info(
+        f"[refresh_1d_priority] refreshed today's 1d for {len(priority)} priority "
+        f"symbols (open={len(open_syms)} hub={len(hub_syms)} shortlist={len(shortlist)}) "
+        f"— saved={saved} failed={failed}"
+    )
+    return {"priority_symbols": len(priority), "saved": saved, "failed": failed}
+
+
+@celery_app.task(name="tasks.refresh_priority_1d_candles", time_limit=900, soft_time_limit=780)
+def refresh_priority_1d_candles_task():
+    """Evening 17:30 IST: fetch TODAY's 1d candle for open positions + hub + shortlist."""
+    logger.info("[refresh_1d_priority] starting evening priority 1d refresh")
+    return _run_async(_refresh_priority_1d_candles())

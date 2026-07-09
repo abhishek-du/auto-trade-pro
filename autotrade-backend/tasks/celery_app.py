@@ -174,6 +174,17 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=10),
     },
 
+    # Evening 12:00 UTC (17:30 IST) Mon-Fri: refresh TODAY's 1d close for the
+    # tradeable set (open positions + hub + shortlist). The 03:10 UTC run above
+    # fires BEFORE Kite finalises the prior day's daily candle, so the daily view
+    # for held/scored stocks ran ~2 days behind — which is what let entries fill
+    # at a stale daily close (TBZ bought 8-Jul at the 6-Jul ₹198.71). This pass
+    # runs after close + Kite finalisation on a small set, so it lands same-day.
+    "refresh-priority-1d-candles-evening": {
+        "task":     "tasks.refresh_priority_1d_candles",
+        "schedule": crontab(hour=12, minute=0, day_of_week="1-5"),
+    },
+
     # Every 15 min during NSE hours: score full NSE universe → market_shortlist
     # (runs 45 s before the hub cycle so the shortlist is always fresh)
     "market-scanner-every-15min": {
