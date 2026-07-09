@@ -2591,6 +2591,29 @@ async def get_agent_log(
         .limit(limit)
     )
     rows = result.scalars().all()
+
+    # Attach the model's gpt-oss reasoning per symbol (latest decision-reasoning
+    # row from llm_reasoning_log) so the Agent Log shows the WHY behind each call.
+    reasoning_by_sym: dict[str, str] = {}
+    try:
+        from db.models import LLMReasoningLog
+        _syms = [r.symbol for r in rows if r.symbol]
+        if _syms:
+            _sub = (
+                select(LLMReasoningLog.symbol, _func.max(LLMReasoningLog.created_at).label("mx"))
+                .where(LLMReasoningLog.source == "decision", LLMReasoningLog.symbol.in_(_syms))
+                .group_by(LLMReasoningLog.symbol)
+                .subquery()
+            )
+            _rr = (await db.execute(
+                select(LLMReasoningLog.symbol, LLMReasoningLog.reasoning)
+                .join(_sub, (LLMReasoningLog.symbol == _sub.c.symbol)
+                            & (LLMReasoningLog.created_at == _sub.c.mx))
+            )).all()
+            reasoning_by_sym = {s: (rs or "")[:3000] for s, rs in _rr if rs}
+    except Exception:
+        reasoning_by_sym = {}
+
     return {
         "entries": [
             {
@@ -2604,6 +2627,7 @@ async def get_agent_log(
                 "trade_taken":  (r.data or {}).get("trade_taken"),
                 "reject_reason":(r.data or {}).get("reject_reason"),
                 "reasoning":    (r.data or {}).get("reasoning", []),
+                "model_reasoning": reasoning_by_sym.get(r.symbol),
             }
             for r in rows
         ],

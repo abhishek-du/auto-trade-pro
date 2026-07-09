@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, CheckCircle, XCircle } from 'lucide-react';
+import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertCircle, CheckCircle, XCircle, Brain } from 'lucide-react';
 import { apiFetch } from '../api/client';
 import { fmtIST } from '../utils/datetime';
 
@@ -178,11 +178,23 @@ export default function AgentLog() {
                     </span>
                   )}
                 </div>
-                {/* Reason */}
-                <div className="text-xs text-muted leading-snug">
+                {/* Reason + model reasoning */}
+                <div className="text-xs text-muted leading-snug min-w-0">
                   {e.trade_taken
                     ? (e.reasoning?.[0] || 'Signal passed all checks')
                     : (e.reject_reason || '—')}
+                  {e.model_reasoning && (
+                    <details className="mt-1 group/rz">
+                      <summary className="flex items-center gap-1 cursor-pointer text-accent/70 hover:text-accent text-[10px] select-none list-none">
+                        <Brain size={11} />
+                        <span className="group-open/rz:hidden">Show reasoning</span>
+                        <span className="hidden group-open/rz:inline">Hide reasoning</span>
+                      </summary>
+                      <pre className="mt-1 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-[11px] text-slate-300 whitespace-pre-wrap break-words leading-relaxed font-sans max-h-64 overflow-y-auto">
+                        {e.model_reasoning}
+                      </pre>
+                    </details>
+                  )}
                 </div>
               </div>
             ))}
