@@ -10,9 +10,40 @@ from utils.config import settings
 from utils.logger import logger
 
 import time as _time
+import contextvars as _contextvars
 
 # Ollama — local deepseek-r1 (primary, no rate limits)
 OLLAMA_CHAT_URL = "{base}/api/chat"
+
+
+# ── Reasoning capture ─────────────────────────────────────────────────────────
+# gpt-oss (Mantle) returns a separate `reasoning` channel alongside the answer.
+# We stash the most recent reasoning in a contextvar (async-task-local, so
+# concurrent Celery/uvicorn coroutines don't clobber each other) so any caller
+# can read it right after a call_llm_chat* invocation — to show on the UI and
+# persist to the DB — without changing the str return type the 18 existing
+# call sites depend on.
+_LAST_REASONING: "_contextvars.ContextVar[str | None]" = _contextvars.ContextVar(
+    "llm_last_reasoning", default=None
+)
+
+
+def _set_last_reasoning(value: "str | None") -> None:
+    try:
+        _LAST_REASONING.set(value)
+    except Exception:
+        pass
+
+
+def get_last_reasoning() -> "str | None":
+    """Reasoning text from the most recent LLM call on this async task, if any.
+
+    Only Mantle/gpt-oss populates this; other providers return None. Read it
+    immediately after call_llm_chat()/call_llm_chat_full()."""
+    try:
+        return _LAST_REASONING.get()
+    except Exception:
+        return None
 
 
 # ── Mantle (AWS Bedrock, OpenAI-compatible) — PRIMARY intelligence layer ──────
@@ -74,12 +105,14 @@ async def call_mantle_chat(
 ) -> str | None:
     """Primary inference via the Mantle/Bedrock OpenAI-compatible endpoint.
 
-    Returns the assistant text (content channel only — reasoning is discarded) or
-    None on any failure, so call_llm_chat can fall back. A short circuit-breaker
-    suppresses calls after a failure burst so a Mantle outage doesn't stall every
-    Celery cycle behind a 60s timeout.
+    Returns the assistant text (content channel) or None on any failure, so
+    call_llm_chat can fall back. gpt-oss also emits a separate `reasoning` channel
+    — it is captured into a contextvar (read via get_last_reasoning()) so callers
+    can show it in the UI / persist it without changing this function's str return
+    type. A short circuit-breaker suppresses calls after a failure burst.
     """
     global _mantle_blocked_until
+    _set_last_reasoning(None)   # clear per-call so stale reasoning never leaks
     client = _mantle_async_client()
     if client is None:
         return None
@@ -95,8 +128,13 @@ async def call_mantle_chat(
         )
         _mantle_blocked_until = 0.0
         choice = (resp.choices or [None])[0]
-        content = (getattr(choice, "message", None).content if choice and choice.message else None) or ""
-        content = content.strip()
+        _msg_obj = getattr(choice, "message", None) if choice else None
+        content = (getattr(_msg_obj, "content", None) or "").strip()
+        # Capture the reasoning channel (gpt-oss harmony format).
+        reasoning = (getattr(_msg_obj, "reasoning", None)
+                     or getattr(_msg_obj, "reasoning_content", None) or "")
+        if reasoning:
+            _set_last_reasoning(str(reasoning).strip())
         if content:
             return content
         logger.warning("[llm.mantle] empty content (reasoning consumed the budget?)")
@@ -432,6 +470,74 @@ async def call_llm_chat(
         messages, max_tokens=max_tokens, temperature=temperature,
         timeout=timeout, model=model if model and ":" in (model or "") else None,
     )
+
+
+async def call_llm_chat_full(
+    messages: list[dict],
+    *,
+    source: str = "",
+    symbol: str | None = None,
+    persist: bool = True,
+    max_tokens: int = 600,
+    temperature: float = 0.3,
+    timeout: float | None = None,
+    model: str | None = None,
+    groq_fallback: bool = True,
+    skip_ollama: bool = False,
+) -> dict:
+    """call_llm_chat that also returns the model's reasoning, and (by default)
+    persists both to the llm_reasoning_log table.
+
+    Returns {"content": str|None, "reasoning": str|None, "model": str}.
+    Use this from chat and decision paths that must show/save the reasoning.
+    Persistence is best-effort and never raises into the caller.
+    """
+    content = await call_llm_chat(
+        messages, max_tokens=max_tokens, temperature=temperature, timeout=timeout,
+        model=model, groq_fallback=groq_fallback, skip_ollama=skip_ollama,
+    )
+    reasoning = get_last_reasoning()
+    used_model = settings.MANTLE_MODEL if reasoning else (model or "fallback")
+    if persist and (content or reasoning):
+        try:
+            prompt_summary = ""
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    prompt_summary = (m.get("content") or "")[:2000]
+                    break
+            await log_llm_reasoning(
+                source=source or "llm", symbol=symbol,
+                prompt=prompt_summary, content=content, reasoning=reasoning,
+                model=used_model,
+            )
+        except Exception as exc:
+            logger.debug(f"[llm] reasoning persist skipped: {exc}")
+    return {"content": content, "reasoning": reasoning, "model": used_model}
+
+
+async def log_llm_reasoning(
+    *, source: str, prompt: str, content: str | None, reasoning: str | None,
+    symbol: str | None = None, model: str | None = None,
+) -> None:
+    """Persist one LLM interaction (prompt summary + answer + reasoning) to
+    llm_reasoning_log. Self-contained session; never raises into the caller."""
+    if not (content or reasoning):
+        return
+    try:
+        from db.database import AsyncSessionLocal
+        from db.models import LLMReasoningLog
+        async with AsyncSessionLocal() as s:
+            s.add(LLMReasoningLog(
+                source=(source or "")[:40],
+                symbol=(symbol or None),
+                prompt=(prompt or "")[:4000],
+                content=(content or "")[:8000],
+                reasoning=(reasoning or "")[:12000],
+                model=(model or "")[:60],
+            ))
+            await s.commit()
+    except Exception as exc:
+        logger.debug(f"[llm.reasoning_log] persist failed: {exc}")
 
 
 # ── Sync clients (kept for legacy sync callers) ───────────────────────────────

@@ -66,6 +66,7 @@ export function useStockChat() {
         id:        (Date.now() + 1).toString(),
         role:      'assistant',
         content:   data.reply,
+        reasoning: data.reasoning,   // gpt-oss reasoning trace (shown collapsibly)
         timestamp: data.timestamp,
         contexts:  data.contexts,
         symbols:   data.symbols,

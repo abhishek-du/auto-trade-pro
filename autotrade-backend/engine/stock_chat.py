@@ -352,24 +352,39 @@ async def process_chat_message(
 
     llm_messages.append({"role": "user", "content": full_user_msg})
 
-    # Step 6: Call Groq (or fallback)
-    if not settings.groq_available:
+    # Step 6: Call the LLM (Mantle→Gemini→Groq→Ollama) and capture its reasoning.
+    # Availability guard now checks ALL providers, not just Groq — Mantle is the
+    # primary, so gating on groq_available alone wrongly skipped the LLM.
+    _llm_up = (getattr(settings, "mantle_available", False)
+               or getattr(settings, "gemini_available", False)
+               or getattr(settings, "groq_available", False)
+               or getattr(settings, "ollama_available", False))
+    reasoning = None
+    if not _llm_up:
         reply  = generate_no_ai_response(user_message, contexts)
         source = "rule_based"
     else:
-        reply = await _call_groq(llm_messages)
+        from utils.llm import call_llm_chat_full
+        _res = await call_llm_chat_full(
+            llm_messages, source="chat",
+            symbol=(resolved[0] if resolved else None),
+            max_tokens=1200, temperature=0.4, timeout=60.0,
+        )
+        reply     = _res.get("content")
+        reasoning = _res.get("reasoning")
         if reply:
-            source = "groq"
+            source = "llm"
         else:
             reply  = generate_no_ai_response(user_message, contexts)
             source = "rule_based"
 
     from datetime import datetime, timezone
     return {
-        "reply":    reply,
-        "contexts": contexts,
-        "intent":   intent_data["intent"],
-        "symbols":  list(contexts.keys()),
-        "source":   source,
+        "reply":     reply,
+        "reasoning": reasoning,   # gpt-oss reasoning channel — shown on UI, saved to DB
+        "contexts":  contexts,
+        "intent":    intent_data["intent"],
+        "symbols":   list(contexts.keys()),
+        "source":    source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

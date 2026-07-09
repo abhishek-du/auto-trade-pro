@@ -367,10 +367,29 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     bull     = str(data.get("bull", ""))[:120]
     bear     = str(data.get("bear", ""))[:120]
 
+    # Capture the model's raw reasoning channel (gpt-oss) for this decision and
+    # persist it, so the WHY behind every trade decision is auditable/visible.
+    model_reasoning = None
+    try:
+        from utils.llm import get_last_reasoning, log_llm_reasoning
+        model_reasoning = get_last_reasoning()
+        if model_reasoning:
+            await log_llm_reasoning(
+                source="decision", symbol=symbol,
+                prompt=f"{mode} gate: {getattr(candidate,'strategy','')} "
+                       f"{getattr(decision,'action','')} @ conf {arith_conf}",
+                content=f"verdict={verdict} conf={llm_conf} bull={bull} bear={bear} risk={key_risk}",
+                reasoning=model_reasoning, model=settings.MANTLE_MODEL,
+            )
+    except Exception:
+        pass
+
     record = {
         "mode": mode, "verdict": verdict, "confidence": llm_conf,
         "bull": bull, "bear": bear, "key_risk": key_risk,
     }
+    if model_reasoning:
+        record["model_reasoning"] = model_reasoning[:4000]
     if data.get("judge"):
         record["judge"] = str(data["judge"])[:160]
     if data.get("_panel"):

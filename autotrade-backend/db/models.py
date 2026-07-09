@@ -1534,6 +1534,33 @@ class TradeLesson(Base):
         return f"<TradeLesson {self.symbol} {self.strategy}/{self.regime} won={self.won}>"
 
 
+class LLMReasoningLog(Base):
+    """Every LLM interaction that carries a reasoning trace (gpt-oss / Mantle).
+
+    Captures the prompt summary, the answer, and the model's separate `reasoning`
+    channel for BOTH chat and decision paths, so the reasoning behind any answer
+    or trade decision is auditable and can be shown on the UI. Written by
+    utils.llm.log_llm_reasoning (best-effort, never blocks inference)."""
+    __tablename__ = "llm_reasoning_log"
+    __table_args__ = (
+        Index("ix_llm_reasoning_log_created", "created_at"),
+        Index("ix_llm_reasoning_log_source", "source"),
+        Index("ix_llm_reasoning_log_symbol", "symbol"),
+    )
+
+    id:         Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    source:     Mapped[str | None] = mapped_column(String(40), nullable=True)   # "chat" | "decision" | "narrative" | ...
+    symbol:     Mapped[str | None] = mapped_column(String(50), nullable=True)
+    prompt:     Mapped[str | None] = mapped_column(Text, nullable=True)          # user prompt / context summary
+    content:    Mapped[str | None] = mapped_column(Text, nullable=True)          # the answer shown to the user
+    reasoning:  Mapped[str | None] = mapped_column(Text, nullable=True)          # the model's reasoning channel
+    model:      Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<LLMReasoningLog {self.source} {self.symbol} @{self.created_at}>"
+
+
 class PortfolioThesis(Base):
     """One row per trade-loop cycle: the portfolio-level 'veteran trader' thesis
     (top-down market + book read) and the stance it produced. Logged for every

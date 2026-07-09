@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Copy, Check, Bot, User } from 'lucide-react'
+import { Copy, Check, Bot, User, Brain } from 'lucide-react'
 import StockDataCard from './StockDataCard'
 
 // ── Text renderer — parses markdown-lite and highlights finance tokens ────────
@@ -88,6 +88,8 @@ function TypingIndicator() {
 export default function ChatMessage({ message, isLast, loading, onSymbolClick }) {
   const [copied, setCopied] = useState(false)
   const [showData, setShowData] = useState(true)
+  const [showReasoning, setShowReasoning] = useState(false)
+  const hasReasoning = !!(message.reasoning && String(message.reasoning).trim())
 
   const isUser = message.role === 'user'
   const hasContexts = message.contexts && Object.keys(message.contexts).length > 0
@@ -149,6 +151,26 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
             {copied ? <Check size={12} className="text-profit" /> : <Copy size={12} />}
           </button>
         </div>
+
+        {/* Model reasoning (gpt-oss) — collapsible, off by default */}
+        {hasReasoning && (
+          <div className="mt-1">
+            <button
+              onClick={() => setShowReasoning(p => !p)}
+              className="text-[10px] text-accent/70 hover:text-accent flex items-center gap-1 mt-1 mb-1">
+              <Brain size={11} />
+              {showReasoning ? 'Hide' : 'Show'} reasoning
+            </button>
+            {showReasoning && (
+              <div className="rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 mb-1">
+                <p className="text-[10px] uppercase tracking-wider text-accent/60 mb-1">Model reasoning</p>
+                <pre className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed font-sans">
+                  {String(message.reasoning).trim()}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Inline data cards */}
         {hasContexts && (
