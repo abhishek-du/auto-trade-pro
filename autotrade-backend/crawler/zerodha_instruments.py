@@ -96,6 +96,16 @@ def get_token(symbol: str) -> int | None:
     # Try live cache first
     if sym in INSTRUMENT_CACHE:
         return INSTRUMENT_CACHE[sym].get("instrument_token")
+    # NSE surveillance / Trade-to-Trade / SME suffix fallback. NSE lists stocks
+    # under special segments with a suffixed tradingsymbol (e.g. ORBTEXP-BE for
+    # Trade-to-Trade, -BZ/-BT for other surveillance tiers, -SM/-ST for SME). The
+    # plain ticker ("ORBTEXP") then isn't a key in the NSE instrument cache, so
+    # token resolution returned None → no candles and no live price → the position
+    # froze at entry with a fake ₹0.00 P&L (observed 9-Jul for ORBTEXP). Fall back
+    # to the suffixed variant so these names can still be priced/marked correctly.
+    for _sfx in ("-BE", "-BZ", "-BT", "-SM", "-ST"):
+        if (sym + _sfx) in INSTRUMENT_CACHE:
+            return INSTRUMENT_CACHE[sym + _sfx].get("instrument_token")
     # Hardcoded fallback (also try the .NS-style key for indices)
     if sym in HARDCODED_TOKENS:
         return HARDCODED_TOKENS[sym]
