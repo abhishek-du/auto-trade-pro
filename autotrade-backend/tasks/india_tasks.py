@@ -703,18 +703,50 @@ async def _india_trade_loop():
             if action == "SELL" and conf < 50:
                 continue
 
-            # Current price: live cache → last candle close
+            # Entry price resolution — must be LIVE, never a stale daily close.
+            # Order: WebSocket cache → Kite REST LTP → freshest recent candle.
+            # Phantom-fill fix: the old fallback used get_latest_candles('1d', 1),
+            # which on a cold cache filled entries at the *last daily close* — days
+            # old when the daily backfill lagged (observed 9-Jul: JINDRILL filled at
+            # ₹601 = 7-Jul close while the live tape was ₹642). Now a candle is only
+            # accepted if it is fresh (<=90 min old during the session); otherwise
+            # the trade is SKIPPED rather than filled at a phantom price.
             sym_base = c["symbol"].replace(".NS", "")
             cached = PRICE_CACHE.get(c["symbol"]) or PRICE_CACHE.get(sym_base)
             entry_price = float(cached.get("price", 0) if isinstance(cached, dict) else getattr(cached, "price", 0) if cached else 0)
             if entry_price <= 0:
+                # Kite REST LTP — real-time, authoritative.
                 try:
-                    last_candles = await get_latest_candles(c["symbol"], "1d", 1, session)
-                    entry_price = float(last_candles[-1].close) if last_candles else 0.0
+                    from crawler.zerodha_market import get_live_prices as _glp
+                    _ns = c["symbol"] if c["symbol"].endswith(".NS") else f"{c['symbol']}.NS"
+                    _q = await _glp([_ns])
+                    _qd = _q.get(_ns) or _q.get(c["symbol"]) or {}
+                    _px = _qd.get("price") or _qd.get("last_price")
+                    if _px and float(_px) > 0:
+                        entry_price = float(_px)
+                except Exception:
+                    pass
+            if entry_price <= 0:
+                # Freshest candle across ALL timeframes, but only if recent.
+                try:
+                    from crawler.price_feed import get_freshest_candle
+                    _cl, _cts = await get_freshest_candle(c["symbol"], session)
+                    if _cl and _cts:
+                        if getattr(_cts, "tzinfo", None):
+                            _cts = _cts.replace(tzinfo=None)
+                        _age_min = (datetime.datetime.utcnow() - _cts).total_seconds() / 60
+                        if _age_min <= 90:
+                            entry_price = _cl
+                        else:
+                            logger.warning(
+                                f"[india_trade_loop] {c['symbol']}: no live price and "
+                                f"freshest candle is {_age_min/60:.1f}h old — SKIP "
+                                f"(refusing phantom fill at stale price ₹{_cl})"
+                            )
                 except Exception:
                     entry_price = 0.0
             if entry_price <= 0:
-                continue   # can't size a trade without a price
+                continue   # can't size a trade without a fresh, real price
 
             # Provisional levels for ranking only — REAL dynamic SL/targets are
             # computed below (compute_indicators → compute_trade_levels) for just
@@ -1730,13 +1762,31 @@ async def _intraday_entry_task():
             else:
                 price = float(getattr(cached, "price", 0) or 0) if cached else 0.0
             if price <= 0:
+                # Kite REST LTP (real-time) before any candle fallback.
                 try:
-                    last = await get_latest_candles(row.symbol, "1m", 1, session)
-                    price = float(last[-1].close) if last else 0.0
+                    from crawler.zerodha_market import get_live_prices as _glp
+                    _ns = row.symbol if row.symbol.endswith(".NS") else f"{row.symbol}.NS"
+                    _q = await _glp([_ns]); _qd = _q.get(_ns) or _q.get(row.symbol) or {}
+                    _px = _qd.get("price") or _qd.get("last_price")
+                    if _px and float(_px) > 0:
+                        price = float(_px)
+                except Exception:
+                    pass
+            if price <= 0:
+                # Freshest candle across ALL timeframes, only if <=30 min old
+                # (intraday MIS entries need a genuinely live price — no phantom fills).
+                try:
+                    from crawler.price_feed import get_freshest_candle
+                    _cl, _cts = await get_freshest_candle(row.symbol, session)
+                    if _cl and _cts:
+                        if getattr(_cts, "tzinfo", None):
+                            _cts = _cts.replace(tzinfo=None)
+                        if (datetime.datetime.utcnow() - _cts).total_seconds() <= 30 * 60:
+                            price = _cl
                 except Exception:
                     price = 0.0
             if price <= 0:
-                logger.debug(f"[intraday_entry] {row.symbol}: no live price, skip")
+                logger.debug(f"[intraday_entry] {row.symbol}: no fresh live price, skip")
                 continue
 
             hub_sub = {

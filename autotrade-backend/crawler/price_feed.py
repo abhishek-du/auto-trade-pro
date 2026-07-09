@@ -434,6 +434,31 @@ async def get_latest_candles(
     return list(result.scalars().all())
 
 
+async def get_freshest_candle(
+    symbol: str,
+    session: AsyncSession,
+) -> tuple[float | None, "datetime | None"]:
+    """Return (close, timestamp) of the single most-recent candle across ALL
+    timeframes for a symbol, or (None, None).
+
+    Why: small/SME stocks often have fresh 1m candles but no 1h candle. Code
+    that fell back to '1h' only would read a stale/absent candle and freeze the
+    price at entry (fake ₹0.00 P&L) or fill entries at a days-old daily close.
+    Ordering by timestamp DESC across every timeframe picks the genuinely newest
+    print — a live intraday 1m during the session, the daily close after hours.
+    The caller decides whether the returned timestamp is fresh enough to trust.
+    """
+    row = (await session.execute(
+        select(Candle.close, Candle.timestamp)
+        .where(Candle.symbol == symbol)
+        .order_by(Candle.timestamp.desc())
+        .limit(1)
+    )).first()
+    if not row or row[0] is None:
+        return None, None
+    return float(row[0]), row[1]
+
+
 async def get_latest_price(symbol: str) -> float | None:
     """Return the most recent close price using 1-minute yfinance data."""
     candles = await fetch_candles_yfinance(symbol, period="1d", interval="1m")
