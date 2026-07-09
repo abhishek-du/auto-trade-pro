@@ -579,12 +579,11 @@ async def compute_live_pnl(
             else:
                 cur = live_px.get(p.symbol)
                 if cur is None:
-                    row = (await session.execute(
-                        select(Candle.close)
-                        .where(Candle.symbol == p.symbol, Candle.timeframe == "1h")
-                        .order_by(Candle.timestamp.desc()).limit(1)
-                    )).scalar_one_or_none()
-                    cur = float(row) if row else None
+                    # Freshest candle across ALL timeframes (small/SME stocks often
+                    # have fresh 1m but no 1h — a '1h'-only read froze the price).
+                    from crawler.price_feed import get_freshest_candle
+                    _cl, _ = await get_freshest_candle(p.symbol, session)
+                    cur = _cl
         except Exception as exc:
             logger.debug(f"compute_live_pnl: price failed for {p.symbol}: {exc}")
 
@@ -708,33 +707,29 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         logger.warning(f"update_positions: {pos.symbol} F&O SL/TP close failed: {exc}")
             continue
 
-        # Prefer the LIVE Kite price; fall back to the latest 1h candle.
+        # Prefer the LIVE Kite price; fall back to the freshest recent candle.
         price = live_px.get(pos.symbol)
         if price is None:
-            candle_row = await session.execute(
-                select(Candle)
-                .where(Candle.symbol == pos.symbol, Candle.timeframe == "1h")
-                .order_by(Candle.timestamp.desc())
-                .limit(1)
-            )
-            candle = candle_row.scalar_one_or_none()
-            if candle is None:
+            # Freshest candle across ALL timeframes — small/SME stocks often have
+            # fresh 1m candles but no 1h, so a '1h'-only read froze the price at
+            # entry (fake ₹0.00 P&L observed 9-Jul: TBZ +15% shown as 0).
+            from crawler.price_feed import get_freshest_candle
+            _cl, _c_ts = await get_freshest_candle(pos.symbol, session)
+            if _cl is None or _c_ts is None:
                 logger.debug(f"update_positions: no price for {pos.symbol} — skipping")
                 continue
-            # B14 fix: bound the candle-fallback age. Marking a position (and
-            # possibly firing its SL/TP) off a candle days old would "close" it at
-            # a phantom price. Skip this cycle if the newest candle is >4 days old
-            # (covers a long weekend); a live/fresh price will resume it next tick.
-            _c_ts = candle.timestamp
+            # B14 fix: bound the candle-fallback age. Marking (and possibly firing
+            # SL/TP) off a candle days old would "close" at a phantom price. Skip
+            # this cycle if the newest print is >4 days old (covers a long weekend).
             if getattr(_c_ts, "tzinfo", None):
                 _c_ts = _c_ts.replace(tzinfo=None)
             if (now - _c_ts).total_seconds() > 4 * 86400:
                 logger.warning(
-                    f"update_positions: {pos.symbol} newest 1h candle is "
+                    f"update_positions: {pos.symbol} newest candle is "
                     f"{(now - _c_ts).days}d old — skipping (stale, no phantom close)"
                 )
                 continue
-            price = candle.close
+            price = _cl
 
         is_buy = pos.direction == TradeDirection.BUY
 
