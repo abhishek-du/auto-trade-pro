@@ -9,8 +9,106 @@ from functools import lru_cache
 from utils.config import settings
 from utils.logger import logger
 
+import time as _time
+
 # Ollama — local deepseek-r1 (primary, no rate limits)
 OLLAMA_CHAT_URL = "{base}/api/chat"
+
+
+# ── Mantle (AWS Bedrock, OpenAI-compatible) — PRIMARY intelligence layer ──────
+# openai.gpt-oss-120b via an OpenAI-compatible endpoint. This is the first
+# provider call_llm_chat tries, so ALL analysis/decision inference in the system
+# routes through it (falling back to Gemini→Groq→Ollama on any failure).
+_mantle_blocked_until: float = 0.0
+
+
+@lru_cache(maxsize=1)
+def _mantle_async_client():
+    """Cached AsyncOpenAI client for the Mantle/Bedrock endpoint (or None)."""
+    if not getattr(settings, "mantle_available", False):
+        return None
+    try:
+        from openai import AsyncOpenAI
+        return AsyncOpenAI(
+            base_url=settings.MANTLE_BASE_URL,
+            api_key=settings.MANTLE_API_KEY,
+            default_headers={"OpenAI-Project": getattr(settings, "MANTLE_PROJECT", "default")},
+            max_retries=0,   # we own the fallback chain — don't let the SDK stall
+        )
+    except Exception as exc:
+        logger.warning(f"[llm.mantle] client init failed: {exc}")
+        return None
+
+
+@lru_cache(maxsize=1)
+def _mantle_sync_client():
+    """Cached sync OpenAI client for the Mantle/Bedrock endpoint (or None)."""
+    if not getattr(settings, "mantle_available", False):
+        return None
+    try:
+        from openai import OpenAI
+        return OpenAI(
+            base_url=settings.MANTLE_BASE_URL,
+            api_key=settings.MANTLE_API_KEY,
+            default_headers={"OpenAI-Project": getattr(settings, "MANTLE_PROJECT", "default")},
+            max_retries=0,
+        )
+    except Exception as exc:
+        logger.warning(f"[llm.mantle] sync client init failed: {exc}")
+        return None
+
+
+def _mantle_budget(max_tokens: int) -> int:
+    """gpt-oss reasoning shares the max_tokens budget with the answer, so a small
+    budget returns empty content. Floor it at MANTLE_MIN_TOKENS."""
+    return max(int(max_tokens or 0), int(getattr(settings, "MANTLE_MIN_TOKENS", 512)))
+
+
+async def call_mantle_chat(
+    messages: list[dict],
+    *,
+    max_tokens: int = 600,
+    temperature: float = 0.3,
+    timeout: float = 60.0,
+    model: str | None = None,
+) -> str | None:
+    """Primary inference via the Mantle/Bedrock OpenAI-compatible endpoint.
+
+    Returns the assistant text (content channel only — reasoning is discarded) or
+    None on any failure, so call_llm_chat can fall back. A short circuit-breaker
+    suppresses calls after a failure burst so a Mantle outage doesn't stall every
+    Celery cycle behind a 60s timeout.
+    """
+    global _mantle_blocked_until
+    client = _mantle_async_client()
+    if client is None:
+        return None
+    if _time.monotonic() < _mantle_blocked_until:
+        return None
+    try:
+        resp = await client.chat.completions.create(
+            model=model or settings.MANTLE_MODEL,
+            messages=messages,
+            max_tokens=_mantle_budget(max_tokens),
+            temperature=temperature,
+            timeout=timeout,
+        )
+        _mantle_blocked_until = 0.0
+        choice = (resp.choices or [None])[0]
+        content = (getattr(choice, "message", None).content if choice and choice.message else None) or ""
+        content = content.strip()
+        if content:
+            return content
+        logger.warning("[llm.mantle] empty content (reasoning consumed the budget?)")
+        return None
+    except Exception as exc:
+        # Back off briefly so a transient outage doesn't block every task on the
+        # 60s timeout. Auth/quota errors get a longer window.
+        _msg = str(exc).lower()
+        _wait = 120 if ("401" in _msg or "403" in _msg or "quota" in _msg or "429" in _msg) else 20
+        _mantle_blocked_until = _time.monotonic() + _wait
+        logger.warning(f"[llm.mantle] failed ({type(exc).__name__}) — backing off {_wait}s: {str(exc)[:160]}")
+        return None
 # Groq — cloud fallback
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = settings.GROQ_MODEL
@@ -288,7 +386,11 @@ async def call_llm_chat(
     groq_fallback: bool = True,
     skip_ollama: bool = False,
 ) -> str | None:
-    """Primary Gemini → secondary Groq → tertiary local Ollama.
+    """Primary Mantle → Gemini → Groq → local Ollama.
+
+    Mantle (AWS Bedrock, openai.gpt-oss-120b) is the primary intelligence layer:
+    every analysis/decision LLM call in the system routes through here and tries
+    Mantle first, falling back on any failure so inference never hard-blocks.
 
     `groq_fallback=False` (background/batch) skips the cloud providers entirely
     after Gemini and only allows the local Ollama path, to protect cloud quotas.
@@ -296,7 +398,15 @@ async def call_llm_chat(
     latency-sensitive paths (e.g. shadow-mode reasoning gate) where a 40s Ollama
     call would push the Celery task past SoftTimeLimitExceeded.
     """
-    # 1. Gemini (primary, cloud)
+    # 0. Mantle / Bedrock (PRIMARY intelligence layer)
+    result = await call_mantle_chat(
+        messages, max_tokens=max_tokens, temperature=temperature,
+        timeout=timeout or 60.0, model=model if (model and "gpt-oss" in model) else None,
+    )
+    if result:
+        return result
+
+    # 1. Gemini (cloud fallback)
     result = await call_gemini_chat(
         messages, max_tokens=max_tokens, temperature=temperature,
         timeout=timeout or 30.0,
@@ -352,8 +462,30 @@ def _claude_client():
 
 # ── Public interface ──────────────────────────────────────────────────────────
 
+def _mantle_sync_chat(prompt: str, system: str, max_tokens: int = 512) -> str:
+    """Sync Mantle inference for the legacy sync helpers. '' on any failure."""
+    client = _mantle_sync_client()
+    if client is None:
+        return ""
+    try:
+        resp = client.chat.completions.create(
+            model=settings.MANTLE_MODEL,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": prompt}],
+            max_tokens=_mantle_budget(max_tokens),
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning(f"[llm.mantle] sync call failed: {exc}")
+        return ""
+
+
 def quick_analysis(prompt: str, system: str = "You are a concise financial analyst.") -> str:
-    """Fast sync inference via Groq. Falls back to empty string if unavailable."""
+    """Fast sync inference — Mantle primary, Groq fallback, '' if both unavailable."""
+    out = _mantle_sync_chat(prompt, system, max_tokens=512)
+    if out:
+        return out
     client = _groq_client()
     if client is None:
         logger.debug("Groq unavailable — skipping quick_analysis")
@@ -375,7 +507,10 @@ def quick_analysis(prompt: str, system: str = "You are a concise financial analy
 
 
 def explain(prompt: str, system: str = "You are an expert trading strategy explainer.") -> str:
-    """Detailed explanation via Claude; falls back to Groq if Claude key not set."""
+    """Detailed explanation — Mantle primary, then Claude, then Groq."""
+    out = _mantle_sync_chat(prompt, system, max_tokens=1024)
+    if out:
+        return out
     client = _claude_client()
     if client is None:
         logger.info("Claude key not set — routing explain() to Groq instead")
