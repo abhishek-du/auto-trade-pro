@@ -114,7 +114,19 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""   # required — set in .env
 
     # ── LLM ───────────────────────────────────────────────────────────────────
-    # Ollama: local inference (primary) — no rate limits, runs on localhost
+    # Mantle (AWS Bedrock, OpenAI-compatible) — PRIMARY intelligence layer.
+    # All analysis/decision LLM calls route through call_llm_chat, which tries
+    # Mantle first (openai.gpt-oss-120b) and falls back to Gemini→Groq→Ollama.
+    # Key lives in .env only (never hardcoded / committed).
+    MANTLE_API_KEY:  str  = ""
+    MANTLE_BASE_URL: str  = "https://bedrock-mantle.us-east-1.api.aws/v1"
+    MANTLE_MODEL:    str  = "openai.gpt-oss-120b"
+    MANTLE_PROJECT:  str  = "default"
+    MANTLE_ENABLED:  bool = True
+    # gpt-oss is a reasoning model: reasoning tokens share the max_tokens budget,
+    # so a tiny budget yields empty content. Floor every Mantle request here.
+    MANTLE_MIN_TOKENS: int = 512
+    # Ollama: local inference — no rate limits, runs on localhost
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL:    str = "qwen2.5:3b"
     OLLAMA_TIMEOUT:  float = 120.0
@@ -512,6 +524,10 @@ class Settings(BaseSettings):
     @property
     def tavily_available(self) -> bool:
         return bool(self.TAVILY_API_KEY)
+
+    @property
+    def mantle_available(self) -> bool:
+        return bool(self.MANTLE_ENABLED and self.MANTLE_API_KEY)
 
     @property
     def gemini_available(self) -> bool:
