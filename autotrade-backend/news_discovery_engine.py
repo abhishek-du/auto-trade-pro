@@ -50,20 +50,107 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
     except:
         return None
 
+async def _execute_news_trade(ticker: str, side: str, headline: str, verdict: dict) -> bool:
+    """Route a TAKE verdict through the same risk gate and paper execution path
+    the automatic India Trade Loop (Path B) uses, so a news-triggered trade
+    obeys the same guardrails — cash buffer, sector caps, correlation limits,
+    duplicate-position guard, drawdown breakers — rather than bypassing risk
+    management. Returns True only if a position was actually opened.
+    """
+    from sqlalchemy import select as _select
+    from crawler.live_prices import get_price, yfinance_ltp_batch
+    from engine.risk_manager import validate_signal, calculate_position_size
+    from engine.signal_generator import TradingSignal
+    from paper_trading.trade_simulator import open_paper_trade
+    from paper_trading.virtual_wallet import VirtualWallet
+    from db.models import OpenPosition
+    from utils.config import settings
+
+    # 1. Live entry price — process-local cache first, yfinance backstop second
+    #    (this script runs as its own process, so it never shares the FastAPI/
+    #    Celery worker's in-memory PRICE_CACHE for a symbol they haven't touched).
+    snap = get_price(ticker)
+    entry_price = snap["price"] if snap else None
+    if not entry_price:
+        batch = await yfinance_ltp_batch([ticker])
+        entry_price = batch.get(ticker)
+    if not entry_price or entry_price <= 0:
+        logger.warning(f"[news_engine] {ticker}: no live price available — skipping execution")
+        return False
+
+    # 2. News catalysts carry no technical support/resistance, so a fixed
+    #    percentage stop/target stands in for the ATR-based levels the other
+    #    strategies compute — sized to the same ~2.5 R:R the LLM candidate is
+    #    already scored against.
+    stop_pct, target_pct = 0.03, 0.075
+    if side == "BUY":
+        stop_loss, take_profit = entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
+    else:
+        stop_loss, take_profit = entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
+
+    confidence = float(verdict.get("confidence") or 60)
+    signal = TradingSignal(
+        symbol=ticker, timeframe="news", action=side, confidence=confidence,
+        entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit,
+        pattern_score=0.0, indicator_score=0.0, sentiment_score=95.0,
+        final_score=confidence, risk_reward_ratio=round(target_pct / stop_pct, 2),
+        reasoning_points=[f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]],
+        regime="NEUTRAL",
+    )
+
+    async with AsyncSessionLocal() as session:
+        summary_row    = await VirtualWallet.get_summary(session)
+        balance        = summary_row["balance"]
+        pos_result     = await session.execute(
+            _select(OpenPosition).where(OpenPosition.product != "MIS")
+        )
+        open_positions = list(pos_result.scalars().all())
+
+        validated, reason = await validate_signal(signal, balance, open_positions, session)
+        if not validated:
+            logger.info(f"[news_engine] {ticker} rejected by risk manager: {reason}")
+            return False
+
+        pos_size = calculate_position_size(signal, balance)
+        product  = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
+        try:
+            await open_paper_trade(signal, pos_size, session, product=product)
+        except ValueError as exc:
+            logger.warning(f"[news_engine] {ticker} execution failed: {exc}")
+            return False
+        await session.commit()
+
+    logger.warning(
+        f"✅ NEWS-TRIGGERED TRADE OPENED: {ticker} {side} "
+        f"qty={pos_size.get('units')} @ {entry_price}"
+    )
+    if getattr(settings, "telegram_available", False):
+        try:
+            from integrations.telegram_service import send, fmt_entry
+            await send(fmt_entry(signal, qty=pos_size.get("units", 0)))
+        except Exception as exc:
+            logger.warning(f"[news_engine] Telegram alert failed: {exc}")
+    return True
+
+
 async def process_ticker(ticker, side, headline, summary):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
-    
+
     try:
         result = await llm_tooluse_candidate(ticker, cand, dec)
-        
+
         if result and result.get('verdict') == 'TAKE':
-            logger.warning(f"🚨 TRADE EXECUTED 🚨")
+            logger.warning(f"🚨 TAKE VERDICT — attempting execution 🚨")
             logger.warning(f"Ticker: {ticker} | Action: {side} | Confidence: {result.get('confidence')}%")
             logger.warning(f"Bull Case: {result.get('bull')}")
             logger.warning(f"Bear Case: {result.get('bear')}")
-            return True
+            try:
+                return await _execute_news_trade(ticker, side, headline, result)
+            except Exception as exc:
+                logger.error(f"[news_engine] execution error for {ticker}: {exc}")
+                return False
         else:
             reason = result.get('key_risk', 'Did not meet criteria') if result else 'Agent failed to reach a decision (Timed out/Insufficient info)'
             logger.info(f"❌ Agent Rejected Trade for {ticker}. Reason: {reason}")
@@ -124,7 +211,12 @@ async def run_news_discovery_loop():
                 summary = article.get('summary', headline)
                 _processed_headlines.add(headline)
                 
-                action_words = ['surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal', 'profit', 'loss', 'fda']
+                action_words = [
+                    'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal', 
+                    'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger', 
+                    'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend', 
+                    'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade'
+                ]
                 if not any(w in headline.lower() for w in action_words):
                     continue
                     

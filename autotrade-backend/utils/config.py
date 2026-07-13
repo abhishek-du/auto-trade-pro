@@ -155,7 +155,8 @@ class Settings(BaseSettings):
     RSS_FEED_URLS: str = (
         "https://www.business-standard.com/rss/markets-106.rss,"
         "https://www.livemint.com/rss/markets,"
-        "https://economictimes.indiatimes.com/markets/rss.cms"
+        "https://economictimes.indiatimes.com/markets/rss.cms,"
+        "https://www.moneycontrol.com/rss/latestnews.xml"
     )
 
     # ── Upstox (data-only: news, fundamentals, corporate actions, shareholding) ──

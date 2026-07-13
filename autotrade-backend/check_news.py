@@ -1,24 +1,16 @@
 import asyncio
 from db.database import AsyncSessionLocal
-from sqlalchemy import text
+from db.models import NewsItem
+from sqlalchemy import select, desc
 
-async def main():
-    async with AsyncSessionLocal() as db:
-        # Count total news
-        total = (await db.execute(text("SELECT COUNT(*) FROM news_items"))).scalar()
-        print(f"Total news items in DB: {total}")
-        
-        # Recent news in last 24h
-        recent = (await db.execute(text("""
-            SELECT title, source, sentiment_label, published_at, tickers_affected
-            FROM news_items 
-            WHERE published_at >= NOW() - INTERVAL '24 hours'
-            ORDER BY published_at DESC 
-            LIMIT 10
-        """))).fetchall()
-        
-        print(f"\nRecent news (last 24h): {len(recent)} items")
-        for r in recent:
-            print(f"  [{r.source}] {r.title[:70]}... | Sentiment: {r.sentiment_label} | {r.published_at}")
+async def check_news():
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(NewsItem).order_by(desc(NewsItem.id)).limit(50))
+        for item in res.scalars().all():
+            if "birla" in item.headline.lower() or "shell" in item.headline.lower() or "sprng" in item.headline.lower():
+                print(f"FOUND: {item.headline} | {item.source}")
+                return
+        print("NOT FOUND IN DB")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(check_news())

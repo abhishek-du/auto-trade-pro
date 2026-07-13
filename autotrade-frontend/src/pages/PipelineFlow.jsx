@@ -563,12 +563,12 @@ export default function PipelineFlow() {
           ]}
         />
         <PathCard
-          letter="C" title="News-First Discovery Engine" Icon={Newspaper} accent="amber" active={false}
-          timing="24/7, 15s RSS poll (when running as a service)"
+          letter="C" title="News-First Discovery Engine" Icon={Newspaper} accent="amber" active={true}
+          timing="24/7, running as a systemd --user service"
           points={[
             'Standalone script (news_discovery_engine.py) — polls free RSS, keyword-filters, extracts an NSE ticker, then runs a multi-tool ReAct "debate" LLM (fundamentals/news/options/price/depth/sector/macro/predict-candle tools) → TAKE/SKIP.',
-            'On TAKE it currently only logs "TRADE EXECUTED" — no call into any order/execution code yet, so no real position results from it today.',
-            'Not currently running as the news-engine systemd service on this host — file exists, unit is not active.',
+            'Running now (autotrade-news-engine.service, Restart=always) — real RSS ingestion and real LLM analysis, queuing overnight candidates to PreMarketNewsQueue for the next market open.',
+            'Wired to execution: on TAKE it now routes through the same validate_signal() risk gate and open_paper_trade() path as the India Trade Loop — fixed 3%/7.5% stop/target (no technical S/R for a news catalyst), full guardrails (cash buffer, sector caps, correlation, duplicate-position, drawdown breakers) apply before any position opens.',
           ]}
         />
       </div>
@@ -674,7 +674,7 @@ export default function PipelineFlow() {
             { time: 'every 5m', event: 'Narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
             { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring + Path A inline execution (fires ~45s after each :14/:29/:44/:59 bar close)', color: 'text-purple-400', dot: 'bg-purple-400' },
             { time: 'every 30m', event: 'Momentum discovery scan — runs 24/7, not market-hours gated', color: 'text-slate-300', dot: 'bg-slate-400' },
-            { time: '24/7', event: 'News-First Discovery Engine RSS poll every 15s — only when the news-engine service is running (verified not active on this host right now)', color: 'text-amber-400', dot: 'bg-amber-400' },
+            { time: '24/7', event: 'News-First Discovery Engine RSS poll — running as a service, TAKE verdicts now route through the standard risk gate into a paper trade', color: 'text-amber-400', dot: 'bg-amber-400' },
             { time: 'every 60s', event: 'India Trade Loop (Path B), 09:15–16:00 IST', color: 'text-blue-400', dot: 'bg-blue-400' },
             { time: '9:00 AM', event: 'hub_universe rebuild (crontab 03:30 UTC)', color: 'text-cyan', dot: 'bg-cyan' },
             { time: '3:25 PM', event: 'Agent EOD reconcile (crontab 09:55 UTC)', color: 'text-slate-300', dot: 'bg-slate-400' },
