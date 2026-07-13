@@ -1,22 +1,16 @@
 import { useState, useEffect } from 'react'
 import {
-  Activity, Zap, TrendingUp, TrendingDown, BarChart2,
+  Activity, Zap, TrendingUp, BarChart2,
   Database, BrainCircuit, ListFilter, Bot, ShoppingCart,
   Bell, Clock, CheckCircle2, XCircle, AlertCircle,
-  RefreshCw, ChevronRight, Wifi, WifiOff,
+  RefreshCw, ChevronRight, Wifi, WifiOff, Newspaper,
+  Gauge, ShieldCheck, FileSearch,
 } from 'lucide-react'
 import { apiFetch, getIndiaMarketStatus } from '../api/client'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 function useInterval(fn, ms) {
   useEffect(() => { fn(); const id = setInterval(fn, ms); return () => clearInterval(id) }, [ms])
-}
-
-function fmt(n, suffix = '') {
-  if (n == null) return '—'
-  if (n >= 1e7) return (n / 1e7).toFixed(1) + ' Cr' + suffix
-  if (n >= 1e5) return (n / 1e5).toFixed(1) + 'L' + suffix
-  return n.toLocaleString('en-IN') + suffix
 }
 
 // ── animated connector ────────────────────────────────────────────────────────
@@ -66,16 +60,13 @@ function Connector({ active = true, label = '', multi = false }) {
   )
 }
 
-// ── merge indicator (3 → 1) ───────────────────────────────────────────────────
+// ── merge indicator (N → 1) ───────────────────────────────────────────────────
 function MergeArrow({ active }) {
   return (
     <div className="flex items-center justify-center my-1" style={{ height: 32 }}>
       <svg width="260" height="32" viewBox="0 0 260 32" fill="none">
-        {/* left branch */}
         <line x1="50" y1="0" x2="130" y2="32" stroke="#334155" strokeWidth="1.5" />
-        {/* center */}
         <line x1="130" y1="0" x2="130" y2="32" stroke="#334155" strokeWidth="1.5" />
-        {/* right branch */}
         <line x1="210" y1="0" x2="130" y2="32" stroke="#334155" strokeWidth="1.5" />
         {active && (
           <>
@@ -90,6 +81,32 @@ function MergeArrow({ active }) {
             <circle cx="210" cy="6"  r="3" fill="#22D3EE" opacity="0.85">
               <animateMotion dur="0.9s" repeatCount="indefinite" begin="0.6s"
                 path="M0,0 L-80,26" />
+            </circle>
+          </>
+        )}
+      </svg>
+    </div>
+  )
+}
+
+// ── branch indicator (1 → N) ─────────────────────────────────────────────────
+function BranchArrow({ active }) {
+  return (
+    <div className="flex items-center justify-center my-1" style={{ height: 32 }}>
+      <svg width="520" height="32" viewBox="0 0 520 32" fill="none">
+        <line x1="260" y1="0" x2="80"  y2="32" stroke="#334155" strokeWidth="1.5" />
+        <line x1="260" y1="0" x2="260" y2="32" stroke="#334155" strokeWidth="1.5" />
+        <line x1="260" y1="0" x2="440" y2="32" stroke="#334155" strokeWidth="1.5" />
+        {active && (
+          <>
+            <circle r="3" fill="#22D3EE" opacity="0.85">
+              <animateMotion dur="1s" repeatCount="indefinite" begin="0s" path="M260,2 L80,30" />
+            </circle>
+            <circle r="3" fill="#22D3EE" opacity="0.85">
+              <animateMotion dur="1s" repeatCount="indefinite" begin="0.33s" path="M260,2 L260,30" />
+            </circle>
+            <circle r="3" fill="#22D3EE" opacity="0.85">
+              <animateMotion dur="1s" repeatCount="indefinite" begin="0.66s" path="M260,2 L440,30" />
             </circle>
           </>
         )}
@@ -182,22 +199,26 @@ function Node({ Icon, title, subtitle, timing, stats = [], accent = 'cyan', stat
   )
 }
 
-// ── 3-column row for parallel tasks ──────────────────────────────────────────
+// ── small card for parallel tasks (auto-wrapping grid) ────────────────────────
 function SmallNode({ Icon, title, subtitle, accent = 'cyan', timing, badge }) {
   const borderColor = {
     cyan:    'border-cyan/25',
     emerald: 'border-emerald-500/25',
     blue:    'border-blue-400/25',
+    amber:   'border-amber-500/25',
+    purple:  'border-purple-500/25',
   }[accent]
 
   const iconColor = {
     cyan:    'text-cyan',
     emerald: 'text-emerald-400',
     blue:    'text-blue-400',
+    amber:   'text-amber-400',
+    purple:  'text-purple-400',
   }[accent]
 
   return (
-    <div className={`flex-1 rounded-xl border ${borderColor} p-3`}
+    <div className={`rounded-xl border ${borderColor} p-3`}
       style={{ background: 'rgba(255,255,255,0.025)', minWidth: 0 }}>
       <div className="flex items-center gap-2 mb-1">
         <Icon size={14} className={iconColor} />
@@ -218,25 +239,55 @@ function SmallNode({ Icon, title, subtitle, accent = 'cyan', timing, badge }) {
   )
 }
 
+// ── decision-path card (Path A / B / C) ────────────────────────────────────────
+function PathCard({ letter, title, Icon, accent, active, timing, points }) {
+  const cfg = {
+    emerald: { border: 'border-emerald-500/30', bg: 'rgba(16,185,129,0.04)', icon: 'text-emerald-400', badge: 'bg-emerald-500/15 text-emerald-400' },
+    blue:    { border: 'border-blue-500/30',    bg: 'rgba(59,130,246,0.04)', icon: 'text-blue-400',    badge: 'bg-blue-500/15 text-blue-400' },
+    amber:   { border: 'border-amber-500/30',   bg: 'rgba(245,158,11,0.04)', icon: 'text-amber-400',   badge: 'bg-amber-500/15 text-amber-400' },
+  }[accent]
+  return (
+    <div className={`flex-1 min-w-0 rounded-2xl border ${cfg.border} p-4`} style={{ background: cfg.bg }}>
+      <div className="flex items-center gap-2 mb-1.5 min-w-0">
+        <span className={`text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center border ${cfg.border} shrink-0 ${cfg.icon}`}>{letter}</span>
+        <Icon size={15} className={`${cfg.icon} shrink-0`} />
+        <span className="text-sm font-semibold text-slate-100 break-words min-w-0">{title}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
+        <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${active ? cfg.badge : 'bg-slate-500/15 text-slate-400'}`}>
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${active ? `${cfg.icon.replace('text-', 'bg-')} animate-pulse` : 'bg-slate-500'}`} />
+          {active ? 'WIRED TO EXECUTION' : 'DECISION-ONLY — NOT WIRED'}
+        </span>
+        <span className="flex items-center gap-1 text-[10px] text-muted"><Clock size={9} className="shrink-0" /> {timing}</span>
+      </div>
+      <div className="space-y-1">
+        {points.map((p, i) => (
+          <p key={i} className="text-[11px] text-muted leading-snug flex items-start gap-1.5 min-w-0">
+            <ChevronRight size={10} className={`${cfg.icon} mt-0.5 shrink-0`} />
+            <span className="min-w-0 break-words">{p}</span>
+          </p>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ── main page ─────────────────────────────────────────────────────────────────
 export default function PipelineFlow() {
   const [market, setMarket]     = useState(null)
   const [agent,  setAgent]      = useState(null)
-  const [intel,  setIntel]      = useState(null)
   const [scores, setScores]     = useState(null)
   const [loading, setLoading]   = useState(true)
 
   const load = async () => {
     try {
-      const [mkt, ag, ctx, sc] = await Promise.allSettled([
+      const [mkt, ag, sc] = await Promise.allSettled([
         getIndiaMarketStatus(),
         apiFetch('/api/v1/agent/status'),
-        apiFetch('/api/v1/intelligence/context'),
         apiFetch('/api/v1/intelligence/scores?limit=200'),
       ])
       if (mkt.status === 'fulfilled')  setMarket(mkt.value)
       if (ag.status  === 'fulfilled')  setAgent(ag.value)
-      if (ctx.status === 'fulfilled')  setIntel(ctx.value)
       if (sc.status  === 'fulfilled')  setScores(sc.value)
     } finally {
       setLoading(false)
@@ -248,7 +299,7 @@ export default function PipelineFlow() {
   const isOpen      = market?.nse_open ?? false
   const nifty       = market?.nifty
   const portfolio   = agent?.portfolio
-  const shortlistN  = Array.isArray(scores) ? scores.length : 0
+  const scoredN     = Array.isArray(scores) ? scores.length : 0
   const buyN        = Array.isArray(scores) ? scores.filter(s => s.signal === 'BUY' || s.signal === 'STRONG_BUY').length : 0
 
   const niftyPct    = nifty?.change_pct ?? 0
@@ -260,7 +311,7 @@ export default function PipelineFlow() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold text-slate-100">Pipeline Flow</h1>
-          <p className="text-muted text-sm mt-0.5">Live view of how Prajna finds and trades stocks</p>
+          <p className="text-muted text-sm mt-0.5">Live, source-verified view of how Prajna discovers, scores, and trades stocks</p>
         </div>
         <div className="flex items-center gap-3">
           {loading && <RefreshCw size={14} className="text-muted animate-spin" />}
@@ -287,56 +338,78 @@ export default function PipelineFlow() {
             ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
             : 'border-border bg-white/[0.02] text-slate-400'}`}>
           <span className={`w-2.5 h-2.5 rounded-full ${isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
-          NSE Market {isOpen ? 'OPEN — 9:15 AM to 3:30 PM IST' : 'CLOSED — Opens 9:15 AM IST tomorrow'}
+          NSE Market {isOpen ? 'OPEN — 9:15 AM to 3:30 PM IST' : 'CLOSED — Opens 9:15 AM IST next session'}
         </div>
       </div>
 
       <Connector active={isOpen} />
 
-      {/* ── STEP 2: Three parallel sources ──────────────────────────────────── */}
+      {/* ── STEP 2: Ingestion & discovery ───────────────────────────────────── */}
       <div className="rounded-2xl border border-border p-4" style={{ background: 'rgba(255,255,255,0.015)' }}>
         <p className="text-[11px] text-muted uppercase tracking-widest mb-3 flex items-center gap-1.5">
-          <Activity size={11} /> Parallel Data Sources — Every 5 min
+          <Activity size={11} /> Continuous Ingestion &amp; Discovery — celery beat, real schedules
         </p>
-        <div className="flex gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <SmallNode
             Icon={TrendingUp}
             accent="cyan"
-            title="Price Crawler"
-            subtitle="Fetches live candles via Zerodha Kite + yfinance for all watchlist & hub symbols"
-            timing="every 5 min"
+            title="Price Scan"
+            subtitle="OHLCV candles + NIFTY/SENSEX/BANKNIFTY/VIX snapshots via Zerodha Kite + yfinance backstop"
+            timing="every 30s"
           />
           <SmallNode
             Icon={Zap}
             accent="emerald"
             title="Breakout Screener"
-            subtitle="Scans all ~3,300 NSE stocks for price ≥4% + vol ≥2× + RSI <85 + close >EMA20"
-            timing="every 5 min"
+            subtitle="Scans all NSE symbols: price ≥4% + vol ≥2x + RSI <85 + close >EMA20. Gated: only when NSE is open."
+            timing="every 5 min (+60s offset)"
+          />
+          <SmallNode
+            Icon={TrendingUp}
+            accent="purple"
+            title="Momentum Discovery"
+            subtitle="Catches slow 30-day grinders breakout misses (10-100% over 30d, e.g. SAKSOFT +55%, JTEKTINDIA +16%). Runs any time of day — not market-hours gated."
+            timing="every 30 min"
             badge="NEW"
           />
           <SmallNode
             Icon={BarChart2}
             accent="blue"
-            title="Market Breadth"
-            subtitle="NSE advances / declines, FII/DII flow, VIX, 52W highs → macro bias score"
+            title="Narrative / Macro Intel"
+            subtitle="FII/DII flow, VIX, sector rotation, market-wide news score → MasterContext cache read by the scorer"
             timing="every 5 min"
+          />
+          <SmallNode
+            Icon={Newspaper}
+            accent="amber"
+            title="News-First Discovery Engine"
+            subtitle="Standalone 24/7 RSS poller — keyword-filters headlines, extracts ticker, runs a multi-tool LLM debate. See Path C below."
+            timing="every 15s (when running)"
+            badge="EXPERIMENTAL"
+          />
+          <SmallNode
+            Icon={Gauge}
+            accent="cyan"
+            title="Options Chain Refresh"
+            subtitle="NIFTY/BANKNIFTY/FINNIFTY chain, Greeks, PCR, max-pain, IV-rank — feeds the F&O pipeline"
+            timing="every 15 min"
           />
         </div>
       </div>
 
-      {/* breakout detail */}
+      {/* discovery detail */}
       <div className="ml-4 pl-4 border-l border-emerald-500/20 text-xs text-muted space-y-1">
         <p className="flex items-center gap-1.5">
           <CheckCircle2 size={11} className="text-emerald-400 shrink-0" />
-          Breakout stocks → injected into <span className="text-slate-300 font-medium">hub_universe</span> + <span className="text-slate-300 font-medium">user_watchlist</span>
+          Breakout + momentum hits → injected into <span className="text-slate-300 font-medium">hub_universe</span> + <span className="text-slate-300 font-medium">user_watchlist</span>
         </p>
         <p className="flex items-center gap-1.5">
           <Bell size={11} className="text-amber-400 shrink-0" />
-          Telegram alert fires with the breakout list
+          Telegram alert fires with the breakout / momentum list
         </p>
         <p className="flex items-center gap-1.5">
           <AlertCircle size={11} className="text-slate-500 shrink-0" />
-          Gate: only runs when NSE is open
+          Outside market hours, news-engine candidates queue in <span className="text-slate-300 font-medium">PreMarketNewsQueue</span> and drain at next open
         </p>
       </div>
 
@@ -347,104 +420,169 @@ export default function PipelineFlow() {
         <Node
           Icon={Database}
           title="Hub Universe"
-          subtitle="All NSE stocks eligible for 7-factor scoring"
-          timing="rebuilt daily 7:00 AM"
+          subtitle="All NSE equities eligible for scoring, ranked by 30-day avg daily turnover"
+          timing="rebuilt daily 9:00 AM IST + live injection"
           accent="blue"
           wide
           stats={[
-            { label: 'Total stocks', value: '1,218+', color: 'text-cyan' },
-            { label: 'Threshold', value: '≥ ₹5 Cr/day', color: 'text-slate-200' },
-            { label: 'Breakout inject', value: 'up to +20', color: 'text-emerald-400' },
-            { label: 'Rebuilt', value: 'daily + live', color: 'text-slate-200' },
+            { label: 'Turnover floor', value: '≥ ₹1 Cr/day', color: 'text-cyan' },
+            { label: 'Universe cap', value: 'top ~3,000', color: 'text-slate-200' },
+            { label: 'Live inject', value: 'breakout + momentum', color: 'text-emerald-400' },
+            { label: 'Rebuild', value: 'daily 03:30 UTC', color: 'text-slate-200' },
           ]}
         >
           <div className="mt-3 text-[11px] text-muted space-y-1 border-t border-border pt-3">
-            <p className="flex gap-2">
-              <span className="text-slate-400 font-medium w-24 shrink-0">Large-cap</span>
-              <span>₹20 Cr+ turnover/day — always included (legacy top-500)</span>
+            <p>
+              Single-tier rank by <code className="text-cyan bg-slate-800 px-1 rounded">AVG(volume × close)</code> over the
+              last 30 sessions, falling back to 1h-candle aggregation if daily candles are thin.
             </p>
-            <p className="flex gap-2">
-              <span className="text-slate-400 font-medium w-24 shrink-0">Mid-cap</span>
-              <span>₹5–20 Cr/day — <span className="text-emerald-400">459 stocks added</span> after threshold cut</span>
-            </p>
-            <p className="flex gap-2">
-              <span className="text-slate-400 font-medium w-24 shrink-0">Breakouts</span>
-              <span>Any stock that moves 4%+ on heavy vol — <span className="text-emerald-400">injected live</span></span>
+            <p>
+              Threshold has been progressively lowered from ₹20 Cr → ₹5 Cr → <span className="text-emerald-400 font-medium">₹1 Cr/day</span> so
+              small-caps that move on real volume (e.g. JTEKTINDIA ~₹4 Cr, SAKSOFT ~₹4.5 Cr, SIGNPOST ~₹3 Cr) are never invisible to the scorer.
             </p>
           </div>
         </Node>
       </div>
 
-      <Connector active label="every 15 min" />
+      <Connector active label="rescored ~every 15 min" />
 
-      {/* ── STEP 4: 7-Factor Scorer ──────────────────────────────────────────── */}
+      {/* ── STEP 4: Master Intelligence Scorer ───────────────────────────────── */}
       <div className="flex justify-center">
         <Node
           Icon={BrainCircuit}
-          title="7-Factor Hub Scorer"
-          subtitle="Computes a conviction score for each stock in the universe"
-          timing="every 15 min"
+          title="Master Intelligence Scorer"
+          subtitle="engine/intelligence_hub.py — computes a composite score per symbol, two weight profiles"
+          timing="every 15 min (:14/:29/:44/:59 marks)"
           accent="purple"
           wide
         >
-          <div className="mt-3 grid grid-cols-1 gap-1.5">
-            {[
-              { factor: 'Technical',   weight: '35%', color: 'bg-cyan',          desc: 'RSI, MACD, Bollinger Bands, EMA, volume trend' },
-              { factor: 'Sector',      weight: '15%', color: 'bg-blue-500',      desc: 'Sector momentum vs Nifty benchmark' },
-              { factor: 'News',        weight: '15%', color: 'bg-amber-500',     desc: 'LLM sentiment on recent headlines (Ollama)' },
-              { factor: 'Macro',       weight: '10%', color: 'bg-emerald-500',   desc: 'Market breadth, VIX, FII/DII flow' },
-              { factor: 'Earnings',    weight: '10%', color: 'bg-orange-500',    desc: 'EPS surprise, guidance, upcoming dates' },
-              { factor: 'Fundamental', weight: '10%', color: 'bg-indigo-500',    desc: 'P/E, ROE, debt ratio, promoter holding' },
-              { factor: 'Options',     weight: '5%',  color: 'bg-purple-500',    desc: 'PCR, IV skew, OI buildup (F&O enabled)' },
-            ].map(f => (
-              <div key={f.factor} className="flex items-center gap-3 text-xs">
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
-                <span className="text-slate-300 font-medium w-24 shrink-0">{f.factor}</span>
-                <span className="text-cyan/80 font-bold w-8 shrink-0">{f.weight}</span>
-                <span className="text-muted">{f.desc}</span>
+          <div className="mt-3 space-y-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Normal mode (effective weights, post-normalisation)</p>
+              <div className="grid grid-cols-1 gap-1">
+                {[
+                  { factor: 'Technical',   weight: '58%', color: 'bg-cyan' },
+                  { factor: 'Volume',      weight: '13%', color: 'bg-blue-500' },
+                  { factor: 'News',        weight: '11%', color: 'bg-amber-500' },
+                  { factor: 'Sector',      weight: '9%',  color: 'bg-emerald-500' },
+                  { factor: 'Macro',       weight: '9%',  color: 'bg-indigo-500' },
+                  { factor: 'Earnings / Fundamental / Options', weight: '0%', color: 'bg-slate-600' },
+                ].map(f => (
+                  <div key={f.factor} className="flex items-center gap-3 text-xs">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
+                    <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                    <span className="text-cyan/80 font-bold w-10 text-right shrink-0">{f.weight}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Swing mode (when swing regime active)</p>
+              <div className="grid grid-cols-1 gap-1">
+                {[
+                  { factor: 'Technical',      weight: '49%', color: 'bg-cyan' },
+                  { factor: 'Sector',         weight: '13%', color: 'bg-emerald-500' },
+                  { factor: 'Volume',         weight: '13%', color: 'bg-blue-500' },
+                  { factor: 'News',           weight: '11%', color: 'bg-amber-500' },
+                  { factor: 'Macro',          weight: '9%',  color: 'bg-indigo-500' },
+                  { factor: '12-month momentum', weight: '4%', color: 'bg-purple-500' },
+                ].map(f => (
+                  <div key={f.factor} className="flex items-center gap-3 text-xs">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
+                    <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                    <span className="text-cyan/80 font-bold w-10 text-right shrink-0">{f.weight}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-          <div className="mt-3 pt-3 border-t border-border flex items-center gap-4 text-xs">
-            <span className="text-muted">Score range:</span>
-            <span className="text-red-400 font-bold">−100</span>
-            <div className="flex-1 h-1.5 rounded-full bg-gradient-to-r from-red-500 via-slate-600 to-emerald-500" />
-            <span className="text-emerald-400 font-bold">+200</span>
+          <p className="mt-3 text-[10px] text-muted italic border-t border-border pt-2">
+            Code note: raw weights sum to 1.12, not 1.0 — the values above are already divided through, so they're the true effective weights.
+            Earnings/fundamental/options are computed but zero-weighted (not live in the score yet). A flat −20 penalty applies when the Nifty macro regime reads BEAR.
+          </p>
+          <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+            <div className="rounded-lg border border-emerald-500/20 px-2 py-1.5 bg-emerald-500/5">
+              <p className="text-emerald-400 font-bold">STRONG_BUY</p><p className="text-muted">≥ 60 (≥40 swing)</p>
+            </div>
+            <div className="rounded-lg border border-cyan/20 px-2 py-1.5 bg-cyan/5">
+              <p className="text-cyan font-bold">BUY</p><p className="text-muted">≥ 25</p>
+            </div>
+            <div className="rounded-lg border border-slate-600 px-2 py-1.5 bg-slate-800/20">
+              <p className="text-slate-400 font-bold">NEUTRAL</p><p className="text-muted">−25 to 25</p>
+            </div>
+            <div className="rounded-lg border border-rose-500/20 px-2 py-1.5 bg-rose-500/5">
+              <p className="text-rose-400 font-bold">SELL / STRONG_SELL</p><p className="text-muted">≤ −25 / ≤ −60</p>
+            </div>
           </div>
         </Node>
       </div>
 
-      <Connector active label="top 100 by score" />
+      <Connector active label="MasterIntelligenceScore table" />
 
-      {/* ── STEP 5: Market Shortlist ──────────────────────────────────────────── */}
+      {/* ── STEP 5: live score table ─────────────────────────────────────────── */}
       <div className="flex justify-center">
         <Node
           Icon={ListFilter}
-          title="Market Shortlist"
-          subtitle="Top-100 BUY/STRONG_BUY stocks — the only universe the agent reads"
-          timing="rebuilt every 15 min"
+          title="Master Intelligence Scores"
+          subtitle="Live DB table — not a separately rebuilt shortlist. Both decision paths below query it directly."
+          timing="latest scoring cycle"
           accent="amber"
           wide
           stats={[
-            { label: 'Scored stocks', value: shortlistN > 0 ? shortlistN : '—', color: 'text-amber-300' },
-            { label: 'BUY signals',   value: buyN > 0 ? buyN : '—',             color: 'text-emerald-400' },
-            { label: 'Hub gate',      value: 'score ≥ 50',                       color: 'text-slate-200' },
-            { label: 'Signal filter', value: 'BUY / STRONG_BUY',                  color: 'text-slate-200' },
+            { label: 'Scored (latest cycle)', value: scoredN > 0 ? scoredN : '—', color: 'text-amber-300' },
+            { label: 'BUY / STRONG_BUY',   value: buyN > 0 ? buyN : '—',             color: 'text-emerald-400' },
+            { label: 'Path A reads',      value: 'top ~10 candidates/cycle',                       color: 'text-slate-200' },
+            { label: 'Path B reads',      value: 'last 45 min window',                  color: 'text-slate-200' },
           ]}
         />
       </div>
 
-      <Connector active label="every 5 min" />
+      <BranchArrow active={isOpen} />
 
-      {/* ── STEP 6: Agent Trade Loop ──────────────────────────────────────────── */}
+      {/* ── STEP 6: three semi-independent decision paths ────────────────────── */}
+      <p className="text-[11px] text-muted uppercase tracking-widest text-center mb-1">
+        Three semi-independent engines can each place an order — not one linear funnel
+      </p>
+      <div className="flex flex-col sm:flex-row gap-3">
+        <PathCard
+          letter="A" title="Master Intelligence Cycle" Icon={BrainCircuit} accent="emerald" active
+          timing="every 15 min, inline with scoring"
+          points={[
+            'Same cycle that scores the universe also closes SL/TP hits, evaluates its own top ~10 candidates, and executes — no handoff to a separate loop.',
+            'DecisionEngine.fuse() → LLM reasoning gate → RiskManagerAgent.can_take_trade() → AgentExecutionManager.execute()',
+            'Daily new-entry cap (AGENT_MAX_NEW_ENTRIES_DAY). Logged as PATH: A_inline.',
+          ]}
+        />
+        <PathCard
+          letter="B" title="India Trade Loop" Icon={Bot} accent="blue" active
+          timing="every 60s, 09:15–16:00 IST"
+          points={[
+            'Queries MasterIntelligenceScore directly (last 45 min) — the same table Path A scores, read independently.',
+            'Runs its own validate_signal / calculate_position_size and its own LLM reasoning-gate call before opening a paper trade.',
+            'Logged as PATH: B_live_loop — instrumented side-by-side with Path A for comparison, not dead code.',
+          ]}
+        />
+        <PathCard
+          letter="C" title="News-First Discovery Engine" Icon={Newspaper} accent="amber" active={false}
+          timing="24/7, 15s RSS poll (when running as a service)"
+          points={[
+            'Standalone script (news_discovery_engine.py) — polls free RSS, keyword-filters, extracts an NSE ticker, then runs a multi-tool ReAct "debate" LLM (fundamentals/news/options/price/depth/sector/macro/predict-candle tools) → TAKE/SKIP.',
+            'On TAKE it currently only logs "TRADE EXECUTED" — no call into any order/execution code yet, so no real position results from it today.',
+            'Not currently running as the news-engine systemd service on this host — file exists, unit is not active.',
+          ]}
+        />
+      </div>
+
+      <MergeArrow active={isOpen} />
+
+      {/* ── STEP 7: shared reasoning + risk + sizing ─────────────────────────── */}
       <div className="flex justify-center">
         <Node
-          Icon={Bot}
-          title="India Trade Loop"
-          subtitle="Reads shortlist, applies LLM reasoning, checks risk gates, decides"
-          timing="every 5 min (market hours)"
-          accent="emerald"
-          status={agent?.enabled && isOpen}
+          Icon={ShieldCheck}
+          title="Shared Reasoning Gate, Risk Check &amp; Capital Sizing"
+          subtitle="Both Path A and Path B route through the same LLM, risk manager, and sizing formula"
+          timing="per candidate"
+          accent="cyan"
           wide
           stats={[
             { label: 'Mode',          value: agent?.paper_mode ? 'PAPER' : 'LIVE', color: agent?.paper_mode ? 'text-blue-400' : 'text-emerald-400' },
@@ -453,26 +591,29 @@ export default function PipelineFlow() {
             { label: 'Decisions today',value: agent?.decisions_today ?? 0, color: 'text-slate-200' },
           ]}
         >
-          <div className="mt-3 pt-3 border-t border-border text-xs text-muted space-y-1">
-            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400" />
-              Reads top-120 from shortlist (BUY / STRONG_BUY / HOLD)
+          <div className="mt-3 pt-3 border-t border-border text-xs text-muted space-y-1.5">
+            <p className="flex items-center gap-1.5"><BrainCircuit size={11} className="text-purple-400 shrink-0" />
+              LLM reasoning gate — sole provider is <span className="text-slate-300 font-medium">Mantle / AWS Bedrock gpt-oss-120b</span>.
+              No Ollama, no Groq fallback (legacy fallback params are accepted but ignored — every call goes to gpt-oss now).
             </p>
-            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400" />
-              Portfolio-level cognitive cycle — macro check, sector rotation, portfolio heat
+            <p className="flex items-center gap-1.5"><FileSearch size={11} className="text-cyan shrink-0" />
+              Every reasoning call is persisted to <span className="text-slate-300 font-medium">LLMReasoningLog</span> / <span className="text-slate-300 font-medium">reasoning_verdicts</span> — full trace visible on the <span className="text-slate-300 font-medium">Agent Log</span> page.
             </p>
-            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400" />
-              Per-symbol LLM gate via <span className="text-slate-300 font-medium">qwen2.5:7b</span> (local Ollama) — reads chart brief + news
+            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
+              Capital sizing (<code className="text-cyan bg-slate-800 px-1 rounded">capital_utilization_size</code>): position weight scales 2%→5% of equity with conviction, damped by VIX (×1.0 at VIX 22 → ×0.5 at VIX 30).
             </p>
-            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400" />
-              Capital sizing: 80% of ₹20L wallet spread across open positions
+            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
+              Hard caps: 5% of equity per position, 20% minimum cash buffer (≤80% of equity ever deployed), and the trade is still capped so a stop-out never loses more than 1% of equity.
+            </p>
+            <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
+              Wallet balance is DB-configurable (RuntimeConfig.paper_trading_balance) — ₹20L is the current default, not a hardcoded constant.
             </p>
           </div>
         </Node>
       </div>
 
-      {/* ── STEP 7: Decision fork ─────────────────────────────────────────────── */}
+      {/* ── STEP 8: Decision fork ─────────────────────────────────────────────── */}
       <div className="flex justify-center gap-8 mt-2">
-        {/* buy branch */}
         <div className="flex flex-col items-center gap-2">
           <div className="relative w-px h-6 bg-border overflow-hidden">
             {isOpen && <div className="absolute w-full bg-emerald-400/80 rounded-full"
@@ -483,11 +624,10 @@ export default function PipelineFlow() {
             <span className="text-sm font-semibold text-emerald-300">BUY Order</span>
           </div>
           <div className="text-[10px] text-muted text-center max-w-[140px]">
-            Placed on Zerodha Kite<br />(or Paper DB in paper mode)
+            AgentExecutionManager / trade_simulator.open_paper_trade — Zerodha Kite live, or Paper DB in paper mode
           </div>
         </div>
 
-        {/* skip branch */}
         <div className="flex flex-col items-center gap-2 opacity-50">
           <div className="w-px h-6 bg-border" />
           <div className="rounded-xl border border-border px-4 py-2 flex items-center gap-2">
@@ -495,12 +635,11 @@ export default function PipelineFlow() {
             <span className="text-sm font-medium text-slate-500">SKIP</span>
           </div>
           <div className="text-[10px] text-muted text-center max-w-[140px]">
-            Low conviction or<br />risk gate triggered
+            Low conviction, LLM veto, or a risk gate triggered
           </div>
         </div>
       </div>
 
-      {/* merge back to telegram */}
       <div className="flex justify-center mt-2">
         <div className="relative w-px h-6 bg-border overflow-hidden">
           {isOpen && <div className="absolute w-full bg-amber-400/80 rounded-full"
@@ -508,7 +647,7 @@ export default function PipelineFlow() {
         </div>
       </div>
 
-      {/* ── STEP 8: Telegram ─────────────────────────────────────────────────── */}
+      {/* ── STEP 9: Telegram ─────────────────────────────────────────────────── */}
       <div className="flex justify-center">
         <div className="rounded-2xl border border-amber-500/25 bg-amber-500/5 px-6 py-4 flex items-center gap-4 w-full max-w-2xl">
           <div className="p-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10">
@@ -517,7 +656,8 @@ export default function PipelineFlow() {
           <div>
             <p className="text-sm font-semibold text-amber-300">Telegram Alert</p>
             <p className="text-xs text-muted mt-0.5">
-              Every BUY order + every breakout discovery → instant Telegram message with symbol, price, qty, hub score, and reasoning
+              Fires on: every BUY order (Path A or B), every breakout/momentum discovery injection, and F&amp;O position open/close —
+              symbol, price, qty, score, and the LLM's reasoning summary.
             </p>
           </div>
         </div>
@@ -526,21 +666,22 @@ export default function PipelineFlow() {
       {/* ── timing summary ───────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-border p-5 mt-4 glass-panel">
         <p className="text-xs font-semibold text-slate-300 uppercase tracking-widest mb-4 flex items-center gap-2">
-          <Clock size={12} className="text-cyan" /> What happens tomorrow when market opens
+          <Clock size={12} className="text-cyan" /> Actual celery-beat schedule (IST)
         </p>
         <div className="space-y-2">
           {[
-            { time: '9:15 AM', event: 'NSE market opens', color: 'text-emerald-400', dot: 'bg-emerald-400' },
-            { time: '9:21 AM', event: 'First breakout scan fires (5-min schedule + 60s offset)', color: 'text-cyan', dot: 'bg-cyan' },
-            { time: '9:21 AM', event: 'Breakout stocks injected → hub_universe + user_watchlist', color: 'text-cyan', dot: 'bg-cyan' },
-            { time: '9:21 AM', event: 'Telegram: "Breakout Auto-Discovery" alert sent', color: 'text-amber-400', dot: 'bg-amber-400' },
-            { time: '9:30 AM', event: 'Hub scorer runs → 7-factor scores for all 1,218+ symbols', color: 'text-purple-400', dot: 'bg-purple-400' },
-            { time: '9:30 AM', event: 'market_shortlist rebuilt with top-100', color: 'text-amber-300', dot: 'bg-amber-400' },
-            { time: '9:35 AM', event: 'Agent loop reads shortlist → LLM reasoning → orders placed', color: 'text-emerald-300', dot: 'bg-emerald-400' },
-            { time: 'Repeat',  event: 'Breakout scan every 5 min | Hub + shortlist every 15 min', color: 'text-slate-400', dot: 'bg-slate-500' },
+            { time: 'continuous', event: 'Price scan every 30s · live-price backstop refresh every 15s', color: 'text-cyan', dot: 'bg-cyan' },
+            { time: 'every 5m', event: 'Narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
+            { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring + Path A inline execution (fires ~45s after each :14/:29/:44/:59 bar close)', color: 'text-purple-400', dot: 'bg-purple-400' },
+            { time: 'every 30m', event: 'Momentum discovery scan — runs 24/7, not market-hours gated', color: 'text-slate-300', dot: 'bg-slate-400' },
+            { time: '24/7', event: 'News-First Discovery Engine RSS poll every 15s — running autonomously in the background.', color: 'text-amber-400', dot: 'bg-amber-400' },
+            { time: 'every 60s', event: 'India Trade Loop (Path B), 09:15–16:00 IST', color: 'text-blue-400', dot: 'bg-blue-400' },
+            { time: '9:00 AM', event: 'hub_universe rebuild (crontab 03:30 UTC)', color: 'text-cyan', dot: 'bg-cyan' },
+            { time: '3:25 PM', event: 'Agent EOD reconcile (crontab 09:55 UTC)', color: 'text-slate-300', dot: 'bg-slate-400' },
+            { time: '3:45 PM', event: 'F&O expiry sweep, weekdays (crontab 10:15 UTC)', color: 'text-amber-300', dot: 'bg-amber-400' },
           ].map((row, i) => (
             <div key={i} className="flex items-start gap-3">
-              <span className="text-[11px] font-mono text-muted w-16 shrink-0 pt-0.5">{row.time}</span>
+              <span className="text-[11px] font-mono text-muted w-20 shrink-0 pt-0.5">{row.time}</span>
               <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${row.dot}`} />
               <span className={`text-xs ${row.color}`}>{row.event}</span>
             </div>
@@ -548,15 +689,14 @@ export default function PipelineFlow() {
         </div>
       </div>
 
-      {/* ── ROTO fix callout ─────────────────────────────────────────────────── */}
+      {/* ── universe threshold callout ───────────────────────────────────────── */}
       <div className="rounded-2xl border border-cyan/20 p-4 flex gap-4" style={{ background: 'rgba(6,182,212,0.04)' }}>
         <Zap size={20} className="text-cyan shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm font-semibold text-cyan mb-1">The ROTO Fix</p>
+          <p className="text-sm font-semibold text-cyan mb-1">Small-cap visibility fix</p>
           <div className="text-xs text-muted space-y-1">
-            <p><span className="text-red-400 font-medium">Before:</span> ROTO avg turnover ₹10 Cr &lt; ₹20 Cr threshold → invisible to agent</p>
-            <p><span className="text-emerald-400 font-medium">After:</span> Threshold lowered to ₹5 Cr → ROTO now at hub rank #972 (of 1,218)</p>
-            <p><span className="text-emerald-400 font-medium">Also:</span> Breakout screener catches any sudden 4%+ move within 5 min of it happening</p>
+            <p><span className="text-red-400 font-medium">Before:</span> hub_universe ranked only by turnover ≥ ₹20 Cr/day → sudden small/mid-cap movers were invisible to the scorer.</p>
+            <p><span className="text-emerald-400 font-medium">After:</span> threshold lowered to ₹1 Cr/day, plus the breakout screener and momentum discovery inject any qualifying mover in real time regardless of its baseline turnover.</p>
           </div>
         </div>
       </div>
