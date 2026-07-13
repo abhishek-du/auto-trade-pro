@@ -4,82 +4,17 @@
 #   • build_postmortem_note() — "Profit/Loss Explanation" when trade closes
 #
 # Synchronous by design — runs in a worker thread inside the journal sync.
-# Falls back gracefully to deterministic templates if Groq is unavailable.
+# Falls back gracefully to deterministic templates if LLM is unavailable.
 
 from __future__ import annotations
 
 from utils.config import settings
 from utils.logger import logger
 
-_GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
-
-# llama-3.3-70b-versatile free-tier limits: 30 RPM / 1K RPD / 12K TPM
-# 2.5 s gap → 24 RPM, safely under 30 RPM.  400 tokens × 24 = 9.6K TPM < 12K TPM.
-_GROQ_MIN_INTERVAL = 2.5   # seconds between calls
-_groq_last_call_ts: float = 0.0
-# Circuit breaker: when daily quota (RPD) is exhausted, skip all remaining calls
-# this session rather than sleeping 200+ s per trade.  Resets each process start.
-_groq_quota_exhausted: bool = False
-
-
-def _groq_sync(prompt: str, system: str, *, max_tokens: int = 400,
-               timeout: float = 20.0) -> str:
-    if not getattr(settings, "GROQ_API_KEY", ""):
-        return ""
-    import time
-    import httpx
-    global _groq_last_call_ts, _groq_quota_exhausted
-
-    # Skip immediately if we already know the daily quota is gone
-    if _groq_quota_exhausted:
-        return ""
-
-    # Pace calls to ≤24 RPM
-    gap = _groq_last_call_ts + _GROQ_MIN_INTERVAL - time.monotonic()
-    if gap > 0:
-        time.sleep(gap)
-
-    for attempt in range(3):
-        try:
-            _groq_last_call_ts = time.monotonic()
-            resp = httpx.post(
-                _GROQ_URL,
-                headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                         "Content-Type": "application/json"},
-                json={"model": _GROQ_MODEL,
-                      "messages": [{"role": "system", "content": system},
-                                   {"role": "user", "content": prompt}],
-                      "max_tokens": max_tokens, "temperature": 0.25},
-                timeout=timeout,
-            )
-            if resp.status_code == 429:
-                wait = float(resp.headers.get("retry-after", 60))
-                if wait > 60:
-                    # retry-after > 60 s = daily RPD quota exhausted, not a burst spike.
-                    # Trip the circuit breaker so we stop trying for the rest of this run.
-                    _groq_quota_exhausted = True
-                    logger.warning(
-                        f"[trade_explainer] Groq RPD quota exhausted (retry-after {wait:.0f}s) "
-                        f"— switching to template notes for this session"
-                    )
-                    return ""
-                logger.warning(
-                    f"[trade_explainer] Groq 429 burst — retry-after {wait:.0f}s "
-                    f"(attempt {attempt+1}/3)"
-                )
-                time.sleep(wait + 1)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "").strip()
-        except httpx.HTTPStatusError:
-            raise
-        except Exception as exc:
-            logger.warning(f"[trade_explainer] Groq call failed: {exc}")
-            return ""
-    logger.warning("[trade_explainer] Groq: 3 retries exhausted — using template fallback")
-    return ""
+def _llm_sync(prompt: str, system: str, *, max_tokens: int = 400) -> str:
+    """Sync inference via gpt-oss-120b. Returns '' on any failure."""
+    from utils.llm import _mantle_sync_chat
+    return _mantle_sync_chat(prompt, system, max_tokens=max_tokens)
 
 
 # ── ETA to first target ────────────────────────────────────────────────────────
@@ -283,7 +218,7 @@ def build_expert_note(symbol: str, direction: str, entry: float, stop: float,
     template = _entry_template(symbol, direction, entry, stop, target_1, target_2,
                                confidence, hub, reasoning, strategy, regime)
 
-    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "mantle_available", False)
     if not _llm_ok:
         return template
 
@@ -310,7 +245,7 @@ Signals: {reasoning[:500]}
 Cover: (1) why bought at this level, (2) what technical/fundamental factor is the primary driver,
 (3) what the R:R implies, (4) the single biggest risk to this trade."""
 
-    note = _groq_sync(prompt, "You are an expert Indian equity trader and journal writer. Write clear, professional, jargon-appropriate prose.")
+    note = _llm_sync(prompt, "You are an expert Indian equity trader and journal writer. Write clear, professional, jargon-appropriate prose.")
     return note or template
 
 
@@ -328,7 +263,7 @@ def build_hold_analysis(symbol: str, side: str, entry: float, current: float,
     template = _hold_template(symbol, side, entry, current, stop, target_1, target_2,
                               pnl, pnl_pct, days_held, hub, strategy)
 
-    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "mantle_available", False)
     if not use_llm or not _llm_ok:
         return template
 
@@ -353,7 +288,7 @@ Original signals: {reasoning[:300]}
 Cover: (1) is the original thesis still intact, (2) key price level to watch,
 (3) whether to tighten stop or let it run, (4) estimated timeline to resolution."""
 
-    note = _groq_sync(prompt, "You are an expert Indian equity trader reviewing an open position. Be analytical and direct.",
+    note = _llm_sync(prompt, "You are an expert Indian equity trader reviewing an open position. Be analytical and direct.",
                       max_tokens=350)
     return note or template
 
@@ -365,7 +300,7 @@ def build_postmortem_note(symbol: str, direction: str, entry: float, exit_price:
     template = _postmortem_template(symbol, direction, entry, exit_price, pnl,
                                     pnl_pct, reason, target_achieved, duration)
 
-    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "GROQ_API_KEY", "")
+    _llm_ok = getattr(settings, "SHEET_LOG_USE_LLM", False) and getattr(settings, "mantle_available", False)
     if not _llm_ok:
         return template
 
@@ -380,6 +315,6 @@ Result: {target_achieved}
 Cover: (1) did the trade thesis play out, (2) was the exit timing/price good,
 (3) what went right or wrong, (4) one actionable lesson for the next similar setup."""
 
-    note = _groq_sync(prompt, "You are an expert equity trader reviewing your closed trades honestly.",
+    note = _llm_sync(prompt, "You are an expert equity trader reviewing your closed trades honestly.",
                       max_tokens=380)
     return note or template

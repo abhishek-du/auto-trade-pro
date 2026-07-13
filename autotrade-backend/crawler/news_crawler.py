@@ -1092,6 +1092,21 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
     await session.flush()
 
+    # ── Strategy #5: Event-Driven Arbitrage (News Flash) ──────────────────────
+    try:
+        from engine.agent.event_arbitrage import evaluate_news_flash
+        for item, sent in zip(new_items, sentiments):
+            if abs(sent["score"]) >= 0.75:
+                # Synchronous await within the same session context
+                await evaluate_news_flash(
+                    headline=item["headline"], 
+                    summary=item.get("summary") or item.get("url") or "", 
+                    source=item["source"], 
+                    session=session
+                )
+    except Exception as exc:
+        logger.error(f"[event_arbitrage] Trigger loop failed: {exc}")
+
     # Push each new headline to any connected WebSocket subscribers so the
     # frontend doesn't have to poll /api/v1/news/ every few seconds. Fire-
     # and-forget — a broadcast failure must not block the crawl persistence.

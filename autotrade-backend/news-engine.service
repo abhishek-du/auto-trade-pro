@@ -1,0 +1,17 @@
+[Unit]
+Description=AutoTrade Pro News-First Discovery Engine
+After=network.target
+
+[Service]
+User=cis
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python /home/cis/windows/auto-trade-pro/autotrade-backend/news_discovery_engine.py
+Restart=always
+RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=news-engine
+
+[Install]
+WantedBy=multi-user.target

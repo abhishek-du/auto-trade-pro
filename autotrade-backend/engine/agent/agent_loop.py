@@ -969,7 +969,6 @@ async def _send_shortlist_alert(
                 max_tokens=200,
                 temperature=0.3,
                 timeout=50.0,
-                groq_fallback=False,  # background task — protect Groq quota for user-facing requests
             ) or ""
         except Exception as exc:
             logger.debug(f"[agent/shortlist] LLM fallback failed for {bare}: {exc}")

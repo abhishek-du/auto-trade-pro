@@ -1,9 +1,9 @@
 """LLM-powered trade explanation for AutoTrade Pro.
 
-Primary  : Groq API (llama-3.3-70b-versatile — strong reasoning, free tier available)
+Primary  : gpt-oss-120b
 Fallback : returns a plain-text summary built from signal.reasoning_points
 
-Designed so the primary can be swapped to Claude (Anthropic) later by
+Designed so the primary can be swapped later by
 changing _call_llm() without touching any other code.
 
 Public API
@@ -15,9 +15,9 @@ format_paper_trade_notification(trade: PaperTrade, explanation: str) -> str
 from db.models import PaperTrade
 from utils.config import settings
 from utils.logger import logger
-from utils.llm import call_llm_chat as call_groq_chat
+from utils.llm import call_llm_chat
 
-# ── System prompt (same wording as the Claude spec — works with any LLM) ─────
+# ── System prompt ─────────────────────────────────────────────────────────────
 _SYSTEM_PROMPT = (
     "You are a trading assistant explaining paper (simulated) trades to a beginner. "
     "This is FAKE money only — no real funds are involved. Be educational. "
@@ -51,10 +51,10 @@ def _build_user_prompt(signal) -> str:
     )
 
 
-# ── Groq API call ─────────────────────────────────────────────────────────────
+# ── LLM API call ──────────────────────────────────────────────────────────────
 
-async def _call_groq(user_prompt: str) -> str | None:
-    return await call_groq_chat(
+async def _call_llm(user_prompt: str) -> str | None:
+    return await call_llm_chat(
         [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user",   "content": user_prompt},
@@ -81,11 +81,8 @@ def _fallback_explanation(signal) -> str:
 async def generate_trade_explanation(signal) -> str:
     """Generate a beginner-friendly explanation for a TradingSignal.
 
-    Calls Groq (llama-3.3-70b-versatile) when GROQ_API_KEY is configured.
+    Calls gpt-oss-120b when available.
     Falls back to a bullet-point summary when the key is absent or the call fails.
-
-    NOTE: When ANTHROPIC_API_KEY is available, swap _call_groq() for _call_claude()
-    without changing this function's interface.
 
     Parameters
     ----------
@@ -96,7 +93,7 @@ async def generate_trade_explanation(signal) -> str:
     str — 1–3 sentence explanation, always succeeds (never raises).
     """
     user_prompt  = _build_user_prompt(signal)
-    explanation  = await _call_groq(user_prompt)
+    explanation  = await _call_llm(user_prompt)
 
     if explanation:
         logger.info(

@@ -88,7 +88,12 @@ function TypingIndicator() {
 export default function ChatMessage({ message, isLast, loading, onSymbolClick }) {
   const [copied, setCopied] = useState(false)
   const [showData, setShowData] = useState(true)
-  const [showReasoning, setShowReasoning] = useState(false)
+  const [showReasoningState, setShowReasoningState] = useState(false)
+
+  // Auto-expand reasoning while streaming reasoning phase
+  const isStreamingReasoning = message.isStreaming && message.streamingPhase === 'reasoning'
+  const isStreamingContent = message.isStreaming && message.streamingPhase === 'content'
+  const showReasoning = isStreamingReasoning || showReasoningState
   const hasReasoning = !!(message.reasoning && String(message.reasoning).trim())
 
   const isUser = message.role === 'user'
@@ -101,7 +106,7 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
     setTimeout(() => setCopied(false), 2000)
   }
 
-  // Loading state
+  // Loading state (used when non-streaming loading logic triggers)
   if (isLast && loading) return <TypingIndicator />
 
   if (isUser) {
@@ -128,7 +133,7 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
       <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 text-white text-xs font-bold glass-panel">A</div>
 
       <div className="flex-1 min-w-0">
-        <div className={`relative px-4 py-3 rounded-2xl rounded-tl-sm border ${message.isError ? 'border-red-500/30' : 'border-border'}`}
+        <div className={`relative px-4 py-3 rounded-2xl rounded-tl-sm border ${message.isError ? 'border-red-500/30' : 'border-border'} ${isStreamingContent ? 'ring-1 ring-accent/30' : ''}`}
           style={{ background: '#0F1829' }}>
 
           {message.isError && (
@@ -136,7 +141,13 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
           )}
 
           <div className="prose-chat">
-            {renderContent(message.content, onSymbolClick)}
+            {message.content ? renderContent(message.content, onSymbolClick) : null}
+            {isStreamingContent && (
+              <span className="inline-block w-1.5 h-3.5 bg-accent/70 animate-pulse ml-1 align-middle rounded-full"></span>
+            )}
+            {!message.content && !isStreamingContent && message.isStreaming && (
+              <div className="text-slate-400 italic text-sm">Thinking...</div>
+            )}
           </div>
 
           {hasBuySell && (
@@ -146,27 +157,33 @@ export default function ChatMessage({ message, isLast, loading, onSymbolClick })
           )}
 
           {/* Copy button */}
-          <button onClick={copy}
-            className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded text-muted hover:text-slate-300 transition-all">
-            {copied ? <Check size={12} className="text-profit" /> : <Copy size={12} />}
-          </button>
+          {!message.isStreaming && (
+            <button onClick={copy}
+              className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded text-muted hover:text-slate-300 transition-all">
+              {copied ? <Check size={12} className="text-profit" /> : <Copy size={12} />}
+            </button>
+          )}
         </div>
 
-        {/* Model reasoning (gpt-oss) — collapsible, off by default */}
+        {/* Model reasoning (gpt-oss) — streams in real-time */}
         {hasReasoning && (
           <div className="mt-1">
             <button
-              onClick={() => setShowReasoning(p => !p)}
+              onClick={() => setShowReasoningState(p => !p)}
               className="text-[10px] text-accent/70 hover:text-accent flex items-center gap-1 mt-1 mb-1">
-              <Brain size={11} />
-              {showReasoning ? 'Hide' : 'Show'} reasoning
+              <Brain size={11} className={isStreamingReasoning ? "animate-pulse text-accent" : ""} />
+              {isStreamingReasoning ? 'Thinking process...' : (showReasoning ? 'Hide reasoning' : 'Show reasoning')}
             </button>
             {showReasoning && (
-              <div className="rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 mb-1">
-                <p className="text-[10px] uppercase tracking-wider text-accent/60 mb-1">Model reasoning</p>
-                <pre className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed font-sans">
+              <div className={`rounded-lg border px-3 py-2 mb-1 transition-colors ${isStreamingReasoning ? 'border-accent/50 bg-accent/10 shadow-[0_0_10px_rgba(56,189,248,0.15)]' : 'border-accent/20 bg-accent/5'}`}>
+                <p className="text-[10px] uppercase tracking-wider text-accent/60 mb-1 flex items-center gap-2">
+                  Model reasoning
+                  {isStreamingReasoning && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping"></span>}
+                </p>
+                <div className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed font-sans max-h-64 overflow-y-auto pr-1 custom-scrollbar">
                   {String(message.reasoning).trim()}
-                </pre>
+                  {isStreamingReasoning && <span className="inline-block w-1.5 h-2.5 bg-accent/70 animate-pulse ml-1 align-baseline"></span>}
+                </div>
               </div>
             )}
           </div>

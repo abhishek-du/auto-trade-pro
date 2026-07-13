@@ -41,7 +41,11 @@ def get_live_tick(symbol: str) -> dict | None:
     token = NSE_TOKENS.get(sym) or INDEX_TOKENS.get(sym)
     if token is None:
         return None
-    return LIVE_TICKS.get(token)
+    tick = LIVE_TICKS.get(token)
+    if tick:
+        import time
+        tick["_age_seconds"] = time.time() - tick.get("_ts", time.time())
+    return tick
 
 
 def is_ticker_running() -> bool:
@@ -117,6 +121,8 @@ def on_ticks(ws, ticks: list[dict]) -> None:
         token = t.get("instrument_token")
         if token is None:
             continue
+        import time
+        t["_ts"] = time.time()
         LIVE_TICKS[token] = t
         sym = _TOKEN_TO_SYMBOL.get(token)
         if not sym:

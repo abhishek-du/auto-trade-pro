@@ -153,7 +153,6 @@ class Settings(BaseSettings):
     BSE_API_BASE_URL:      str = "https://api.bseindia.com"
     # Comma-separated RSS feed URLs for free news (no key required)
     RSS_FEED_URLS: str = (
-        "https://www.moneycontrol.com/rss/latestnews.xml,"
         "https://www.business-standard.com/rss/markets-106.rss,"
         "https://www.livemint.com/rss/markets,"
         "https://economictimes.indiatimes.com/markets/rss.cms"
@@ -189,7 +188,7 @@ class Settings(BaseSettings):
 
     # ── Unified decision router ──────────────────────────────────────────────
     # Single confidence gate used by paper, live, and agent execution paths
-    PAPER_CONFIDENCE_THRESHOLD: float = 60.0   # min confidence for paper trade
+    PAPER_CONFIDENCE_THRESHOLD: float = 20.0   # min confidence for paper trade
     LIVE_CONFIDENCE_THRESHOLD:  float = 70.0   # tighter gate for live Zerodha orders
     AGENT_DRY_RUN:              bool  = False  # if true, agent logs but never executes
 
@@ -280,17 +279,17 @@ class Settings(BaseSettings):
     # confidence threshold are additionally reasoned over by the LLM (bull/bear/
     # risk → TAKE/SKIP + confidence), which can veto or blend the decision. Default
     # OFF — opt-in until A/B validated. Runs only on already-qualified candidates.
-    AGENT_LLM_REASONING_ENABLED: bool = False
+    AGENT_LLM_REASONING_ENABLED: bool = True
     # Level-2: multi-agent debate. When True (and reasoning is enabled), the gate
     # runs a Bull / Bear / Risk analyst panel (in parallel) and a Judge synthesises
     # the verdict — instead of the single-pass Level-1 reasoning. ~4 LLM calls per
     # qualified candidate, so keep it for high-conviction names. Default OFF.
-    AGENT_LLM_DEBATE_ENABLED:    bool = False
+    AGENT_LLM_DEBATE_ENABLED:    bool = True
     # Level-3: agentic tool-use. When True, the gate lets the LLM call data tools
     # (news / options / fundamentals / price_action) to investigate a candidate
     # before deciding (a ReAct loop, ≤3 tool calls). Takes priority over debate.
     # ~2-5 LLM calls + DB queries per candidate. Default OFF.
-    AGENT_LLM_TOOLUSE_ENABLED:   bool = False
+    AGENT_LLM_TOOLUSE_ENABLED:   bool = True
     # Shadow mode: when True, the reasoning gate still runs and LOGS its verdict,
     # but NEVER vetoes or blends — the arithmetic decision passes through unchanged.
     # So would-be-SKIP trades are still taken and get real outcomes, enabling an
@@ -300,15 +299,15 @@ class Settings(BaseSettings):
     # trade (entry thesis vs outcome) and stores a transferable lesson; the
     # reasoning gate then injects the most relevant recent lessons into its prompt,
     # so the agent learns from its own history. Default OFF.
-    AGENT_LLM_REFLECTION_ENABLED: bool = False
+    AGENT_LLM_REFLECTION_ENABLED: bool = True
     AGENT_LLM_LESSONS_IN_PROMPT:  int  = 5   # how many lessons to inject per decision
     # Portfolio-level cognitive cycle: once per trade-loop cycle, an LLM forms a
     # top-down "veteran trader" thesis over the whole book + market (regime, VIX,
     # P&L, open-position load) and returns a stance that can HALT new entries or
     # CAP how many open this cycle. SHADOW logs the thesis without acting; flip
     # shadow off to let it gate. Both default OFF — opt-in, A/B before enforcing.
-    AGENT_PORTFOLIO_BRAIN_ENABLED: bool = False
-    AGENT_PORTFOLIO_BRAIN_SHADOW:  bool = True
+    AGENT_PORTFOLIO_BRAIN_ENABLED: bool = True
+    AGENT_PORTFOLIO_BRAIN_SHADOW:  bool = False
     # Include a technical/chart read (candlestick patterns, indicator states,
     # support/resistance, ML next-day forecast) in the per-candidate LLM reasoning
     # context, so the model reasons over the chart like a trader — not just the

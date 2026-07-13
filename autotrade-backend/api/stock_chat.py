@@ -1,9 +1,11 @@
-# AI Stock Chat API endpoints.
+# AI Stock Chat API endpoints — streaming SSE + non-streaming.
 
+import json as _json
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +14,8 @@ from engine.stock_chat import process_chat_message
 from engine.stock_context_builder import resolve_symbol, build_stock_context, SYMBOL_ALIASES
 from crawler.live_prices import PRICE_CACHE
 from sqlalchemy import text
-from utils.llm import call_llm_chat
+from utils.llm import call_llm_chat, call_llm_chat_stream, get_last_reasoning, log_llm_reasoning
+
 router = APIRouter(tags=["chat"])
 
 
@@ -55,6 +58,152 @@ async def chat_message(
         }
 
     return result
+
+
+# ── POST /stream — SSE streaming endpoint ────────────────────────────────────
+
+@router.post("/stream")
+async def chat_stream(
+    req: ChatRequest,
+    session: AsyncSession = Depends(get_db),
+):
+    """Stream a response from Avishk via Server-Sent Events.
+
+    Event types:
+      - reasoning: model's chain-of-thought (gpt-oss reasoning tokens)
+      - content:   the actual answer (streamed token-by-token)
+      - meta:      contexts, intent, symbols (sent once, before done)
+      - error:     error message
+      - done:      stream complete
+    """
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="message cannot be empty")
+
+    async def sse_generator():
+        from engine.stock_chat import (
+            detect_intent, _extract_symbols, build_system_prompt,
+            format_context_for_llm, generate_no_ai_response,
+        )
+        from engine.stock_context_builder import resolve_symbol, build_stock_context
+
+        history = [{"role": m.role, "content": m.content} for m in req.history]
+
+        # Step 1: Intent + symbol detection
+        intent_data = detect_intent(req.message)
+        raw_symbols = _extract_symbols(req.message)
+        resolved = []
+        for s in raw_symbols[:2]:
+            r = resolve_symbol(s)
+            if r:
+                resolved.append(r)
+
+        # Step 2: Build context
+        contexts = {}
+        for sym in resolved[:2]:
+            try:
+                contexts[sym] = await build_stock_context(sym, session, intent_data["timeframe"])
+            except Exception as exc:
+                from utils.logger import logger
+                logger.warning("Context build failed for %s: %s", sym, exc)
+
+        context_text = ""
+        for ctx in contexts.values():
+            context_text += format_context_for_llm(ctx) + "\n"
+
+        # Step 3: Build LLM messages
+        llm_messages = [{"role": "system", "content": build_system_prompt()}]
+        llm_messages.extend(history[-6:])
+
+        if context_text.strip():
+            full_user_msg = f"{context_text}\nUser Question: {req.message}"
+        else:
+            full_user_msg = req.message
+
+        llm_messages.append({"role": "user", "content": full_user_msg})
+
+        # Step 4: Stream via gpt-oss-120b
+        from utils.config import settings
+        _llm_up = getattr(settings, "mantle_available", False)
+
+        if not _llm_up:
+            # No LLM — send rule-based response as a single content event
+            reply = generate_no_ai_response(req.message, contexts)
+            yield f"event: content\ndata: {_json.dumps({'text': reply})}\n\n"
+            yield f"event: meta\ndata: {_json.dumps({'contexts': _serialize_contexts(contexts), 'intent': intent_data['intent'], 'symbols': list(contexts.keys()), 'source': 'rule_based'})}\n\n"
+            yield f"event: done\ndata: {{}}\n\n"
+            return
+
+        reasoning_parts = []
+        content_parts = []
+
+        async for chunk in call_llm_chat_stream(
+            llm_messages, max_tokens=1200, temperature=0.4, timeout=90.0,
+        ):
+            chunk_type = chunk.get("type", "")
+            chunk_text = chunk.get("text", "")
+
+            if chunk_type == "reasoning":
+                reasoning_parts.append(chunk_text)
+                yield f"event: reasoning\ndata: {_json.dumps({'text': chunk_text})}\n\n"
+            elif chunk_type == "content":
+                content_parts.append(chunk_text)
+                yield f"event: content\ndata: {_json.dumps({'text': chunk_text})}\n\n"
+            elif chunk_type == "error":
+                yield f"event: error\ndata: {_json.dumps({'text': chunk_text})}\n\n"
+            elif chunk_type == "done":
+                pass  # handled below
+
+        # Persist reasoning to DB (best-effort)
+        full_content = "".join(content_parts).strip()
+        full_reasoning = "".join(reasoning_parts).strip()
+        if full_content or full_reasoning:
+            try:
+                prompt_summary = req.message[:2000]
+                await log_llm_reasoning(
+                    source="chat_stream",
+                    symbol=(resolved[0] if resolved else None),
+                    prompt=prompt_summary,
+                    content=full_content,
+                    reasoning=full_reasoning,
+                    model=settings.MANTLE_MODEL,
+                )
+            except Exception:
+                pass
+
+        # Send metadata + done
+        yield f"event: meta\ndata: {_json.dumps({'contexts': _serialize_contexts(contexts), 'intent': intent_data['intent'], 'symbols': list(contexts.keys()), 'source': 'llm'})}\n\n"
+        yield f"event: done\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _serialize_contexts(contexts: dict) -> dict:
+    """Make contexts JSON-serializable (strip non-serializable objects)."""
+    import copy
+    try:
+        safe = {}
+        for sym, ctx in contexts.items():
+            if isinstance(ctx, dict):
+                safe[sym] = {}
+                for k, v in ctx.items():
+                    try:
+                        _json.dumps(v)
+                        safe[sym][k] = v
+                    except (TypeError, ValueError):
+                        safe[sym][k] = str(v)
+            else:
+                safe[sym] = str(ctx)
+        return safe
+    except Exception:
+        return {}
 
 
 # ── GET /suggest/{partial} ────────────────────────────────────────────────────
@@ -121,14 +270,15 @@ async def quick_analysis(
     return ctx
 
 
-# ── GET /predict-chart/{symbol} ──────────────────────────────────────────────
+# ── GET /predict-chart/{symbol} — with optional SSE streaming ────────────────
 
 @router.get("/predict-chart/{symbol:path}")
 async def predict_chart(
     symbol: str,
+    stream: bool = Query(False, description="Stream the response as SSE"),
     session: AsyncSession = Depends(get_db),
 ):
-    """Predict next candle and price movement using LLM based on recent candles."""
+    """Predict next candle and price movement using gpt-oss-120b with reasoning."""
     resolved = resolve_symbol(symbol)
     if not resolved:
         resolved = symbol if symbol.endswith(".NS") or symbol.endswith(".BO") else f"{symbol}.NS"
@@ -143,12 +293,18 @@ async def predict_chart(
     rows = res.fetchall()
 
     if not rows:
+        if stream:
+            async def _empty():
+                yield f"event: content\ndata: {_json.dumps({'text': 'Not enough historical candle data available for prediction.'})}\n\n"
+                yield f"event: done\ndata: {{}}\n\n"
+            return StreamingResponse(_empty(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         return {"prediction": "Not enough historical candle data available for prediction."}
 
     # Format data for LLM (chronological order)
     rows.reverse()
-    
-    # Deduplicate by date (fixes issues where yfinance and upstox sync the same day with different time horizons e.g. 00:00 vs 15:30)
+
+    # Deduplicate by date
     unique_candles = {}
     for r in rows:
         date_str = r.timestamp.strftime("%Y-%m-%d")
@@ -173,12 +329,27 @@ async def predict_chart(
         {"role": "user", "content": user_prompt}
     ]
 
+    if stream:
+        async def _stream_predict():
+            async for chunk in call_llm_chat_stream(messages, max_tokens=4000):
+                chunk_type = chunk.get("type", "")
+                chunk_text = chunk.get("text", "")
+                if chunk_type in ("reasoning", "content", "error"):
+                    yield f"event: {chunk_type}\ndata: {_json.dumps({'text': chunk_text})}\n\n"
+                elif chunk_type == "done":
+                    yield f"event: done\ndata: {{}}\n\n"
+        return StreamingResponse(_stream_predict(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # Non-streaming path
     try:
         llm_response = await call_llm_chat(messages, max_tokens=4000)
+        reasoning = get_last_reasoning()
     except Exception as e:
         llm_response = f"Failed to generate AI prediction: {str(e)}"
+        reasoning = None
 
     if not llm_response:
-        llm_response = "Prediction is currently unavailable because the AI service is experiencing rate limits (quotas exhausted during testing). Please try again in a few minutes."
+        llm_response = "Prediction is currently unavailable. Please try again in a few minutes."
 
-    return {"prediction": llm_response}
+    return {"prediction": llm_response, "reasoning": reasoning}

@@ -643,58 +643,56 @@ async def run_india_price_crawl(
     # We fetch two timeframes per symbol:
     #   5m  (period=5d)  — for the agent's real-time decision-making
     #   1h  (period=60d) — for Hub scoring and longer-window indicators
+    # Step 1 — fetch candles for every symbol concurrently using an asyncio Semaphore
+    # (max 15 concurrent threads) to avoid Celery SoftTimeLimit exceptions.
     counted: set[str] = set()
-    for symbol in all_symbols:
-        logger.info(f"  →  Fetching candles for {symbol} ...")
+    sem = asyncio.Semaphore(15)
+
+    async def _fetch_symbol(symbol: str):
         symbol_ok = False
+        async with sem:
+            # 5-minute candles
+            try:
+                candles_5m = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda s=symbol: fetch_nse_candles(s, interval="5m", period="5d"),
+                    ),
+                    timeout=20.0,
+                )
+                if candles_5m:
+                    all_candles.extend(candles_5m)
+                    symbol_ok = True
+            except asyncio.TimeoutError:
+                errors.append(f"{symbol}/5m: timeout")
+            except Exception as exc:
+                pass
 
-        # 5-minute candles (only available for last 60 days; fetch 5d to keep DB fresh)
-        try:
-            candles_5m = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda s=symbol: fetch_nse_candles(s, interval="5m", period="5d"),
-                ),
-                timeout=20.0,
-            )
-            if candles_5m:
-                all_candles.extend(candles_5m)
-                symbol_ok = True
-                logger.info(f"  ✓  {symbol}: {len(candles_5m)} × 5m candles")
-            else:
-                logger.debug(f"  -  {symbol}: no 5m data (index/forex skip is normal)")
-        except asyncio.TimeoutError:
-            logger.warning(f"  ✗  {symbol}: 5m yfinance timeout (>20s)")
-            errors.append(f"{symbol}/5m: timeout")
-        except Exception as exc:
-            logger.debug(f"  -  {symbol}: 5m fetch skipped: {exc}")
+            # 1-hour candles
+            try:
+                candles_1h = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda s=symbol: fetch_nse_candles(s, interval="1h"),
+                    ),
+                    timeout=20.0,
+                )
+                if candles_1h:
+                    all_candles.extend(candles_1h)
+                    symbol_ok = True
+                else:
+                    errors.append(f"{symbol}/1h: empty response")
+            except asyncio.TimeoutError:
+                errors.append(f"{symbol}/1h: timeout")
+            except Exception as exc:
+                errors.append(f"{symbol}/1h: {exc}")
 
-        # 1-hour candles (primary source for Hub scoring + EMA/RSI on longer window)
-        try:
-            candles_1h = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda s=symbol: fetch_nse_candles(s, interval="1h"),
-                ),
-                timeout=20.0,
-            )
-            if candles_1h:
-                all_candles.extend(candles_1h)
-                symbol_ok = True
-                logger.info(f"  ✓  {symbol}: {len(candles_1h)} × 1h candles")
-            else:
-                logger.warning(f"  ✗  {symbol}: no 1h candle data returned")
-                errors.append(f"{symbol}/1h: empty response")
-        except asyncio.TimeoutError:
-            logger.warning(f"  ✗  {symbol}: 1h yfinance timeout (>20s)")
-            errors.append(f"{symbol}/1h: timeout")
-        except Exception as exc:
-            logger.warning(f"  ✗  Failed to fetch {symbol} 1h: {exc}")
-            errors.append(f"{symbol}/1h: {exc}")
+            if symbol_ok:
+                counted.add(symbol)
 
-        if symbol_ok and symbol not in counted:
-            counted.add(symbol)
-            total_symbols += 1
+    # Launch all symbols concurrently
+    await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
+    total_symbols = len(counted)
 
     # Step 2 — fetch index snapshots (non-DB, informational / dashboard use)
     indices = fetch_nifty_indices()
