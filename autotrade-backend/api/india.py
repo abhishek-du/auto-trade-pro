@@ -3174,7 +3174,7 @@ async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
     # 4. AI commentary (LLM) — concise, grounded in the numbers above
     ai_text = None
     try:
-        # User-facing → unified LLM chain (Gemini primary ~2s, Groq secondary).
+        # User-facing → Mantle (AWS Bedrock gpt-oss-120b), the sole LLM provider.
         from utils.llm import call_llm_chat
         sug = (signal.get("suggestion") or {}) if isinstance(signal, dict) else {}
         prompt = (

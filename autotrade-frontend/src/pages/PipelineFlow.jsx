@@ -308,14 +308,14 @@ export default function PipelineFlow() {
   return (
     <div className="max-w-3xl mx-auto space-y-2 pb-12">
       {/* header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex items-center justify-between flex-wrap gap-y-3 gap-x-4 mb-6">
+        <div className="min-w-0">
           <h1 className="text-xl font-bold text-slate-100">Pipeline Flow</h1>
           <p className="text-muted text-sm mt-0.5">Live, source-verified view of how Prajna discovers, scores, and trades stocks</p>
         </div>
-        <div className="flex items-center gap-3">
-          {loading && <RefreshCw size={14} className="text-muted animate-spin" />}
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm font-semibold
+        <div className="flex items-center gap-3 flex-wrap">
+          {loading && <RefreshCw size={14} className="text-muted animate-spin shrink-0" />}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm font-semibold whitespace-nowrap shrink-0
             ${isOpen
               ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10'
               : 'border-slate-600 text-slate-400 bg-slate-800/40'}`}>
@@ -323,7 +323,7 @@ export default function PipelineFlow() {
             NSE {isOpen ? 'OPEN' : 'CLOSED'}
           </div>
           {nifty && (
-            <div className={`text-sm font-bold tabular-nums ${niftyColor}`}>
+            <div className={`text-sm font-bold tabular-nums whitespace-nowrap shrink-0 ${niftyColor}`}>
               Nifty {nifty.price?.toLocaleString('en-IN')}
               <span className="text-xs ml-1">({niftyPct >= 0 ? '+' : ''}{niftyPct?.toFixed(2)}%)</span>
             </div>
@@ -332,13 +332,13 @@ export default function PipelineFlow() {
       </div>
 
       {/* ── STEP 1: Market Open trigger ─────────────────────────────────────── */}
-      <div className="flex justify-center">
-        <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl border font-semibold text-sm
+      <div className="flex justify-center px-2">
+        <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl border font-semibold text-sm text-center sm:text-left max-w-full
           ${isOpen
             ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
             : 'border-border bg-white/[0.02] text-slate-400'}`}>
-          <span className={`w-2.5 h-2.5 rounded-full ${isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
-          NSE Market {isOpen ? 'OPEN — 9:15 AM to 3:30 PM IST' : 'CLOSED — Opens 9:15 AM IST next session'}
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+          <span className="break-words">NSE Market {isOpen ? 'OPEN — 9:15 AM to 3:30 PM IST' : 'CLOSED — Opens 9:15 AM IST next session'}</span>
         </div>
       </div>
 
@@ -674,7 +674,7 @@ export default function PipelineFlow() {
             { time: 'every 5m', event: 'Narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
             { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring + Path A inline execution (fires ~45s after each :14/:29/:44/:59 bar close)', color: 'text-purple-400', dot: 'bg-purple-400' },
             { time: 'every 30m', event: 'Momentum discovery scan — runs 24/7, not market-hours gated', color: 'text-slate-300', dot: 'bg-slate-400' },
-            { time: '24/7', event: 'News-First Discovery Engine RSS poll every 15s — running autonomously in the background.', color: 'text-amber-400', dot: 'bg-amber-400' },
+            { time: '24/7', event: 'News-First Discovery Engine RSS poll every 15s — only when the news-engine service is running (verified not active on this host right now)', color: 'text-amber-400', dot: 'bg-amber-400' },
             { time: 'every 60s', event: 'India Trade Loop (Path B), 09:15–16:00 IST', color: 'text-blue-400', dot: 'bg-blue-400' },
             { time: '9:00 AM', event: 'hub_universe rebuild (crontab 03:30 UTC)', color: 'text-cyan', dot: 'bg-cyan' },
             { time: '3:25 PM', event: 'Agent EOD reconcile (crontab 09:55 UTC)', color: 'text-slate-300', dot: 'bg-slate-400' },

@@ -129,9 +129,9 @@ function PositionsPanel({ data }) {
       <div className="glass-panel border border-border rounded-xl p-6 text-center text-muted text-sm space-y-1">
         <p>No open F&O positions right now.</p>
         <p className="text-xs">
-          F&O trading is <span className="text-profit font-semibold">enabled</span> and Zerodha&nbsp;Kite
-          is <span className="text-profit font-semibold">connected</span>. The agent opens an index
-          option position when its multi-factor signal triggers (see Signals &amp; Predictions below).
+          When F&amp;O is enabled (<code className="text-cyan">ENABLE_FNO</code> + <code className="text-cyan">ENABLE_OPTIONS</code>) and Zerodha&nbsp;Kite
+          is connected, the agent opens an index option spread when its multi-factor signal
+          triggers (see Signals &amp; Predictions below and the <a href="/fno-pipeline" className="text-cyan hover:underline">F&amp;O Pipeline Flow</a> page for the exact gates).
         </p>
       </div>
     );

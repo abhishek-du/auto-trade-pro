@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  Activity, Zap, TrendingUp, TrendingDown, BarChart2,
+  Activity, Zap, TrendingUp,
   Database, BrainCircuit, Bot, ShoppingCart, Bell, Clock,
   CheckCircle2, XCircle, AlertCircle, RefreshCw, ChevronRight,
-  Wifi, WifiOff, Shield, Layers, Target, BarChart, Gauge,
-  GitMerge, GitBranch, ArrowUpDown, Flame, TrendingDown as BearIcon,
+  Wifi, WifiOff, Shield, Layers, Target, BarChart,
+  ArrowUpDown,
 } from 'lucide-react'
 import { apiFetch, getIndiaMarketStatus } from '../api/client'
 
@@ -42,7 +42,7 @@ function Connector({ active = true, label = '' }) {
   )
 }
 
-function BranchConnector({ active, labels = ['', '', ''] }) {
+function BranchConnector({ active }) {
   return (
     <div className="flex items-end justify-center gap-16 my-1" style={{ height: 44 }}>
       <svg width="520" height="44" viewBox="0 0 520 44" fill="none">
@@ -191,53 +191,6 @@ function Node({ Icon, title, subtitle, timing, stats = [], accent = 'cyan', stat
   )
 }
 
-function CardRow({ items }) {
-  return (
-    <div className="flex gap-3">
-      {items.map((item, i) => {
-        const borders = {
-          cyan:   'border-cyan/25',
-          emerald:'border-emerald-500/25',
-          blue:   'border-blue-400/25',
-          amber:  'border-amber-500/25',
-          purple: 'border-purple-500/25',
-          rose:   'border-rose-500/25',
-        }
-        const icons = {
-          cyan:   'text-cyan',
-          emerald:'text-emerald-400',
-          blue:   'text-blue-400',
-          amber:  'text-amber-400',
-          purple: 'text-purple-400',
-          rose:   'text-rose-400',
-        }
-        const bc = borders[item.accent ?? 'cyan']
-        const ic = icons[item.accent ?? 'cyan']
-        return (
-          <div key={i} className={`flex-1 rounded-xl border ${bc} p-3`}
-            style={{ background: 'rgba(255,255,255,0.025)', minWidth: 0 }}>
-            <div className="flex items-center gap-2 mb-1">
-              <item.Icon size={14} className={ic} />
-              <span className="text-xs font-semibold text-slate-200 truncate">{item.title}</span>
-              {item.badge && (
-                <span className="ml-auto text-[10px] font-bold bg-emerald-500/15 text-emerald-400 px-1.5 py-0.5 rounded-full shrink-0">
-                  {item.badge}
-                </span>
-              )}
-            </div>
-            <p className="text-[11px] text-muted leading-snug">{item.subtitle}</p>
-            {item.timing && (
-              <p className="text-[10px] text-muted/70 mt-1 flex items-center gap-1">
-                <Clock size={9} /> {item.timing}
-              </p>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 export default function FnOPipelineFlow() {
   const [market, setMarket]   = useState(null)
   const [signals, setSignals] = useState(null)
@@ -288,14 +241,14 @@ export default function FnOPipelineFlow() {
     <div className="max-w-3xl mx-auto space-y-2 pb-12">
 
       {/* ── Header ───────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex items-center justify-between flex-wrap gap-y-3 gap-x-4 mb-6">
+        <div className="min-w-0">
           <h1 className="text-xl font-bold text-slate-100">F&O Pipeline Flow</h1>
           <p className="text-muted text-sm mt-0.5">How Prajna selects, prices, and executes F&O strategies</p>
         </div>
-        <div className="flex items-center gap-3">
-          {loading && <RefreshCw size={14} className="text-muted animate-spin" />}
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm font-semibold
+        <div className="flex items-center gap-3 flex-wrap">
+          {loading && <RefreshCw size={14} className="text-muted animate-spin shrink-0" />}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm font-semibold whitespace-nowrap shrink-0
             ${isOpen
               ? 'border-emerald-500/40 text-emerald-400 bg-emerald-500/10'
               : 'border-slate-600 text-slate-400 bg-slate-800/40'}`}>
@@ -303,7 +256,7 @@ export default function FnOPipelineFlow() {
             NSE {isOpen ? 'OPEN' : 'CLOSED'}
           </div>
           {nifty && (
-            <div className={`text-sm font-bold tabular-nums ${niftyColor}`}>
+            <div className={`text-sm font-bold tabular-nums whitespace-nowrap shrink-0 ${niftyColor}`}>
               Nifty {nifty.price?.toLocaleString('en-IN')}
               <span className="text-xs ml-1">({niftyPct >= 0 ? '+' : ''}{niftyPct?.toFixed(2)}%)</span>
             </div>
@@ -339,7 +292,7 @@ export default function FnOPipelineFlow() {
               ['20d ROC',     'Rate-of-change momentum — positive = accelerating'],
               ['EMA Slope',   'Slope of EMA50 — positive = trend still rising'],
               ['Breadth',     'NSE advance/decline ratio > 0.55 = broad participation'],
-              ['India VIX',   'VIX < 18 = calm; 18-24 = caution; >24 = fear regime'],
+              ['India VIX',   'VIX < 18 = calm; 18-24 = caution; >24 = fear (regime scale — the Market Sentiment panel below uses a separate 13/18 VIX scale)'],
             ].map(([k, v]) => (
               <p key={k} className="flex gap-2">
                 <span className="text-slate-400 font-medium w-20 shrink-0">{k}</span>
@@ -369,13 +322,13 @@ export default function FnOPipelineFlow() {
         >
           <div className="mt-3 grid grid-cols-1 gap-1.5">
             {[
-              { factor: 'Price Trend + Momentum', weight: '35', color: 'bg-cyan',        desc: 'EMA20 trend × 40 + 5-day momentum × 30' },
-              { factor: 'PCR Contrarian',          weight: '15', color: 'bg-blue-500',    desc: 'High PCR (>1.4) = contrarian bullish; low (<0.7) = bearish' },
+              { factor: 'Price Trend + Momentum', weight: '35', color: 'bg-cyan',        desc: 'EMA21 trend × 40 + 5-day momentum × 30 (FINNIFTY proxies off BANKNIFTY candle — bank-dominated index)' },
+              { factor: 'PCR Contrarian',          weight: '15', color: 'bg-blue-500',    desc: 'Linear on (PCR − 1.0)/0.4, clamped ±1 — high PCR = contrarian bullish, low = bearish' },
               { factor: 'FII/DII Net Flow',        weight: '15', color: 'bg-emerald-500', desc: '±₹5,000 Cr saturates; positive = institutional buying' },
               { factor: 'Market Breadth',          weight: '10', color: 'bg-indigo-500',  desc: 'NSE advances vs declines normalised ratio' },
               { factor: 'Max Pain Gravity',        weight: '10', color: 'bg-amber-500',   desc: 'OI-weighted strike pinning — spot vs max-pain deviation' },
-              { factor: 'News Sentiment',          weight: '10', color: 'bg-orange-500',  desc: 'LLM average on last 20 news items (Ollama sentiment)' },
-              { factor: 'VIX Damper',              weight:  '5', color: 'bg-purple-500',  desc: 'VIX <18 → ×1.0; 18-24 → ×0.8; >24 → ×0.6 conviction scale' },
+              { factor: 'News Sentiment',          weight: '10', color: 'bg-orange-500',  desc: 'Average of precomputed score on last 20 NewsItem rows + narrative-engine boost — no LLM call in this factor itself' },
+              { factor: 'VIX Damper',              weight:  '5', color: 'bg-purple-500',  desc: 'Multiplier on total score, not additive: VIX <18 → ×1.0; 18-24 → ×0.8; >24 → ×0.6' },
             ].map(f => (
               <div key={f.factor} className="flex items-center gap-3 text-xs">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
@@ -424,37 +377,63 @@ export default function FnOPipelineFlow() {
 
       <Connector active={isOpen} label="confidence ≥ 55%" />
 
-      {/* ── STEP 3: IV-Rank Branch ───────────────────────────────────────────── */}
+      <p className="text-[11px] text-muted uppercase tracking-widest text-center">
+        Two independent passes both feed contract resolution below — the composite signal never checks IV-Rank,
+        and the volatility pass never checks the composite signal
+      </p>
+
+      {/* ── STEP 3a: Directional pass (signal-driven, no IV-Rank input) ─────── */}
+      <div className="flex justify-center">
+        <div className="rounded-2xl border border-emerald-500/25 p-4 w-full max-w-2xl" style={{ background: 'rgba(16,185,129,0.03)' }}>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center border border-emerald-500/25 text-emerald-400 shrink-0">1</span>
+            <p className="text-slate-100 font-semibold text-sm">Directional Spread Pass — <code className="text-emerald-400">evaluate_index_options()</code></p>
+          </div>
+          <p className="text-muted text-xs mb-2">Gate: ENABLE_FNO + ENABLE_OPTIONS · NSE must be open · runs every agent cycle</p>
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className="rounded-xl border border-emerald-500/20 p-2.5 bg-emerald-500/5">
+              <p className="text-emerald-400 font-bold mb-1">Signal = BUY</p>
+              <p className="text-slate-200 font-medium">Bull Call Spread</p>
+              <p className="text-muted mt-0.5">Blocked if regime ∈ WEAK_BEAR/STRONG_BEAR</p>
+            </div>
+            <div className="rounded-xl border border-rose-500/20 p-2.5 bg-rose-500/5">
+              <p className="text-rose-400 font-bold mb-1">Signal = SELL</p>
+              <p className="text-slate-200 font-medium">Bear Put Spread</p>
+              <p className="text-muted mt-0.5">Blocked if regime ∈ MODERATE_BULL/STRONG_BULL</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── STEP 3b: Volatility pass (IV-Rank driven, no signal input) ──────── */}
       <div className="flex justify-center">
         <div className="rounded-2xl border border-amber-500/25 p-4 w-full max-w-2xl" style={{ background: 'rgba(245,158,11,0.03)' }}>
-          <div className="flex items-center gap-3 mb-3">
-            <div className="p-2 rounded-xl border border-amber-500/25 bg-amber-500/5">
-              <Gauge size={18} className="text-amber-400" />
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center border border-amber-500/25 text-amber-400 shrink-0">2</span>
+            <div className="flex-1">
+              <p className="text-slate-100 font-semibold text-sm">Volatility Pass — <code className="text-amber-400">evaluate_volatility()</code></p>
+              <p className="text-muted text-xs">Gate: ENABLE_FNO + ENABLE_OPTIONS + <span className="text-amber-400 font-medium">FNO_VOL_ENABLED</span> (off by default, separate flag)</p>
             </div>
-            <div>
-              <p className="text-slate-100 font-semibold text-sm">IV-Rank Strategy Router</p>
-              <p className="text-muted text-xs">Options vol regime selects the correct strategy</p>
-            </div>
-            <div className="ml-auto text-right">
+            <div className="text-right shrink-0">
               <p className={`text-lg font-bold tabular-nums ${ivColor}`}>{ivLabel}</p>
               {ivDesc && <p className={`text-[10px] font-bold ${ivColor}`}>{ivDesc}</p>}
             </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-[11px]">
             <div className="rounded-xl border border-cyan/25 p-2.5 bg-cyan/5">
-              <p className="text-cyan font-bold mb-1">IV-Rank &lt; 30%</p>
+              <p className="text-cyan font-bold mb-1">IV-Rank &lt; 30</p>
               <p className="text-slate-200 font-medium">Long Straddle</p>
-              <p className="text-muted mt-0.5">Options are cheap — buy ATM CE + PE. Profit from any big move.</p>
+              <p className="text-muted mt-0.5">Cheap options — buy ATM CE + PE. SL −50%/TP +100% per leg.</p>
             </div>
-            <div className="rounded-xl border border-amber-500/25 p-2.5 bg-amber-500/5">
-              <p className="text-amber-400 font-bold mb-1">IV-Rank 30–70%</p>
-              <p className="text-slate-200 font-medium">Directional Spread</p>
-              <p className="text-muted mt-0.5">Fair vol → Bull Call Spread (BUY) or Bear Put Spread (SELL).</p>
+            <div className="rounded-xl border border-slate-600 p-2.5 bg-slate-800/20">
+              <p className="text-slate-400 font-bold mb-1">IV-Rank 30–70</p>
+              <p className="text-slate-200 font-medium">No vol trade</p>
+              <p className="text-muted mt-0.5">Fair vol — this pass skips the underlying entirely</p>
             </div>
             <div className="rounded-xl border border-rose-500/25 p-2.5 bg-rose-500/5">
-              <p className="text-rose-400 font-bold mb-1">IV-Rank &gt; 70%</p>
+              <p className="text-rose-400 font-bold mb-1">IV-Rank &gt; 70</p>
               <p className="text-slate-200 font-medium">Iron Condor</p>
-              <p className="text-muted mt-0.5">Options are rich — sell OTM strangle with wings. Collect premium decay.</p>
+              <p className="text-muted mt-0.5">Rich options — sell OTM strangle with wings for credit.</p>
             </div>
           </div>
         </div>
@@ -462,21 +441,20 @@ export default function FnOPipelineFlow() {
 
       <BranchConnector active={isOpen} />
 
-      {/* ── STEP 4: Three parallel strategies ───────────────────────────────── */}
+      {/* ── STEP 4: Four concrete strategy specs ─────────────────────────────── */}
       <div className="flex gap-3">
         {/* Bull Call Spread */}
         <div className="flex-1 rounded-xl border border-emerald-500/25 p-3" style={{ background: 'rgba(16,185,129,0.03)' }}>
           <div className="flex items-center gap-2 mb-2">
             <TrendingUp size={14} className="text-emerald-400" />
-            <span className="text-xs font-bold text-emerald-300">BULL CALL SPREAD</span>
+            <span className="text-xs font-bold text-emerald-300">BULL/BEAR SPREAD</span>
           </div>
           <div className="space-y-1 text-[11px] text-muted">
-            <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">BUY leg:</span> ATM CE (e.g. 24200CE)</p>
-            <p className="flex gap-1"><span className="text-rose-400 w-14 shrink-0">SELL leg:</span> ATM + width CE (e.g. 24400CE)</p>
-            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Width:</span> NIFTY 200pts · BANKNIFTY 500pts</p>
+            <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">BUY leg:</span> ATM CE or PE</p>
+            <p className="flex gap-1"><span className="text-rose-400 w-14 shrink-0">SELL leg:</span> ATM ± width</p>
+            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Width:</span> 200pts (500 for BANKNIFTY/SENSEX)</p>
             <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Net debit:</span> buy_prem − sell_prem</p>
-            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Max profit:</span> width − net_debit × qty</p>
-            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Max loss:</span> net_debit × qty</p>
+            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Exit:</span> TP 50% of max profit · SL 80% of max loss</p>
           </div>
         </div>
 
@@ -490,7 +468,6 @@ export default function FnOPipelineFlow() {
             <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">CE leg:</span> Buy 1 lot ATM Call</p>
             <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">PE leg:</span> Buy 1 lot ATM Put</p>
             <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Trigger:</span> IV-Rank &lt; 30 (cheap vol)</p>
-            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Goal:</span> Profit from big move either way</p>
             <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">SL:</span> −50% per leg premium</p>
             <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">TP:</span> +100% per leg premium</p>
           </div>
@@ -503,12 +480,11 @@ export default function FnOPipelineFlow() {
             <span className="text-xs font-bold text-rose-300">IRON CONDOR</span>
           </div>
           <div className="space-y-1 text-[11px] text-muted">
-            <p className="flex gap-1"><span className="text-rose-400 w-14 shrink-0">SELL CE:</span> ATM + short_width</p>
-            <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">BUY CE:</span> ATM + long_width</p>
-            <p className="flex gap-1"><span className="text-rose-400 w-14 shrink-0">SELL PE:</span> ATM − short_width</p>
-            <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">BUY PE:</span> ATM − long_width</p>
+            <p className="flex gap-1"><span className="text-rose-400 w-14 shrink-0">SELL:</span> ATM ± short width</p>
+            <p className="flex gap-1"><span className="text-emerald-400 w-14 shrink-0">BUY:</span> ATM ± long width</p>
+            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Widths:</span> 200/400 (500/1000 BANKNIFTY)</p>
             <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Net credit:</span> collected upfront</p>
-            <p className="flex gap-1"><span className="text-slate-300 w-14 shrink-0">Trigger:</span> IV-Rank &gt; 70</p>
+            <p className="flex gap-1"><span className="text-amber-400 w-14 shrink-0">Exit:</span> no SL/TP set — held to expiry sweep</p>
           </div>
         </div>
       </div>
@@ -678,7 +654,7 @@ export default function FnOPipelineFlow() {
       <div className="flex justify-center">
         <div className="rounded-2xl border border-border p-4 w-full max-w-2xl" style={{ background: 'rgba(255,255,255,0.015)' }}>
           <p className="text-[11px] text-muted uppercase tracking-widest mb-3 flex items-center gap-1.5">
-            <Activity size={11} /> Open Position Monitoring — Continuous
+            <Activity size={11} /> Open Position Monitoring — Continuous (exit rule differs per strategy)
           </p>
           <div className="flex gap-3">
             {[
@@ -686,19 +662,19 @@ export default function FnOPipelineFlow() {
                 Icon: Target,
                 accent: 'emerald',
                 title: 'Mark-to-Market',
-                subtitle: 'WebSocket → REST → snapshot → BS reprice every price-tick. Updates unrealised_pnl.',
+                subtitle: 'WebSocket → REST → snapshot → BS reprice every price-tick. Updates unrealised_pnl for every open leg.',
               },
               {
                 Icon: Shield,
                 accent: 'rose',
                 title: 'SL / TP Check',
-                subtitle: 'Long options: SL at −50% premium, TP at +100% premium. Auto-closes and returns margin.',
+                subtitle: 'Spreads: TP 50% of max profit, SL 80% of max loss (monitor_spread_exits). Straddle: SL −50%/TP +100% per leg. Iron Condor: no SL/TP set — rides to expiry.',
               },
               {
                 Icon: Clock,
                 accent: 'amber',
                 title: 'Expiry Sweep',
-                subtitle: 'Daily 3:30 PM: settle at intrinsic (options) or spot (futures). Margin returned to wallet.',
+                subtitle: 'Daily 3:45 PM IST, weekdays: settle at intrinsic (options) or spot (futures). Margin returned to wallet.',
               },
             ].map((item, i) => {
               const borders = { emerald: 'border-emerald-500/25', rose: 'border-rose-500/25', amber: 'border-amber-500/25' }
@@ -737,7 +713,7 @@ export default function FnOPipelineFlow() {
           </div>
           <div>
             <p className="text-sm font-semibold text-rose-300">Trade Closed — Stop-Loss</p>
-            <p className="text-xs text-muted mt-0.5">SL hit at −50% premium; max loss realised = premium debit</p>
+            <p className="text-xs text-muted mt-0.5">SL fraction depends on strategy (see monitoring rule above); max loss realised = net debit paid</p>
           </div>
         </div>
       </div>
@@ -781,11 +757,11 @@ export default function FnOPipelineFlow() {
             </thead>
             <tbody className="space-y-1">
               {[
-                { name: 'Bull Call Spread', trigger: 'BUY signal + regime ≠ bear',      risk: 'Net debit × qty',             reward: '(Width − net debit) × qty', color: 'text-emerald-400' },
-                { name: 'Bear Put Spread',  trigger: 'SELL signal + regime ≠ bull',     risk: 'Net debit × qty',             reward: '(Width − net debit) × qty', color: 'text-rose-400' },
-                { name: 'Long Straddle',    trigger: 'IV-Rank < 30',                    risk: 'Total premium (both legs)',   reward: 'Unlimited (big move)',       color: 'text-cyan' },
-                { name: 'Iron Condor',      trigger: 'IV-Rank > 70',                    risk: '(Wing width − credit) × qty', reward: 'Net credit × qty',           color: 'text-purple-400' },
-                { name: 'Portfolio Hedge',  trigger: 'Equity book > 10% + bearish',     risk: 'PE premium debit',            reward: 'Hedge against drawdown',     color: 'text-amber-400' },
+                { name: 'Bull Call Spread', trigger: 'ENABLE_OPTIONS · BUY signal, conf ≥55, regime ≠ bear',      risk: 'Net debit × qty',             reward: '(Width − net debit) × qty', color: 'text-emerald-400' },
+                { name: 'Bear Put Spread',  trigger: 'ENABLE_OPTIONS · SELL signal, conf ≥55, regime ≠ bull',     risk: 'Net debit × qty',             reward: '(Width − net debit) × qty', color: 'text-rose-400' },
+                { name: 'Long Straddle',    trigger: 'ENABLE_OPTIONS + FNO_VOL_ENABLED · IV-Rank < 30',                    risk: 'Total premium (both legs)',   reward: 'Unlimited (big move)',       color: 'text-cyan' },
+                { name: 'Iron Condor',      trigger: 'ENABLE_OPTIONS + FNO_VOL_ENABLED · IV-Rank > 70',                    risk: '(Wing width − credit) × qty', reward: 'Net credit × qty',           color: 'text-purple-400' },
+                { name: 'Portfolio Hedge',  trigger: 'ENABLE_OPTIONS + FNO_HEDGE_ENABLED · equity book >10% + NIFTY bearish',     risk: 'PE premium debit',            reward: 'Hedge against drawdown',     color: 'text-amber-400' },
                 { name: 'Index Futures',    trigger: 'ENABLE_FUTURES + BUY/SELL signal', risk: '1.5% stop × notional',        reward: '3% target × notional',       color: 'text-blue-400' },
               ].map((r, i) => (
                 <tr key={i} className="border-t border-border/40">
@@ -819,12 +795,14 @@ export default function FnOPipelineFlow() {
             <Zap size={12} className="text-cyan" /> Key Config Flags
           </p>
           <div className="space-y-1 text-[11px] text-muted font-mono">
-            <p><span className="text-cyan">ENABLE_FNO</span> = master gate</p>
-            <p><span className="text-cyan">ENABLE_OPTIONS</span> = spreads + straddles</p>
-            <p><span className="text-cyan">ENABLE_FUTURES</span> = index futures</p>
-            <p><span className="text-cyan">FNO_CONFIDENCE_THRESHOLD</span> = 55%</p>
+            <p><span className="text-cyan">ENABLE_FNO</span> = master gate (default off)</p>
+            <p><span className="text-cyan">ENABLE_OPTIONS</span> = spreads (default off)</p>
+            <p><span className="text-cyan">ENABLE_FUTURES</span> = index futures (default off)</p>
+            <p><span className="text-cyan">FNO_VOL_ENABLED</span> = straddle/condor pass (default off)</p>
+            <p><span className="text-cyan">FNO_HEDGE_ENABLED</span> = portfolio hedge (default off)</p>
             <p><span className="text-cyan">FNO_DEFAULT_DTE</span> = 21 days</p>
-            <p><span className="text-cyan">FNO_MAX_LOTS_PER_TRADE</span> = cap</p>
+            <p><span className="text-cyan">FNO_MAX_LOTS_PER_TRADE</span> = 10</p>
+            <p className="text-muted/70 not-italic normal-case">confidence gate = 55% — hardcoded literal in selection.py, not an actual settings field despite the name</p>
           </div>
         </div>
       </div>
