@@ -100,6 +100,22 @@ async def run_news_discovery_loop():
             
             if new_articles:
                 logger.info(f"📰 Found {len(new_articles)} new global/Indian headlines.")
+                # Save to NewsItem table for the News Page UI
+                from db.models import NewsItem
+                async with AsyncSessionLocal() as session:
+                    for article in new_articles:
+                        headline = article.get('headline', '')
+                        if headline:
+                            new_item = NewsItem(
+                                headline=headline,
+                                source=article.get('source', 'RSS'),
+                                url=article.get('url'),
+                                sentiment="neutral",
+                                score=0.0,
+                                tickers_affected=None,
+                            )
+                            session.add(new_item)
+                    await session.commit()
             
             for article in new_articles:
                 headline = article.get('headline', '')
