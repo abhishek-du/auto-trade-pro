@@ -25,6 +25,11 @@ This document was regenerated from a direct read of the current codebase (not fr
 - Futures and Options Engine
 - India Market Suite
 - My Portfolio — Stocks, Mutual Funds, Zerodha Sync
+- Asset Allocation Analyzer
+- SIP Goal Planner
+- Tax Calculator
+- IPO Tracker
+- Mutual Fund Tracker
 - Portfolio Doctor
 - Earnings Call Analyzer
 - Zerodha KiteConnect Integration
@@ -133,7 +138,18 @@ Database:
 
 ## Master Intelligence Hub
 
-`engine/intelligence_hub.py` builds one `MasterContext` (macro bias, sector rotation, news score, earnings tone) and scores every symbol in the Hub universe.
+`engine/intelligence_hub.py` builds one `MasterContext` and scores every symbol in the Hub universe. The context is assembled from eight independent sub-builders, run sequentially on one DB session (a single `AsyncSession` cannot serve concurrent queries):
+
+- `build_macro_context()` — India VIX (LOW below 13, MODERATE below 20, HIGH below 25, else EXTREME), a FII/DII bias from the last 3/5 trading days of net flow (with a staleness guard that forces neutral if the FII data is more than 5 days old), a market-breadth mood pulled from the breadth cache, and a Nifty regime flag (BULL/BEAR) computed from whether the Nifty 50 close is above or below its own 200-day EMA.
+- `build_sector_context()` — reads the in-memory sector cache (synchronous, no DB) to get a mood and bias per NSE sector, and identifies the strongest/weakest sector and which sectors are rotating into or out of favor.
+- `build_news_context()` — averages FinBERT/keyword sentiment scores per symbol over the trailing 7 days, then optionally calls `enrich_news_context_with_tavily()` (capped at 10 Tavily credits per cycle) to fill in symbols the hub universe includes but that have zero RSS/DB news coverage.
+- `build_earnings_context()` — the most recent management tone per symbol from earnings call summaries in the last 90 days.
+- `build_options_context()` — NIFTY/BANKNIFTY PCR-derived bias (PCR >= 1.3 is treated as contrarian-bullish, <= 0.7 as bearish), plus, where a recent options snapshot exists, per-symbol PCR, ATM IV, CE/PE IV skew, and an IV-rank computed against trailing IV history.
+- `build_portfolio_context()` — current sector exposure of open positions, plus the most recent Portfolio Doctor health score/grade and any concentration or overweight-sector flags it raised.
+- `build_event_context()` — scans upcoming `MarketEvent` rows over the next 7 days for: symbols with earnings due within 5 days, any macro event (RBI MPC, Budget, Fed meeting) within 7 days, whether F&O expiry falls this week, and which sectors have IPOs that could drain retail liquidity.
+- `build_mf_flow_context()` — a sector-level bias derived from average 5-day mutual fund NAV momentum per category (rising NAVs in a category are read as bullish retail flow into that sector).
+
+Fundamental scores and 3-year profit/revenue growth are also side-loaded per symbol from the `FundamentalData` table (a DB-only read — no live yfinance calls happen during a Hub cycle).
 
 Hub universe (`engine/hub_universe.py`): all NSE equities with 30-day average daily turnover >= Rs 1 Cr, ranked by `AVG(volume * close)`, capped at roughly 3,000 symbols, rebuilt daily. The threshold has been lowered progressively from Rs 20 Cr to Rs 5 Cr to Rs 1 Cr so that small-caps that move on real volume are never invisible to the scorer. It falls back to 1-hour candle aggregation if daily candles are thin. The breakout screener and momentum-discovery scanner inject qualifying movers into this universe live, independent of the daily rebuild.
 
@@ -193,6 +209,29 @@ Path C — News-First Discovery Engine (`news_discovery_engine.py`, meant to run
 ### A fourth, manual, legacy path also exists
 
 `engine/agent/agent_loop.py::run_agent_cycle()` is a full evaluation-and-execution cycle in its own right, but it is not on any Celery beat schedule. It is invoked directly (not via Celery) from `POST /api/v1/agent/run-cycle` (admin JWT required, since it mutates the paper book) for a manual "run one cycle now" trigger. Its symbol universe comes from a different source than Paths A and B: the `MarketShortlist` table (populated every 15 minutes by the separate legacy `tasks.market_scanner.run_market_scanner` task, which in turn is powered by the standalone `india_signal_generator.py` — see the next section), plus the user's watchlist, plus a hard-coded large-cap fallback. It drives the same four-strategy `StrategySelectorAgent` used by the AI Trading Agent (see below).
+
+### Inside DecisionEngine.fuse() — how a candidate becomes a sized order
+
+`engine/agent/decision_engine.py::DecisionEngine.fuse()` is the step between "a strategy proposed a candidate" and "here is a sized, priced decision." In order:
+
+1. Position sizing via `capital_utilization_size()` (see Risk Management) — if the sized quantity comes out to zero, the candidate is rejected immediately (`qty_zero`).
+2. The Varsity M12 "Innerworth" bear-case check — writes the opposing argument against the trade into the decision's reasons, for later audit, without necessarily blocking it.
+3. Conflict detection — for BUY candidates, a hard skip fires if the current hub context actively disagrees with the signal, checked before any confidence math so a low-confidence order is never emitted for a candidate the hub context contradicts.
+4. A multiplicative confidence formula, not a simple weighted sum: `final_confidence = signal_strength x regime_factor x news_factor x earnings_factor x fii_factor`, clamped to 0-100. `signal_strength` is the candidate's own master score or confidence normalized to 0-1; `regime_factor` cuts confidence to 0.7 for counter-trend trades (a BUY while the regime reads BEAR_TRENDING, or a SELL while it reads BULL_TRENDING); `news_factor`, `earnings_factor`, and `fii_factor` each nudge confidence up or down within a bounded range (roughly 0.5x-1.5x for news and earnings tone, 0.6x-1.4x for FII flow bias) based on the same Hub context described above.
+5. The blended confidence must still clear `AGENT_CONFIDENCE_THRESHOLD` (30) or the candidate is rejected.
+6. Product type is set automatically: `MIS` (intraday-only) for short-only strategies or any SELL side, because NSE rules don't allow CNC (delivery) short selling; everything else defaults to `AGENT_DEFAULT_PRODUCT` (CNC).
+
+### The LLM reasoning gate — apply_reasoning_gate()
+
+After `fuse()` produces a decision, `apply_reasoning_gate()` (same file) optionally lets the LLM confirm or veto it. The gate is fail-open by design: if it's disabled, or the LLM call fails for any reason, the arithmetic decision passes through unchanged — trading never blocks on the LLM being available.
+
+There are three escalating modes, chosen by which flags are enabled (`AGENT_LLM_TOOLUSE_ENABLED` wins over `AGENT_LLM_DEBATE_ENABLED`, which wins over a plain single-pass `AGENT_LLM_REASONING_ENABLED`):
+
+- Reason (L1) — one LLM call given the candidate's context, returns a verdict.
+- Debate (L2) — a structured bull-vs-bear exchange before a verdict.
+- Tool-use (L3) — a multi-tool ReAct-style loop where the LLM can call dedicated tools for fundamentals, news, options data, price action, market depth, sector analysis, macro environment, the latest earnings report, a next-candle prediction, a deeper screener pass, and intraday candles, before returning a verdict. This is architecturally similar to (but a separate implementation from) the multi-tool debate the News-First Discovery Engine (Path C) runs.
+
+On a SKIP verdict the candidate is rejected. On TAKE, the LLM's own confidence is blended 50/50 with the arithmetic confidence from `fuse()`. There is also an `AGENT_LLM_SHADOW_MODE` flag: when set, the LLM's verdict is computed and logged but never enforced — the trade proceeds either way, which exists specifically to let the verdicts be evaluated for accuracy against real outcomes without letting them affect live trading. Every gate call's raw model reasoning is captured and persisted (see LLM Integration) so the full bull/bear/verdict/confidence record for any decision is auditable after the fact.
 
 ---
 
@@ -310,6 +349,36 @@ FII/DII daily flow, options chain data, sector heatmap and rotation (five dedica
 ## My Portfolio — Stocks, Mutual Funds, Zerodha Sync
 
 `engine/portfolio_analytics.py` computes Sharpe, Treynor, and Jensen's Alpha (annualized, using the India 10-year G-Sec yield of roughly 7.1% as the risk-free rate). Mutual fund NAVs auto-fetch from mfapi.in via `utils/nav_cache.py`, `engine/mf_signal_engine.py`, and `engine/sip_engine.py`. Four distinct frontend pages keep the two portfolio concepts clearly separated: `Portfolio.jsx` (the paper-trading simulator), `PortfolioTracker.jsx` (real holdings — manual, mutual fund, and Zerodha-synced, unified), `PortfolioAnalytics.jsx`, and `PortfolioDoctor.jsx`.
+
+---
+
+## Asset Allocation Analyzer
+
+`engine/allocation_engine.py` (`/api/v1/allocation`) classifies every holding into an asset class (large-cap, mid-cap, small-cap equity, debt, gold, international, cash — stocks via hardcoded large/mid-cap sets, mutual funds via a scheme-category-to-asset-class map) and compares the resulting mix against one of six target risk profiles: conservative, moderate-conservative, moderate, moderate-aggressive, aggressive, and very-aggressive. Each profile has a fixed target percentage per asset class, an expected CAGR range (7-9% up to 16-22%), a suggested investment horizon, and a description of who it suits. A 5-question risk questionnaire (time horizon, reaction to a drawdown, goal type, income stability, investing experience) scores 5-25 and maps directly to one of the six profiles. `calculate_rebalancing()` compares actual vs. target percentages per asset class and generates a plain-language suggestion — invest more, reduce the position, or leave it alone — with a suggested Rupee amount for each.
+
+---
+
+## SIP Goal Planner
+
+`engine/sip_engine.py` (`/api/v1/sip`) manages named savings goals (e.g. "Retirement," "House down payment") with a monthly SIP amount, expected return, and target date. `simulate_sip()` runs a month-by-month future-value simulation with optional annual step-up (the SIP amount increases by a fixed percentage every 12 months). `calculate_required_sip()` reverse-solves the monthly amount needed to hit a target (a PMT-style annuity formula). `calculate_months_to_target()` binary-searches for how many months a given SIP needs to reach a target. Goal progress (`calculate_goal_progress()`) computes actual XIRR from recorded installments, projects the completion date at the current pace, and reports whether the goal is on track — plus three scenario projections computed at 0.7x, 1.0x, and 1.3x of the goal's expected return (not a flat plus-or-minus percentage-point CAGR band).
+
+---
+
+## Tax Calculator
+
+`engine/tax_engine.py` (`/api/v1/tax`) computes Indian capital gains tax per trade, correctly split across the Budget 2024 rate change: sales before 23 July 2024 use the old rates (STCG 15%, LTCG 10%), sales on or after that date use the new rates (STCG 20%, LTCG 12.5%, Section 112A), with the Rs 1.25L annual LTCG exemption applied after netting short-term losses against short-term gains, then remaining short-term losses and long-term losses against long-term gains. Two harvesting features go beyond a simple calculator: loss harvesting flags open positions sitting at an unrealized loss where selling now would offset existing gains (estimated tax saved includes the 4% health-and-education cess, and the code notes India has no wash-sale rule, so an immediate rebuy is legal), and gain harvesting flags long-term winners that could be sold and immediately rebought to use up any unused LTCG exemption for the year, stepping up the cost basis tax-free.
+
+---
+
+## IPO Tracker
+
+`api/ipo_tracker.py` and `crawler/ipo_crawler.py` pull IPO data from ipoalerts.in (free-tier, rate-limited — the crawler paginates with a short delay to stay under the daily cap and falls back to cached data when the limit is hit). `engine/ipo_analyzer.py` generates a per-IPO analysis: an AI verdict (SUBSCRIBE / AVOID / NEUTRAL) with a 1-10 score through Mantle, or a rule-based fallback that scores from grey-market premium percentage and subscription levels if the AI call fails — 8 or higher is a high-conviction SUBSCRIBE, 6-7 a plain SUBSCRIBE, 3 or below AVOID.
+
+---
+
+## Mutual Fund Tracker
+
+`engine/mutual_fund_analyzer.py` and `engine/mf_signal_engine.py` (`/api/v1/mf-tracker`) track NAV history and generate fund-level signals. `get_mf_buy_signal()` issues a BUY signal only when all three conditions hold at once: 1-year return above 15%, current NAV more than 5% below its 52-week high (i.e. a dip), and India VIX below 20 (favorable broad conditions) — otherwise the signal is HOLD. `compare_funds()` ranks funds within a category with a composite score of `0.4 x one-year return + 0.4 x three-year return - 0.2 x return-consistency (monthly return standard deviation over 3 years)`, so a fund with strong but volatile returns can rank below a steadier one with similar raw performance.
 
 ---
 
