@@ -221,7 +221,7 @@ class AgentExecutionManager:
     ) -> dict[str, float]:
         """Batch-fetch latest Hub master_score for all open positions (one query).
 
-        Returns {bare_symbol: master_score}. Scores older than 2 hours are
+        Returns {bare_symbol: master_score}. Scores older than 24 hours are
         excluded — stale data is worse than no data for exit decisions.
         """
         from db.models import MasterIntelligenceScore
@@ -275,34 +275,27 @@ class AgentExecutionManager:
             price = float(price_data.get("price", 0) or 0)
 
             # PRICE_CACHE is empty after market hours (KiteTicker stops at 15:30
-            # IST, yfinance cache TTL expires) — fall back to the most recent
-            # 1h candle close so end-of-day SL/target sweeps still process.
+            # IST) — fall back to the freshest recent candle across ALL timeframes
+            # so end-of-day SL/target sweeps still process. Small/SME stocks often
+            # have fresh 1m but no 1h, so a '1h'-only read used to freeze them.
             if price <= 0:
                 try:
-                    from db.models import Candle
-                    from sqlalchemy import select
-                    # B14 fix: also read the candle timestamp and reject stale data.
-                    # Firing a stop/target off a candle days old closes the position
-                    # at a phantom price. Only use candles <=4 days old.
-                    crow = (await session.execute(
-                        select(Candle.close, Candle.timestamp)
-                        .where(Candle.symbol == symbol, Candle.timeframe == "1h")
-                        .order_by(Candle.timestamp.desc())
-                        .limit(1)
-                    )).first()
-                    if crow:
-                        _c_ts = crow[1]
+                    from crawler.price_feed import get_freshest_candle
+                    _cl, _c_ts = await get_freshest_candle(symbol, session)
+                    # B14: reject stale data — firing a stop/target off a candle
+                    # days old closes at a phantom price. Only use prints <=4d old.
+                    if _cl is not None and _c_ts is not None:
                         if getattr(_c_ts, "tzinfo", None):
                             _c_ts = _c_ts.replace(tzinfo=None)
                         if (datetime.utcnow() - _c_ts).total_seconds() <= 4 * 86400:
-                            price = float(crow[0])
+                            price = float(_cl)
                             logger.debug(
                                 f"[exits] {symbol}: PRICE_CACHE empty, "
-                                f"using last 1h candle ₹{price:.2f}"
+                                f"using freshest candle ₹{price:.2f}"
                             )
                         else:
                             logger.warning(
-                                f"[exits] {symbol}: newest 1h candle "
+                                f"[exits] {symbol}: newest candle "
                                 f"{(datetime.utcnow() - _c_ts).days}d old — "
                                 f"skipping (stale, no phantom close)"
                             )
@@ -423,7 +416,7 @@ class AgentExecutionManager:
                     new_sl = entry + 0.1 * abs(entry - stop_orig)
                     portfolio_ctx.open_positions[symbol]["trailing_sl"]  = round(new_sl, 2)
                     portfolio_ctx.cash += half_qty * price
-                    await self._record_exit(symbol, price, "T1_PARTIAL", partial_pnl, session)
+                    await self._record_partial_exit(symbol, price, half_qty, partial_pnl, new_sl, session)
                     logger.info(
                         f"[{'PAPER' if settings.AGENT_PAPER_MODE else 'LIVE'}] "
                         f"T1 HIT {symbol} @ ₹{price:.2f} | "
@@ -446,6 +439,70 @@ class AgentExecutionManager:
                     f"[{'PAPER' if settings.AGENT_PAPER_MODE else 'LIVE'}] "
                     f"CLOSED {symbol} @ ₹{price:.2f} | {exit_reason} | pnl=₹{pnl:,.2f}"
                 )
+
+    async def _record_partial_exit(
+        self,
+        symbol: str,
+        price: float,
+        sold_qty: int,
+        partial_pnl: float,
+        new_stop: float,
+        session: AsyncSession,
+    ) -> None:
+        """Book a T1 partial on the canonical book WITHOUT closing the position.
+
+        Regression fix: the B1 repair routed T1 partials through `_record_exit`,
+        which closes the ENTIRE OpenPosition via close_paper_trade — turning
+        "sell 50% at T1" into a full close. Instead, mirror the simulator's own
+        partial semantics (trade_simulator.py T1 branch): reduce
+        OpenPosition.size_units, lift the stop to breakeven, and record the
+        partial in the PaperTrade's trade_mgmt snapshot so close_paper_trade
+        folds partial_pnl into the final P&L. Guarded by partial_done so the
+        60s loop and the agent ladder can never both book the same partial.
+        """
+        from db.models import OpenPosition as OpenPos, PaperTrade
+        from sqlalchemy import select
+
+        pos_res = await session.execute(
+            select(OpenPos).where(OpenPos.symbol == symbol).limit(1)
+        )
+        open_pos = pos_res.scalar_one_or_none()
+        if open_pos is None:
+            logger.debug(f"[agent] partial: no OpenPosition for {symbol} — skipping DB book")
+            return
+
+        trade = (await session.execute(
+            select(PaperTrade).where(PaperTrade.id == open_pos.trade_id)
+        )).scalar_one_or_none()
+        if trade is None:
+            return
+
+        snap = dict(trade.indicator_snapshot or {})
+        tm   = dict(snap.get("trade_mgmt") or {})
+        if tm.get("partial_done"):
+            logger.debug(f"[agent] partial: {symbol} already partial-booked — skipping")
+            return
+
+        sold_qty = min(sold_qty, int(open_pos.size_units) - 1)
+        if sold_qty < 1:
+            return
+        tm.update(
+            partial_done=True,
+            partial_qty=sold_qty,
+            partial_price=round(price, 4),
+            partial_pnl=round(partial_pnl, 4),
+        )
+        # Reassign the dict so SQLAlchemy detects the JSON mutation
+        trade.indicator_snapshot = {**snap, "trade_mgmt": tm}
+        open_pos.size_units = open_pos.size_units - sold_qty
+        # Breakeven-plus stop for the remaining half — never loosen
+        open_pos.stop_loss = max(open_pos.stop_loss or 0.0, round(new_stop, 4))
+        await session.commit()
+        logger.info(
+            f"[agent] T1 partial booked on canonical book: {symbol} "
+            f"sold {sold_qty} @ ₹{price:.2f}, {int(open_pos.size_units)} remain, "
+            f"stop → ₹{open_pos.stop_loss:.2f}"
+        )
 
     async def _record_exit(
         self,

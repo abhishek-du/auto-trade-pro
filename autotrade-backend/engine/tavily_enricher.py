@@ -106,36 +106,68 @@ async def fetch_news_score(symbol: str, company_name: str = "") -> tuple[float, 
     if cached and (time.monotonic() - cached[2]) < _CACHE_TTL_S:
         return cached[0], cached[1]
 
-    client = _client()
-    if client is None:
-        return 0.0, []
-
     query_name = company_name or bare
     query = f"{query_name} NSE stock news India latest"
 
     try:
+        from duckduckgo_search import DDGS
         loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(
-            None,
-            lambda: client.search(
-                query,
-                search_depth="basic",
-                topic="finance",
-                max_results=5,
-                include_answer=False,
-                time_range="week",
-            ),
-        )
-        results = resp.get("results") or []
-        headlines = [r.get("title", "") or r.get("content", "")[:120] for r in results[:5]]
+        def _ddg_run():
+            with DDGS() as ddgs:
+                return [r for r in ddgs.news(query, max_results=5)]
+        
+        results = await loop.run_in_executor(None, _ddg_run)
+        if not results:
+            def _ddg_text_run():
+                with DDGS() as ddgs:
+                    return [r for r in ddgs.text(query, max_results=5)]
+            results = await loop.run_in_executor(None, _ddg_text_run)
+            
+        headlines = [r.get("title", "") or r.get("body", "")[:120] for r in results[:5]]
         headlines = [h for h in headlines if h]
-        score = _score_headlines_finbert(headlines)
-        logger.debug(f"[tavily/news] {bare}: {len(results)} results, sentiment={score:+.2f}")
-        _enriched_cache[bare] = (score, headlines, time.monotonic())
-        return score, headlines
-    except Exception as exc:
-        logger.debug(f"[tavily/news] {bare}: {exc}")
-        return 0.0, []
+        if not headlines: raise ValueError("Empty DDG")
+    except Exception as e:
+        logger.debug(f"[ddg/news] {bare} DDG failed: {e}. Falling back to Google News RSS.")
+        try:
+            import urllib.request
+            import urllib.parse
+            import xml.etree.ElementTree as ET
+            
+            def _gnews_run():
+                url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    root = ET.fromstring(response.read())
+                return [item.findtext('title') for item in root.findall('.//item')[:5] if item.findtext('title')]
+                
+            loop = asyncio.get_running_loop()
+            headlines = await loop.run_in_executor(None, _gnews_run)
+            if not headlines: raise ValueError("Empty GNews")
+        except Exception as e2:
+            logger.debug(f"[gnews/news] {bare} GNews failed: {e2}. Falling back to Tavily.")
+            client = _client()
+            if client is None:
+                return 0.0, []
+            try:
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: client.search(
+                        query, search_depth="basic", topic="finance",
+                        max_results=5, include_answer=False, time_range="week",
+                    )
+                )
+                results = resp.get("results") or []
+                headlines = [r.get("title", "") or r.get("content", "")[:120] for r in results[:5]]
+            except Exception as exc:
+                logger.debug(f"[tavily/news] {bare}: {exc}")
+                return 0.0, []
+
+    headlines = [h for h in headlines if h]
+    score = _score_headlines_finbert(headlines)
+    logger.debug(f"[web/news] {bare}: {len(headlines)} results, sentiment={score:+.2f}")
+    _enriched_cache[bare] = (score, headlines, time.monotonic())
+    return score, headlines
 
 
 # ── Batch enrichment for hub cycle ───────────────────────────────────────────
@@ -240,11 +272,25 @@ async def research_stock_for_alert(
     company_name = await loop.run_in_executor(None, lambda: _get_company_name(symbol))
 
     async def _tavily_part() -> str:
+        search_term = company_name if company_name and len(company_name) > 4 else bare
+        query = f'"{search_term}" NSE India stock analysis news 2026 outlook'
+        
+        try:
+            from duckduckgo_search import DDGS
+            def _ddg_run():
+                with DDGS() as ddgs:
+                    return [r for r in ddgs.text(query, max_results=3)]
+            results = await loop.run_in_executor(None, _ddg_run)
+            if results:
+                snippets = [r.get("body", "")[:200] for r in results[:3] if r.get("body")]
+                return " | ".join(snippets)[:500]
+        except Exception as e:
+            logger.debug(f"[ddg/research] {bare} DDG failed: {e}. Falling back to Tavily.")
+
         client = _client()
         if client is None:
             return ""
-        search_term = company_name if company_name and len(company_name) > 4 else bare
-        query = f'"{search_term}" NSE India stock analysis news 2026 outlook'
+            
         try:
             resp = await loop.run_in_executor(
                 None,

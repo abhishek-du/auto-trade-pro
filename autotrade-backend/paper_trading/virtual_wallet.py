@@ -249,6 +249,57 @@ class VirtualWallet:
     # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
+    async def check_drawdown_breakers(session: AsyncSession) -> bool:
+        """Mark-to-market daily-loss circuit breaker (audit P2.11).
+
+        Compares current wallet EQUITY (cash + locked capital + open unrealised
+        P&L) against today's day-start equity (the PerformanceSnapshot row seeded
+        by get_or_create on the first touch of the day). If the day's MTM loss
+        exceeds `max_daily_loss` (runtime-configurable, default 5%), sets the
+        sticky `trading_halted` runtime flag. Entry loops check the flag before
+        opening anything new; exit management and the 5s fast-SL keep running so
+        a halted book can still be de-risked. Resume via POST /agent/resume.
+
+        Returns True when trading is (already or newly) halted.
+        """
+        cfg = await RuntimeConfig.load(session)
+        if cfg.trading_halted:
+            return True
+
+        wallet = await VirtualWallet.get_or_create(session)
+        snap = (await session.execute(
+            select(PerformanceSnapshot).where(PerformanceSnapshot.date == date.today())
+        )).scalar_one_or_none()
+        day_start_equity = snap.equity if snap else wallet.equity
+        if day_start_equity <= 0:
+            return False
+
+        day_loss = day_start_equity - wallet.equity
+        limit    = day_start_equity * cfg.max_daily_loss
+        if day_loss >= limit:
+            await RuntimeConfig.set(session, "trading_halted", True)
+            await session.flush()
+            logger.critical(
+                f"[CIRCUIT BREAKER] Daily MTM loss ₹{day_loss:,.2f} ≥ "
+                f"{cfg.max_daily_loss * 100:.1f}% of day-start equity "
+                f"₹{day_start_equity:,.2f} — trading HALTED. "
+                f"Exits stay active; resume via POST /api/v1/agent/resume."
+            )
+            VirtualWallet._log("CIRCUIT_BREAKER", "—", -day_loss, wallet.balance)
+            await VirtualWallet._simlog(
+                session, "CIRCUIT_BREAKER", "—",
+                f"Daily MTM loss ₹{day_loss:,.2f} exceeded "
+                f"{cfg.max_daily_loss * 100:.1f}% limit — trading halted",
+                {"day_loss": round(day_loss, 2),
+                 "day_start_equity": round(day_start_equity, 2),
+                 "equity": round(wallet.equity, 2)},
+            )
+            return True
+        return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
     async def get_summary(session: AsyncSession) -> dict:
         """Return the full wallet state as a JSON-serialisable dict."""
         wallet = await VirtualWallet.get_or_create(session)

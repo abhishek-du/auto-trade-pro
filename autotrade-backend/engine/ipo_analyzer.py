@@ -1,4 +1,4 @@
-# IPO analysis engine — Groq AI verdict + rule-based fallback.
+# IPO analysis engine — gpt-oss-120b AI verdict + rule-based fallback.
 
 import json
 import re
@@ -6,11 +6,10 @@ from typing import Any
 
 from utils.config import settings
 from utils.logger import logger
-from utils.llm import call_llm_chat as call_groq_chat
+from utils.llm import call_llm_chat
 
-
-async def _call_groq(prompt: str) -> str | None:
-    return await call_groq_chat(
+async def _call_llm(prompt: str) -> str | None:
+    return await call_llm_chat(
         [{"role": "user", "content": prompt}],
         max_tokens=600, temperature=0.3, timeout=15.0,
     )
@@ -64,9 +63,9 @@ Respond with this exact JSON structure:
 # ── AI analysis ────────────────────────────────────────────────────────────────
 
 async def generate_ipo_analysis(ipo: dict) -> dict:
-    """Call Groq for structured IPO analysis; fall back to rule-based on failure."""
+    """Call gpt-oss-120b for structured IPO analysis; fall back to rule-based on failure."""
     prompt = _build_ipo_prompt(ipo)
-    raw    = await _call_groq(prompt)
+    raw    = await _call_llm(prompt)
 
     if raw:
         # Strip any markdown fences if model adds them
@@ -76,7 +75,7 @@ async def generate_ipo_analysis(ipo: dict) -> dict:
             data["source"] = "ai"
             return data
         except (json.JSONDecodeError, KeyError):
-            logger.warning("Failed to parse Groq IPO response — falling back")
+            logger.warning("Failed to parse gpt-oss IPO response — falling back")
 
     return generate_rule_based_analysis(ipo)
 

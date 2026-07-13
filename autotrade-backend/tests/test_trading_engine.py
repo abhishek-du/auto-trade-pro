@@ -1224,6 +1224,9 @@ class TestExitLogic:
         from engine.agent.execution import AgentExecutionManager
         mgr = AgentExecutionManager()
         mgr._record_exit = AsyncMock()
+        # T1 partials go through _record_partial_exit (NOT _record_exit, which
+        # would close the entire canonical position via close_paper_trade)
+        mgr._record_partial_exit = AsyncMock()
         mgr._fetch_hub_scores_for_exits = AsyncMock(return_value={})
 
         pos = self._pos(entry=500, stop=490, t1=510, t2=520, partial=False, qty=100)
@@ -1242,6 +1245,10 @@ class TestExitLogic:
 
         # Partial: close_position should NOT be called (only half closed)
         portfolio.close_position.assert_not_called()
+        # Full-exit recorder must NOT run on a partial
+        mgr._record_exit.assert_not_called()
+        # Partial must be booked on the canonical book
+        mgr._record_partial_exit.assert_awaited_once()
         # partial_done should be set
         assert portfolio.open_positions["TEST.NS"]["partial_done"] is True
         # SL should move to near breakeven

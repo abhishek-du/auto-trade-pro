@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { apiFetch } from '../api/client'
 
 const WELCOME_MSG = {
   id: 'welcome',
@@ -44,7 +43,21 @@ export function useStockChat() {
       timestamp: new Date().toISOString(),
     }
 
-    setMessages(prev => [...prev, userMsg])
+    const assistantId = (Date.now() + 1).toString();
+
+    setMessages(prev => [
+      ...prev,
+      userMsg,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        reasoning: '',
+        timestamp: new Date().toISOString(),
+        isStreaming: true,
+        streamingPhase: 'reasoning'
+      }
+    ])
     setInput('')
     setLoading(true)
     setError(null)
@@ -55,39 +68,77 @@ export function useStockChat() {
       .map(m => ({ role: m.role, content: m.content }))
 
     try {
-      const data = await apiFetch('/api/v1/chat/message', {
+      const token = localStorage.getItem('atp_admin_token')
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const res = await fetch((import.meta.env?.VITE_API_BASE || '') + '/api/v1/chat/stream', {
         method: 'POST',
-        body:   JSON.stringify({ message: txt.trim(), history }),
+        headers,
+        body: JSON.stringify({ message: txt.trim(), history }),
       })
 
-      if (data.source === 'rule_based') setNoAiBanner(true)
+      if (!res.ok) throw new Error('Failed to start stream')
 
-      const assistantMsg = {
-        id:        (Date.now() + 1).toString(),
-        role:      'assistant',
-        content:   data.reply,
-        reasoning: data.reasoning,   // gpt-oss reasoning trace (shown collapsibly)
-        timestamp: data.timestamp,
-        contexts:  data.contexts,
-        symbols:   data.symbols,
-        intent:    data.intent,
-        source:    data.source,
-      }
-      setMessages(prev => [...prev, assistantMsg])
-      if (data.contexts && Object.keys(data.contexts).length) {
-        setActiveContexts(data.contexts)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const block of lines) {
+          if (!block.trim()) continue
+          
+          let eventType = 'message'
+          let eventData = ''
+          
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event: ')) {
+              eventType = line.substring(7).trim()
+            } else if (line.startsWith('data: ')) {
+              eventData = line.substring(6)
+            }
+          }
+
+          if (!eventData) continue
+          const parsedData = JSON.parse(eventData)
+
+          setMessages(prev => prev.map(m => {
+            if (m.id !== assistantId) return m
+
+            if (eventType === 'reasoning') {
+              return { ...m, reasoning: (m.reasoning || '') + parsedData.text, streamingPhase: 'reasoning' }
+            } else if (eventType === 'content') {
+              return { ...m, content: (m.content || '') + parsedData.text, streamingPhase: 'content' }
+            } else if (eventType === 'meta') {
+              if (parsedData.source === 'rule_based') setNoAiBanner(true)
+              setActiveContexts(parsedData.contexts || {})
+              return { ...m, contexts: parsedData.contexts, intent: parsedData.intent, symbols: parsedData.symbols, source: parsedData.source }
+            } else if (eventType === 'done') {
+              return { ...m, isStreaming: false, streamingPhase: 'done' }
+            } else if (eventType === 'error') {
+              return { ...m, content: parsedData.text, isError: true, isStreaming: false }
+            }
+            return m
+          }))
+        }
       }
     } catch (err) {
       setError('Failed to get response. Please try again.')
-      setMessages(prev => [...prev, {
-        id:        (Date.now() + 1).toString(),
-        role:      'assistant',
-        content:   'Sorry, I encountered an error. Please try again.',
-        isError:   true,
-        timestamp: new Date().toISOString(),
-      }])
+      setMessages(prev => prev.map(m =>
+        m.id === assistantId ? { ...m, content: 'Sorry, I encountered an error. Please try again.', isError: true, isStreaming: false } : m
+      ))
     } finally {
       setLoading(false)
+      setMessages(prev => prev.map(m =>
+        m.id === assistantId ? { ...m, isStreaming: false, streamingPhase: 'done' } : m
+      ))
     }
   }, [input, loading, messages])
 

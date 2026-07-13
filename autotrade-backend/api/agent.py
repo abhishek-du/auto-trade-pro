@@ -672,14 +672,20 @@ async def get_performance_metrics(db: AsyncSession = Depends(get_db)):
     return await compute_metrics(db)
 
 @router.post("/halt", summary="Halt all trading immediately")
-async def halt_trading(db: AsyncSession = Depends(get_db)):
+async def halt_trading(
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_auth),   # unauthenticated halt = trading DoS
+):
     from utils.runtime_config import RuntimeConfig
     await RuntimeConfig.set(db, "trading_halted", True)
     await db.commit()
     return {"status": "success", "message": "Trading halted."}
 
 @router.post("/resume", summary="Resume trading")
-async def resume_trading(db: AsyncSession = Depends(get_db)):
+async def resume_trading(
+    db: AsyncSession = Depends(get_db),
+    _admin: str = Depends(require_auth),   # resume overrides the circuit breaker
+):
     from utils.runtime_config import RuntimeConfig
     await RuntimeConfig.set(db, "trading_halted", False)
     await db.commit()

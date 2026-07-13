@@ -4,7 +4,7 @@ Narrative Intelligence Engine — Top-Down Sector Theme Builder
 This module implements the 3-step "Eagle Eyes" strategy:
 
   Step 1: SCRAPER — Fetch raw signals from Telegram channels + RSS feeds every 5-10 minutes
-  Step 2: LLM DECODER — Use Gemini/Groq to extract hot sectors + keywords from the noise
+  Step 2: LLM DECODER — Use gpt-oss-120b to extract hot sectors + keywords from the noise
   Step 3: HUB INJECTION — Write a "narrative boost" cache that Intelligence Hub reads to
                           give +20 score bonus to stocks in hot sectors
 
@@ -14,7 +14,7 @@ Architecture:
   └──────────────┬──────────────────────┘
                  ↓
   ┌─────────────────────────────────────┐
-  │   LLM Decoder (Gemini/Groq)         │  ← Extracts narrative themes
+  │   LLM Decoder (gpt-oss-120b)        │  ← Extracts narrative themes
   │   Output: {sector: score, reason}   │
   └──────────────┬──────────────────────┘
                  ↓
@@ -264,8 +264,6 @@ async def _llm_decode_narrative(headlines: list[str], keyword_scores: dict[str, 
             messages,
             max_tokens=400,
             temperature=0.2,
-            groq_fallback=True,
-            skip_ollama=True,  # Too slow for real-time narrative building
         )
         if not resp:
             return {}

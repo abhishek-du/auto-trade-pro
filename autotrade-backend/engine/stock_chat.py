@@ -13,9 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.config import settings
 from utils.logger import logger
-from utils.llm import call_llm_chat as call_groq_chat
-
-# ── Groq constants (same as llm_explainer.py) ────────────────────────────────
+from utils.llm import call_llm_chat
 
 # ── Intent classification ─────────────────────────────────────────────────────
 
@@ -267,7 +265,7 @@ def generate_no_ai_response(message: str, contexts: dict) -> str:
             "I couldn't find data for that stock. "
             "Try entering the exact NSE symbol like RELIANCE, TCS, or HDFCBANK."
         )
-    lines = ["Here is the current data (AI analysis unavailable — configure GROQ_API_KEY for full Avishk AI):"]
+    lines = ["Here is the current data (AI analysis unavailable — configure MANTLE_API_KEY for full Avishk AI):"]
     for sym, ctx in contexts.items():
         price = ctx.get("price", {})
         p  = price.get("price", 0) or 0
@@ -287,10 +285,10 @@ def generate_no_ai_response(message: str, contexts: dict) -> str:
     return "\n".join(lines)
 
 
-# ── Groq call ─────────────────────────────────────────────────────────────────
+# ── LLM call ──────────────────────────────────────────────────────────────────
 
-async def _call_groq(messages: list[dict], max_tokens: int = 600) -> str | None:
-    return await call_groq_chat(
+async def _call_llm(messages: list[dict], max_tokens: int = 600) -> str | None:
+    return await call_llm_chat(
         messages, max_tokens=max_tokens, temperature=0.4, timeout=20.0,
     )
 
@@ -338,7 +336,7 @@ async def process_chat_message(
     for ctx in contexts.values():
         context_text += format_context_for_llm(ctx) + "\n"
 
-    # Step 5: Build Groq messages
+    # Step 5: Build LLM messages
     llm_messages: list[dict] = [
         {"role": "system", "content": build_system_prompt()}
     ]
@@ -352,13 +350,8 @@ async def process_chat_message(
 
     llm_messages.append({"role": "user", "content": full_user_msg})
 
-    # Step 6: Call the LLM (Mantle→Gemini→Groq→Ollama) and capture its reasoning.
-    # Availability guard now checks ALL providers, not just Groq — Mantle is the
-    # primary, so gating on groq_available alone wrongly skipped the LLM.
-    _llm_up = (getattr(settings, "mantle_available", False)
-               or getattr(settings, "gemini_available", False)
-               or getattr(settings, "groq_available", False)
-               or getattr(settings, "ollama_available", False))
+    # Step 6: Call the LLM and capture its reasoning.
+    _llm_up = getattr(settings, "mantle_available", False)
     reasoning = None
     if not _llm_up:
         reply  = generate_no_ai_response(user_message, contexts)

@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import (
     AgentCapitalSnapshot,
     AgentPerformance,
-    AgentPosition,
+    OpenPosition,
     Candle,
     FundamentalData,
     PortfolioPolicy,
@@ -73,21 +73,21 @@ async def get_position_weights(
 ) -> dict[str, float]:
     """Return {symbol: weight_pct} for all open agent positions."""
     rows = (await session.execute(
-        select(AgentPosition).where(AgentPosition.is_paper == is_paper)
+        select(OpenPosition)
     )).scalars().all()
 
     if not rows:
         return {}
 
     total_value = sum(
-        (p.current_price or p.entry_price) * p.qty for p in rows
+        (p.current_price or p.entry_price) * p.size_units for p in rows
     )
     if total_value <= 0:
         return {}
 
     return {
         p.symbol: round(
-            (p.current_price or p.entry_price) * p.qty / total_value * 100, 2
+            (p.current_price or p.entry_price) * p.size_units / total_value * 100, 2
         )
         for p in rows
     }

@@ -537,6 +537,8 @@ async def _india_trade_loop():
     if not is_window:
         return
 
+    is_entry_window = now_ist.time() < datetime.time(15, 20)
+
     # ── Live snapshot: hot-patch PRICE_CACHE + SECTOR_CACHE from Kite ─────
     from crawler.live_snapshot import fetch_live_snapshot
     await fetch_live_snapshot()
@@ -565,6 +567,13 @@ async def _india_trade_loop():
                         reason=c["reason"],
                     ))
 
+        # ── AI Dynamic Management: LLM manages SL/TP for open positions ────────
+        try:
+            from engine.agent.dynamic_management import llm_dynamic_sl_tp
+            await llm_dynamic_sl_tp(session)
+        except Exception as e:
+            logger.error(f"[india_trade_loop] Dynamic management failed: {e}")
+
         # Circuit breaker + halt gate — AFTER exit management, BEFORE any entry.
         # check_drawdown_breakers trips the sticky trading_halted flag on a
         # >max_daily_loss mark-to-market day loss (audit P2.11).
@@ -583,6 +592,10 @@ async def _india_trade_loop():
         # new entries for a few minutes so this loop doesn't re-buy into the crash.
         if (await RuntimeConfig.load(session)).shock_cooldown_active:
             logger.warning("[india_trade_loop] SHOCK COOLDOWN active — exits done, no new entries")
+            return
+
+        if not is_entry_window:
+            logger.info("[india_trade_loop] Past 15:20 IST — exits done, no new entries")
             return
 
         # Step 2: read actionable signals from market_shortlist — the SINGLE source of
@@ -611,12 +624,20 @@ async def _india_trade_loop():
         # latest BUY record which may be days old (e.g., HDFCGOLD STRONG_BUY June 10
         # while today's hub says NEUTRAL). Always trade the current assessment.
         from sqlalchemy import func as _func
+        import datetime as _dt
+        _now_utc = _dt.datetime.utcnow()
+        _open_utc = _now_utc.replace(hour=3, minute=45, second=0, microsecond=0)
+        _cutoff = max(_now_utc - _dt.timedelta(minutes=45), _open_utc)
+
         _latest_subq = (
             select(
                 MasterIntelligenceScore.symbol.label("sym"),
                 _func.max(MasterIntelligenceScore.scored_at).label("max_at"),
             )
-            .where(MasterIntelligenceScore.symbol.like("%.NS"))
+            .where(
+                MasterIntelligenceScore.symbol.like("%.NS"),
+                MasterIntelligenceScore.scored_at >= _cutoff,
+            )
             .group_by(MasterIntelligenceScore.symbol)
         ).subquery()
 
@@ -1201,6 +1222,15 @@ async def _india_trade_loop():
             # SELL = equity short → must be intraday MIS (NSE rule); BUY = CNC delivery
             _product = "MIS" if signal.action == "SELL" else "CNC"
             try:
+                import datetime as _dt
+                _score_age = (_dt.datetime.utcnow() - _dt.datetime.fromisoformat(signal.hub_subscores["scored_at"])).total_seconds() if signal.hub_subscores and signal.hub_subscores.get("scored_at") else 0.0
+                from crawler.live_prices import PRICE_CACHE
+                _lp = PRICE_CACHE.get(signal.symbol)
+                _price_age = _lp.get("age_seconds", 0.0) if _lp else 0.0
+                logger.info(f"[hub_instrumentation] PATH: B_live_loop | SYMBOL: {signal.symbol} | SCORE_AGE: {_score_age}s | PRICE_AGE: {_price_age}s")
+            except Exception: pass
+            
+            try:
                 trade = await open_paper_trade(signal, pos_size, session, product=_product)
             except ValueError as exc:
                 logger.warning(f"[india_trade_loop] {exc}")
@@ -1578,6 +1608,13 @@ async def _market_news_alert() -> None:
             if is_high_impact_news(r.headline, r.sentiment, r.score,
                                    settings.NEWS_ALERT_MIN_ABS_SCORE)
         ]
+        
+        # Deep LLM analysis on ALL new headlines to detect hidden trends and stock catalysts
+        from engine.agent.event_arbitrage import evaluate_news_flash
+        for r in rows:
+            # We don't have a summary column readily here, just pass the headline
+            await evaluate_news_flash(r.headline, "Full analysis via LLM reasoning", r.source, session)
+            
         if not hits:
             return
 
@@ -2948,6 +2985,59 @@ def run_master_intelligence_cycle():
                             if candidate is None:
                                 flow["no_candidate"] += 1
                                 continue
+                                
+                            # ── Live-snap + divergence guard ──
+                            live_px = None
+                            price_age = 0.0
+                            try:
+                                from crawler.live_prices import get_price
+                                lp = get_price(stock.symbol)
+                                live_px = float(lp["price"]) if lp and lp.get("price") else None
+                                price_age = float(lp.get("age_seconds", 0.0)) if lp else 0.0
+
+                                if live_px is None:
+                                    try:
+                                        from crawler.zerodha_market import get_live_prices
+                                        _sym_ns = stock.symbol if stock.symbol.endswith(".NS") else f"{stock.symbol}.NS"
+                                        _quotes = await get_live_prices([_sym_ns])
+                                        _q = _quotes.get(_sym_ns) or _quotes.get(stock.symbol)
+                                        if _q:
+                                            _px = _q.get("price") or _q.get("last_price")
+                                            if _px and float(_px) > 0:
+                                                live_px = float(_px)
+                                    except Exception as _exc:
+                                        logger.debug(f"[hub] REST LTP fallback failed for {stock.symbol}: {_exc}")
+
+                            except Exception as exc:
+                                logger.warning(f"[hub] {stock.symbol}: live entry-price confirmation errored ({exc})")
+                                continue
+
+                            if live_px is None:
+                                logger.warning(f"[hub] {stock.symbol}: cannot confirm live price, skipping trade")
+                                continue
+
+                            if candidate.entry:
+                                divergence = abs(live_px - candidate.entry) / candidate.entry
+                                if divergence < 0.05:
+                                    delta = live_px - candidate.entry
+                                    candidate.entry = round(live_px, 2)
+                                    if getattr(candidate, "stop", None):
+                                        candidate.stop = round(candidate.stop + delta, 2)
+                                    for attr in ("target", "target_1", "target_2"):
+                                        v = getattr(candidate, attr, None)
+                                        if v:
+                                            setattr(candidate, attr, round(v + delta, 2))
+                                else:
+                                    logger.warning(f"[hub] {stock.symbol}: candle price ₹{candidate.entry:.2f} vs live ₹{live_px:.2f} — {divergence*100:.1f}% divergence, skipping trade")
+                                    continue
+                            # ── End Live-snap ──
+
+                            try:
+                                import datetime as _dt
+                                score_age = (_dt.datetime.utcnow() - stock.scored_at).total_seconds() if getattr(stock, "scored_at", None) else 0.0
+                                logger.info(f"[hub_instrumentation] PATH: A_inline | SYMBOL: {stock.symbol} | SCORE_AGE: {score_age}s | PRICE_AGE: {price_age}s")
+                            except Exception: pass
+                            
                             decision, _reject = de.fuse(
                                 symbol=stock.symbol, candidate=candidate, regime=stock.regime,
                                 macro_bias=ctx.macro.total_macro_bias, fund_score=0,
@@ -3734,3 +3824,84 @@ def refresh_priority_1d_candles_task():
     """Evening 17:30 IST: fetch TODAY's 1d candle for open positions + hub + shortlist."""
     logger.info("[refresh_1d_priority] starting evening priority 1d refresh")
     return _run_async(_refresh_priority_1d_candles())
+
+@celery_app.task(name="tasks.india_weekend_reflection")
+def india_weekend_reflection():
+    """Runs the weekend self-reflection loop to analyze past trades."""
+    _run_async(_india_weekend_reflection())
+
+async def _india_weekend_reflection():
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import text as _t
+    import json
+    import os
+    from utils.logger import logger
+    from utils.llm import call_llm_chat
+
+    logger.info("[weekend_reflection] Starting weekend self-reflection loop...")
+    async with AsyncSessionLocal() as session:
+        # Fetch the last 20 closed trades
+        rows = (await session.execute(_t("""
+            SELECT id, symbol, direction, entry_price, status, strategy_name, regime_at_entry, entry_reason, exit_reason, r_multiple
+            FROM paper_trades
+            WHERE status IN ('CLOSED_WIN', 'CLOSED_LOSS')
+            ORDER BY closed_at DESC
+            LIMIT 20
+        """))).fetchall()
+
+    if not rows:
+        logger.info("[weekend_reflection] No closed trades found for reflection.")
+        return
+
+    trade_data = []
+    wins = 0
+    for r in rows:
+        if "WIN" in r.status:
+            wins += 1
+        trade_data.append(
+            f"Trade #{r.id} | {r.symbol} | {r.direction} | Entry: {r.entry_price} | Strategy: {r.strategy_name} | "
+            f"Regime: {r.regime_at_entry} | R-Mult: {r.r_multiple} | Exit: {r.exit_reason} | "
+            f"Reasoning: {r.entry_reason}"
+        )
+
+    win_rate = (wins / len(rows)) * 100
+
+    prompt = (
+        f"Analyze these recent {len(rows)} closed trades. Our win rate was {win_rate:.1f}%.\n"
+        "Identify common patterns in our LOSING trades and what setup features led to WINS.\n"
+        "Then, formulate exactly ONE concrete, actionable trading rule (max 2 sentences) to add to our global rulebook "
+        "to prevent future losses based on these patterns. Format the output as JSON:\n"
+        '{"analysis": "...", "new_rule": "..."}\n\n'
+        "Trades:\n" + "\n".join(trade_data)
+    )
+
+    sys_prompt = "You are an elite quantitative trading coach reviewing a portfolio's recent performance."
+
+    try:
+        resp = await call_llm_chat(
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": prompt}],
+            max_tokens=500, temperature=0.3
+        )
+
+        from engine.agent.decision_engine import _parse_first_json
+        data = _parse_first_json(resp)
+        if data and data.get("new_rule"):
+            rule = data["new_rule"]
+            logger.info(f"[weekend_reflection] New Rule Generated: {rule}")
+            
+            rules_file = os.path.join(os.path.dirname(__file__), "..", "engine", "agent", "agent_rules.json")
+            existing_rules = []
+            if os.path.exists(rules_file):
+                with open(rules_file, "r") as f:
+                    try:
+                        existing_rules = json.load(f)
+                    except: pass
+            
+            existing_rules.append({"rule": rule, "from_trades": [r.id for r in rows]})
+            existing_rules = existing_rules[-10:]
+            
+            with open(rules_file, "w") as f:
+                json.dump(existing_rules, f, indent=4)
+    except Exception as exc:
+        logger.error(f"[weekend_reflection] Error: {exc}")

@@ -108,14 +108,6 @@ export default function StockChat() {
                   onSymbolClick={sendMessage}
                 />
               ))}
-              {loading && messages[messages.length - 1]?.role === 'user' && (
-                <ChatMessage
-                  message={{ role: 'assistant', content: '', timestamp: new Date().toISOString() }}
-                  isLast
-                  loading
-                  onSymbolClick={sendMessage}
-                />
-              )}
             </>
           )}
           <div ref={messagesEndRef} />

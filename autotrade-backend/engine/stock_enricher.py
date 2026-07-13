@@ -128,18 +128,52 @@ async def _screener_context(bare: str) -> dict:
 
 async def _tavily_news(symbol: str, company_name: str) -> tuple[str, float]:
     """Quick Tavily search for latest news. Returns (note, sentiment)."""
+    bare = symbol.replace(".NS", "").replace(".BO", "")
+    search_term = (company_name or bare)[:60]
+    query = f'"{search_term}" NSE India stock news analysis 2026 latest'
+    
     try:
         from utils.config import settings
         if not settings.tavily_available:
             return "", 0.0
         from engine.tavily_enricher import _client, _score_text
+        try:
+            from duckduckgo_search import DDGS
+            def _ddg_run():
+                with DDGS() as ddgs:
+                    return [r for r in ddgs.news(query, max_results=3)]
+            results = await asyncio.get_running_loop().run_in_executor(None, _ddg_run)
+            if results:
+                note = " | ".join([r.get("title", "") for r in results[:3]])
+                sentiment = _score_text(note)
+                logger.debug(f"[enricher/ddg] {bare}: {len(note)} chars, sentiment={sentiment:+.2f}")
+                return note, sentiment
+        except Exception as e:
+            logger.debug(f"[enricher/ddg] failed for {symbol}: {e}. Trying Google News RSS.")
+            
+        try:
+            import urllib.request, urllib.parse
+            import xml.etree.ElementTree as ET
+            def _gnews_run():
+                url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    root = ET.fromstring(response.read())
+                return [item.findtext('title') for item in root.findall('.//item')[:3] if item.findtext('title')]
+                
+            loop = asyncio.get_running_loop()
+            headlines = await loop.run_in_executor(None, _gnews_run)
+            if headlines:
+                note = " | ".join(headlines)
+                sentiment = _score_text(note)
+                logger.debug(f"[enricher/gnews] {bare}: {len(note)} chars, sentiment={sentiment:+.2f}")
+                return note, sentiment
+        except Exception as e2:
+            logger.debug(f"[enricher/gnews] failed for {symbol}: {e2}. Falling back to Tavily.")
+
         client = _client()
         if client is None:
             return "", 0.0
-
-        bare = symbol.replace(".NS", "").replace(".BO", "")
-        search_term = (company_name or bare)[:60]
-        query = f'"{search_term}" NSE India stock news analysis 2026 latest'
 
         import re
         loop = asyncio.get_running_loop()

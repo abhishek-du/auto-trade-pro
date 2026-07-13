@@ -73,7 +73,7 @@ async def portfolio_cognitive_cycle(context: dict) -> dict | None:
         resp = await call_llm_chat(
             [{"role": "system", "content": sys_prompt},
              {"role": "user",   "content": user_prompt}],
-            max_tokens=320, temperature=0.2, groq_fallback=True,
+            max_tokens=320, temperature=0.2,
         )
         data = _parse_first_json(resp)
         if not data:

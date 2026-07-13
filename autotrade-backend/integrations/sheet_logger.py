@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import PaperTrade, MasterIntelligenceScore, TradeStatus, AgentTrade, AgentDecision, AgentPosition
+from db.models import PaperTrade, MasterIntelligenceScore, TradeStatus, AgentTrade, AgentDecision, OpenPosition
 from integrations.trade_explainer import (
     build_expert_note, build_hold_analysis, build_postmortem_note, estimate_eta_to_target,
 )
@@ -1499,11 +1499,11 @@ async def sync_journal(session: AsyncSession, *, limit: int = 500) -> dict:
                 decision_map[d.id] = d
 
         # ── Open agent positions — for live P&L and hold analysis ─────────────
-        open_positions_result = await session.execute(
-            select(AgentPosition).where(AgentPosition.is_paper == True)
-        )
-        open_positions = open_positions_result.scalars().all()
-        pos_map = {p.symbol: p for p in open_positions}       # symbol → AgentPosition
+        open_positions = (await session.execute(
+            select(OpenPosition)
+        )).scalars().all()
+
+        pos_map = {p.symbol: p for p in open_positions}       # symbol → OpenPosition
 
         # Hub scores for hold-analysis refresh (open agent trades in existing sheet)
         all_open_syms = {f"{t.symbol.split('.')[0]}.NS"

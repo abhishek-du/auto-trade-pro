@@ -49,14 +49,16 @@ def get_price(symbol: str) -> dict | None:
             from crawler.zerodha_ticker import get_live_tick
             tick = get_live_tick(symbol)
             if tick and tick.get("last_price"):
-                return {
-                    "price":      float(tick["last_price"]),
-                    "change":     float(tick.get("change", 0) or 0),
-                    "change_pct": float(tick.get("change_percent", 0) or 0),
-                    "volume":     float(tick.get("volume_traded", 0) or 0),
-                    "source":     "zerodha_ticker",
-                    "age_seconds": 0.0,
-                }
+                age = float(tick.get("_age_seconds", 0.0))
+                if age <= 30.0:
+                    return {
+                        "price":      float(tick["last_price"]),
+                        "change":     float(tick.get("change", 0) or 0),
+                        "change_pct": float(tick.get("change_percent", 0) or 0),
+                        "volume":     float(tick.get("volume_traded", 0) or 0),
+                        "source":     "zerodha_ticker",
+                        "age_seconds": round(age, 2),
+                    }
         except Exception:
             pass  # Fall through to PRICE_CACHE
 
@@ -64,11 +66,12 @@ def get_price(symbol: str) -> dict | None:
     cached = PRICE_CACHE.get(symbol)
     if cached and cached.get("price"):
         age = _time.time() - cached.get("_ts", _time.time())
-        return {
-            **{k: v for k, v in cached.items() if not k.startswith("_")},
-            "source":     "yfinance_cache",
-            "age_seconds": round(age, 2),
-        }
+        if age <= 30.0:
+            return {
+                **{k: v for k, v in cached.items() if not k.startswith("_")},
+                "source":     "yfinance_cache",
+                "age_seconds": round(age, 2),
+            }
 
     return None
 

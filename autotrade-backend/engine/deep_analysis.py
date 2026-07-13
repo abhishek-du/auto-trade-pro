@@ -6,7 +6,7 @@ Returns:
   technicals   — per-indicator human-readable reasoning (bullish/bearish/neutral)
   trade_setup  — entry zone, stop-loss, T1, T2, R:R, when to buy/sell/hold
   news         — up to 5 recent Finnhub headlines for the stock
-  ai_summary   — Groq LLM commentary (empty string when GROQ_API_KEY absent)
+  ai_summary   — gpt-oss-120b LLM commentary (empty string when MANTLE_API_KEY absent)
 """
 
 from __future__ import annotations
@@ -374,8 +374,8 @@ async def groq_commentary(
     research_note: str = "",
     screener_summary: str = "",
 ) -> str:
-    """Generate expert-level equity research commentary using Groq. Returns '' on failure."""
-    if not settings.groq_available:
+    """Generate expert-level equity research commentary using gpt-oss-120b. Returns '' on failure."""
+    if not getattr(settings, "mantle_available", False):
         return ""
 
     bull_pts  = "\n".join(f"• {r}" for r in reasoning["bullish"])
@@ -430,9 +430,10 @@ async def groq_commentary(
         "support, resistance, entry zone, stop-loss, and targets. "
         "What specific price action would CONFIRM the trade (e.g., close above ₹X with volume)? "
         "What would INVALIDATE the setup?\n\n"
-        "PARAGRAPH 3 — NEWS & BUSINESS CONTEXT: Interpret what the recent news means for the company. "
-        "How does each news item affect the company's revenue, margins, order book, or competitive position? "
-        "What is the market pricing in or ignoring?\n\n"
+        "PARAGRAPH 3 — NEWS & SENTIMENT DIVERGENCE (ALPHA EDGE): Interpret what the recent news means for the company. "
+        "Crucially, look for divergences between retail sentiment (if evident in research/news) and the price trend. "
+        "Are there signs of 'Institutional Distribution' (retail wildly bullish but price making lower highs) or "
+        "'Institutional Accumulation' (retail panicking but price holding support)? Be explicit about this alpha edge.\n\n"
         "PARAGRAPH 4 — RISK FACTORS: 3-4 specific risks to this trade. "
         "Include both technical risk (SL level) and fundamental risk (business/macro).\n\n"
         "PARAGRAPH 5 — TRADE MANAGEMENT: Specific entry advice (limit order vs breakout buy), "
@@ -442,10 +443,9 @@ async def groq_commentary(
         "professional, specific, data-driven. This is for informational purposes only."
     )
 
-    # Use Groq directly for deep analysis — Ollama (deepseek-r1) is too slow (~2-4 min)
-    # for a user-facing request. Groq responds in 3-8s with the same quality.
-    from utils.llm import call_groq_chat
-    reply = await call_groq_chat(
+    # Use gpt-oss-120b directly for deep analysis
+    from utils.llm import call_llm_chat
+    reply = await call_llm_chat(
         [
             {
                 "role": "system",

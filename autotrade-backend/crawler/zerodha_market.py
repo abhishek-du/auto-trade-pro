@@ -107,7 +107,8 @@ def _to_kite_interval(tf: str) -> str:
 
 
 def _symbol_to_kite(symbol: str) -> str:
-    """Convert 'RELIANCE.NS' → 'NSE:RELIANCE', '^NSEI' → 'NSE:NIFTY 50'."""
+    """Convert 'RELIANCE.NS' → 'NSE:RELIANCE', '^NSEI' → 'NSE:NIFTY 50',
+    'NIFTY25JUL24500CE' → 'NFO:NIFTY25JUL24500CE'."""
     _index_map = {
         "^NSEI":     "NSE:NIFTY 50",
         "^BSESN":    "BSE:SENSEX",
@@ -120,6 +121,11 @@ def _symbol_to_kite(symbol: str) -> str:
         return f"NSE:{symbol[:-3]}"
     if symbol.endswith(".BO"):
         return f"BSE:{symbol[:-3]}"
+    # Suffix-less F&O tradingsymbols (…CE / …PE / …FUT with an embedded digit)
+    # live on NFO — routing them to NSE: makes Kite's LTP silently drop them,
+    # which left option positions invisible to the 5s fast-SL check.
+    if symbol.endswith(("CE", "PE", "FUT")) and any(ch.isdigit() for ch in symbol):
+        return f"NFO:{symbol}"
     return f"NSE:{symbol}"
 
 
@@ -402,9 +408,23 @@ async def _get_token_from_db(symbol: str, session: AsyncSession | None) -> int |
     if session is None:
         return None
     bare = symbol.replace(".NS", "").replace(".BO", "")
+    
+    # First try exact match
     result = await session.execute(
         select(KiteInstrument).where(
             KiteInstrument.tradingsymbol == bare,
+            KiteInstrument.exchange == "NSE",
+            KiteInstrument.instrument_type == "EQ",
+        ).limit(1)
+    )
+    inst = result.scalar_one_or_none()
+    if inst:
+        return inst.instrument_token
+        
+    # If not found, try fuzzy match for SME/Trade-to-Trade series (e.g. CLEDUCATE-BE)
+    result = await session.execute(
+        select(KiteInstrument).where(
+            KiteInstrument.tradingsymbol.like(f"{bare}-%"),
             KiteInstrument.exchange == "NSE",
             KiteInstrument.instrument_type == "EQ",
         ).limit(1)
@@ -438,7 +458,11 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
     if not kite.access_token or not _kite_quotes_available:
         return {}
 
-    instruments = [_symbol_to_kite(s) for s in symbols]
+    # Remember the exact symbol each caller asked with, so the reverse mapping
+    # returns keys the caller can actually look up ("^NSEI" and option
+    # tradingsymbols were previously mangled into "<bare>.NS" and never found).
+    kite_to_ours = {_symbol_to_kite(s): s for s in symbols}
+    instruments = list(kite_to_ours)
     if not instruments:
         return {}
 
@@ -460,16 +484,23 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
             continue
 
         for kite_sym, data in raw.items():
-            # Reverse-map kite_sym ("NSE:RELIANCE") to our symbol ("RELIANCE.NS")
-            bare = kite_sym.split(":")[-1]
-            our_sym = f"{bare}.NS"
+            # Reverse-map to the symbol the caller asked with; fall back to the
+            # legacy "<bare>.NS" form for anything Kite returns unexpectedly.
+            bare    = kite_sym.split(":")[-1]
+            our_sym = kite_to_ours.get(kite_sym, f"{bare}.NS")
             ltp = float(data.get("last_price", 0.0))
-            result[our_sym] = {
+            quote = {
                 "price":       ltp,
                 "last_price":  ltp,
                 "change":      0.0,   # LTP endpoint doesn't include change
                 "change_pct":  0.0,
             }
+            result[our_sym] = quote
+            # Compatibility: keep the legacy ".NS" key for callers that pass
+            # bare equity symbols but look results up with the suffix.
+            legacy = f"{bare}.NS"
+            if legacy != our_sym and not kite_sym.startswith("NFO:"):
+                result.setdefault(legacy, quote)
     return result
 
 

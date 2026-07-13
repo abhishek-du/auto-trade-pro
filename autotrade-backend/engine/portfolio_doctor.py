@@ -1,7 +1,7 @@
 """Portfolio Doctor — AI-powered health analysis for the personal portfolio tracker.
 
 Runs 7 diagnostic modules (concentration, risk, diversification, tax, performance,
-sector timing, position sizing) and generates an AI narrative via Groq.
+sector timing, position sizing) and generates an AI narrative via gpt-oss-120b.
 """
 from __future__ import annotations
 
@@ -757,19 +757,19 @@ async def generate_ai_narrative(
         f"Include specific stock names and numbers where available."
     )
 
-    if not getattr(settings, "groq_available", False) or not getattr(settings, "GROQ_API_KEY", ""):
+    if not getattr(settings, "mantle_available", False) or not getattr(settings, "MANTLE_API_KEY", ""):
         crit_titles = [f.title for f in critical[:2]]
         warn_titles = [f.title for f in warnings[:2]]
         narrative = (
             f"Portfolio diagnosis complete. "
             f"{'Critical issues found: ' + '; '.join(crit_titles) + '. ' if crit_titles else 'No critical issues. '}"
             f"{'Warnings: ' + '; '.join(warn_titles) + '.' if warn_titles else 'Minor optimisations suggested.'}"
-            f" Add GROQ_API_KEY to .env for detailed AI narrative."
+            f" Add MANTLE_API_KEY to .env for detailed AI narrative."
         )
         return narrative, False
 
-    from utils.llm import call_llm_chat as call_groq_chat
-    text = await call_groq_chat(
+    from utils.llm import call_llm_chat
+    text = await call_llm_chat(
         [
             {"role": "system", "content": system},
             {"role": "user",   "content": user},

@@ -1621,3 +1621,16 @@ class BuybackOffer(Base):
 
     def __repr__(self) -> str:
         return f"<BuybackOffer {self.symbol} @₹{self.buyback_price} spread={self.spread_pct}%>"
+
+class PreMarketNewsQueue(Base):
+    """Stores high-impact news captured outside of trading hours for processing at market open."""
+    __tablename__ = "premarket_news_queue"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(10), nullable=False) # 'BUY' or 'SELL'
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, PROCESSED
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

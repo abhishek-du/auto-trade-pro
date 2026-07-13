@@ -36,6 +36,7 @@ celery_app = Celery(
         "tasks.india_tasks",
         "tasks.market_scanner",
         "tasks.pre_diagnose",
+        "tasks.unstructured_alpha_scan",
     ],
 )
 
@@ -66,9 +67,9 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.market_scan.scan_watchlist",
         "schedule": 30,
     },
-    "crawl-news-every-5min": {
+    "crawl-news-every-1min": {
         "task":     "tasks.news_scan.scan_news",
-        "schedule": 300,
+        "schedule": 60,
     },
     # Sunday 02:30 IST (21:00 UTC Saturday). Keeps news_items bounded; the
     # 5-minute crawl saves ~150 rows/cycle → ~43k/day → ~2.6M/2 months without
@@ -101,11 +102,23 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=13, minute=0),
     },
 
+    # Saturday 05:30 UTC = 11:00 AM IST: Weekend LLM Self-Reflection Loop
+    "weekend-reflection-loop": {
+        "task":     "tasks.india_weekend_reflection",
+        "schedule": crontab(day_of_week="saturday", hour=5, minute=30),
+    },
+
     # Every 15 min during NSE hours: NIFTY + BANKNIFTY options chain
     "india-options-every-15min": {
         "task":     "tasks.india_options_analysis",
         "schedule": 900,
         "options":  {"countdown": 10},
+    },
+
+    # Every hour: Advanced Unstructured Data Parsing (Alpha Edge)
+    "unstructured-alpha-scan-hourly": {
+        "task":     "tasks.unstructured_alpha_scan",
+        "schedule": crontab(minute=15),
     },
 
     # 2×/day during NSE hours (05:30 UTC = 11:00 IST, 09:30 UTC = 15:00 IST):
@@ -209,12 +222,12 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 8},
     },
 
-    # Every 5 min (incl. after-hours): alert on high-impact market-shock news so
-    # a crash-capable headline is never silently buried in the /news feed.
-    "market-news-alert-every-5min": {
+    # Every 1 min (incl. after-hours): alert on high-impact market-shock news so
+    # operators are aware of macro swings before the 15-min hub cycle logs them.
+    "market-news-alert-every-1min": {
         "task":     "tasks.market_news_alert",
-        "schedule": 300,
-        "options":  {"countdown": 25},
+        "schedule": 60.0,
+        "options":  {"expires": 45.0},
     },
 
     # Every 60 s during NSE hours + 30 min: full India paper-trading cycle

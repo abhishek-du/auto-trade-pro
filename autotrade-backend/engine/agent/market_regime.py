@@ -272,13 +272,69 @@ async def get_market_regime(
                 pass
 
         result = classify_regime(closes, breadth_pct=breadth_pct, vix=vix)
+        
+        # LLM Dynamic Regime Adjustment (Strategy #3)
+        global _LLM_REGIME_CACHE
+        if "_LLM_REGIME_CACHE" not in globals():
+            _LLM_REGIME_CACHE = {"date": None, "state": None, "note": ""}
+            
+        try:
+            from datetime import datetime
+            import json
+            from utils.llm import call_llm_chat
+            from engine.agent.decision_engine import _parse_first_json
+            
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            if _LLM_REGIME_CACHE.get("date") == today_str and _LLM_REGIME_CACHE.get("state"):
+                result.state = _LLM_REGIME_CACHE["state"]
+                result.signals["llm_note"] = _LLM_REGIME_CACHE["note"]
+                result.size_mult = REGIME_SIZE_MULT.get(result.state, result.size_mult)
+                result.min_conf = REGIME_MIN_CONF.get(result.state, result.min_conf)
+                result.can_buy = result.size_mult > 0
+                result.can_sell = result.state != STRONG_BULL
+            else:
+                prompt = f"""Analyze the current Indian macro environment and classify the Market Regime.
+                
+Arithmetic Composite Score: {result.score} (-100 to +100)
+VIX: {vix}
+Market Breadth (% stocks > 50d proxy): {breadth_pct}%
+EMA 20-Day Rate of Change: {result.signals.get('roc_20d_%')}%
+Base Regime (Arithmetic): {result.state}
+
+Given this data, classify the regime into exactly one of: STRONG_BULL, MODERATE_BULL, SIDEWAYS, WEAK_BEAR, STRONG_BEAR.
+If you detect a "High Volatility / Choppy" regime (e.g. VIX spiking while breadth is weak), downgrade to SIDEWAYS or WEAK_BEAR.
+If you detect a "Strong Bull Trend" (e.g. breadth > 60%, ROC positive), upgrade to STRONG_BULL.
+
+Respond ONLY with valid JSON:
+{{"state": "STRONG_BULL", "reason": "Short explanation"}}
+"""
+                llm_resp = await call_llm_chat(
+                    [{"role": "system", "content": "You are a top-tier macro hedge fund manager."},
+                     {"role": "user", "content": prompt}], max_tokens=150, temperature=0.2
+                )
+                data = _parse_first_json(llm_resp)
+                if data and "state" in data and data["state"] in REGIME_SIZE_MULT:
+                    _LLM_REGIME_CACHE["date"] = today_str
+                    _LLM_REGIME_CACHE["state"] = data["state"]
+                    _LLM_REGIME_CACHE["note"] = data.get("reason", "")
+                    
+                    result.state = data["state"]
+                    result.signals["llm_note"] = data.get("reason", "")
+                    result.size_mult = REGIME_SIZE_MULT[result.state]
+                    result.min_conf = REGIME_MIN_CONF[result.state]
+                    result.can_buy = result.size_mult > 0
+                    result.can_sell = result.state != STRONG_BULL
+        except Exception as e:
+            logger.warning(f"[regime] LLM regime classification failed: {e}")
+
         logger.info(
             f"[regime] {result.state} | score={result.score} | "
             f"size_mult={result.size_mult} | "
             f"ema_levels={result.signals.get('ema_levels')} | "
             f"roc_20d={result.signals.get('roc_20d_%')}% | "
             f"slope={result.signals.get('ema50_slope_%')}% | "
-            f"vix={vix}"
+            f"vix={vix} | "
+            f"llm_note={result.signals.get('llm_note', '')[:40]}"
         )
         return result
 

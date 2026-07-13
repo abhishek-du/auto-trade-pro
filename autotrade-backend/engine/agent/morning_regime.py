@@ -238,7 +238,7 @@ async def _classify_regime_llm(
     ]
 
     from utils.llm import call_llm_chat
-    response = await call_llm_chat(messages, max_tokens=80, temperature=0.1, groq_fallback=True)
+    response = await call_llm_chat(messages, max_tokens=80, temperature=0.1)
 
     if not response:
         raise ValueError("LLM returned empty response")

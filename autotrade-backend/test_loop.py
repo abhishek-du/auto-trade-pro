@@ -1,15 +1,14 @@
-import asyncio
-from db.database import get_db
-from tasks.india_tasks import _india_trade_loop
+from tasks.india_tasks import india_trade_loop
+from utils.logger import logger
 import logging
+import sys
 
-logging.getLogger("utils.logger").setLevel(logging.DEBUG)
 
-async def main():
-    async for db in get_db():
-        print("Running trade loop...")
-        await _india_trade_loop()
-        print("Done!")
-        break
 
-asyncio.run(main())
+if __name__ == "__main__":
+    print("Running India Trade Loop Manually...")
+    try:
+        india_trade_loop()
+        print("Trade Loop Execution Completed.")
+    except Exception as e:
+        print(f"Error: {e}")

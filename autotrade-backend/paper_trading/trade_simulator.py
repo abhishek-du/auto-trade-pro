@@ -644,7 +644,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
     # happened — bad sector/market news doesn't get ahead of it. build_sector_context()
     # is a cheap in-memory cache read (no DB/API call), safe to call every cycle.
     # A prior version of this check existed (tasks/india_tasks.py's
-    # run_master_intelligence_cycle) but operated on AgentPosition — a parallel
+    # run_master_intelligence_cycle) but operated on OpenPosition — a parallel
     # portfolio object that has never held a real position (confirmed empty,
     # 2026-07-06) — so it never actually protected anything. This is the same
     # check wired into the loop that manages the real, live positions.

@@ -1,6 +1,6 @@
 """AI Earnings Call Summarizer for AutoTrade Pro.
 
-Orchestrates transcript fetching → PDF extraction → Groq AI summarization.
+Orchestrates transcript fetching → PDF extraction → gpt-oss-120b summarization.
 Caches results in the EarningsCallSummary DB table.
 
 Public API
@@ -104,32 +104,7 @@ def get_summarizer_system_prompt() -> str:
     )
 
 
-# ── Groq call helper ──────────────────────────────────────────────────────────
-
-def _get_groq_client():
-    if not settings.groq_available:
-        return None
-    try:
-        from groq import Groq
-        return Groq(api_key=settings.GROQ_API_KEY)
-    except Exception:
-        try:
-            import httpx as _httpx
-            return None  # use httpx path instead
-        except Exception:
-            return None
-
-
-async def _call_groq_for_earnings(system: str, user: str, max_tokens: int = 2000) -> str | None:
-    """Delegate to the shared async Groq client."""
-    from utils.llm import call_llm_chat as call_groq_chat
-    return await call_groq_chat(
-        [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user},
-        ],
-        max_tokens=max_tokens, temperature=0.2,
-    )
+# Removed obsolete Groq helper functions.
 
 
 # ── Rule-based fallback ───────────────────────────────────────────────────────
@@ -138,9 +113,9 @@ def _rule_based_summary(
     text: str, symbol: str, company_name: str,
     quarter: str, call_date: str, pdf_url: str, source: str,
     word_count: int, transcript_length: int,
-    groq_reason: str = "",
+    llm_reason: str = "",
 ) -> EarningsSummary:
-    """Basic regex extraction when Groq is unavailable or rate-limited."""
+    """Basic regex extraction when LLM is unavailable or rate-limited."""
     highlights = []
 
     revenue_matches = re.findall(
@@ -160,17 +135,17 @@ def _rule_based_summary(
         highlights.append(f"Growth figure: {g[0]}% {g[1]}")
     highlights.append(f"Transcript available: {word_count:,} words from {source}")
 
-    groq_configured = getattr(settings, "groq_available", False)
-    if groq_configured:
-        ai_note = groq_reason or "Groq AI rate-limited — try refreshing in a few minutes"
+    llm_configured = getattr(settings, "mantle_available", False)
+    if llm_configured:
+        ai_note = llm_reason or "AI rate-limited — try refreshing in a few minutes"
     else:
-        ai_note = "Add GROQ_API_KEY to .env for full AI analysis"
+        ai_note = "Add MANTLE_API_KEY to .env for full AI analysis"
 
     highlights.append(ai_note)
     while len(highlights) < 5:
         highlights.append("Full AI analysis pending — refresh to retry")
 
-    pending_msg = "Refresh page to retry AI analysis" if groq_configured else "Configure GROQ_API_KEY in .env"
+    pending_msg = "Refresh page to retry AI analysis" if llm_configured else "Configure MANTLE_API_KEY in .env"
 
     return EarningsSummary(
         symbol=symbol, company_name=company_name,
@@ -215,8 +190,25 @@ async def summarize_transcript(
         transcript_text = first + "\n...[MIDDLE SECTION TRUNCATED]...\n" + last
         logger.info(f"[earnings] Truncated transcript from {transcript_length} to {MAX_CHARS} chars")
 
+    prev_context = ""
+    try:
+        from db.database import AsyncSessionLocal
+        from db.models import EarningsCallSummary
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as session:
+            prev_call = (await session.execute(
+                select(EarningsCallSummary.management_tone, EarningsCallSummary.tone_reason)
+                .where(EarningsCallSummary.symbol == symbol)
+                .order_by(EarningsCallSummary.call_date.desc())
+                .limit(1)
+            )).first()
+            if prev_call:
+                prev_context = f"\n\nPRIOR QUARTER CONTEXT: The CEO's tone last quarter was {prev_call[0]} ({prev_call[1]}). Please compare the current tone against this baseline, specifically noting if they are using more hedging words (like 'uncertainty', 'headwinds')."
+    except Exception:
+        pass
+
     prompt = f"""Analyse this earnings call transcript for {company_name} ({symbol}) — {quarter}.
-Call Date: {call_date}
+Call Date: {call_date}{prev_context}
 
 TRANSCRIPT:
 {transcript_text}
@@ -259,6 +251,7 @@ Extract the following and respond ONLY with valid JSON — no markdown, no expla
   "dividend_info": "Dividend declared if any (amount + record date), else null",
   "management_tone": "OPTIMISTIC or CAUTIOUS or NEUTRAL or NEGATIVE",
   "tone_reason": "One sentence: specific evidence from transcript supporting this tone",
+  "tone_comparison_vs_last_quarter": "Analysis of CEO tone shift vs prior quarter (hedging words, confidence changes) under 30 words, or null if no prior context provided.",
   "ai_confidence": "HIGH if transcript clear and complete, MEDIUM if partial, LOW if very short"
 }}
 
@@ -269,15 +262,20 @@ RULES:
 - Use Indian format: Crores not Millions (unless company uses USD)
 - Each bullet under 120 words"""
 
-    if not settings.groq_available:
+    if not getattr(settings, "mantle_available", False):
         return _rule_based_summary(
             transcript_text, symbol, company_name,
             quarter, call_date, pdf_url, source,
             word_count, transcript_length,
         )
 
-    reply = await _call_groq_for_earnings(
-        get_summarizer_system_prompt(), prompt, max_tokens=2000
+    from utils.llm import call_llm_chat
+    reply = await call_llm_chat(
+        [
+            {"role": "system", "content": get_summarizer_system_prompt()},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=2000, temperature=0.2
     )
 
     if not reply:
@@ -299,7 +297,7 @@ RULES:
             try:
                 data = json.loads(m.group())
             except Exception:
-                logger.error(f"[earnings] Failed to parse Groq JSON: {reply[:300]}")
+                logger.error(f"[earnings] Failed to parse gpt-oss JSON: {reply[:300]}")
                 return _rule_based_summary(
                     transcript_text, symbol, company_name,
                     quarter, call_date, pdf_url, source,
@@ -334,7 +332,7 @@ RULES:
         capex_guidance=_clean_null(data.get("capex_guidance")),
         dividend_info=_clean_null(data.get("dividend_info")),
         management_tone=data.get("management_tone", "NEUTRAL"),
-        tone_reason=data.get("tone_reason", ""),
+        tone_reason=data.get("tone_reason", "") + (" | Vs Last Qtr: " + data["tone_comparison_vs_last_quarter"] if data.get("tone_comparison_vs_last_quarter") else ""),
         ai_confidence=data.get("ai_confidence", "MEDIUM"),
         transcript_length=transcript_length,
         is_ai_generated=True,
@@ -360,7 +358,7 @@ async def summarize_long_transcript(
             quarter, call_date, pdf_url, source,
         )
 
-    if not settings.groq_available:
+    if not getattr(settings, "mantle_available", False):
         return _rule_based_summary(
             transcript_text, symbol, company_name, quarter,
             call_date, pdf_url, source,
@@ -374,13 +372,16 @@ async def summarize_long_transcript(
     for i, chunk in enumerate(chunks):
         if i > 0:
             await asyncio.sleep(3)  # avoid back-to-back 429s on free tier
-        reply = await _call_groq_for_earnings(
-            system="You are a financial analyst summarizing an Indian earnings call transcript.",
-            user=(
-                f"Summarize section {i+1}/{len(chunks)} of the {company_name} earnings call "
-                f"in 200 words, preserving all numbers and percentages:\n\n{chunk[:60_000]}"
-            ),
-            max_tokens=400,
+        from utils.llm import call_llm_chat
+        reply = await call_llm_chat(
+            [
+                {"role": "system", "content": "You are a financial analyst summarizing an Indian earnings call transcript."},
+                {"role": "user", "content": (
+                    f"Summarize section {i+1}/{len(chunks)} of the {company_name} earnings call "
+                    f"in 200 words, preserving all numbers and percentages:\n\n{chunk[:60_000]}"
+                )}
+            ],
+            max_tokens=400, temperature=0.2
         )
         if reply:
             intermediates.append(reply)

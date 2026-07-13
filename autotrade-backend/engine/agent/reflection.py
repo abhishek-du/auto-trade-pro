@@ -49,7 +49,7 @@ async def reflect_on_closed_trade(trade) -> None:
         lesson = await call_llm_chat(
             [{"role": "system", "content": sys_prompt},
              {"role": "user",   "content": user_prompt}],
-            max_tokens=80, temperature=0.3, groq_fallback=True,
+            max_tokens=80, temperature=0.3,
         )
         if not lesson:
             return
