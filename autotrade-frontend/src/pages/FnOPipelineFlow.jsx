@@ -412,7 +412,7 @@ export default function FnOPipelineFlow() {
             <span className="text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center border border-amber-500/25 text-amber-400 shrink-0">2</span>
             <div className="flex-1">
               <p className="text-slate-100 font-semibold text-sm">Volatility Pass — <code className="text-amber-400">evaluate_volatility()</code></p>
-              <p className="text-muted text-xs">Gate: ENABLE_FNO + ENABLE_OPTIONS + <span className="text-amber-400 font-medium">FNO_VOL_ENABLED</span> (off by default, separate flag)</p>
+              <p className="text-muted text-xs">Gate: ENABLE_FNO + ENABLE_OPTIONS + <span className="text-amber-400 font-medium">FNO_VOL_ENABLED</span> (separate flag, code default off — enabled on this host)</p>
             </div>
             <div className="text-right shrink-0">
               <p className={`text-lg font-bold tabular-nums ${ivColor}`}>{ivLabel}</p>
@@ -795,11 +795,11 @@ export default function FnOPipelineFlow() {
             <Zap size={12} className="text-cyan" /> Key Config Flags
           </p>
           <div className="space-y-1 text-[11px] text-muted font-mono">
-            <p><span className="text-cyan">ENABLE_FNO</span> = master gate (default off)</p>
-            <p><span className="text-cyan">ENABLE_OPTIONS</span> = spreads (default off)</p>
-            <p><span className="text-cyan">ENABLE_FUTURES</span> = index futures (default off)</p>
-            <p><span className="text-cyan">FNO_VOL_ENABLED</span> = straddle/condor pass (default off)</p>
-            <p><span className="text-cyan">FNO_HEDGE_ENABLED</span> = portfolio hedge (default off)</p>
+            <p><span className="text-cyan">ENABLE_FNO</span> = master gate (code default off — <span className="text-emerald-400">on</span> on this host)</p>
+            <p><span className="text-cyan">ENABLE_OPTIONS</span> = spreads (code default off — <span className="text-emerald-400">on</span> on this host)</p>
+            <p><span className="text-cyan">ENABLE_FUTURES</span> = index futures (code default off — <span className="text-emerald-400">on</span> on this host)</p>
+            <p><span className="text-cyan">FNO_VOL_ENABLED</span> = straddle/condor pass (code default off — <span className="text-emerald-400">on</span> on this host)</p>
+            <p><span className="text-cyan">FNO_HEDGE_ENABLED</span> = portfolio hedge (code default off — <span className="text-emerald-400">on</span> on this host)</p>
             <p><span className="text-cyan">FNO_DEFAULT_DTE</span> = 21 days</p>
             <p><span className="text-cyan">FNO_MAX_LOTS_PER_TRADE</span> = 10</p>
             <p className="text-muted/70 not-italic normal-case">confidence gate = 55% — hardcoded literal in selection.py, not an actual settings field despite the name</p>
