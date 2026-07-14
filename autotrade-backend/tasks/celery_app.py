@@ -320,6 +320,14 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 20},
     },
 
+    # Every 10 min: poll NSE Social Stock Exchange (NPO) announcements —
+    # informational only, low filing volume, no need for the equities feed's
+    # faster cadence.
+    "sync-sse-announcements-10min": {
+        "task":     "tasks.india_tasks.sync_sse_announcements",
+        "schedule": 600,
+    },
+
     # Daily 10:45 UTC = 4:15 PM IST: save capital snapshot with Sharpe/Treynor/Jensen
     "capital-snapshot-daily": {
         "task":     "tasks.india_tasks.save_capital_snapshot",

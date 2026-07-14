@@ -4,7 +4,10 @@ from datetime import datetime
 from db.database import AsyncSessionLocal
 from db.models import PreMarketNewsQueue
 from sqlalchemy import select
-from crawler.news_crawler import fetch_newsdata_india, fetch_free_rss_news, SentimentAnalyser
+from crawler.news_crawler import (
+    fetch_newsdata_india, fetch_free_rss_news, fetch_nse_corporate_announcements,
+    SentimentAnalyser,
+)
 from engine.agent.decision_engine import llm_tooluse_candidate
 from utils.llm import call_llm_chat
 from tasks.india_tasks import _is_india_trading_window
@@ -14,6 +17,22 @@ logger = logging.getLogger("news_engine")
 
 # Track processed news headlines to avoid duplicates (persist in memory for the run)
 _processed_headlines = set()
+
+# Track processed NSE corporate-announcement seq_ids the same way.
+_processed_seq_ids = set()
+
+# NSE's anti-bot layer is far more aggressive on repeated /api/* hits than the
+# free RSS feeds are — polling it every 15s (this loop's cadence) risks the
+# IP getting blocked. Gate it behind its own, slower cadence instead.
+_NSE_ANNOUNCEMENT_POLL_SEC = 60
+_last_nse_announcement_fetch: datetime | None = None
+
+# Negative-leaning keywords for corporate-announcement side inference — wider
+# than the RSS headline list since announcement categories use formal terms
+# ("Resignation", "Credit Rating") rather than headline verbs ("plunge").
+_ANNOUNCEMENT_BEARISH_KEYWORDS = (
+    "resign", "downgrade", "default", "loss", "decline", "disqualif", "suspend",
+)
 
 # Lazily built on first use — FinBERT load is lru_cached inside news_crawler,
 # so re-instantiating this here is cheap after the first call.
@@ -264,9 +283,66 @@ async def run_news_discovery_loop():
                         session.add(new_q)
                         await session.commit()
 
+            # 2. Fetch NSE corporate announcements (financial results, M&A,
+            #    dividends, credit-rating actions, buybacks, resignations…) —
+            #    on its own slower cadence, see _NSE_ANNOUNCEMENT_POLL_SEC.
+            global _last_nse_announcement_fetch
+            now = datetime.now()
+            if (_last_nse_announcement_fetch is None
+                    or (now - _last_nse_announcement_fetch).total_seconds() >= _NSE_ANNOUNCEMENT_POLL_SEC):
+                _last_nse_announcement_fetch = now
+                announcements = await fetch_nse_corporate_announcements()
+                new_announcements = [
+                    a for a in announcements if a["seq_id"] and a["seq_id"] not in _processed_seq_ids
+                ]
+
+                if new_announcements:
+                    logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
+                    from db.models import NewsItem
+                    analyser = _get_sentiment_analyser()
+                    try:
+                        ann_sentiments = analyser.analyse_batch(
+                            [a["headline"] for a in new_announcements]
+                        )
+                    except Exception as exc:
+                        logger.error(f"[news_engine] announcement sentiment scoring failed: {exc}")
+                        ann_sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(new_announcements)
+                    async with AsyncSessionLocal() as session:
+                        for ann, sent in zip(new_announcements, ann_sentiments):
+                            session.add(NewsItem(
+                                headline=ann["headline"],
+                                source=ann["source"],
+                                url=ann["pdf_url"],
+                                published_at=ann["published_at"],
+                                sentiment=sent.get("sentiment", "neutral"),
+                                score=sent.get("score", 0.0),
+                                tickers_affected=[ann["symbol"]],
+                                category=ann["category"],
+                                company=ann["company"],
+                            ))
+                        await session.commit()
+
+                    for ann in new_announcements:
+                        _processed_seq_ids.add(ann["seq_id"])
+                        ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
+                        text = f"{ann['category']} {ann['summary']}".lower()
+                        side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
+
+                        logger.info(f"🔍 Analyzing NSE announcement: {headline}")
+                        if market_open:
+                            await process_ticker(ticker, side, headline, summary)
+                        else:
+                            logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
+                            async with AsyncSessionLocal() as session:
+                                session.add(PreMarketNewsQueue(
+                                    symbol=ticker, side=side, headline=headline,
+                                    summary=summary, status="PENDING",
+                                ))
+                                await session.commit()
+
         except Exception as exc:
             logger.error(f"Error in News Loop: {exc}")
-        
+
         await asyncio.sleep(15)
 
 if __name__ == '__main__':

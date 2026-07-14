@@ -2496,6 +2496,60 @@ def refresh_ipo_data():
     logger.info("[ipo_refresh] Done")
 
 
+# ── 15b. NSE Social Stock Exchange announcements — every 10 minutes ─────────
+
+async def _sync_sse_announcements():
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from crawler.news_crawler import fetch_sse_announcements, SentimentAnalyser
+    from db.models import SSEAnnouncement
+    from tasks._db import celery_session
+
+    items = await fetch_sse_announcements()
+    if not items:
+        return {"fetched": 0, "saved": 0}
+
+    analyser = SentimentAnalyser()
+    try:
+        sentiments = analyser.analyse_batch(
+            [f"{i.get('an_desc') or ''} {i.get('text') or ''}" for i in items]
+        )
+    except Exception as exc:
+        logger.error(f"[sse_announcements] sentiment scoring failed: {exc}")
+        sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(items)
+
+    saved = 0
+    async with celery_session() as session:
+        for item, sent in zip(items, sentiments):
+            stmt = (
+                pg_insert(SSEAnnouncement)
+                .values(
+                    seq_id=item["seq_id"], comp_name=item["comp_name"],
+                    symbol=item["symbol"], an_desc=item["an_desc"], text=item["text"],
+                    an_attach=item["an_attach"], att_file_size=item["att_file_size"],
+                    has_xbrl=item["has_xbrl"], ann_date=item["ann_date"],
+                    ann_tstamp=item["ann_tstamp"], diff_time=item["diff_time"],
+                    sentiment=sent.get("sentiment", "neutral"), score=sent.get("score", 0.0),
+                )
+                .on_conflict_do_nothing(index_elements=["seq_id"])
+            )
+            result = await session.execute(stmt)
+            saved += result.rowcount or 0
+        await session.commit()
+
+    return {"fetched": len(items), "saved": saved}
+
+
+@celery_app.task(name="tasks.india_tasks.sync_sse_announcements")
+def sync_sse_announcements():
+    """Poll NSE's Social Stock Exchange (NPO) announcement feed. DB-backed
+    dedup via seq_id's unique constraint (ON CONFLICT DO NOTHING) rather than
+    an in-memory set, so a worker restart can't reprocess/duplicate rows the
+    way the News-First Discovery Engine's in-memory dedup can."""
+    logger.info("[sse_announcements] Starting")
+    result = _run_async(_sync_sse_announcements())
+    logger.info(f"[sse_announcements] Done — {result}")
+
+
 # ── 16. Daily capital snapshot (Sharpe/Treynor/Jensen) ───────────────────────
 
 async def _save_capital_snapshot():

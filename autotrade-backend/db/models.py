@@ -280,12 +280,55 @@ class NewsItem(Base):
     tickers_affected: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     published_at:     Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     crawled_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    # Populated for source="NSE-Announcements" rows only (category e.g.
+    # "Acquisition", "Credit Rating- New"; company = NSE's sm_name) so the
+    # frontend can render a Corporate Announcements section without having
+    # to re-parse them back out of the constructed headline string.
+    category: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    company:  Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     def __repr__(self) -> str:
         return (
             f"<NewsItem id={self.id} source={self.source!r} "
             f"sentiment={self.sentiment} score={self.score:+.2f} "
             f"headline={self.headline[:40]!r}>"
+        )
+
+
+class SSEAnnouncement(Base):
+    """NSE Social Stock Exchange filings (index=sse) — NPOs and Social
+    Enterprises, not standard tradeable equities, so these are informational
+    only and never routed to paper-trade execution the way NewsItem rows
+    from the News-First Discovery Engine are. Kept as its own table (rather
+    than folded into NewsItem) because the source schema is genuinely
+    different — comp_name/an_desc/text/an_attach vs sm_name/desc/attchmntText/
+    attchmntFile — and squashing the two would lose fields either way.
+    """
+    __tablename__ = "sse_announcements"
+    __table_args__ = (
+        UniqueConstraint("seq_id", name="uq_sse_announcements_seq_id"),
+    )
+
+    id:            Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    seq_id:        Mapped[str]           = mapped_column(String(30), nullable=False)
+    comp_name:     Mapped[str | None]    = mapped_column(String(200), nullable=True)
+    symbol:        Mapped[str | None]    = mapped_column(String(30),  nullable=True)
+    an_desc:       Mapped[str | None]    = mapped_column(String(120), nullable=True)  # category
+    text:          Mapped[str | None]    = mapped_column(Text,        nullable=True)  # short description
+    an_attach:     Mapped[str | None]    = mapped_column(Text,        nullable=True)  # PDF/ZIP URL
+    att_file_size: Mapped[str | None]    = mapped_column(String(30),  nullable=True)  # e.g. "4.52 MB"
+    has_xbrl:      Mapped[bool]          = mapped_column(Boolean, nullable=False, default=False)
+    ann_date:      Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ann_tstamp:    Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    diff_time:     Mapped[str | None]    = mapped_column(String(20), nullable=True)  # raw "HH:MM:SS" latency
+    sentiment:     Mapped[str | None]    = mapped_column(String(20), nullable=True)
+    score:         Mapped[float]         = mapped_column(Float, nullable=False, default=0.0)
+    crawled_at:    Mapped[datetime]      = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<SSEAnnouncement id={self.id} comp_name={self.comp_name!r} "
+            f"an_desc={self.an_desc!r} seq_id={self.seq_id}>"
         )
 
 

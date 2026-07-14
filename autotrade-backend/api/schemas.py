@@ -147,6 +147,26 @@ class NewsItemOut(BaseModel):
     published_at:     Optional[datetime]
     crawled_at:       datetime
     high_impact:      bool = False   # market-shock catalyst + strong negative sentiment
+    category:         Optional[str] = None   # NSE-Announcements rows only, e.g. "Acquisition"
+    company:          Optional[str] = None   # NSE-Announcements rows only
+
+
+class SSEAnnouncementOut(BaseModel):
+    id:            int
+    seq_id:        str
+    comp_name:     Optional[str]
+    symbol:        Optional[str]
+    an_desc:       Optional[str]
+    text:          Optional[str]
+    an_attach:     Optional[str]
+    att_file_size: Optional[str]
+    has_xbrl:      bool
+    ann_date:      Optional[datetime]
+    ann_tstamp:    Optional[datetime]
+    diff_time:     Optional[str]
+    sentiment:     Optional[str]
+    score:         float
+    crawled_at:    datetime
 
 
 class SentimentOut(BaseModel):

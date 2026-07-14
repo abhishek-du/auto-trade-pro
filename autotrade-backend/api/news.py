@@ -5,10 +5,10 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
-from api.schemas import NewsItemOut, SentimentOut
+from api.schemas import NewsItemOut, SentimentOut, SSEAnnouncementOut
 from crawler.news_crawler import get_market_sentiment
 from db.database import get_db
-from db.models import NewsItem
+from db.models import NewsItem, SSEAnnouncement
 from engine.news_impact import is_high_impact_news
 from utils.config import settings
 
@@ -30,6 +30,8 @@ def _item_out(item: NewsItem) -> NewsItemOut:
             item.headline, item.sentiment, item.score,
             settings.NEWS_ALERT_MIN_ABS_SCORE,
         ),
+        category=item.category,
+        company=item.company,
     )
 
 
@@ -75,6 +77,28 @@ async def get_high_impact_news(
                                settings.NEWS_ALERT_MIN_ABS_SCORE)
     ]
     return [_item_out(item) for item in hits[:limit]]
+
+
+@router.get(
+    "/announcements",
+    response_model=list[NewsItemOut],
+    summary="High-impact NSE corporate announcements only (results, M&A, dividends, credit rating, etc.)",
+)
+async def get_corporate_announcements(
+    limit: int = Query(30, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rows written by the News-First Discovery Engine's NSE corporate-
+    announcements poller — a distinct source from the RSS/headline feed, kept
+    on its own endpoint so the frontend can render them as a separate section
+    instead of them being buried in the general chronological feed."""
+    result = await db.execute(
+        select(NewsItem)
+        .where(NewsItem.source == "NSE-Announcements")
+        .order_by(desc(NewsItem.crawled_at))
+        .limit(limit)
+    )
+    return [_item_out(item) for item in result.scalars().all()]
 
 
 @router.get(
@@ -132,6 +156,34 @@ async def get_narrative_intelligence():
         "cache_age_seconds": age_seconds,
         "total_hot_sectors": len(cache),
     }
+
+
+@router.get(
+    "/sse-announcements",
+    response_model=list[SSEAnnouncementOut],
+    summary="NSE Social Stock Exchange (NPO/Social Enterprise) filings — informational only",
+)
+async def get_sse_announcements(
+    limit: int = Query(30, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full-fidelity feed from tasks.india_tasks.sync_sse_announcements —
+    every field NSE returns for index=sse is kept (see SSEAnnouncement model),
+    unlike the equities feed which is condensed into a single headline."""
+    result = await db.execute(
+        select(SSEAnnouncement).order_by(desc(SSEAnnouncement.crawled_at)).limit(limit)
+    )
+    return [
+        SSEAnnouncementOut(
+            id=item.id, seq_id=item.seq_id, comp_name=item.comp_name,
+            symbol=item.symbol, an_desc=item.an_desc, text=item.text,
+            an_attach=item.an_attach, att_file_size=item.att_file_size,
+            has_xbrl=item.has_xbrl, ann_date=item.ann_date,
+            ann_tstamp=item.ann_tstamp, diff_time=item.diff_time,
+            sentiment=item.sentiment, score=item.score, crawled_at=item.crawled_at,
+        )
+        for item in result.scalars().all()
+    ]
 
 
 

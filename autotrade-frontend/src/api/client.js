@@ -57,6 +57,8 @@ export const getTrades                = ()     => api.get('/api/v1/trades/');
 export const getSignals               = ()     => api.get('/api/v1/signals/');
 export const getNews                  = ()     => api.get('/api/v1/news/');
 export const getNewsAlerts            = ()     => api.get('/api/v1/news/alerts');
+export const getCorporateAnnouncements = ()    => api.get('/api/v1/news/announcements');
+export const getSSEAnnouncements       = ()    => api.get('/api/v1/news/sse-announcements');
 export const getAnalytics             = ()     => api.get('/api/v1/analytics/');
 export const getSimulationLogs        = ()     => api.get('/api/v1/simulation/logs');
 export const getSimulationPerformance = ()     => api.get('/api/v1/simulation/performance');

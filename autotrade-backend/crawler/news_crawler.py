@@ -299,6 +299,142 @@ async def fetch_free_rss_news() -> list[dict]:
     return all_rows
 
 
+# High-impact corporate-announcement categories worth an LLM look — routine
+# compliance filings (SEBI DP certificates, AGM notices, investor-meet
+# intimations) are deliberately excluded so the news engine doesn't burn LLM
+# tokens on filings with no near-term price relevance.
+_HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES: tuple[str, ...] = (
+    "financial result", "result", "board meeting outcome", "dividend",
+    "acquisition", "merger", "amalgamation", "demerger",
+    "scheme of arrangement", "credit rating", "resignation",
+    "fund raising", "preferential issue", "rights issue",
+    "qualified institutions placement", "buyback", "bonus issue", "bonus",
+    "stock split", "sub-division", "order win", "large order",
+)
+
+
+def _parse_nse_announcement_dt(raw: str | None) -> datetime | None:
+    """NSE's an_dt/exchdisstime look like '14-Jul-2026 20:10:07'."""
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.strip(), "%d-%b-%Y %H:%M:%S")
+    except Exception:
+        return None
+
+
+async def fetch_nse_corporate_announcements(limit: int = 50) -> list[dict]:
+    """Live NSE corporate-announcements feed — financial results, M&A,
+    dividends, credit-rating actions, buybacks, resignations, etc.
+
+    NSE blocks any /api/* call that skips a home-page cookie warm-up first;
+    this uses the same two-step session pattern as fetch_nse_transcripts()
+    in crawler/earnings_crawler.py and fetch_fii_dii_data() in
+    crawler/fii_dii_crawler.py — a bare request with just a browser
+    User-Agent and no prior session visit gets a 403.
+
+    Each item: {seq_id, symbol, company, category, summary, headline,
+    pdf_url, published_at, source}. Only categories in
+    _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES are returned — call this, not the
+    raw NSE feed, when the goal is trade-worthy signal rather than every
+    routine filing NSE publishes.
+    """
+    from crawler.fii_dii_crawler import BROWSER_HEADERS
+
+    url = "https://www.nseindia.com/api/corporate-announcements?index=equities"
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            await client.get("https://www.nseindia.com", headers=BROWSER_HEADERS)
+            await asyncio.sleep(1.5)
+            r = await client.get(url, headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+            })
+            if r.status_code != 200:
+                logger.debug(f"[news] NSE corporate-announcements returned {r.status_code}")
+                return []
+            data = r.json()
+    except Exception as exc:
+        logger.warning(f"[news] NSE corporate-announcements fetch failed: {exc}")
+        return []
+
+    results: list[dict] = []
+    for item in (data or [])[:limit]:
+        symbol = (item.get("symbol") or "").strip()
+        category = (item.get("desc") or "").strip()
+        if not symbol or not category:
+            continue
+        if not any(kw in category.lower() for kw in _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES):
+            continue
+        company = item.get("sm_name", "") or symbol
+        summary = (item.get("attchmntText") or "").strip()
+        results.append({
+            "seq_id":       str(item.get("seq_id") or ""),
+            "symbol":       f"{symbol}.NS",
+            "company":      company,
+            "category":     category,
+            "summary":      summary,
+            "headline":     f"{company}: {category} — {summary}"[:300] if summary else f"{company}: {category}",
+            "pdf_url":      item.get("attchmntFile", ""),
+            "published_at": _parse_nse_announcement_dt(item.get("an_dt")),
+            "source":       "NSE-Announcements",
+        })
+
+    logger.info(f"[news] NSE corporate-announcements: {len(results)}/{len(data or [])} high-impact")
+    return results
+
+
+async def fetch_sse_announcements(limit: int = 50) -> list[dict]:
+    """NSE Social Stock Exchange filings (index=sse) — NPOs and Social
+    Enterprises. Distinct schema from the equities feed above (comp_name,
+    an_desc, text, an_attach, ann_Date, ann_tstamp, diff_time, hasXbrl), so
+    every field is passed through as-is rather than squeezed into the
+    equities shape. Not trade-relevant (most rows have symbol=None, and the
+    ones that don't — e.g. "EF-SE" — aren't standard .NS equities), so this
+    is informational-only: no side/ticker inference, no execution wiring.
+    """
+    from crawler.fii_dii_crawler import BROWSER_HEADERS
+
+    url = "https://www.nseindia.com/api/corporate-announcements?index=sse"
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            await client.get("https://www.nseindia.com", headers=BROWSER_HEADERS)
+            await asyncio.sleep(1.5)
+            r = await client.get(url, headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+            })
+            if r.status_code != 200:
+                logger.debug(f"[news] NSE SSE announcements returned {r.status_code}")
+                return []
+            data = r.json()
+    except Exception as exc:
+        logger.warning(f"[news] NSE SSE announcements fetch failed: {exc}")
+        return []
+
+    results: list[dict] = []
+    for item in (data or [])[:limit]:
+        seq_id = str(item.get("seq_id") or "")
+        if not seq_id:
+            continue
+        results.append({
+            "seq_id":        seq_id,
+            "comp_name":     item.get("comp_name"),
+            "symbol":        item.get("symbol"),
+            "an_desc":       item.get("an_desc"),
+            "text":          item.get("text"),
+            "an_attach":     item.get("an_attach"),
+            "att_file_size": item.get("attFileSize"),
+            "has_xbrl":      bool(item.get("hasXbrl")),
+            "ann_date":      _parse_nse_announcement_dt(item.get("ann_Date") or item.get("ann_date")),
+            "ann_tstamp":    _parse_nse_announcement_dt(item.get("ann_tstamp")),
+            "diff_time":     item.get("diff_time"),
+        })
+
+    logger.info(f"[news] NSE SSE announcements: {len(results)} fetched")
+    return results
+
+
 # Common English / market-speak / industry tokens that collide with short NSE
 # tradingsymbols and would produce false-positive ticker tags if left in the
 # name map (e.g. "FOCUS" is a tradingsymbol but headlines say "in focus today").
