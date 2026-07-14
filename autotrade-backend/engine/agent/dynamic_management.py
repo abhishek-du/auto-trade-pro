@@ -51,7 +51,7 @@ async def llm_dynamic_sl_tp(session: AsyncSession) -> None:
                          f"Rev Growth 3y: {fund_row.revenue_growth_3yr}% | Profit Growth 3y: {fund_row.profit_growth_3yr}%")
 
         # Get Live Macro (Nifty/BankNifty) from PRICE_CACHE
-        from crawler.india_price_feed import PRICE_CACHE
+        from crawler.live_prices import PRICE_CACHE
         nifty = PRICE_CACHE.get("^NSEI", {})
         banknifty = PRICE_CACHE.get("^NSEBANK", {})
         macro_text = f"NIFTY 50: {nifty.get('change_pct', 0.0)}% | BANKNIFTY: {banknifty.get('change_pct', 0.0)}%"

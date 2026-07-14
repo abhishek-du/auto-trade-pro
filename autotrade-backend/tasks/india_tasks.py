@@ -2218,6 +2218,7 @@ async def _intraday_squareoff_task():
         sign = "+" if total_pnl >= 0 else ""
         logger.info(f"[intraday_squareoff] closed {closed} MIS position(s), P&L ₹{sign}{total_pnl:,.0f}")
 
+        from utils.config import settings as _cfg
         if closed and _cfg.telegram_available:
             from integrations.telegram_service import send
             detail_str = " · ".join(details) if details else ""
@@ -3343,6 +3344,7 @@ async def _candle_staleness_watchdog():
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
 
+    from utils.config import settings
     threshold = int(getattr(settings, "CANDLE_STALENESS_ALERT_MIN", 20))
     from tasks._db import celery_session
     from sqlalchemy import text
