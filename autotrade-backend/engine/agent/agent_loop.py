@@ -776,13 +776,60 @@ async def _process_symbol(
         )
         return None
 
-    # 6. Risk Manager veto
-    # Stamp the candidate's sector so can_take_trade() can check the exposure gate.
-    # Resolution order: Hub hub_subscores → india_specific.SECTOR_MAP → None (unknown).
+    # 6. Advanced Cooldown & Regime Veto
     if candidate is not None and not getattr(candidate, "sector", None):
         from engine.india_specific import SECTOR_MAP
         candidate.sector = SECTOR_MAP.get(symbol) or SECTOR_MAP.get(symbol.replace(".NS", "") + ".NS")
 
+    # A. Regime Veto (Fixing the root cause of whipsaw in RANGE markets)
+    if features.regime == "RANGE" and candidate is not None and getattr(candidate, "strategy", "") == "HUB_SIGNAL":
+        if candidate.confidence < 80:
+            logger.info(f"[agent] BLOCKED {symbol} | REGIME_VETO: Range market requires 80+ confidence | {candidate.strategy}")
+            await _log_skipped_decision(
+                symbol=symbol, candidate=candidate, regime=features.regime,
+                macro_bias=macro_bias, fund_score=fund_score,
+                drop_reason="regime_veto_range_choppy", session=session, decision=decision,
+            )
+            return None
+
+    # B. Symbol-Specific Lockouts (Cooldown & 2-Strikes)
+    from db.models import PaperTrade
+    from sqlalchemy import select
+    from datetime import datetime, timedelta
+    
+    # Get today's closed trades for this symbol
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    cooldown_query = select(PaperTrade.closed_at, PaperTrade.pnl).where(
+        PaperTrade.symbol == symbol,
+        PaperTrade.closed_at >= today_start
+    ).order_by(PaperTrade.closed_at.desc())
+    cooldown_res = await session.execute(cooldown_query)
+    symbol_closed_trades = cooldown_res.fetchall()
+    
+    if symbol_closed_trades:
+        last_closed_time = symbol_closed_trades[0][0]
+        # Mandatory 45-min cooldown
+        if last_closed_time and (datetime.utcnow() - last_closed_time) < timedelta(minutes=45):
+            logger.info(f"[agent] BLOCKED {symbol} | COOLDOWN_LOCK: mandatory 45 min rest")
+            await _log_skipped_decision(
+                symbol=symbol, candidate=candidate, regime=features.regime,
+                macro_bias=macro_bias, fund_score=fund_score,
+                drop_reason="cooldown_45min_lockout", session=session, decision=decision,
+            )
+            return None
+            
+        # Two-Strikes Lockout
+        losses = sum(1 for _, pnl in symbol_closed_trades if pnl is not None and pnl < 0)
+        if losses >= 2:
+            logger.info(f"[agent] BLOCKED {symbol} | TWO_STRIKES_LOCK: Max losses reached today")
+            await _log_skipped_decision(
+                symbol=symbol, candidate=candidate, regime=features.regime,
+                macro_bias=macro_bias, fund_score=fund_score,
+                drop_reason="two_strikes_lockout", session=session, decision=decision,
+            )
+            return None
+
+    # 6b. Risk Manager veto (Portfolio level)
     risk_ok, risk_reason = RiskManagerAgent(portfolio.to_risk_ctx()).can_take_trade(
         candidate=candidate if candidate else decision,
         equity=portfolio.equity,
