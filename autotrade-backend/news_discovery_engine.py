@@ -4,7 +4,7 @@ from datetime import datetime
 from db.database import AsyncSessionLocal
 from db.models import PreMarketNewsQueue
 from sqlalchemy import select
-from crawler.news_crawler import fetch_newsdata_india, fetch_free_rss_news
+from crawler.news_crawler import fetch_newsdata_india, fetch_free_rss_news, SentimentAnalyser
 from engine.agent.decision_engine import llm_tooluse_candidate
 from utils.llm import call_llm_chat
 from tasks.india_tasks import _is_india_trading_window
@@ -14,6 +14,17 @@ logger = logging.getLogger("news_engine")
 
 # Track processed news headlines to avoid duplicates (persist in memory for the run)
 _processed_headlines = set()
+
+# Lazily built on first use — FinBERT load is lru_cached inside news_crawler,
+# so re-instantiating this here is cheap after the first call.
+_sentiment_analyser = None
+
+
+def _get_sentiment_analyser() -> SentimentAnalyser:
+    global _sentiment_analyser
+    if _sentiment_analyser is None:
+        _sentiment_analyser = SentimentAnalyser()
+    return _sentiment_analyser
 
 class NewsCandidate:
     def __init__(self, side, headline, summary):
@@ -189,16 +200,25 @@ async def run_news_discovery_loop():
                 logger.info(f"📰 Found {len(new_articles)} new global/Indian headlines.")
                 # Save to NewsItem table for the News Page UI
                 from db.models import NewsItem
+                analyser = _get_sentiment_analyser()
+                try:
+                    sentiments = analyser.analyse_batch(
+                        [a.get('headline', '') for a in new_articles]
+                    )
+                except Exception as exc:
+                    logger.error(f"[news_engine] sentiment scoring failed: {exc}")
+                    sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(new_articles)
                 async with AsyncSessionLocal() as session:
-                    for article in new_articles:
+                    for article, sent in zip(new_articles, sentiments):
                         headline = article.get('headline', '')
                         if headline:
                             new_item = NewsItem(
                                 headline=headline,
                                 source=article.get('source', 'RSS'),
                                 url=article.get('url'),
-                                sentiment="neutral",
-                                score=0.0,
+                                published_at=article.get('published_at'),
+                                sentiment=sent.get('sentiment', 'neutral'),
+                                score=sent.get('score', 0.0),
                                 tickers_affected=None,
                             )
                             session.add(new_item)
