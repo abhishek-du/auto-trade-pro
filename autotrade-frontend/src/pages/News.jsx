@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert, Landmark, FileText, HeartHandshake, FileCheck2, Paperclip } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { getNews, getNewsAlerts, apiFetch } from '../api/client';
+import { getNews, getNewsAlerts, getCorporateAnnouncements, getSSEAnnouncements, apiFetch } from '../api/client';
 import { useLivePrices } from '../contexts/LivePricesContext';
 
 /* ── Sentiment helpers ──────────────────────────────────────── */
@@ -119,6 +119,194 @@ function MarketAlertsStrip() {
           </a>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ── NSE Corporate Announcements (separate from the RSS feed) ─── */
+function CorporateAnnouncements() {
+  const [items, setItems]     = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchItems = () =>
+    getCorporateAnnouncements()
+      .then((d) => setItems(Array.isArray(d) ? d : []))
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
+
+  useEffect(() => {
+    fetchItems();
+    const id = setInterval(fetchItems, 60000); // matches the poller's own 60s cadence
+    return () => clearInterval(id);
+  }, []);
+
+  const refresh = () => { setLoading(true); fetchItems(); };
+
+  return (
+    <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-accent/15 border border-accent/40 flex items-center justify-center">
+            <Landmark size={16} className="text-accent" />
+          </div>
+          <div>
+            <h3 className="text-slate-100 font-bold text-sm">NSE Corporate Announcements</h3>
+            <p className="text-[10px] text-muted uppercase tracking-widest">
+              Financial results · M&amp;A · dividends · credit rating · buybacks — routine filings excluded
+            </p>
+          </div>
+        </div>
+        <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-surface text-muted hover:text-accent transition-colors" title="Refresh announcements">
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {loading && items.length === 0 ? (
+        <div className="text-xs text-muted animate-pulse py-2">Polling NSE for high-impact filings…</div>
+      ) : items.length === 0 ? (
+        <div className="text-xs text-muted py-2">
+          No high-impact NSE announcements captured yet.
+          <span className="ml-1 text-accent">Checked every 60 seconds.</span>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map((a) => {
+            const symbol = a.tickers_affected?.[0];
+            return (
+              <div key={a.id} className="flex items-start gap-3 bg-surface/40 hover:bg-surface/70 border border-border/60 rounded-lg px-3 py-2.5 transition-colors">
+                <FileText size={14} className="text-accent shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0 space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-slate-200 font-semibold text-sm truncate">{a.company || symbol}</span>
+                    {symbol && (
+                      <span className="bg-accent/20 text-accent text-xs px-1.5 py-0.5 rounded font-mono">{symbol}</span>
+                    )}
+                    {a.category && (
+                      <span className="text-[10px] font-bold text-amber-400 border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 rounded-full">
+                        {a.category}
+                      </span>
+                    )}
+                    <SentimentBadge sentiment={a.sentiment} />
+                  </div>
+                  <p className="text-muted text-xs leading-relaxed line-clamp-2">{a.headline}</p>
+                  <div className="flex items-center gap-1.5 text-muted text-xs">
+                    <Clock size={11} />
+                    <span>{relTime(a.published_at ?? a.crawled_at)}</span>
+                  </div>
+                </div>
+                {a.url && (
+                  <a href={a.url} target="_blank" rel="noopener noreferrer"
+                    className="p-1.5 text-muted hover:text-accent rounded-lg hover:bg-surface transition-colors shrink-0"
+                    title="Open NSE filing PDF">
+                    <ExternalLink size={13} />
+                  </a>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── NSE Social Stock Exchange announcements (NPOs/Social Enterprises) ─── */
+/* Informational only — not routed to execution, see backend comment on
+   SSEAnnouncement / sync_sse_announcements for why. Shows every field NSE
+   returns (comp_name, symbol, an_desc, text, PDF, file size, XBRL flag,
+   filing vs recorded timestamp and the latency between them) rather than
+   condensing them into a single headline the way the RSS feed is. */
+function SSEAnnouncements() {
+  const [items, setItems]     = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchItems = () =>
+    getSSEAnnouncements()
+      .then((d) => setItems(Array.isArray(d) ? d : []))
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
+
+  useEffect(() => {
+    fetchItems();
+    const id = setInterval(fetchItems, 300000); // matches the 10-min poller
+    return () => clearInterval(id);
+  }, []);
+
+  const refresh = () => { setLoading(true); fetchItems(); };
+
+  return (
+    <div className="glass-panel border border-border rounded-xl p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-pink-500/15 border border-pink-500/40 flex items-center justify-center">
+            <HeartHandshake size={16} className="text-pink-400" />
+          </div>
+          <div>
+            <h3 className="text-slate-100 font-bold text-sm">Social Stock Exchange Announcements</h3>
+            <p className="text-[10px] text-muted uppercase tracking-widest">
+              NPO &amp; Social Enterprise filings · informational only, not traded
+            </p>
+          </div>
+        </div>
+        <button onClick={refresh} className="p-1.5 rounded-lg hover:bg-surface text-muted hover:text-pink-400 transition-colors" title="Refresh SSE filings">
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {loading && items.length === 0 ? (
+        <div className="text-xs text-muted animate-pulse py-2">Polling NSE Social Stock Exchange filings…</div>
+      ) : items.length === 0 ? (
+        <div className="text-xs text-muted py-2">
+          No SSE filings captured yet.
+          <span className="ml-1 text-pink-400">Checked every 10 minutes.</span>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map((a) => (
+            <div key={a.id} className="bg-surface/40 hover:bg-surface/70 border border-border/60 rounded-lg px-3 py-2.5 transition-colors space-y-1.5">
+              <div className="flex items-start gap-3">
+                <FileText size={14} className="text-pink-400 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0 space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-slate-200 font-semibold text-sm truncate">{a.comp_name || 'Unknown entity'}</span>
+                    {a.symbol && (
+                      <span className="bg-pink-500/20 text-pink-300 text-xs px-1.5 py-0.5 rounded font-mono">{a.symbol}</span>
+                    )}
+                    {a.an_desc && (
+                      <span className="text-[10px] font-bold text-amber-400 border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 rounded-full">
+                        {a.an_desc}
+                      </span>
+                    )}
+                    {a.has_xbrl && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-400 border border-blue-400/30 bg-blue-400/10 px-1.5 py-0.5 rounded-full">
+                        <FileCheck2 size={9} />XBRL
+                      </span>
+                    )}
+                    <SentimentBadge sentiment={a.sentiment} />
+                  </div>
+                  {a.text && <p className="text-muted text-xs leading-relaxed">{a.text}</p>}
+                  <div className="flex items-center gap-3 text-muted text-[11px] flex-wrap">
+                    <span className="inline-flex items-center gap-1"><Clock size={11} />{relTime(a.ann_date ?? a.crawled_at)}</span>
+                    {a.att_file_size && (
+                      <span className="inline-flex items-center gap-1"><Paperclip size={11} />{a.att_file_size}</span>
+                    )}
+                    {a.diff_time && (
+                      <span title="Time between filing and NSE recording it">recorded +{a.diff_time}</span>
+                    )}
+                  </div>
+                </div>
+                {a.an_attach && (
+                  <a href={a.an_attach} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-pink-300 border border-pink-500/30 bg-pink-500/10 hover:bg-pink-500/20 rounded-lg transition-colors shrink-0"
+                    title="Open filing PDF">
+                    <ExternalLink size={12} />PDF
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -312,6 +500,12 @@ export default function News() {
 
       {/* High-impact market alerts (shock / geopolitical news) — surfaced on top */}
       <MarketAlertsStrip />
+
+      {/* NSE corporate announcements — separate source from the RSS feed below */}
+      <CorporateAnnouncements />
+
+      {/* NSE Social Stock Exchange (NPO) announcements — its own section, its own table */}
+      <SSEAnnouncements />
 
       {/* Two-col: sentiment gauge + source breakdown */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
