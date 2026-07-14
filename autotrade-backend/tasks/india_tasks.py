@@ -1202,7 +1202,7 @@ async def _india_trade_loop():
                            master_score=getattr(signal, "final_score", None) or signal.confidence,
                            confidence=int(signal.confidence or 0),
                            entry=signal.entry_price, stop=signal.stop_loss or 0.0,
-                           target=_tgt, risk_reward=_rr,
+                           target=_tgt, risk_reward=_rr, reasons=[],
                            confidence_factors={k: _hub.get(k) for k in
                                ("technical", "news", "sector", "macro",
                                 "earnings", "fundamental", "options")})
@@ -1216,7 +1216,17 @@ async def _india_trade_loop():
                     continue
                 signal.confidence = _kept.confidence  # propagate blend (no-op in shadow)
             except Exception as _exc:
-                logger.debug(f"[india_trade_loop] reasoning gate skipped {signal.symbol}: {_exc}")
+                # Fail-CLOSED: a broken/crashed reasoning gate must reject the
+                # candidate, not silently let it trade unreviewed. This is the
+                # same class of bug that let 8 unreviewed SUNTV entries through
+                # on 2026-07-14 -- an AttributeError inside apply_reasoning_gate
+                # was swallowed here and execution fell through regardless.
+                logger.warning(f"[india_trade_loop] reasoning gate FAILED (fail-closed) {signal.symbol}: {_exc}")
+                await SimLogger.log_analysis_cycle(
+                    session, signal.symbol, signal,
+                    rejected=True, reject_reason=f"[llm_reason_error] {_exc}",
+                )
+                continue
 
             pos_size = calculate_position_size(signal, balance)
             # SELL = equity short → must be intraday MIS (NSE rule); BUY = CNC delivery
