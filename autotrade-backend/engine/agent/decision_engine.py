@@ -583,8 +583,10 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
 
     On a candidate that has already cleared the arithmetic threshold, let the LLM
     confirm/veto and blend confidence. Returns (decision_or_None, reject_reason).
-    Fail-open: if the gate is disabled or the LLM is unavailable, the arithmetic
-    decision passes through unchanged so trading never blocks on the LLM.
+    If the gate itself is disabled (AGENT_LLM_REASONING_ENABLED=false), the
+    arithmetic decision passes through unchanged. If the gate is enabled but the
+    LLM call fails/times out, this now fails CLOSED: the candidate is rejected
+    rather than allowed through un-reviewed.
     """
     if not getattr(settings, "AGENT_LLM_REASONING_ENABLED", False):
         return decision, None
@@ -597,8 +599,8 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     else:
         mode, data = "reason", await llm_reason_candidate(symbol, candidate, decision)
     if not data:
-        candidate.reasons.append(f"llm_{mode}:unavailable→arithmetic")
-        return decision, None
+        candidate.reasons.append(f"llm_{mode}:unavailable→veto")
+        return None, "llm_reasoning_unavailable"
 
     arith_conf = decision.confidence   # snapshot BEFORE any blend
     verdict  = str(data.get("verdict", "TAKE")).upper()
@@ -640,6 +642,7 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
         decision.confidence_factors["llm_reasoning"] = record
     except Exception:
         pass
+    decision.reasons.append(f"llm_{mode}:{verdict} conf={llm_conf} risk={key_risk}")
     candidate.reasons.append(f"llm_{mode}:{verdict} conf={llm_conf} risk={key_risk}")
 
     # Shadow mode: log the verdict but DON'T act on it — the trade proceeds either
