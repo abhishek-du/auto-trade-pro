@@ -182,7 +182,7 @@ async def process_ticker(ticker, side, headline, summary):
                     # Trigger 2nd-order graph trades
                     from engine.sector_graph import get_second_order_trades
                     event_sentiment = "positive" if side == "BUY" else "negative"
-                    second_order_trades = get_second_order_trades(ticker, event_sentiment)
+                    second_order_trades = await get_second_order_trades(ticker, headline, summary, event_sentiment)
                     
                     if second_order_trades:
                         logger.warning(f"🕸️ KNOWLEDGE GRAPH ACTIVATED: Found {len(second_order_trades)} 2nd-Order trades for {ticker}")

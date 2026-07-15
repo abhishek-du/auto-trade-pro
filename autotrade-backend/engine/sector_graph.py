@@ -1,89 +1,69 @@
-"""
-Institutional-Grade Knowledge Graph for 2nd Order Event-Driven Trading.
-Maps direct news events on a primary entity to its suppliers, competitors, or sector beneficiaries.
-"""
+import json
+from loguru import logger
 from typing import List, Dict
 
-# Mapping of Primary Ticker/Sector to its 2nd Order Beneficiaries or Victims
-KNOWLEDGE_GRAPH = {
-    # ── Auto Sector ────────────────────────────────────────────────────────────
-    "TATAMOTORS.NS": {
-        "suppliers": ["SONACOMS.NS", "MOTHERSON.NS", "TATAELXSI.NS"],
-        "competitors": ["M&M.NS", "MARUTI.NS"],
-    },
-    "M&M.NS": {
-        "suppliers": ["BOSCHLTD.NS", "UNOMINDA.NS"],
-        "competitors": ["TATAMOTORS.NS", "MARUTI.NS"],
-    },
-    
-    # ── Commodities & Macro ────────────────────────────────────────────────────
-    "CRUDE_OIL_DOWN": {
-        "beneficiaries": ["ASIANPAINT.NS", "BERGERPAINT.NS", "INDIGO.NS", "PIDILITIND.NS"],
-        "victims": ["ONGC.NS", "OIL.NS", "RELIANCE.NS"],
-    },
-    "CRUDE_OIL_UP": {
-        "beneficiaries": ["ONGC.NS", "OIL.NS"],
-        "victims": ["ASIANPAINT.NS", "BERGERPAINT.NS", "INDIGO.NS"],
-    },
-    
-    # ── Real Estate & Infrastructure ───────────────────────────────────────────
-    "DLF.NS": {
-        "sector_proxies": ["ULTRACEMCO.NS", "AMBUJACEM.NS", "ASTRAL.NS", "KAJARIACER.NS", "HAVELLS.NS"],
-        "competitors": ["MACROTECH.NS", "GODREJPROP.NS"],
-    },
-    "LT.NS": {
-        "suppliers": ["SIEMENS.NS", "ABB.NS", "CUMMINSIND.NS"],
-        "sector_proxies": ["ULTRACEMCO.NS"],
-    },
-    
-    # ── IT & Tech ──────────────────────────────────────────────────────────────
-    "TCS.NS": {
-        "competitors": ["INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS"],
-    },
-    "INFY.NS": {
-        "competitors": ["TCS.NS", "WIPRO.NS", "HCLTECH.NS"],
-    },
-    
-    # ── Financials ─────────────────────────────────────────────────────────────
-    "HDFCBANK.NS": {
-        "competitors": ["ICICIBANK.NS", "AXISBANK.NS", "KOTAKBANK.NS", "SBIN.NS"],
-    },
-    "BAJFINANCE.NS": {
-        "competitors": ["BAJAJFINSV.NS", "CHOLAFIN.NS"],
-    }
-}
-
-def get_second_order_trades(primary_ticker: str, event_sentiment: str) -> List[Dict[str, str]]:
+async def get_second_order_trades(primary_ticker: str, headline: str, summary: str, event_sentiment: str) -> List[Dict[str, str]]:
     """
-    Given a primary ticker and its event sentiment ("positive" or "negative"),
-    returns a list of 2nd order trades to execute instantly.
+    Dynamically infers 2nd-order beneficiaries or victims across the entire Indian stock market
+    (Large, Mid, and Small Cap) using the 120B LLM.
     
     Returns: [{"ticker": "SONACOMS.NS", "action": "BUY", "reason": "Supplier of TATAMOTORS.NS"}]
     """
-    trades = []
+    from utils.llm import call_llm_chat
     
-    # Normalize ticker
     ticker = primary_ticker.upper()
     if not ticker.endswith(".NS") and not ticker.endswith(".BO") and not ticker.startswith("CRUDE"):
         ticker += ".NS"
         
-    if ticker not in KNOWLEDGE_GRAPH:
-        return trades
-        
-    graph = KNOWLEDGE_GRAPH[ticker]
+    logger.info(f"🕸️ Dynamically analyzing 2nd-order market effects for {ticker}...")
     
-    if event_sentiment == "positive":
-        # Primary is doing well -> Buy Suppliers, Buy Sector Proxies
-        for supplier in graph.get("suppliers", []):
-            trades.append({"ticker": supplier, "action": "BUY", "reason": f"Supplier of {ticker} (Positive Event)"})
-        for proxy in graph.get("sector_proxies", []):
-            trades.append({"ticker": proxy, "action": "BUY", "reason": f"Sector Proxy for {ticker} (Positive Event)"})
+    system_prompt = (
+        "You are an expert Indian equities prop-desk analyst. "
+        "Your job is to identify 2nd-order effect trades based on a primary news event. "
+        "If a primary company has a major event (e.g., massive order win, FDA approval, crude drop, management fraud), "
+        "identify 1 to 3 OTHER Indian stocks (NSE symbols ending in .NS, can be small/mid/large cap) that will be heavily impacted as a direct consequence. "
+        "Examples of relationships: Suppliers, Competitors (market share shift), Customers, or Sector Proxies. "
+        "Return ONLY a raw JSON array. DO NOT wrap it in markdown block quotes. If there are no obvious 2nd-order trades, return []. "
+        "Format: [{\"ticker\": \"SYMBOL.NS\", \"action\": \"BUY\" or \"SELL\", \"reason\": \"Short explanation\"}]"
+    )
+    
+    user_prompt = (
+        f"Primary Stock: {ticker}\n"
+        f"Event Sentiment: {event_sentiment}\n"
+        f"Headline: {headline}\n"
+        f"Summary: {summary}\n\n"
+        f"Output JSON array of 2nd-order trades:"
+    )
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
+    try:
+        response = await call_llm_chat(messages, max_tokens=1000, temperature=0.2)
+        response = response.strip()
+        
+        # Clean up any potential markdown formatting
+        if response.startswith("```json"):
+            response = response[7:]
+        if response.startswith("```"):
+            response = response[3:]
+        if response.endswith("```"):
+            response = response[:-3]
             
-    elif event_sentiment == "negative":
-        # Primary is doing poorly -> Short Suppliers, Buy Competitors (Zero-sum gain)
-        for supplier in graph.get("suppliers", []):
-            trades.append({"ticker": supplier, "action": "SELL", "reason": f"Supplier of {ticker} (Negative Event)"})
-        for comp in graph.get("competitors", []):
-            trades.append({"ticker": comp, "action": "BUY", "reason": f"Competitor of {ticker} (Negative Event - Market Share Gain)"})
-            
-    return trades
+        trades = json.loads(response.strip())
+        
+        # Basic validation
+        valid_trades = []
+        if isinstance(trades, list):
+            for t in trades:
+                if isinstance(t, dict) and "ticker" in t and "action" in t and "reason" in t:
+                    if t["ticker"] != ticker and t["action"] in ["BUY", "SELL"]:
+                        valid_trades.append(t)
+                        
+        return valid_trades
+        
+    except Exception as exc:
+        logger.error(f"[sector_graph] Failed to generate dynamic 2nd-order trades for {ticker}: {exc}")
+        return []
