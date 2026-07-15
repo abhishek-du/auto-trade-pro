@@ -320,36 +320,6 @@ async def run_news_discovery_loop():
                     from crawler.pdf_parser import process_nse_announcement
                     from engine.sector_graph import get_second_order_trades
                     
-                    # ── HFT ARCHITECTURE STEP 1: PRE-CLASSIFICATION (LATENCY OPTIMIZED) ──
-                    # If the category itself is a massive market-mover, trade it IMMEDIATELY
-                    # before wasting 2-5 seconds on downloading the PDF and calling the LLM.
-                    tier1_executed = set()
-                    _TIER_1_CATS = ["Acquisition", "Amalgamation", "Merger", "Award of Order", "Fund Raising"]
-                    
-                    for ann in new_announcements:
-                        ticker = ann["symbol"]
-                        category = ann.get("category", "") or ""
-                        headline = ann["headline"]
-                        
-                        if any(c.lower() in category.lower() for c in _TIER_1_CATS):
-                            if market_open and ticker not in tier1_executed:
-                                logger.warning(f"⚡ FPGA-STYLE PRE-CLASSIFICATION ACTIVATED: {category} for {ticker}")
-                                side = "BUY" # Assume Tier1 categories are mostly positive catalysts
-                                mock_result = {"confidence": 75, "bull": "Tier 1 Instant Pre-classification Execution", "bear": "N/A"}
-                                
-                                try:
-                                    success = await _execute_news_trade(ticker, side, f"[FAST SCOUT] {headline}", mock_result)
-                                    if success:
-                                        tier1_executed.add(ticker)
-                                        # Trigger 2nd-order instantly too
-                                        for trade in get_second_order_trades(ticker, "positive"):
-                                            await _execute_news_trade(trade["ticker"], trade["action"], f"2nd Order Event: {ticker}", {"confidence": 80, "bull": trade["reason"], "bear": ""})
-                                except Exception as exc:
-                                    logger.error(f"[news_engine] Tier 1 Fast Execution failed for {ticker}: {exc}")
-
-                    # ── HFT ARCHITECTURE STEP 2: DEEP NLP CLASSIFICATION ──
-                    # Now that the scout trades are fired, take the time to download the PDF,
-                    # run OCR, and get the deep 120B LLM Summary for the DB and 2nd Order checks.
                     ann_sentiments = []
                     for ann in new_announcements:
                         try:
@@ -389,11 +359,6 @@ async def run_news_discovery_loop():
                         ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
                         text = f"{ann['category']} {ann['summary']}".lower()
                         side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
-
-                        # Skip the slow LLM debate if we already fired the fast Tier 1 trade
-                        if ticker in tier1_executed:
-                            logger.info(f"⏭️ Skipping Multi-Agent Debate for {ticker} (already executed via Tier 1 Pre-classification)")
-                            continue
 
                         logger.info(f"🔍 Analyzing NSE announcement: {headline}")
                         if market_open:
