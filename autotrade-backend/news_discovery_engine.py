@@ -299,14 +299,27 @@ async def run_news_discovery_loop():
                 if new_announcements:
                     logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
                     from db.models import NewsItem
-                    analyser = _get_sentiment_analyser()
-                    try:
-                        ann_sentiments = analyser.analyse_batch(
-                            [a["headline"] for a in new_announcements]
-                        )
-                    except Exception as exc:
-                        logger.error(f"[news_engine] announcement sentiment scoring failed: {exc}")
-                        ann_sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(new_announcements)
+                    from crawler.pdf_parser import process_nse_announcement
+                    
+                    ann_sentiments = []
+                    for ann in new_announcements:
+                        try:
+                            # 1. Download PDF -> 2. OCR -> 3. LLM Analysis
+                            llm_res = await process_nse_announcement(ann["symbol"], ann["headline"], ann["pdf_url"])
+                            
+                            # Map signal to sentiment for DB
+                            sig = llm_res.get("trading_signal", "HOLD")
+                            sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
+                            score = llm_res.get("impact_score", 0) / 100.0
+                            
+                            # Update headline with deep LLM summary
+                            ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
+                            
+                            ann_sentiments.append({"sentiment": sent, "score": score})
+                        except Exception as exc:
+                            logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
+                            ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
+                            
                     async with AsyncSessionLocal() as session:
                         for ann, sent in zip(new_announcements, ann_sentiments):
                             session.add(NewsItem(
