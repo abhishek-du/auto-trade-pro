@@ -310,6 +310,10 @@ _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES: tuple[str, ...] = (
     "fund raising", "preferential issue", "rights issue",
     "qualified institutions placement", "buyback", "bonus issue", "bonus",
     "stock split", "sub-division", "order win", "large order",
+    "joint venture", "partnership", "strategic alliance", "mou",
+    "memorandum of understanding", "patent", "fda", "approval",
+    "launch", "commissioning", "expansion", "stake", "investment",
+    "business update", "press release", "agreement", "contract"
 )
 
 
