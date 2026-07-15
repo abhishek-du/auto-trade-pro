@@ -48,19 +48,20 @@ from utils.logger import logger
 import os
 _HOLIDAY_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "nse_holidays.txt")
 def _load_holidays() -> set[str]:
+    from utils.nse_market_status import fetch_nse_holidays_sync
     try:
+        holidays_map = fetch_nse_holidays_sync()
+        if holidays_map:
+            return set(holidays_map.keys())
+        
+        # Fallback to local file if API fails
         with open(_HOLIDAY_FILE, "r") as f:
             days = {line.strip() for line in f if line.strip() and not line.startswith("#")}
-        # B10 fix: warn loudly if the calendar has no entry for the CURRENT year.
-        # A stale file silently degrades to "no holidays" → the bot would trade on
-        # a weekday exchange holiday against stale prices. This makes it visible.
         import datetime as _dt
         _yr = str(_dt.date.today().year)
         if days and not any(d.startswith(_yr) for d in days):
             logger.warning(
-                f"[nse_calendar] nse_holidays.txt has NO {_yr} dates — holiday "
-                f"detection is STALE. Update {_HOLIDAY_FILE} with the {_yr} NSE "
-                f"holiday list, or the bot may trade on exchange holidays."
+                f"[nse_calendar] API failed and nse_holidays.txt is STALE for {_yr}."
             )
         return days
     except Exception:

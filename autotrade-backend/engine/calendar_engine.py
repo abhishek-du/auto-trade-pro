@@ -41,7 +41,15 @@ NSE_HOLIDAYS_2026: list[date] = [
     date(2026, 12, 25),
 ]
 
-_HOLIDAY_SET: set[date] = set(NSE_HOLIDAYS_2026)
+def _get_dynamic_holidays_set() -> set[date]:
+    from utils.nse_market_status import fetch_nse_holidays_sync
+    dynamic_map = fetch_nse_holidays_sync()
+    from datetime import datetime
+    if dynamic_map:
+        return {datetime.strptime(k, "%Y-%m-%d").date() for k in dynamic_map.keys()}
+    return set(NSE_HOLIDAYS_2026)
+
+_HOLIDAY_SET: set[date] = _get_dynamic_holidays_set()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

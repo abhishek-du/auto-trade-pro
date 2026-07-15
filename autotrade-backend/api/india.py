@@ -675,8 +675,12 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
     now_ist = datetime.datetime.now(_IST)
     date_str = now_ist.strftime("%Y-%m-%d")
 
-    today_holiday = date_str in _NSE_HOLIDAYS
-    holiday_name  = _NSE_HOLIDAYS.get(date_str, "")
+    from utils.nse_market_status import fetch_nse_holidays_dynamic, check_market_status_dynamic
+    
+    dynamic_holidays = await fetch_nse_holidays_dynamic() or _NSE_HOLIDAYS
+    
+    today_holiday = date_str in dynamic_holidays
+    holiday_name  = dynamic_holidays.get(date_str, "")
 
     # Also check the market_events DB for HOLIDAY events on today's date —
     # covers dynamically seeded holidays not in the hardcoded list above.
@@ -699,7 +703,13 @@ async def get_market_status(db: AsyncSession = Depends(get_db)):
         except Exception:
             pass  # DB check is best-effort; hardcoded list is the fallback
 
-    nse_open = is_nse_market_open() and not today_holiday
+    # Check live market status from NSE API dynamically
+    live_status = await check_market_status_dynamic()
+    if live_status and live_status.get("status"):
+        nse_open = (live_status["status"] == "Open") and not today_holiday
+    else:
+        # Fallback to local time-based logic if API fails
+        nse_open = is_nse_market_open() and not today_holiday
 
     idx = await loop.run_in_executor(None, _fetch_index_prices)
 
