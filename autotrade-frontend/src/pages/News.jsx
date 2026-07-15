@@ -172,11 +172,20 @@ function CorporateAnnouncements() {
         <div className="space-y-2">
           {items.map((a) => {
             const symbol = a.tickers_affected?.[0];
+            
+            let title = a.headline;
+            let llmSummary = "";
+            if (title && title.includes("| [LLM Summary: ")) {
+              const parts = title.split("| [LLM Summary: ");
+              title = parts[0].trim();
+              llmSummary = parts[1].replace(/]$/, "").trim();
+            }
+
             return (
               <div key={a.id} className="flex items-start gap-3 bg-surface/40 hover:bg-surface/70 border border-border/60 rounded-lg px-3 py-2.5 transition-colors">
                 <FileText size={14} className="text-accent shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0 space-y-1">
-                  <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
                     <span className="text-slate-200 font-semibold text-sm truncate">{a.company || symbol}</span>
                     {symbol && (
                       <span className="bg-accent/20 text-accent text-xs px-1.5 py-0.5 rounded font-mono">{symbol}</span>
@@ -188,17 +197,35 @@ function CorporateAnnouncements() {
                     )}
                     <SentimentBadge sentiment={a.sentiment} />
                   </div>
-                  <p className="text-muted text-xs leading-relaxed line-clamp-2">{a.headline}</p>
-                  <div className="flex items-center gap-1.5 text-muted text-xs">
+                  
+                  <p className="text-muted text-xs leading-relaxed">{title}</p>
+                  
+                  {llmSummary && (
+                    <div className="mt-2 pl-3 border-l-2 border-accent/40 bg-accent/5 p-2.5 rounded-r-md shadow-sm">
+                      <p className="text-[10px] text-accent/90 uppercase tracking-widest font-bold mb-1 flex items-center gap-1.5">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        AI Impact Analysis
+                      </p>
+                      <p className="text-[11px] text-slate-300 leading-relaxed italic">{llmSummary}</p>
+                      {a.score !== undefined && a.score !== 0 && (
+                        <div className="mt-2 text-[10px] text-muted font-mono">
+                          Confidence Score: <span className="text-accent font-bold">{(a.score * 100).toFixed(0)}/100</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-1.5 text-muted text-xs mt-1">
                     <Clock size={11} />
                     <span>{relTime(a.published_at ?? a.crawled_at)}</span>
                   </div>
                 </div>
                 {a.url && (
                   <a href={a.url} target="_blank" rel="noopener noreferrer"
-                    className="p-1.5 text-muted hover:text-accent rounded-lg hover:bg-surface transition-colors shrink-0"
+                    className="flex flex-col items-center justify-center p-2 text-accent/70 hover:text-accent rounded-lg hover:bg-accent/10 transition-colors shrink-0 border border-accent/20"
                     title="Open NSE filing PDF">
-                    <ExternalLink size={13} />
+                    <ExternalLink size={14} className="mb-1" />
+                    <span className="text-[9px] font-bold tracking-widest uppercase">PDF</span>
                   </a>
                 )}
               </div>
