@@ -39,7 +39,7 @@ _LEVEL_NAME = {SHOCK_NONE: "NONE", SHOCK_TIGHTEN: "TIGHTEN", SHOCK_FLATTEN: "FLA
 # On TIGHTEN, pull each stop to within this % of the live price (locks most of
 # an open gain; caps further downside on a losing long). Kept as a module
 # constant to avoid config sprawl — the trigger thresholds are the tunable part.
-_TIGHTEN_TRAIL_PCT = 0.5
+_TIGHTEN_TRAIL_PCT = 2.0
 
 # Shared shock keyword list (also drives the /news high-impact alert + surfacing).
 from engine.news_impact import SHOCK_KEYWORDS as _SHOCK_KEYWORDS
@@ -99,23 +99,23 @@ async def _news_shock_hits(session: AsyncSession, window_min: int) -> tuple[int,
     cutoff = datetime.utcnow() - timedelta(minutes=window_min)
     try:
         rows = (await session.execute(
-            select(NewsItem.headline)
+            select(NewsItem.headline, NewsItem.sentiment, NewsItem.score)
             .where(
                 func.coalesce(NewsItem.published_at, NewsItem.crawled_at) >= cutoff,
                 NewsItem.sentiment == "negative",
             )
             .order_by(func.coalesce(NewsItem.published_at, NewsItem.crawled_at).desc())
             .limit(200)
-        )).scalars().all()
+        )).all()
     except Exception as exc:
         logger.debug(f"[shock] news query failed: {exc}")
         return 0, []
 
+    from engine.news_impact import is_high_impact_news
     hits: list[str] = []
-    for headline in rows:
-        low = (headline or "").lower()
-        if any(kw in low for kw in _SHOCK_KEYWORDS):
-            hits.append(headline)
+    for r in rows:
+        if is_high_impact_news(r.headline, r.sentiment, r.score):
+            hits.append(r.headline)
     return len(hits), hits[:5]
 
 
@@ -190,9 +190,12 @@ async def apply_shock_action(assessment: ShockAssessment, session: AsyncSession)
     """Tighten stops (level 1) or flatten longs (level 2) on open EQUITY longs."""
     from db.models import OpenPosition, TradeDirection
     from paper_trading.trade_simulator import close_paper_trade
+    from sqlalchemy.orm import selectinload
 
     longs = [
-        p for p in (await session.execute(select(OpenPosition))).scalars().all()
+        p for p in (await session.execute(
+            select(OpenPosition).options(selectinload(OpenPosition.trade))
+        )).scalars().all()
         if p.direction == TradeDirection.BUY
         and getattr(p, "instrument_type", "EQUITY") == "EQUITY"
     ]
@@ -227,6 +230,8 @@ async def apply_shock_action(assessment: ShockAssessment, session: AsyncSession)
             old_stop = float(pos.stop_loss or 0.0)
             if new_stop > old_stop:
                 pos.stop_loss = new_stop
+                if hasattr(pos, "trade") and pos.trade:
+                    pos.trade.stop_loss = new_stop
                 await session.commit()
                 result["tightened"].append(
                     {"symbol": pos.symbol, "old_stop": old_stop, "new_stop": new_stop}

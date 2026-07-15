@@ -796,6 +796,8 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         pos.size_units      = pos.size_units - partial_qty
                         # Break-even stop: remaining half can never lose
                         pos.stop_loss = max(pos.stop_loss, pos.entry_price)
+                        if hasattr(pos, "trade") and pos.trade:
+                            pos.trade.stop_loss = pos.stop_loss
                         trailed = True
                         logger.info(
                             f"[T1 partial] {pos.symbol}: booked {partial_qty} units "
@@ -811,6 +813,8 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     new_stop = peak - trail_dist
                     if new_stop > pos.stop_loss:
                         pos.stop_loss = round(new_stop, 4)
+                        if hasattr(pos, "trade") and pos.trade:
+                            pos.trade.stop_loss = pos.stop_loss
                         trailed = True
             else:  # SELL
                 peak = min(peak, price)
@@ -820,6 +824,8 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     new_stop = peak + trail_dist
                     if new_stop < pos.stop_loss:
                         pos.stop_loss = round(new_stop, 4)
+                        if hasattr(pos, "trade") and pos.trade:
+                            pos.trade.stop_loss = pos.stop_loss
                         trailed = True
 
             # Persist mutated trailing state (reassign dict so SQLAlchemy detects it)
