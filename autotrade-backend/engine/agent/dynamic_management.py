@@ -13,7 +13,8 @@ async def llm_dynamic_sl_tp(session: AsyncSession) -> None:
     LLM reasoning. This makes the agent manage trades actively like a human expert,
     keeping a "peni nazar" (sharp eye) on price action and news.
     """
-    positions = (await session.execute(select(OpenPosition))).scalars().all()
+    from sqlalchemy.orm import selectinload
+    positions = (await session.execute(select(OpenPosition).options(selectinload(OpenPosition.trade)))).scalars().all()
     if not positions:
         return
         
@@ -110,6 +111,9 @@ Respond ONLY with valid JSON:
                     logger.info(f"[dynamic_management] {pos.symbol} LLM updating SL: {pos.stop_loss}->{new_sl}, TP: {pos.take_profit}->{new_tp} | Reason: {data.get('reasoning')}")
                     pos.stop_loss = new_sl
                     pos.take_profit = new_tp
+                    if hasattr(pos, "trade") and pos.trade:
+                        pos.trade.stop_loss = new_sl
+                        pos.trade.take_profit = new_tp
         except Exception as e:
             logger.debug(f"[dynamic_management] Failed for {pos.symbol}: {e}")
 
