@@ -84,6 +84,81 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
     except:
         return None
 
+async def _compute_news_trade_levels(ticker: str, side: str, entry_price: float) -> dict:
+    """Structural/volatility-aware SL/TP for a news-triggered trade, replacing
+    the previous fixed 3%/7.5% template (flagged in the 2026-07-20
+    execution-authority audit as "a template, not real intelligence").
+
+    Reuses the same compute_indicators -> compute_trade_levels hierarchy
+    already used by tasks/india_tasks.py's intraday_entry path — not a new,
+    parallel risk model:
+      1. Dynamic/structural (Supertrend/Bollinger/support-resistance) via
+         engine.deep_analysis.build_trade_setup, when 1m/1d candles + enough
+         bars are available.
+      2. ATR-based (entry ± 2×ATR stop, ± 2×/4×ATR targets), when structure
+         isn't available but ATR is.
+      3. Static percentage fallback (∓5%/±10%/±15%) — the SAME fallback every
+         other strategy in the codebase uses, not a bespoke news-only number.
+    Plus a gap-adjustment layer specific to news reactions: if the live entry
+    price has already moved materially away from the last known candle close
+    (a news-driven gap), the stop computed against pre-gap structure/ATR may
+    sit too close to the new price — widen it proportionally rather than
+    leaving a stop nearly guaranteed to be clipped by post-gap noise.
+
+    Known gap, not silently assumed handled: this does NOT yet implement a
+    liquidity/order-book-depth adjustment tier (bid/ask spread, market depth)
+    — that requires a live depth feed this function doesn't have access to.
+    """
+    import pandas as pd
+    from crawler.price_feed import get_latest_candles
+    from engine.indicators import compute_indicators
+    from engine.risk_manager import compute_trade_levels
+
+    action = "BUY" if side == "BUY" else "SELL"
+    sig_ind = None
+    last_close = None
+
+    try:
+        async with AsyncSessionLocal() as session:
+            candles_1m = await get_latest_candles(ticker, "1m", 60, session)
+            df = None
+            if len(candles_1m) >= 20:
+                df = pd.DataFrame([{
+                    "open": c.open, "high": c.high, "low": c.low,
+                    "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
+                } for c in candles_1m])
+            if df is None or df.empty:
+                candles_1d = await get_latest_candles(ticker, "1d", 60, session)
+                if len(candles_1d) >= 20:
+                    df = pd.DataFrame([{
+                        "open": c.open, "high": c.high, "low": c.low,
+                        "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
+                    } for c in candles_1d])
+            if df is not None and not df.empty:
+                last_close = float(df.iloc[-1]["close"])
+                sig_ind = compute_indicators(df)
+    except Exception as exc:
+        logger.debug(f"[news_engine] {ticker}: candle fetch for SL/TP levels failed: {exc}")
+
+    lv = compute_trade_levels(action, entry_price, sig=sig_ind)
+    stop_loss, target_1 = lv["stop_loss"], lv["target_1"]
+
+    gap_pct = abs(entry_price - last_close) / last_close if last_close and last_close > 0 else 0.0
+    if gap_pct > 0.02:  # >2% gap between last known candle close and live entry
+        extra_room = entry_price * min(gap_pct, 0.05)  # cap the widening at 5%
+        if action == "BUY":
+            stop_loss = min(stop_loss, entry_price - extra_room)
+        else:
+            stop_loss = max(stop_loss, entry_price + extra_room)
+
+    return {
+        "stop_loss": round(stop_loss, 2), "target_1": round(target_1, 2),
+        "target_2": round(lv.get("target_2", target_1), 2),
+        "atr": lv.get("atr", 0.0), "source": lv.get("source", "static"),
+        "gap_pct": round(gap_pct, 4),
+    }
+
+
 async def _execute_news_trade(
     ticker: str, side: str, headline: str, verdict: dict, *,
     event_directness=None, confidence_source=None, evidence_ids: list[str] | None = None,
@@ -126,17 +201,16 @@ async def _execute_news_trade(
         logger.warning(f"[news_engine] {ticker}: no live price available — skipping execution")
         return False
 
-    # 2. News catalysts carry no technical support/resistance, so a fixed
-    #    percentage stop/target stands in for the ATR-based levels the other
-    #    strategies compute — sized to the same ~2.5 R:R the LLM candidate is
-    #    already scored against. (Flagged in the 2026-07-20 execution-authority
-    #    audit as a template, not real intelligence — replacing this with an
-    #    event-type/volatility-aware model is a separate, later fix.)
-    stop_pct, target_pct = 0.03, 0.075
-    if side == "BUY":
-        stop_loss, take_profit = entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
-    else:
-        stop_loss, take_profit = entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
+    # 2. Structural/ATR-based SL/TP (Step 5, event-driven-pipeline-audit.md) —
+    #    replaces the previous fixed 3%/7.5% template. See
+    #    _compute_news_trade_levels() docstring for the full tier hierarchy.
+    levels = await _compute_news_trade_levels(ticker, side, entry_price)
+    stop_loss, take_profit = levels["stop_loss"], levels["target_1"]
+    logger.info(
+        f"[news_engine] {ticker} SL/TP source={levels['source']} "
+        f"(atr={levels['atr']:.2f}, gap={levels['gap_pct']:.1%}) "
+        f"SL=₹{stop_loss} TP=₹{take_profit}"
+    )
 
     confidence = float(verdict.get("confidence") or 60)
     product = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
