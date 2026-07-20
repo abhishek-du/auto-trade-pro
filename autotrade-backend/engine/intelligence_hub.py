@@ -1135,63 +1135,105 @@ def _score_symbol_sync(
         _nifty_regime = ctx.macro.nifty_regime
         _regime_penalty = -20.0 if _nifty_regime == "BEAR" else 0.0
 
-        # B13 note: these are RELATIVE weights — they sum to 1.12, not 1.0, and the
-        # `_w = v/_total_w` line below normalises them, so the EFFECTIVE weights are
-        # each value / 1.12 (e.g. technical is ~49%, not 55%). Behaviour is correct;
-        # only read the post-normalisation values as the true factor weights.
-        _w = {
-            "technical":    0.55,
-            "sector":       0.15,
-            "momentum_12m": 0.05,
-            "volume":       0.15,
-            "macro":        0.10,
-            "news":         0.12,
-            "earnings":     0.0,
-            "fundamental":  0.0,
-            "options":      0.0,
-        }
-        _total_w = sum(_w.values())
-        if _total_w > 0:
-            _w = {k: v / _total_w for k, v in _w.items()}
+        # ── Strategy-Specific Weight Engine (V4) ────────────────────────────
+        
+        _nifty_regime = ctx.macro.nifty_regime
+        _regime_penalty = -20.0 if _nifty_regime == "BEAR" else 0.0
+        
+        volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
+        vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
 
-        volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
-        vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
-        master_score = (
-            technical_score    * _w["technical"] +
-            sector_score       * _w["sector"] +
-            momentum_12m_score * _w["momentum_12m"] +
-            vol_score          * _w["volume"] +
-            macro_score        * _w["macro"] +
-            news_score         * _w["news"] +
-            _regime_penalty
+        # 1. Technical Swing Strategy
+        ts_w = {"tech": 0.45, "news": 0.20, "volume": 0.15, "sector": 0.10, "macro": 0.10, "options": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        technical_swing_score = (
+            technical_score * ts_w["tech"] +
+            news_score * ts_w["news"] +
+            vol_score * ts_w["volume"] +
+            sector_score * ts_w["sector"] +
+            macro_score * ts_w["macro"]
         )
+
+        # 2. News/Event Swing Strategy
+        es_w = {"news": 0.40, "tech": 0.30, "sector": 0.10, "macro": 0.10, "volume": 0.10, "options": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        event_swing_score = (
+            news_score * es_w["news"] +
+            technical_score * es_w["tech"] +
+            sector_score * es_w["sector"] +
+            macro_score * es_w["macro"] +
+            vol_score * es_w["volume"]
+        )
+
+        # 3. Intraday Momentum
+        id_w = {"tech": 0.50, "volume": 0.25, "options": 0.15, "news": 0.05, "macro": 0.05, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        intraday_score = (
+            technical_score * id_w["tech"] +
+            vol_score * id_w["volume"] +
+            options_score * id_w["options"] +
+            news_score * id_w["news"] +
+            macro_score * id_w["macro"]
+        )
+
+        # 4. Positional/Long-term
+        pos_w = {"fundamentals": 0.40, "earnings": 0.20, "tech": 0.20, "macro": 0.10, "sector": 0.10, "news": 0.0, "volume": 0.0, "options": 0.0}
+        positional_score = (
+            fundamental_score * pos_w["fundamentals"] +
+            earnings_score * pos_w["earnings"] +
+            technical_score * pos_w["tech"] +
+            macro_score * pos_w["macro"] +
+            sector_score * pos_w["sector"]
+        )
+
+        # Gating Logic (Score Decision Engine)
+        if news_score >= 85 and technical_score >= 60:
+            strategy_selected = "Event Swing"
+            master_score = event_swing_score
+            _w = es_w
+        elif technical_score >= 85 and vol_score >= 70:
+            strategy_selected = "Technical Swing"
+            master_score = technical_swing_score
+            _w = ts_w
+        elif fundamental_score >= 80:
+            strategy_selected = "Positional"
+            master_score = positional_score
+            _w = pos_w
+        else:
+            # Fallback to the best default based on mode
+            if swing_mode:
+                if event_swing_score > technical_swing_score:
+                    strategy_selected = "Event Swing"
+                    master_score = event_swing_score
+                    _w = es_w
+                else:
+                    strategy_selected = "Technical Swing"
+                    master_score = technical_swing_score
+                    _w = ts_w
+            else:
+                strategy_selected = "Intraday Momentum"
+                master_score = intraday_score
+                _w = id_w
+
+        master_score += _regime_penalty
+        
     else:
-        _w = {
-            "technical":   0.65,
-            "news":        0.12,
-            "sector":      0.10,
-            "macro":       0.10,
-            "volume":      0.15,
-            "earnings":    0.0,
-            "fundamental": 0.0,
-            "options":     0.0,
-        }
-        _total_w = sum(_w.values())
-        if _total_w > 0:
-            _w = {k: v / _total_w for k, v in _w.items()}
-    
+        # Intraday / Non-swing branch fallback
         volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
         vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
-        master_score = (
-            technical_score   * _w["technical"] +
-            news_score        * _w["news"] +
-            sector_score      * _w["sector"] +
-            macro_score       * _w["macro"] +
-            vol_score         * _w["volume"] +
-            earnings_score    * _w["earnings"] +
-            fundamental_score * _w["fundamental"] +
-            options_score     * _w["options"]
+        id_w = {"tech": 0.50, "volume": 0.25, "options": 0.15, "news": 0.05, "macro": 0.05, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        intraday_score = (
+            technical_score * id_w["tech"] +
+            vol_score * id_w["volume"] +
+            options_score * id_w["options"] +
+            news_score * id_w["news"] +
+            macro_score * id_w["macro"]
         )
+        strategy_selected = "Intraday Momentum"
+        master_score = intraday_score
+        _w = id_w
+
+        # We will also expose the 4 scores array to the analytics output
+        technical_swing_score = intraday_score
+        event_swing_score = intraday_score
+        positional_score = intraday_score
 
     # Blocking + penalties
     is_blocked, blocked_reason = False, None
@@ -1287,6 +1329,12 @@ def _score_symbol_sync(
         "sector": round(sector_score, 1), "macro": round(macro_score, 1),
         "earnings": round(earnings_score, 1), "fundamental": round(fundamental_score, 1),
         "options": round(options_score, 1), "master": round(master_score, 1),
+        "strategy_scores": {
+            "technical_swing": round(technical_swing_score, 2),
+            "event_swing": round(event_swing_score, 2),
+            "intraday": round(intraday_score, 2),
+            "positional": round(positional_score, 2)
+        },
         "regime": regime, "sector_name": sector, "news_tone": tone,
         "sector_mood": sector_mood, "fund_grade": fund_grade,
         "is_blocked": is_blocked, "blocked_reason": blocked_reason,
