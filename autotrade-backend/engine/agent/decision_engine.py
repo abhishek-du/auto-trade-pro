@@ -111,21 +111,41 @@ async def _candidate_context(symbol: str, candidate, decision) -> str:
     if brief:
         base += "\nTechnical / chart read:\n" + str(brief)
 
-    # Structured news evidence (DecisionEvidence) — explicit, clearly-labeled
-    # transport, replacing the previous practice of smuggling a news summary
-    # through `chart_brief` (a field meant for candlestick/indicator data).
-    # This is a VERIFIED classification, not raw text — the thesis below must
-    # not contradict it (see engine/event_classifier.py::validate_evidence_consistency,
-    # which enforces this after the verdict is produced, not just via prompt wording).
+    # Phase 3 (canonical event -> decision-context binding): when a canonical
+    # CausalEvent already exists for this candidate, the LLM's job changes
+    # from "discover what happened" to "given what already happened, is it
+    # tradeable." event_id is rendered for traceability (so this exact prompt
+    # can be tied back to the CausalEvent row in logs), not so the model can
+    # verify the database — it can't, and isn't asked to. The gate
+    # (_verify_canonical_event, engine/decision_router.py) is what actually
+    # enforces consistency after the verdict comes back; this block is what
+    # gives the model the real facts up front so it has less reason to
+    # contradict them in the first place.
     evidence = getattr(candidate, "evidence", None)
     if evidence is not None:
+        event_id = getattr(candidate, "event_id", None)
         base += (
-            f"\n📰 VERIFIED NEWS EVIDENCE (structured classification — do not contradict):\n"
-            f"Source: {evidence.source_type} | Category: {evidence.event_category} | "
-            f"Materiality: {evidence.materiality} | Direction: {evidence.direction}\n"
-            f"Title: {evidence.title}\n"
-            f"Summary: {evidence.summary}\n"
-            f"Classifier confidence: {evidence.confidence:.2f}\n"
+            f"\n=== CANONICAL_EVENT (already established — you are not discovering this) ===\n"
+            f"event_id: {event_id}\n"
+            f"event_category: {evidence.event_category}\n"
+            f"materiality: {evidence.materiality}\n"
+            f"direction: {evidence.direction}\n"
+            f"source_type: {evidence.source_type}\n"
+            f"published_at: {evidence.published_at}\n"
+            f"title: {evidence.title}\n"
+            f"summary: {evidence.summary}\n"
+            f"classifier_confidence: {evidence.confidence:.2f}\n"
+            f"===============================================================\n"
+            f"The event above is canonical fact, not a lead to investigate further. "
+            f"You may NOT search for or substitute a different news event, a different "
+            f"cause, or a different affected company. Your job is only to determine:\n"
+            f"  1. Does {symbol} actually correspond to the company this event concerns?\n"
+            f"  2. Is the event's stated materiality/direction enough to act on right now?\n"
+            f"  3. Does current market context (price action, sector, macro, technicals) "
+            f"support or argue against acting on it?\n"
+            f"  4. What are the risks to this specific trade?\n"
+            f"  5. What confidence do you have in EXECUTING on this canonical event now — "
+            f"not in whether the event itself is real (it is; that's already verified)?\n"
         )
     try:
         from engine.agent.reflection import get_relevant_lessons
@@ -477,13 +497,65 @@ _LLM_TOOLS = {
 }
 
 
+_NEWS_AUTHORITY_TOOLS = ("news", "expert_research")
+
+
 async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None:
     """Level-3 agentic reasoning: give the LLM tools (news / options / fundamentals
-    / price_action / market_depth) and let it INVESTIGATE before deciding."""
+    / price_action / market_depth) and let it INVESTIGATE before deciding.
+
+    Phase 3 (canonical event -> decision-context binding): when candidate.evidence
+    is already set, a canonical CausalEvent exists for this candidate (see
+    news_discovery_engine.py::process_ticker() / _build_evidence()). In that case
+    `news` and `expert_research` — the two tools that let the model fetch its own,
+    unclassified news (live Google RSS, or a raw NewsItem-table query) — are removed
+    from the tool menu entirely, not merely discouraged by prompt wording. Structural
+    removal, not a prompt instruction: a model that tries anyway gets a BLOCKED
+    observation, not a second source of "truth" to reason from. This closes the gap
+    Phase 1/2's gate could only catch after the fact (BLOCKED_EVIDENCE_DRIFT) — the
+    model no longer has a standing tool that could originate a contradictory thesis.
+
+    For candidates with no canonical event (candidate.evidence is None — e.g. the
+    TECHNICAL equity-scan callers in agent_loop.py/india_tasks.py, which never set
+    .evidence), all tools remain available — this restriction only applies once a
+    canonical event already exists to be reasoned over.
+    """
     try:
         from utils.llm import call_llm_chat
 
-        sys_prompt = """You are a senior NSE swing and intraday algorithmic trading analyst. Your task is to evaluate a candidate trade and output a final decision: TAKE or SKIP.
+        has_canonical_event = getattr(candidate, "evidence", None) is not None
+        available_tools = {k: v for k, v in _LLM_TOOLS.items()
+                            if not (has_canonical_event and k in _NEWS_AUTHORITY_TOOLS)}
+
+        tool_table_rows = [
+            "| `fundamentals` | Swing only: Need debt, promoter holding, growth. IGNORE for Intraday. |",
+            "| `options` | Index or heavily traded stocks – check OI and PCR. |",
+            "| `price_action` | Current LTP, daily trend, recent returns. |",
+            "| `market_depth` | Order book – bid/ask imbalance, pending volumes (Critical for Intraday). |",
+            "| `intraday_candles` | Short‑term 15‑minute bars for entry timing and intraday setups. |",
+            "| `sector` | Sector performance relative to broader market. |",
+            "| `macro` | FII/DII flows, overall market direction. |",
+            "| `predict_candle` | Momentum‑based next‑candle probability (Crucial for Intraday). |",
+        ]
+        if not has_canonical_event:
+            tool_table_rows.insert(1, "| `news` | Immediate catalysts, intraday spikes, sentiment. |")
+        tool_table = "\n".join(tool_table_rows)
+
+        # The "core tools" list the model is forced to use before it may decide —
+        # swap `news` out for `options` when a canonical event already exists, so
+        # the requirement never demands a tool that no longer exists.
+        core_tools = ["fundamentals", "sector", "price_action", "market_depth", "intraday_candles"]
+        core_tools.append("options" if has_canonical_event else "news")
+
+        news_authority_notice = (
+            "\n## Canonical Event Notice\n"
+            "A canonical event already exists for this candidate (see CANONICAL_EVENT "
+            "in the context below). The `news`/`expert_research` tools are NOT available "
+            "to you for this candidate — you must reason over the given canonical event, "
+            "not search for or substitute a different one.\n"
+        ) if has_canonical_event else ""
+
+        sys_prompt = f"""You are a senior NSE swing and intraday algorithmic trading analyst. Your task is to evaluate a candidate trade and output a final decision: TAKE or SKIP.
 
 ## Your Workflow (ReAct)
 
@@ -493,20 +565,12 @@ You must follow this cycle until you have enough evidence to decide:
 3. **OBSERVE** – Review the tool output.
 4. **REPEAT** – Continue until you have called ALL available tools to debate the facts before making your decision.
 5. **DECIDE** – Output your final verdict with confidence and rationale.
-
+{news_authority_notice}
 ## Available Tools and When to Use
 
 | Tool | When to Use |
 |------|-------------|
-| `fundamentals` | Swing only: Need debt, promoter holding, growth. IGNORE for Intraday. |
-| `news` | Immediate catalysts, intraday spikes, sentiment. |
-| `options` | Index or heavily traded stocks – check OI and PCR. |
-| `price_action` | Current LTP, daily trend, recent returns. |
-| `market_depth` | Order book – bid/ask imbalance, pending volumes (Critical for Intraday). |
-| `intraday_candles` | Short‑term 15‑minute bars for entry timing and intraday setups. |
-| `sector` | Sector performance relative to broader market. |
-| `macro` | FII/DII flows, overall market direction. |
-| `predict_candle` | Momentum‑based next‑candle probability (Crucial for Intraday). |
+{tool_table}
 
 **Important**: You MUST call ALL available tools before arriving at a decision. You are required to debate on data and facts using live data from every tool (including screener, fundamentals, etc.).
 
@@ -514,35 +578,37 @@ You must follow this cycle until you have enough evidence to decide:
 
 ### During investigation (THINK + ACT):
 ```json
-{
+{{
   "thought": "<your reasoning about what you know and what you need next>",
   "action": "tool",
   "tool": "<tool_name>"
-}
+}}
 ```
 
 ### When ready to decide (ONLY after using all tools):
 You MUST simulate a multi-agent debate inside the `thought` field before taking the final call.
 ```json
-{
+{{
   "thought": "SWING_AGENT: <argues if it's a good swing trade using tool proofs> | INTRADAY_AGENT: <argues if it's a good intraday trade using tool proofs> | FINAL_JUDGE: <takes all discussions/proofs and makes the final call>",
   "action": "decide",
   "verdict": "TAKE" or "SKIP",
   "confidence": <integer 0-100>,
   "bull": "<strongest bullish argument, max 20 words>",
   "bear": "<strongest bearish argument, max 20 words>",
-  "key_risk": "<single biggest risk, max 12 words>"
-}
+  "key_risk": "<single biggest risk, max 12 words>",
+  "thesis": "<if a CANONICAL_EVENT was given: state how it justifies this trade, in your own words, WITHOUT contradicting its category/materiality/direction. If no canonical event was given, your general investment thesis.>",
+  "market_confirmation": "POSITIVE" or "NEGATIVE" or "NEUTRAL"
+}}
 ```
 
 ## Concrete Decision Criteria
 
-- **INTRADAY TRADING RULES:** 
+- **INTRADAY TRADING RULES:**
   - **IGNORE** PE ratio, PB, and long-term earnings completely.
   - Focus heavily on live `market_depth`, `intraday_candles`, and `predict_candle`.
   - **Embrace Short Selling:** If a stock has been going up for many days but is now showing weakness, bleeding sector momentum, or aggressive sellers in market depth, DO NOT HESITATE to TAKE a short (SELL) setup to profit from the fall.
 
-- **SWING TRADING RULES (Multi-day):** 
+- **SWING TRADING RULES (Multi-day):**
   - **AVOID EXTENDED RUNNERS:** If a stock has been going up continuously for many days (overbought), DO NOT BUY IT. It is prone to sudden profit-booking (falling from the top).
   - **Catch Fresh Moves:** Only TAKE trades on FRESH breakouts from a consolidation zone that are *just starting* to go up, supported by volume and short-term catalysts.
   - Ignore high PE if the fresh volume breakout and news catalyst are very strong.
@@ -556,7 +622,7 @@ You MUST simulate a multi-agent debate inside the `thought` field before taking 
 ## Critical Rules (Must Follow)
 1. **Never** output more than one JSON per response.
 2. **Never** call a tool without a `thought` explaining *why* you need it.
-3. **Never** decide without sufficient investigation. You MUST use at least 6 core tools (fundamentals, news, sector, price_action, market_depth, intraday_candles) before you are allowed to output a verdict.
+3. **Never** decide without sufficient investigation. You MUST use at least {len(core_tools)} core tools ({", ".join(core_tools)}) before you are allowed to output a verdict.
 4. **Always** include your reasoning in `thought`.
 5. **Embrace Intraday Shorts:** Do not hesitate to approve SELL side (shorting) setups if momentum is bleeding.
 
@@ -573,18 +639,28 @@ Now, based on the user's context below, follow your workflow and produce your fi
             step = _parse_first_json(resp)
             if not step:
                 return None
-            if step.get("action") == "tool" and step.get("tool") in _LLM_TOOLS:
-                tool = step["tool"]
-                result = await _LLM_TOOLS[tool](symbol)
-                used.append(tool)
+            if step.get("action") == "tool":
+                tool = step.get("tool")
                 messages.append({"role": "assistant", "content": resp})
-                messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
+                if tool in available_tools:
+                    result = await available_tools[tool](symbol)
+                    used.append(tool)
+                    messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
+                elif tool in _NEWS_AUTHORITY_TOOLS:
+                    messages.append({"role": "user", "content": (
+                        f"TOOL[{tool}] → BLOCKED: not available for this candidate — a canonical "
+                        f"event already exists (see CANONICAL_EVENT above). Independent news search "
+                        f"is not permitted; reason over the given event facts instead. "
+                        f"Available tools: {list(available_tools)}"
+                    )})
+                else:
+                    messages.append({"role": "user", "content": f"TOOL[{tool}] → unknown tool. Available tools: {list(available_tools)}"})
                 continue
             if step.get("action") == "decide" or "verdict" in step:
                 # Force the agent to actually use tools instead of hallucinating a decision early
                 if len(set(used)) < 5:
                     messages.append({"role": "assistant", "content": resp})
-                    messages.append({"role": "user", "content": "You have not met the minimum tool requirement. You must use at least 5-6 core tools (market_depth, intraday_candles, news, sector, fundamentals) to debate facts before taking the final call. Continue investigating."})
+                    messages.append({"role": "user", "content": f"You have not met the minimum tool requirement. You must use at least 5-6 core tools ({', '.join(core_tools)}) to debate facts before taking the final call. Continue investigating."})
                     continue
                 
                 step["tools_used"] = used

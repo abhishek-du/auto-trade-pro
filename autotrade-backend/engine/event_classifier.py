@@ -164,7 +164,11 @@ def validate_evidence_consistency(
         )
 
     materiality = (evidence.materiality or "").upper()
-    bull_text   = (verdict.get("bull") or "").lower()
+    # Phase 3: scan both `bull` (legacy field) and `thesis` (the explicit
+    # canonical-event-grounded field added in engine/agent/decision_engine.py's
+    # llm_tooluse_candidate() decide-output) for unsupported high-conviction
+    # claims — a model could put the contradiction in either field.
+    bull_text   = " ".join(str(verdict.get(k) or "") for k in ("bull", "thesis")).lower()
     confidence  = float(verdict.get("confidence") or 0)
 
     if materiality in _LOW_MATERIALITY_TIERS:

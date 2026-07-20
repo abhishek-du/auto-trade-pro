@@ -60,6 +60,12 @@ class NewsCandidate:
         # field. See process_ticker(), which sets .evidence after classifying.
         self.chart_brief = None
         self.evidence = None
+        # Phase 3 (canonical event -> decision-context binding): the canonical
+        # CausalEvent.id this candidate traces to, set alongside .evidence by
+        # process_ticker(). Rendered into the LLM's context for traceability,
+        # and used as the signal that flips llm_tooluse_candidate() into
+        # "canonical event already exists — no independent news tool" mode.
+        self.event_id = None
 
 class NewsDecision:
     def __init__(self, action):
@@ -222,7 +228,15 @@ async def _execute_news_trade(
     confidence = float(verdict.get("confidence") or 60)
     product = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
 
-    extra = {"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]}
+    # Phase 3: include `thesis` (the canonical-event-grounded field) alongside
+    # the legacy `bull` field — the gate's thesis-vs-canonical check
+    # (_verify_canonical_event -> validate_evidence_consistency) reads this
+    # joined text, so a contradiction placed in either field is caught.
+    reasoning_points = [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]
+    thesis = verdict.get("thesis")
+    if thesis:
+        reasoning_points.append(str(thesis)[:300])
+    extra = {"reasoning_points": reasoning_points}
     if extra_factors:
         extra.update(extra_factors)
 
@@ -433,6 +447,7 @@ async def process_ticker(ticker, side, headline, summary):
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
     cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary)
+    cand.event_id = event_id
 
     if event_id is None:
         # "NO EVENT -> NO TRADE" (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §5) —
