@@ -2163,6 +2163,18 @@ async def _open_index_option_mis(
         target=round(spec.premium * (1 + tp_pct * 5), 2),
     )
 
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    _intent = TradeIntent(
+        strategy="NIFTY_MIS_OPTION", symbol=spec.tradingsymbol, action=direction, instrument_type=spec.option_type,
+        entry_price=spec.premium, stop_loss=spec.stop, take_profit=spec.target,
+        confidence=abs(avg_score), confidence_source=ConfidenceSource.CALCULATED,
+        event_directness=EventDirectness.NOT_APPLICABLE,
+    )
+    _auth = await authorize_trade_intent(_intent, session)
+    if not _auth.approved:
+        logger.info(f"[intraday_entry] NIFTY option gate blocked: {_auth.reason}")
+        return False
+
     trade = await open_option_paper_trade(
         spec, session, confidence=abs(avg_score),
         ai_reason=(

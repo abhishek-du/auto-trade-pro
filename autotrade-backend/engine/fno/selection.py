@@ -632,6 +632,20 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
             spec = await select_index_spread(under, direction, spot, equity, session)
             if spec is None:
                 continue
+
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+            _intent = TradeIntent(
+                strategy="FNO_SPREAD", symbol=spec.tradingsymbol_buy, action=direction,
+                instrument_type=spec.option_type,
+                entry_price=spec.net_premium, stop_loss=0.0, take_profit=0.0,
+                confidence=confidence, confidence_source=ConfidenceSource.CALCULATED,
+                event_directness=EventDirectness.NOT_APPLICABLE,
+            )
+            _auth = await authorize_trade_intent(_intent, session)
+            if not _auth.approved:
+                logger.info(f"[fno/evaluate] {under} gate blocked: {_auth.reason}")
+                continue
+
             # Carry the factor rationale into the trade note.
             rationale = "; ".join(f"{f['factor']}={f['score']:+.0f}" for f in sig["factors"])
             spread_name = "BULL CALL SPREAD" if spec.option_type == "CE" else "BEAR PUT SPREAD"
@@ -819,6 +833,19 @@ async def evaluate_portfolio_hedge(session: AsyncSession, equity: float) -> dict
         premium=round(premium, 2), lots=lots, qty=qty, notional=debit,
         stop=0.0, target=0.0, dte=contract.dte,     # hedge has no fixed SL/TP
     )
+
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    _intent = TradeIntent(
+        strategy="FNO_HEDGE", symbol=contract.tradingsymbol, action="BUY", instrument_type="PE",
+        entry_price=premium, stop_loss=0.0, take_profit=0.0,
+        confidence=sig[1], confidence_source=ConfidenceSource.CALCULATED,
+        event_directness=EventDirectness.NOT_APPLICABLE,
+    )
+    _auth = await authorize_trade_intent(_intent, session)
+    if not _auth.approved:
+        logger.info(f"[fno/hedge] gate blocked: {_auth.reason}")
+        return None
+
     trade = await open_option_paper_trade(
         spec, session, confidence=sig[1],
         ai_reason=f"🛡️ HEDGE: NIFTY {contract.strike:.0f}PE | {lots} lot(s) protecting "

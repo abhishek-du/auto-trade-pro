@@ -79,15 +79,19 @@ Respond ONLY with valid JSON in this exact format:
         ticker = f"{symbol.upper()}.NS"
         logger.warning(f"[event_arbitrage] 🔥 HIGH SURPRISE EVENT DETECTED: {ticker} {direction} (Surprise: {surprise})")
         logger.warning(f"[event_arbitrage] Reasoning: {data.get('reasoning')}")
-        
+
         # In a real system, we would instantly hit the Zerodha API with a limit order.
         # Here, we record an instant paper trade to bypass the standard 5-minute trade loop.
-        await _execute_instant_trade(ticker, direction, data.get("reasoning"), session)
-        
+        # `surprise` is the LLM's own actionability_factor_0_to_100 — pass it through as
+        # the real confidence instead of discarding it for a hardcoded value.
+        await _execute_instant_trade(ticker, direction, data.get("reasoning"), surprise, session)
+
     except Exception as exc:
         logger.error(f"[event_arbitrage] Failed to evaluate news flash: {exc}")
 
-async def _execute_instant_trade(symbol: str, direction: str, reasoning: str, session: AsyncSession) -> None:
+async def _execute_instant_trade(
+    symbol: str, direction: str, reasoning: str, confidence: float, session: AsyncSession,
+) -> None:
     """Instant execution bypasses the standard technical loop."""
     from crawler.live_prices import PRICE_CACHE
     tick = PRICE_CACHE.get(symbol, {})
@@ -96,7 +100,7 @@ async def _execute_instant_trade(symbol: str, direction: str, reasoning: str, se
         # Fallback to historical if live isn't cached (usually because market is closed or it's a new ticker)
         logger.warning(f"[event_arbitrage] No live price for {symbol}, aborting instant execution.")
         return
-        
+
     # Calculate crude R:R limits for the instant trade
     # If LONG, stop loss 3% down, target 6% up. If SHORT, stop loss 3% up, target 6% down.
     if direction == "LONG":
@@ -105,28 +109,48 @@ async def _execute_instant_trade(symbol: str, direction: str, reasoning: str, se
     else:
         sl = price * 1.03
         t1 = price * 0.94
-        
-    class MockCandidate:
-        strategy = "EVENT_ARBITRAGE"
-        entry = round(price, 2)
-        stop = round(sl, 2)
-        target = round(t1, 2)
-        risk_reward = 2.0
-        
-    class MockDecision:
-        symbol = symbol
-        action = direction
-        entry = round(price, 2)
-        stop = round(sl, 2)
-        qty = max(1, int(100000 / price))  # allocate ~1L for event trades
-        regime = "NEWS_FLASH"
-        master_score = 99
-        confidence = 99
-        confidence_factors = {"news_factor": "+50"}
-        candidate = MockCandidate()
-        
-    decision = MockDecision()
-    
+
+    action = "BUY" if direction == "LONG" else "SELL"
+
+    # Central execution gate — confidence is the LLM's real actionability score
+    # (CALCULATED), not the hardcoded 99 this used to carry.
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    _intent = TradeIntent(
+        strategy="EVENT_ARBITRAGE", symbol=symbol, action=action, instrument_type="EQUITY",
+        entry_price=round(price, 2), stop_loss=round(sl, 2), take_profit=round(t1, 2),
+        confidence=float(confidence), confidence_source=ConfidenceSource.CALCULATED,
+        event_directness=EventDirectness.DIRECT,
+        extra={"reasoning_points": [reasoning or ""]},
+    )
+    _auth = await authorize_trade_intent(_intent, session)
+    if not _auth.approved:
+        logger.info(f"[event_arbitrage] gate blocked {symbol}: {_auth.reason}")
+        return
+
+    # Built as SimpleNamespace instances, not classes with self-referential
+    # class-body assignments (`symbol = symbol` etc.) — that pattern silently
+    # raises NameError/UnboundLocalError because a class body treats any name
+    # assigned within it as local for the WHOLE body, including the RHS of its
+    # own assignment. Found while migrating this file to the central gate: the
+    # original class-based Mock objects also lacked risk_pct/macro_bias/
+    # fund_score/target/risk_reward, which AgentExecutionManager._paper_execute()
+    # requires — so this path could never have completed a trade even when
+    # EVENT_ARBITRAGE_ENABLED was on; it silently crashed in the outer try/except.
+    from types import SimpleNamespace
+    candidate = SimpleNamespace(
+        strategy="EVENT_ARBITRAGE", entry=round(price, 2), stop=round(sl, 2),
+        target=round(t1, 2), risk_reward=2.0,
+    )
+    decision = SimpleNamespace(
+        symbol=symbol, action=action, entry=round(price, 2), stop=round(sl, 2),
+        target=round(t1, 2), qty=max(1, int(100000 / price)),  # allocate ~1L for event trades
+        regime="NEWS_FLASH", master_score=confidence, confidence=confidence,
+        confidence_factors={"news_factor": "+50"}, strategy="EVENT_ARBITRAGE",
+        reasons=[reasoning or ""],
+        risk_pct=round(abs(price - sl) / price, 4) if price else 0.0,
+        macro_bias=0, fund_score=0, risk_reward=2.0, candidate=candidate,
+    )
+
     # Execute entry via AgentExecutionManager
     logger.info(f"[event_arbitrage] Instantly executing {direction} on {symbol} at {price}")
     from engine.agent.execution import AgentExecutionManager
