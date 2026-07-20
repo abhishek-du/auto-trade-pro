@@ -672,6 +672,17 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     if cur:
                         pos.current_price = cur
                         pos.unrealised_pnl, pos.unrealised_pct = option_pnl(pos, cur)
+                if not cur:
+                    # All 4 price-lookup tiers (WS cache, Kite LTP, latest
+                    # snapshot, Black-Scholes reprice) failed — current_price
+                    # stays frozen at its last value (entry price on a brand
+                    # new position). Log so a stuck ₹0.00 P&L is diagnosable
+                    # instead of silently looking like a genuinely flat market.
+                    logger.warning(
+                        f"update_positions: no live price for {pos.symbol} "
+                        f"({pos.instrument_type}) — current_price frozen at "
+                        f"₹{pos.current_price} (entry ₹{pos.entry_price})"
+                    )
             except Exception as exc:
                 logger.debug(f"update_positions: F&O mark failed for {pos.symbol}: {exc}")
 
