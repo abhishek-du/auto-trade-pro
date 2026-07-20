@@ -110,6 +110,23 @@ async def _candidate_context(symbol: str, candidate, decision) -> str:
     brief = getattr(candidate, "chart_brief", None)
     if brief:
         base += "\nTechnical / chart read:\n" + str(brief)
+
+    # Structured news evidence (DecisionEvidence) — explicit, clearly-labeled
+    # transport, replacing the previous practice of smuggling a news summary
+    # through `chart_brief` (a field meant for candlestick/indicator data).
+    # This is a VERIFIED classification, not raw text — the thesis below must
+    # not contradict it (see engine/event_classifier.py::validate_evidence_consistency,
+    # which enforces this after the verdict is produced, not just via prompt wording).
+    evidence = getattr(candidate, "evidence", None)
+    if evidence is not None:
+        base += (
+            f"\n📰 VERIFIED NEWS EVIDENCE (structured classification — do not contradict):\n"
+            f"Source: {evidence.source_type} | Category: {evidence.event_category} | "
+            f"Materiality: {evidence.materiality} | Direction: {evidence.direction}\n"
+            f"Title: {evidence.title}\n"
+            f"Summary: {evidence.summary}\n"
+            f"Classifier confidence: {evidence.confidence:.2f}\n"
+        )
     try:
         from engine.agent.reflection import get_relevant_lessons
         lessons = await get_relevant_lessons(candidate.strategy, decision.regime, decision.action)

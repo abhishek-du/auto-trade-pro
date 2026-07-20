@@ -55,7 +55,11 @@ class NewsCandidate:
         self.target = 0
         self.risk_reward = 2.5
         self.hub_subscores = {"technical": 0, "news": 95, "sector": 50, "macro": 50, "earnings": 50, "fundamental": 50, "options": 0}
-        self.chart_brief = summary
+        # chart_brief intentionally left unset here — news summary text now
+        # flows through `evidence` (a DecisionEvidence), not the chart-data
+        # field. See process_ticker(), which sets .evidence after classifying.
+        self.chart_brief = None
+        self.evidence = None
 
 class NewsDecision:
     def __init__(self, action):
@@ -175,10 +179,79 @@ def _intent_to_signal_for_alert(ticker: str, side: str, entry_price: float, conf
     )
 
 
+async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
+    """Classify this event (headline + summary, not headline-only) and persist
+    a CausalEvent row for traceability, connecting the previously-disconnected
+    event-classification pipeline (crawler/event_pipeline.py) to the actual
+    trade-decision path for the first time. Returns a DecisionEvidence, or
+    None if classification fails (callers must treat None as "no evidence to
+    validate against", not as a free pass)."""
+    from engine.event_classifier import classify_event, DecisionEvidence
+    from db.models import CausalEvent
+
+    classification = await classify_event(headline, summary)
+    if classification is None:
+        logger.warning(f"[news_engine] {ticker}: event classification failed — proceeding without structured evidence")
+        return None
+
+    evidence = DecisionEvidence.from_classification(
+        classification, source_type="NSE_ANNOUNCEMENT_OR_RSS", source_id=None,
+        title=headline, summary=summary or "",
+    )
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(CausalEvent(
+                news_id=None,  # this pipeline doesn't have a NewsItem row to link — see audit doc §3.6
+                event_title=classification.category,
+                country=classification.impact,  # matches crawler/event_pipeline.py's existing (mis)use of this column
+                importance=classification.surprise_score,
+                confidence=classification.confidence,
+                affected_sectors=classification.entities.get("sectors", []),
+                affected_indices=[],
+                bullish_stocks=classification.entities.get("companies", []) if classification.bullish else [],
+                bearish_stocks=classification.entities.get("companies", []) if not classification.bullish else [],
+                duration=str(classification.expected_half_life_hours),
+            ))
+            await session.commit()
+    except Exception as exc:
+        logger.warning(f"[news_engine] {ticker}: failed to persist CausalEvent: {exc}")
+
+    return evidence
+
+
+async def _log_evidence_gate_audit(ticker, side, evidence, verdict, consistency) -> None:
+    """Audit trail for evidence-consistency blocks — separate from the central
+    execution gate's own SimulationLog rows (event_type="EXECUTION_GATE") since
+    this check runs BEFORE a TradeIntent is even constructed."""
+    try:
+        from db.models import SimulationLog
+        async with AsyncSessionLocal() as session:
+            session.add(SimulationLog(
+                event_type="EVIDENCE_CONSISTENCY_GATE",
+                symbol=ticker,
+                message=f"BLOCKED | {side} | {consistency.reason}",
+                data={
+                    "action": side,
+                    "verdict_confidence": verdict.get("confidence"),
+                    "verdict_bull": verdict.get("bull"),
+                    "evidence_materiality": getattr(evidence, "materiality", None),
+                    "evidence_category": getattr(evidence, "event_category", None),
+                    "unsupported_claims": consistency.unsupported_claims,
+                    "reason": consistency.reason,
+                },
+                timestamp=datetime.utcnow(),
+            ))
+            await session.commit()
+    except Exception as exc:
+        logger.debug(f"[news_engine] evidence-gate audit log failed: {exc}")
+
+
 async def process_ticker(ticker, side, headline, summary):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
+    cand.evidence = await _build_evidence(ticker, side, headline, summary)
 
     try:
         result = await llm_tooluse_candidate(ticker, cand, dec)
@@ -188,6 +261,23 @@ async def process_ticker(ticker, side, headline, summary):
             logger.warning(f"Ticker: {ticker} | Action: {side} | Confidence: {result.get('confidence')}%")
             logger.warning(f"Bull Case: {result.get('bull')}")
             logger.warning(f"Bear Case: {result.get('bear')}")
+
+            # Evidence Consistency Gate — the central execution gate (Phase 1-2,
+            # engine/decision_router.py) validates confidence PROVENANCE (was it
+            # calculated?), not whether the calculated thesis actually matches the
+            # evidence it was shown. This is what would have blocked the
+            # 2026-07-20 ULTRACEMCO trade (materiality=LOW, thesis claimed "Strong
+            # earnings beat", confidence=71% — a genuinely-calculated number
+            # attached to a thesis the evidence doesn't support).
+            from engine.event_classifier import validate_evidence_consistency
+            consistency = validate_evidence_consistency(cand.evidence, result)
+            if not consistency.consistent:
+                logger.warning(
+                    f"[news_engine] ⛔ EVIDENCE INCONSISTENCY for {ticker}: {consistency.reason}"
+                )
+                await _log_evidence_gate_audit(ticker, side, cand.evidence, result, consistency)
+                return False
+
             try:
                 success = await _execute_news_trade(ticker, side, headline, result)
                 if success:
