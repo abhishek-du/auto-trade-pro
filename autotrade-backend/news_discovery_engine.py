@@ -80,21 +80,35 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
     except:
         return None
 
-async def _execute_news_trade(ticker: str, side: str, headline: str, verdict: dict) -> bool:
-    """Route a TAKE verdict through the same risk gate and paper execution path
-    the automatic India Trade Loop (Path B) uses, so a news-triggered trade
-    obeys the same guardrails — cash buffer, sector caps, correlation limits,
-    duplicate-position guard, drawdown breakers — rather than bypassing risk
-    management. Returns True only if a position was actually opened.
+async def _execute_news_trade(
+    ticker: str, side: str, headline: str, verdict: dict, *,
+    event_directness=None, confidence_source=None, evidence_ids: list[str] | None = None,
+) -> bool:
+    """Build a TradeIntent from a TAKE verdict and route it through the central
+    execution gate (engine.decision_router.execute_trade_intent), so a
+    news-triggered trade obeys the same guardrails — cash buffer, sector caps,
+    correlation limits, duplicate-position guard, drawdown breakers, AND the
+    gate's confidence-provenance/event-directness checks — rather than
+    bypassing risk management. Returns True only if a position was actually
+    opened.
+
+    event_directness/confidence_source default to DIRECT/CALCULATED (a primary
+    TAKE verdict from llm_tooluse_candidate is a real evaluation). The 2nd-order
+    cascade caller in process_ticker() overrides both explicitly, since its
+    "confidence" is a fixed override, not an independent evaluation — the gate
+    blocks that by design (BLOCKED_CONFIDENCE_INTEGRITY) until sector_graph.py
+    produces a real per-candidate score.
     """
-    from sqlalchemy import select as _select
     from crawler.live_prices import get_price, yfinance_ltp_batch
-    from engine.risk_manager import validate_signal, calculate_position_size
-    from engine.signal_generator import TradingSignal
-    from paper_trading.trade_simulator import open_paper_trade
-    from paper_trading.virtual_wallet import VirtualWallet
-    from db.models import OpenPosition
+    from engine.decision_router import (
+        TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome,
+    )
     from utils.config import settings
+
+    if event_directness is None:
+        event_directness = EventDirectness.DIRECT
+    if confidence_source is None:
+        confidence_source = ConfidenceSource.CALCULATED
 
     # 1. Live entry price — process-local cache first, yfinance backstop second
     #    (this script runs as its own process, so it never shares the FastAPI/
@@ -111,7 +125,9 @@ async def _execute_news_trade(ticker: str, side: str, headline: str, verdict: di
     # 2. News catalysts carry no technical support/resistance, so a fixed
     #    percentage stop/target stands in for the ATR-based levels the other
     #    strategies compute — sized to the same ~2.5 R:R the LLM candidate is
-    #    already scored against.
+    #    already scored against. (Flagged in the 2026-07-20 execution-authority
+    #    audit as a template, not real intelligence — replacing this with an
+    #    event-type/volatility-aware model is a separate, later fix.)
     stop_pct, target_pct = 0.03, 0.075
     if side == "BUY":
         stop_loss, take_profit = entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
@@ -119,48 +135,44 @@ async def _execute_news_trade(ticker: str, side: str, headline: str, verdict: di
         stop_loss, take_profit = entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
 
     confidence = float(verdict.get("confidence") or 60)
-    signal = TradingSignal(
-        symbol=ticker, timeframe="news", action=side, confidence=confidence,
+    product = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
+
+    intent = TradeIntent(
+        strategy="NEWS_CASCADE" if event_directness == EventDirectness.SECOND_ORDER else "NEWS_DIRECT",
+        symbol=ticker, action=side, instrument_type="EQUITY",
         entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit,
-        pattern_score=0.0, indicator_score=0.0, sentiment_score=95.0,
-        final_score=confidence, risk_reward_ratio=round(target_pct / stop_pct, 2),
-        reasoning_points=[f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]],
-        regime="NEUTRAL",
+        confidence=confidence, confidence_source=confidence_source,
+        event_directness=event_directness, evidence_ids=evidence_ids or [],
+        product=product,
+        extra={"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]},
     )
 
     async with AsyncSessionLocal() as session:
-        summary_row    = await VirtualWallet.get_summary(session)
-        balance        = summary_row["balance"]
-        pos_result     = await session.execute(
-            _select(OpenPosition).where(OpenPosition.product != "MIS")
-        )
-        open_positions = list(pos_result.scalars().all())
+        result = await execute_trade_intent(intent, session)
 
-        validated, reason = await validate_signal(signal, balance, open_positions, session)
-        if not validated:
-            logger.info(f"[news_engine] {ticker} rejected by risk manager: {reason}")
-            return False
+    if result.outcome not in (RoutingOutcome.EXECUTED_PAPER, RoutingOutcome.EXECUTED_LIVE):
+        logger.info(f"[news_engine] {ticker} not executed: {result.outcome.value} — {result.reason}")
+        return False
 
-        pos_size = calculate_position_size(signal, balance)
-        product  = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
-        try:
-            await open_paper_trade(signal, pos_size, session, product=product)
-        except ValueError as exc:
-            logger.warning(f"[news_engine] {ticker} execution failed: {exc}")
-            return False
-        await session.commit()
-
-    logger.warning(
-        f"✅ NEWS-TRIGGERED TRADE OPENED: {ticker} {side} "
-        f"qty={pos_size.get('units')} @ {entry_price}"
-    )
+    logger.warning(f"✅ NEWS-TRIGGERED TRADE OPENED: {ticker} {side} @ {entry_price} ({result.outcome.value})")
     if getattr(settings, "telegram_available", False):
         try:
             from integrations.telegram_service import send, fmt_entry
-            await send(fmt_entry(signal, qty=pos_size.get("units", 0)))
+            await send(fmt_entry(_intent_to_signal_for_alert(ticker, side, entry_price, confidence), qty=0))
         except Exception as exc:
             logger.warning(f"[news_engine] Telegram alert failed: {exc}")
     return True
+
+
+def _intent_to_signal_for_alert(ticker: str, side: str, entry_price: float, confidence: float):
+    """Minimal TradingSignal for the Telegram alert formatter only — the real
+    trade record (qty, SL/TP, product) already went through the gate above."""
+    from engine.signal_generator import TradingSignal
+    return TradingSignal(
+        symbol=ticker, timeframe="news", action=side, confidence=confidence,
+        entry_price=entry_price, stop_loss=entry_price, take_profit=entry_price,
+        pattern_score=0.0, indicator_score=0.0, sentiment_score=95.0, final_score=confidence,
+    )
 
 
 async def process_ticker(ticker, side, headline, summary):
@@ -186,14 +198,23 @@ async def process_ticker(ticker, side, headline, summary):
                     
                     if second_order_trades:
                         logger.warning(f"🕸️ KNOWLEDGE GRAPH ACTIVATED: Found {len(second_order_trades)} 2nd-Order trades for {ticker}")
+                        from engine.decision_router import ConfidenceSource, EventDirectness
                         for trade in second_order_trades:
                             st_ticker = trade["ticker"]
                             st_side = trade["action"]
                             st_reason = trade["reason"]
-                            logger.info(f"⚡ Firing 2nd-Order Trade: {st_ticker} {st_side} - {st_reason}")
-                            # Execute them instantly with 80% confidence override
+                            logger.info(f"⚡ Candidate 2nd-Order Trade: {st_ticker} {st_side} - {st_reason}")
+                            # sector_graph.py proposes the candidate but never independently
+                            # scores it — this "confidence" is a fixed override, not a real
+                            # evaluation, so the gate blocks it (BLOCKED_CONFIDENCE_INTEGRITY)
+                            # until sector_graph.py produces a genuine per-candidate score.
                             mock_result = {"confidence": 80, "bull": st_reason, "bear": st_reason}
-                            await _execute_news_trade(st_ticker, st_side, f"2nd Order Event from {ticker}: {headline}", mock_result)
+                            await _execute_news_trade(
+                                st_ticker, st_side, f"2nd Order Event from {ticker}: {headline}", mock_result,
+                                event_directness=EventDirectness.SECOND_ORDER,
+                                confidence_source=ConfidenceSource.HARDCODED,
+                                evidence_ids=[f"cascade_from:{ticker}"],
+                            )
                 
                 return success
             except Exception as exc:

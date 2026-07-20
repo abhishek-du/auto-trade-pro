@@ -22,7 +22,7 @@ Any caller wanting to place a trade calls `route_decision(signal, session)`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -47,7 +47,56 @@ class RoutingOutcome(str, Enum):
     BLOCKED_GATE    = "BLOCKED_SAFETY_GATE"
     BLOCKED_NO_TOKEN = "BLOCKED_NO_ZERODHA_TOKEN"
     BLOCKED_DISABLED = "BLOCKED_AGENT_DISABLED"
+    BLOCKED_CONFIDENCE_INTEGRITY = "BLOCKED_CONFIDENCE_INTEGRITY"
+    BLOCKED_SECOND_ORDER         = "BLOCKED_SECOND_ORDER_CONFIDENCE"
+    WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Central Execution Gate — TradeIntent contract
+#
+# Every strategy that wants to open a trade builds a TradeIntent and calls
+# execute_trade_intent(). This exists because an audit of the live trade log
+# (2026-07-20) found 10+ independent code paths calling open_paper_trade /
+# open_option_paper_trade / AgentExecutionManager.execute directly, each with
+# its own ad-hoc confidence threshold (10, 30, 55, ...) and — in two cases
+# (news_discovery_engine.py's 2nd-order cascade, event_arbitrage.py's instant
+# trade) — a hardcoded confidence number standing in for a real evaluation.
+# The gate enforces confidence provenance and event-directness before a
+# TradeIntent is even allowed to reach the existing mode/threshold routing
+# in route_decision() below.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ConfidenceSource(str, Enum):
+    CALCULATED = "calculated"   # produced by a real scoring/evaluation function
+    HARDCODED  = "hardcoded"    # a literal number standing in for an evaluation
+    OVERRIDE   = "override"     # explicit manual/admin override (not yet supported — blocked like HARDCODED)
+
+
+class EventDirectness(str, Enum):
+    DIRECT         = "direct"          # company's own filing/result/announcement
+    SECOND_ORDER   = "second_order"    # inferred via sector/supplier/competitor graph
+    SPECULATIVE    = "speculative"     # pure narrative/thematic inference — never auto-trades
+    NOT_APPLICABLE = "n/a"             # non-news strategies (technical/F&O scans)
+
+
+@dataclass
+class TradeIntent:
+    strategy:           str                        # e.g. "NEWS_DIRECT", "NEWS_CASCADE"
+    symbol:             str
+    action:             str                         # BUY | SELL
+    instrument_type:    str                         # EQUITY | CE | PE | FUTURE
+    entry_price:        float
+    stop_loss:          float
+    take_profit:        float
+    confidence:         float
+    confidence_source:  ConfidenceSource
+    event_directness:   EventDirectness = EventDirectness.NOT_APPLICABLE
+    evidence_ids:       list[str] = field(default_factory=list)
+    position_size_hint: dict | None = None
+    product:            str = "CNC"
+    extra:              dict = field(default_factory=dict)
 
 
 @dataclass
@@ -232,6 +281,149 @@ async def route_decision(
             reason=f"paper execution error: {exc}",
             metadata={"source": source},
         )
+
+
+def _intent_to_signal(intent: TradeIntent) -> Any:
+    """Build a TradingSignal from a TradeIntent for route_decision()/validate_signal()."""
+    from engine.signal_generator import TradingSignal
+    return TradingSignal(
+        symbol=intent.symbol, timeframe="event", action=intent.action,
+        confidence=intent.confidence, entry_price=intent.entry_price,
+        stop_loss=intent.stop_loss, take_profit=intent.take_profit,
+        pattern_score=0.0, indicator_score=0.0, sentiment_score=0.0,
+        final_score=intent.confidence,
+        reasoning_points=intent.extra.get("reasoning_points", []),
+        regime=intent.extra.get("regime", ""),
+    )
+
+
+async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> RoutingResult:
+    """Central execution gate. Every strategy must call this instead of
+    open_paper_trade / open_option_paper_trade / AgentExecutionManager.execute /
+    place_real_order directly.
+
+    Checks, in order:
+      1. Confidence provenance — only CALCULATED may auto-execute.
+      2. Event-directness tier — SPECULATIVE never auto-trades; SECOND_ORDER
+         needs a stricter confidence bar and evidence_ids.
+      3. Equity risk validation (validate_signal) when instrument_type == EQUITY.
+         F&O intents are not yet supported here — those strategies still call
+         their own open_option_paper_trade/open_spread_paper_trade/
+         open_future_paper_trade directly (Phase 2 migration).
+      4. Existing mode/threshold/execution routing via route_decision().
+    """
+    mode = await resolve_mode(session)
+
+    if intent.confidence_source != ConfidenceSource.CALCULATED:
+        result = RoutingResult(
+            outcome=RoutingOutcome.BLOCKED_CONFIDENCE_INTEGRITY, mode=mode,
+            reason=(
+                f"confidence_source={intent.confidence_source.value} — only 'calculated' "
+                f"confidence may auto-execute; a hardcoded/override value is not a real "
+                f"evaluation and cannot silently authorize a trade"
+            ),
+            metadata={"strategy": intent.strategy, "confidence": intent.confidence,
+                      "event_directness": intent.event_directness.value},
+        )
+        logger.warning(
+            f"[execution_gate] BLOCKED (confidence integrity) {intent.symbol} {intent.action} "
+            f"strategy={intent.strategy} source={intent.confidence_source.value} conf={intent.confidence}"
+        )
+        await _log_intent_audit(intent, mode, result, session)
+        return result
+
+    if intent.event_directness == EventDirectness.SPECULATIVE:
+        result = RoutingResult(
+            outcome=RoutingOutcome.WATCHLIST_ONLY, mode=mode,
+            reason="speculative inferred event — candidate only, not auto-tradable",
+            metadata={"strategy": intent.strategy, "confidence": intent.confidence},
+        )
+        logger.info(f"[execution_gate] WATCHLIST_ONLY {intent.symbol} strategy={intent.strategy}")
+        await _log_intent_audit(intent, mode, result, session)
+        return result
+
+    if intent.event_directness == EventDirectness.SECOND_ORDER:
+        if not intent.evidence_ids:
+            result = RoutingResult(
+                outcome=RoutingOutcome.BLOCKED_GATE, mode=mode,
+                reason="second-order intent has no evidence_ids — cannot verify the originating event",
+                metadata={"strategy": intent.strategy},
+            )
+            await _log_intent_audit(intent, mode, result, session)
+            return result
+        _min_second_order = float(getattr(settings, "SECOND_ORDER_MIN_CONFIDENCE", 70.0))
+        if intent.confidence < _min_second_order:
+            result = RoutingResult(
+                outcome=RoutingOutcome.BLOCKED_SECOND_ORDER, mode=mode,
+                reason=f"second-order candidate conf={intent.confidence:.1f} below stricter bar {_min_second_order:.1f}",
+                metadata={"strategy": intent.strategy},
+            )
+            await _log_intent_audit(intent, mode, result, session)
+            return result
+
+    signal = _intent_to_signal(intent)
+    position_size = intent.position_size_hint
+
+    if intent.instrument_type == "EQUITY":
+        from sqlalchemy import select as _select
+        from paper_trading.virtual_wallet import VirtualWallet
+        from engine.risk_manager import validate_signal, calculate_position_size
+        from db.models import OpenPosition
+
+        summary = await VirtualWallet.get_summary(session)
+        balance = summary["balance"]
+        open_positions = list((await session.execute(_select(OpenPosition))).scalars().all())
+        ok, reason = await validate_signal(signal, balance, open_positions, session)
+        if not ok:
+            result = RoutingResult(
+                outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                metadata={"strategy": intent.strategy},
+            )
+            await _log_intent_audit(intent, mode, result, session)
+            return result
+        if position_size is None:
+            position_size = calculate_position_size(signal, balance)
+    elif position_size is None:
+        position_size = {"units": 1, "usd_value": intent.entry_price}
+
+    result = await route_decision(signal, session, position_size=position_size, source=intent.strategy)
+    await _log_intent_audit(intent, mode, result, session)
+    return result
+
+
+async def _log_intent_audit(
+    intent: TradeIntent, mode: TradeMode, result: RoutingResult, session: AsyncSession,
+) -> None:
+    """Append a row to SimulationLog with the full TradeIntent provenance —
+    confidence_source and event_directness are what let this be audited later,
+    unlike the plain signal-based _log_decision_audit() below."""
+    try:
+        from db.models import SimulationLog
+        entry = SimulationLog(
+            event_type="EXECUTION_GATE",
+            symbol=intent.symbol,
+            message=f"{result.outcome.value} | {intent.strategy} | mode={mode.value}",
+            data={
+                "action":            intent.action,
+                "instrument_type":   intent.instrument_type,
+                "confidence":        intent.confidence,
+                "confidence_source": intent.confidence_source.value,
+                "event_directness":  intent.event_directness.value,
+                "evidence_ids":      intent.evidence_ids,
+                "entry":             intent.entry_price,
+                "stop_loss":         intent.stop_loss,
+                "take_profit":       intent.take_profit,
+                "outcome":           result.outcome.value,
+                "reason":            result.reason,
+                "mode":              mode.value,
+                "strategy":          intent.strategy,
+            },
+            timestamp=datetime.utcnow(),
+        )
+        session.add(entry)
+        await session.commit()
+    except Exception as exc:
+        logger.debug(f"[execution_gate] audit log failed: {exc}")
 
 
 async def _log_decision_audit(

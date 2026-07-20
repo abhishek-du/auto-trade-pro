@@ -19,7 +19,21 @@ async def evaluate_news_flash(headline: str, summary: str, source: str, session:
     Evaluates a breaking news headline for a high 'Surprise Factor'.
     If the LLM determines it's a massive surprise event (black swan or massive catalyst),
     we immediately execute an instant paper trade.
+
+    DISABLED by default (2026-07-20 execution-authority audit): _execute_instant_trade()
+    hardcodes confidence=99/master_score=99 in a MockDecision instead of a real evaluation,
+    and routes through AgentExecutionManager.execute() — the same manager that can reach
+    place_real_order() if AGENT_PAPER_MODE is ever False. This is called from two live
+    schedulers (crawler/news_crawler.py, tasks/india_tasks.py), so disabling it here (before
+    any LLM call, not just before execution) is the safest single choke point. Re-enable via
+    EVENT_ARBITRAGE_ENABLED=true only after this is migrated to build a TradeIntent with a
+    real confidence_source=CALCULATED value and routed through execute_trade_intent().
     """
+    from utils.config import settings
+    if not getattr(settings, "EVENT_ARBITRAGE_ENABLED", False):
+        logger.debug(f"[event_arbitrage] disabled (EVENT_ARBITRAGE_ENABLED=false) — skipping: {headline[:80]}")
+        return
+
     prompt = f"""You are an elite event-driven algorithmic trading engine for the NSE.
 A news flash or market update has just crossed the wire. Evaluate its "Actionability Factor" and immediate price impact on specific Indian listed companies.
 
