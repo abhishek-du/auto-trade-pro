@@ -908,7 +908,32 @@ async def _process_symbol(
         except (asyncio.TimeoutError, Exception) as _exc:
             logger.debug(f"[agent] pre-trade research error for {symbol}: {_exc} → ALLOW")
 
-    # 8. Execute
+    # 8. Central execution gate — confidence-provenance + equity risk check.
+    #    Uses authorize_trade_intent() (not execute_trade_intent()) because this
+    #    path's own executor (AgentExecutionManager) does more than a generic
+    #    open_paper_trade: it writes AgentDecision/AgentTrade audit tables (read
+    #    by /api/v1/agent/decisions and /api/v1/agent/trades), has its own
+    #    idempotency guard, and subscribes the live ticker. The gate only
+    #    decides whether the trade is authorized; execution mechanics stay here.
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    _intent = TradeIntent(
+        strategy=decision.strategy, symbol=decision.symbol, action=decision.action,
+        instrument_type=getattr(decision, "instrument_type", "EQUITY"),
+        entry_price=decision.entry, stop_loss=decision.stop, take_profit=decision.target,
+        confidence=decision.confidence, confidence_source=ConfidenceSource.CALCULATED,
+        event_directness=EventDirectness.NOT_APPLICABLE,
+    )
+    _auth = await authorize_trade_intent(_intent, session)
+    if not _auth.approved:
+        logger.info(f"[agent] GATE BLOCKED {symbol} | {_auth.reason} | {decision.strategy}")
+        await _log_skipped_decision(
+            symbol=symbol, candidate=candidate, regime=features.regime,
+            macro_bias=macro_bias, fund_score=fund_score,
+            drop_reason=f"execution_gate:{_auth.reason}", session=session, decision=decision,
+        )
+        return None
+
+    # 9. Execute
     order_id = await _executor.execute(decision, session)
 
     if order_id:
