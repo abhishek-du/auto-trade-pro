@@ -633,12 +633,13 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
             if spec is None:
                 continue
 
-            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
             _intent = TradeIntent(
                 strategy="FNO_SPREAD", symbol=spec.tradingsymbol_buy, action=direction,
                 instrument_type=spec.option_type,
                 entry_price=spec.net_premium, stop_loss=0.0, take_profit=0.0,
                 confidence=confidence, confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.FNO,
                 event_directness=EventDirectness.NOT_APPLICABLE,
             )
             _auth = await authorize_trade_intent(_intent, session)
@@ -834,11 +835,12 @@ async def evaluate_portfolio_hedge(session: AsyncSession, equity: float) -> dict
         stop=0.0, target=0.0, dte=contract.dte,     # hedge has no fixed SL/TP
     )
 
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
     _intent = TradeIntent(
         strategy="FNO_HEDGE", symbol=contract.tradingsymbol, action="BUY", instrument_type="PE",
         entry_price=premium, stop_loss=0.0, take_profit=0.0,
         confidence=sig[1], confidence_source=ConfidenceSource.CALCULATED,
+        strategy_family=StrategyFamily.FNO,
         event_directness=EventDirectness.NOT_APPLICABLE,
     )
     _auth = await authorize_trade_intent(_intent, session)

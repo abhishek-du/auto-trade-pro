@@ -1244,11 +1244,12 @@ async def _india_trade_loop():
             # signal already passed validate_signal + apply_reasoning_gate above;
             # event_directness=NOT_APPLICABLE (technical/hub scan, not a news
             # cascade). position_size_hint preserves the sizing already computed.
-            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome
             _intent = TradeIntent(
                 strategy=_strat, symbol=signal.symbol, action=signal.action, instrument_type="EQUITY",
                 entry_price=signal.entry_price, stop_loss=signal.stop_loss, take_profit=signal.take_profit,
                 confidence=signal.confidence, confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.TECHNICAL,
                 event_directness=EventDirectness.NOT_APPLICABLE, position_size_hint=pos_size, product=_product,
             )
             _gate_result = await execute_trade_intent(_intent, session)
@@ -2017,11 +2018,12 @@ async def _intraday_entry_task():
                 logger.debug(f"[intraday_entry] {sig.symbol}: insufficient cash (₹{balance:.0f})")
                 continue
 
-            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome
             _intent = TradeIntent(
                 strategy="INTRADAY_MIS", symbol=sig.symbol, action="BUY", instrument_type="EQUITY",
                 entry_price=sig.entry_price, stop_loss=sig.stop_loss, take_profit=sig.take_profit,
                 confidence=sig.confidence, confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.TECHNICAL,
                 event_directness=EventDirectness.NOT_APPLICABLE,
                 position_size_hint={"units": units, "usd_value": cost}, product="MIS",
             )
@@ -2163,11 +2165,12 @@ async def _open_index_option_mis(
         target=round(spec.premium * (1 + tp_pct * 5), 2),
     )
 
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
     _intent = TradeIntent(
         strategy="NIFTY_MIS_OPTION", symbol=spec.tradingsymbol, action=direction, instrument_type=spec.option_type,
         entry_price=spec.premium, stop_loss=spec.stop, take_profit=spec.target,
         confidence=abs(avg_score), confidence_source=ConfidenceSource.CALCULATED,
+        strategy_family=StrategyFamily.FNO,
         event_directness=EventDirectness.NOT_APPLICABLE,
     )
     _auth = await authorize_trade_intent(_intent, session)

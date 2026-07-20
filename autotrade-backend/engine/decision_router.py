@@ -81,6 +81,20 @@ class EventDirectness(str, Enum):
     NOT_APPLICABLE = "n/a"             # non-news strategies (technical/F&O scans)
 
 
+class StrategyFamily(str, Enum):
+    """Closed classification of WHY a trade exists — orthogonal to `strategy`
+    (which free-text names like "NEWS_DIRECT"/"FNO_SPREAD" already encode
+    inconsistently). Added per the 2026-07-20 execution-authority audit's
+    Phase 4 (event-driven-pipeline-audit.md): required on every TradeIntent so
+    performance can later be sliced by "why" a trade exists, not just overall
+    P&L — a news-driven trade and a technical-scan trade should never be
+    silently pooled together when measuring whether news actually has edge.
+    """
+    EVENT_DRIVEN = "EVENT_DRIVEN"   # news_discovery_engine.py, event_arbitrage.py
+    TECHNICAL    = "TECHNICAL"      # agent_loop.py equity scan, india_tasks.py equity/MIS loops
+    FNO          = "FNO"            # engine/fno/* — spreads, futures, straddles, NIFTY MIS options
+
+
 @dataclass
 class TradeIntent:
     strategy:           str                        # e.g. "NEWS_DIRECT", "NEWS_CASCADE"
@@ -92,6 +106,7 @@ class TradeIntent:
     take_profit:        float
     confidence:         float
     confidence_source:  ConfidenceSource
+    strategy_family:    StrategyFamily
     event_directness:   EventDirectness = EventDirectness.NOT_APPLICABLE
     evidence_ids:       list[str] = field(default_factory=list)
     position_size_hint: dict | None = None
@@ -431,6 +446,7 @@ async def _log_intent_audit(
                 "instrument_type":   intent.instrument_type,
                 "confidence":        intent.confidence,
                 "confidence_source": intent.confidence_source.value,
+                "strategy_family":   intent.strategy_family.value,
                 "event_directness":  intent.event_directness.value,
                 "evidence_ids":      intent.evidence_ids,
                 "entry":             intent.entry_price,
