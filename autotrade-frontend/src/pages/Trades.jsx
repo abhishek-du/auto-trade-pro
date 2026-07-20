@@ -579,7 +579,7 @@ export default function Trades() {
       getPortfolio().then(setWallet).catch(() => {});
     }
   }, [lastAgentEvent, refetchTrades]);
-  const wsStatus = connected ? 'open' : 'closed';
+  const wsStatus = connected ? 'connected' : 'closed';
 
   /* build symbol → position map for fast lookup.
      Agent trades use id="agent_N" which never matches OpenPosition.trade_id

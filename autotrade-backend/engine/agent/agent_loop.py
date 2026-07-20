@@ -309,25 +309,43 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     # Pre-fetch hub scores for the whole universe in one call (avoids N+1 queries)
     hub_scores: dict[str, dict] = await _fetch_hub_scores(universe, session)
 
+    # New entries must never be opened outside real NSE market hours, even on a
+    # force=True manual trigger — force is meant to let admins re-run exit/risk
+    # management (check_and_close_positions, MIS squareoff above) anytime, not
+    # to open fresh positions priced off a closed/stale feed. Without this,
+    # POST /cycle/trigger (which hardcodes force=True) could open a brand-new
+    # position at any hour, since only the whole-cycle force bypass gated
+    # _is_market_hours() before this point.
+    entries_allowed = _is_market_hours()
+    if not entries_allowed:
+        logger.info(
+            f"[agent] force cycle outside market hours "
+            f"({settings.AGENT_SESSION_START}-{settings.AGENT_SESSION_END} IST) "
+            f"— exits/risk checks ran above, but skipping new-entry scan for {len(universe)} symbol(s)"
+        )
+
     max_pos = getattr(settings, "AGENT_MAX_POSITIONS", 15)
-    for symbol in universe:
-        if len(portfolio.open_positions) >= max_pos:
-            logger.info(f"[agent] MAX_POSITIONS cap ({max_pos}) reached — stopping new entries")
-            break
-        try:
-            result = await _process_symbol(
-                symbol, portfolio, session,
-                hub_info=hub_scores.get(symbol) or hub_scores.get(symbol.replace(".NS", "")),
-                regime_mode=regime_mode,
-                market_regime=market_regime,
-            )
-            if result:
-                results.append(result)
-            else:
+    if entries_allowed:
+        for symbol in universe:
+            if len(portfolio.open_positions) >= max_pos:
+                logger.info(f"[agent] MAX_POSITIONS cap ({max_pos}) reached — stopping new entries")
+                break
+            try:
+                result = await _process_symbol(
+                    symbol, portfolio, session,
+                    hub_info=hub_scores.get(symbol) or hub_scores.get(symbol.replace(".NS", "")),
+                    regime_mode=regime_mode,
+                    market_regime=market_regime,
+                )
+                if result:
+                    results.append(result)
+                else:
+                    skipped += 1
+            except Exception as exc:
+                logger.warning(f"[agent] cycle error on {symbol}: {exc}")
                 skipped += 1
-        except Exception as exc:
-            logger.warning(f"[agent] cycle error on {symbol}: {exc}")
-            skipped += 1
+    else:
+        skipped = len(universe)
 
     # ── F&O spread SL/TP monitor (runs before opening new positions) ─────────
     if getattr(settings, "ENABLE_OPTIONS", False):
@@ -340,20 +358,21 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             logger.warning(f"[agent] spread monitor failed: {exc}")
 
     # ── F&O passes (additive; gated by ENABLE_OPTIONS / ENABLE_FUTURES) ───────
+    # Also new-entry-only — same entries_allowed gate as the equity scan above.
     fno_opened: list[dict] = []
-    if getattr(settings, "ENABLE_OPTIONS", False):
+    if entries_allowed and getattr(settings, "ENABLE_OPTIONS", False):
         try:
             from engine.fno.selection import evaluate_index_options
             fno_opened += await evaluate_index_options(session, portfolio.equity)
         except Exception as exc:
             logger.warning(f"[agent] F&O option pass failed: {exc}")
-    if getattr(settings, "ENABLE_FUTURES", False):
+    if entries_allowed and getattr(settings, "ENABLE_FUTURES", False):
         try:
             from engine.fno.futures import evaluate_index_futures
             fno_opened += await evaluate_index_futures(session, portfolio.equity)
         except Exception as exc:
             logger.warning(f"[agent] F&O futures pass failed: {exc}")
-    if getattr(settings, "FNO_HEDGE_ENABLED", False):
+    if entries_allowed and getattr(settings, "FNO_HEDGE_ENABLED", False):
         try:
             from engine.fno.selection import evaluate_portfolio_hedge
             hedge = await evaluate_portfolio_hedge(session, portfolio.equity)
@@ -361,7 +380,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
                 fno_opened.append(hedge)
         except Exception as exc:
             logger.warning(f"[agent] F&O hedge pass failed: {exc}")
-    if getattr(settings, "FNO_VOL_ENABLED", False):
+    if entries_allowed and getattr(settings, "FNO_VOL_ENABLED", False):
         try:
             from engine.fno.strategies_vol import evaluate_volatility
             fno_opened += await evaluate_volatility(session, portfolio.equity)

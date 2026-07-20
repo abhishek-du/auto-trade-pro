@@ -165,7 +165,7 @@ def _parse_chain_payload(payload: dict) -> tuple[list[dict], float, int, int, da
 # 1. Fetch
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_nse_chain_sync(normalized: str, equity: bool) -> dict:
+def _fetch_nse_chain_sync(normalized: str, equity: bool, expiry_date: datetime.date | None = None) -> dict:
     """Blocking NSE fetch via curl_cffi (Chrome TLS impersonation).
 
     NSE/Akamai fingerprints the TLS handshake, so plain httpx/requests get a
@@ -173,7 +173,8 @@ def _fetch_nse_chain_sync(normalized: str, equity: bool) -> dict:
     current v3 endpoint (the old option-chain-indices was retired → 404).
 
     Sequence: homepage + option-chain page (Akamai cookies) → contract-info
-    (expiry list) → option-chain-v3 for the nearest expiry.
+    (expiry list) → option-chain-v3 for the requested expiry (nearest, if
+    `expiry_date` is not given or doesn't match any listed expiry).
     """
     from curl_cffi import requests as creq
 
@@ -197,28 +198,39 @@ def _fetch_nse_chain_sync(normalized: str, equity: bool) -> dict:
     expiries = (ci.json() or {}).get("expiryDates") or []
     if not expiries:
         raise ValueError(f"NSE returned no expiries for {normalized}")
-    nearest = expiries[0]
+    target = expiries[0]
+    if expiry_date is not None:
+        for e in expiries:
+            if _parse_expiry(e) == expiry_date:
+                target = e
+                break
 
-    # Chain for the nearest expiry.
+    # Chain for the target expiry.
     import urllib.parse
-    url = _CHAIN_V3.format(otype=otype, symbol=normalized, expiry=urllib.parse.quote(nearest))
+    url = _CHAIN_V3.format(otype=otype, symbol=normalized, expiry=urllib.parse.quote(target))
     r = s.get(url, headers=headers, timeout=20)
     if r.status_code != 200:
         raise ValueError(f"NSE option-chain-v3 HTTP {r.status_code} for {normalized}")
     payload = r.json()
     if not payload or not (payload.get("records") or {}).get("data"):
         raise ValueError(f"NSE returned empty chain for {normalized} (market closed?)")
+    payload["_all_expiries"] = expiries
     return payload
 
 
-async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False) -> dict:
+async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False, expiry_date: datetime.date | None = None) -> dict:
     """Fetch the live NSE option chain for an index or single stock.
 
     Uses curl_cffi (Chrome TLS impersonation) + the current v3 API. The blocking
     fetch runs in a thread executor so the async caller isn't blocked.
 
+    `expiry_date` (optional): fetch this specific expiry's chain instead of the
+    nearest one (falls back to nearest if it isn't in NSE's listed expiries).
+    Needed because a position can be opened on a later expiry than the front
+    week, and that contract still needs live premium updates every cycle.
+
     Returns dict: symbol, expiry_date, spot_price, options_data, total_call_oi,
-    total_put_oi. Raises ValueError on bot-block / empty / closed-market.
+    total_put_oi, all_expiries. Raises ValueError on bot-block / empty / closed-market.
     """
     normalized = symbol.upper().replace(" ", "").replace("-", "").replace(".NS", "")
     if not equity and normalized not in SUPPORTED_SYMBOLS:
@@ -231,7 +243,7 @@ async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False) ->
 
     loop = asyncio.get_event_loop()
     try:
-        payload = await loop.run_in_executor(None, _fetch_nse_chain_sync, normalized, equity)
+        payload = await loop.run_in_executor(None, _fetch_nse_chain_sync, normalized, equity, expiry_date)
     except Exception as exc:
         _last_nse_failure = _time.time()
         raise ValueError(str(exc))
@@ -252,6 +264,7 @@ async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False) ->
         "options_data":  options_data,
         "total_call_oi": total_call_oi,
         "total_put_oi":  total_put_oi,
+        "all_expiries":  payload.get("_all_expiries") or [],
     }
 
 
@@ -597,5 +610,63 @@ async def run_options_analysis(session: AsyncSession) -> dict:
             else:
                 logger.warning(f"Options analysis failed for {symbol}: {msg}")
             results[symbol] = {"error": msg}
+
+    # ── Non-nearest expiries with open positions ────────────────────────────
+    # The pass above only ever fetches the single nearest NSE expiry per
+    # symbol. A position opened on a later expiry (e.g. next week's, while
+    # this week's is still the "nearest") would then never get a fresh
+    # snapshot until its own expiry becomes the nearest one — silently
+    # freezing current_option_premium() at the entry price for the position's
+    # entire life. Cover any open position's actual expiry explicitly.
+    covered = {
+        (sym, res["expiry_date"])
+        for sym, res in results.items()
+        if "error" not in res
+    }
+    try:
+        from sqlalchemy import select as _select, distinct as _distinct
+        from db.models import OpenPosition
+        today = datetime.date.today()
+        rows = (await session.execute(
+            _select(_distinct(OpenPosition.underlying_symbol), OpenPosition.expiry_date)
+            .where(
+                OpenPosition.instrument_type.in_(("CE", "PE")),
+                OpenPosition.underlying_symbol.in_(SUPPORTED_SYMBOLS),
+                OpenPosition.expiry_date.is_not(None),
+                OpenPosition.expiry_date >= today,
+            )
+        )).all()
+    except Exception as exc:
+        logger.warning(f"Options analysis: open-position expiry lookup failed: {exc}")
+        rows = []
+
+    for underlying, expiry_date in rows:
+        if (underlying, expiry_date) in covered:
+            continue
+        try:
+            chain = await fetch_options_chain(underlying, expiry_date=expiry_date)
+            if not chain["options_data"] or chain["spot_price"] == 0:
+                continue
+            if getattr(settings, "ENABLE_FNO", False):
+                await compute_and_persist_greeks(underlying, chain, session)
+            else:
+                # Still persist raw per-strike LTPs even when Greeks are gated
+                # off, so current_option_premium()'s snapshot fallback (tier 3)
+                # has data for this contract regardless of ENABLE_FNO.
+                for row in chain["options_data"]:
+                    strike = float(row.get("strike_price") or 0.0)
+                    if strike <= 0:
+                        continue
+                    for opt_type, ltp_key in (("CE", "call_ltp"), ("PE", "put_ltp")):
+                        ltp = float(row.get(ltp_key) or 0.0)
+                        session.add(OptionContractSnapshot(
+                            underlying=underlying.upper(), expiry_date=chain["expiry_date"],
+                            strike=strike, option_type=opt_type, spot=chain["spot_price"], ltp=ltp,
+                        ))
+                await session.flush()
+            covered.add((underlying, expiry_date))
+            logger.info(f"[options] {underlying} extra expiry {expiry_date} snapshotted for open position(s)")
+        except Exception as exc:
+            logger.warning(f"[options] extra-expiry snapshot failed for {underlying} {expiry_date}: {exc}")
 
     return results

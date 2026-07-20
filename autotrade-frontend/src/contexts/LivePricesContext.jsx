@@ -38,6 +38,7 @@ export function LivePricesProvider({ children }) {
   const wsRef        = useRef(null);
   const pingRef      = useRef(null);
   const reconnectRef = useRef(null);
+  const retriesRef   = useRef(0);
   const restPollRef  = useRef(null);
   const mountedRef   = useRef(true);
 
@@ -68,6 +69,7 @@ export function LivePricesProvider({ children }) {
     ws.onopen = () => {
       if (!mountedRef.current) { ws.close(); return; }
       setConnected(true);
+      retriesRef.current = 0;
       clearTimeout(reconnectRef.current);
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send('ping');
@@ -98,16 +100,13 @@ export function LivePricesProvider({ children }) {
       clearInterval(pingRef.current);
       if (!mountedRef.current) return;
       setConnected(false);
-      
-      const retries = reconnectRef.current?.retries || 0;
-      if (retries < 3) {
-        reconnectRef.current = setTimeout(() => {
-          reconnectRef.current.retries = retries + 1;
-          connect();
-        }, RECONNECT_MS);
-      } else {
-        console.warn('WebSocket failed 3 times. Falling back to REST polling entirely.');
+
+      const delay = retriesRef.current < 3 ? RECONNECT_MS : REST_POLL_MS;
+      if (retriesRef.current === 3) {
+        console.warn('WebSocket failed 3 times. Falling back to REST polling; will keep retrying WS every 30s in the background.');
       }
+      retriesRef.current += 1;
+      reconnectRef.current = setTimeout(connect, delay);
     };
 
     ws.onerror = () => {
