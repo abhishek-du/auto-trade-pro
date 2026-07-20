@@ -2908,26 +2908,6 @@ def kite_check_token_task():
     return {"valid": valid}
 
 
-@celery_app.task(name="tasks.run_agent_cycle")
-def run_agent_cycle_task():
-    """Run one AI agent evaluation cycle on each 15-min bar close."""
-    async def _run():
-        from db.database import get_db
-        from engine.agent.agent_loop import run_agent_cycle
-        async for session in get_db():
-            result = await run_agent_cycle(session)
-            logger.info(
-                f"[agent_cycle] scanned={result.get('symbols_scanned',0)} "
-                f"decisions={result.get('decisions',0)} "
-                f"mode={'PAPER' if result.get('paper_mode') else 'LIVE'} "
-                f"status={result.get('status')}"
-            )
-            break
-
-    asyncio.run(_run())
-    return {"status": "done"}
-
-
 @celery_app.task(
     name="tasks.run_master_intelligence_cycle",
     soft_time_limit=1080,  # ~758 symbols × candle-load + indicators; raise from the 300s default

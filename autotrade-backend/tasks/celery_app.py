@@ -36,7 +36,6 @@ celery_app = Celery(
         "tasks.india_tasks",
         "tasks.market_scanner",
         "tasks.pre_diagnose",
-        "tasks.unstructured_alpha_scan",
     ],
 )
 
@@ -113,12 +112,6 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_options_analysis",
         "schedule": 900,
         "options":  {"countdown": 10},
-    },
-
-    # Every hour: Advanced Unstructured Data Parsing (Alpha Edge)
-    "unstructured-alpha-scan-hourly": {
-        "task":     "tasks.unstructured_alpha_scan",
-        "schedule": crontab(minute=15),
     },
 
     # 2×/day during NSE hours (05:30 UTC = 11:00 IST, 09:30 UTC = 15:00 IST):
