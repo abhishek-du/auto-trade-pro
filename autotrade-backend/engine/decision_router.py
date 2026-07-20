@@ -362,8 +362,22 @@ async def _verify_canonical_event(intent: TradeIntent, session: AsyncSession) ->
     if canonical is None:
         return False, f"event_id={intent.event_id} does not reference an existing CausalEvent row"
 
+    canonical_materiality = (canonical.country or "").upper()  # country column stores impact/materiality (event_pipeline.py convention)
+
+    # Phase 2 — materiality floor for DIRECT candidates (News-Only Target
+    # Architecture Contract, "Direct Candidates" requirements: "materiality
+    # must meet the minimum threshold"). A LOW/NONE-materiality event means
+    # the classifier itself judged the event as not very meaningful — trading
+    # on it contradicts "news creates the thesis." Only applies to DIRECT;
+    # SECOND_ORDER has its own stricter WATCHLIST_ONLY path (Phase 2.3) and
+    # SPECULATIVE is already WATCHLIST_ONLY-only elsewhere in this function.
+    if intent.event_directness == EventDirectness.DIRECT and canonical_materiality in ("LOW", "NONE"):
+        return False, (
+            f"materiality floor: canonical CausalEvent id={intent.event_id} has "
+            f"materiality={canonical_materiality or 'UNSET'} — below the minimum for a DIRECT trade"
+        )
+
     if intent.evidence is not None:
-        canonical_materiality = (canonical.country or "").upper()  # country column stores impact/materiality (event_pipeline.py convention)
         snapshot_materiality  = (intent.evidence.materiality or "").upper()
         if canonical_materiality and snapshot_materiality and canonical_materiality != snapshot_materiality:
             return False, (
@@ -371,20 +385,50 @@ async def _verify_canonical_event(intent: TradeIntent, session: AsyncSession) ->
                 f"CausalEvent id={intent.event_id} has materiality={canonical_materiality}"
             )
 
+        # Phase 2 — tightened from "reject only if affirmatively in the
+        # OPPOSITE list" to "require affirmative presence in the MATCHING
+        # list." The old version let a caller claim a direction the canonical
+        # event never actually confirmed for this symbol, as long as it also
+        # wasn't confirmed opposite. Direct candidates require canonical
+        # confirmation, not merely absence of contradiction.
         bare_symbol = intent.symbol.replace(".NS", "").replace(".BO", "").upper()
         bullish = {s.upper() for s in (canonical.bullish_stocks or [])}
         bearish = {s.upper() for s in (canonical.bearish_stocks or [])}
         snapshot_direction = (intent.evidence.direction or "").upper()
-        if snapshot_direction == "BULLISH" and bearish and bare_symbol in bearish and bare_symbol not in bullish:
-            return False, (
-                f"evidence drift: snapshot claims BULLISH for {intent.symbol} but canonical "
-                f"CausalEvent id={intent.event_id} lists it under bearish_stocks"
-            )
-        if snapshot_direction == "BEARISH" and bullish and bare_symbol in bullish and bare_symbol not in bearish:
-            return False, (
-                f"evidence drift: snapshot claims BEARISH for {intent.symbol} but canonical "
-                f"CausalEvent id={intent.event_id} lists it under bullish_stocks"
-            )
+        if (bullish or bearish) and snapshot_direction in ("BULLISH", "BEARISH"):
+            if snapshot_direction == "BULLISH" and bare_symbol not in bullish:
+                return False, (
+                    f"evidence drift: snapshot claims BULLISH for {intent.symbol} but canonical "
+                    f"CausalEvent id={intent.event_id} does not list it under bullish_stocks "
+                    f"(bullish={sorted(bullish)}, bearish={sorted(bearish)})"
+                )
+            if snapshot_direction == "BEARISH" and bare_symbol not in bearish:
+                return False, (
+                    f"evidence drift: snapshot claims BEARISH for {intent.symbol} but canonical "
+                    f"CausalEvent id={intent.event_id} does not list it under bearish_stocks "
+                    f"(bullish={sorted(bullish)}, bearish={sorted(bearish)})"
+                )
+
+    # Phase 2 — thesis-vs-canonical check, moved to the gate itself so it
+    # applies to ANY EVENT_DRIVEN TradeIntent, not just ones that happened to
+    # go through news_discovery_engine.py's own pre-gate call to
+    # validate_evidence_consistency(). Reuses that SAME function (not a
+    # reimplementation) by adapting the intent's own reasoning text into the
+    # verdict-dict shape it expects. This is what would catch a downstream
+    # LLM producing a "Strong earnings beat" thesis against a canonical
+    # "routine filing, no financial figures" event, regardless of which
+    # caller built the TradeIntent.
+    from engine.event_classifier import validate_evidence_consistency, DecisionEvidence as _DE
+    thesis_evidence = intent.evidence or _DE(
+        source_type="CANONICAL", source_id=str(canonical.id), title="", summary="",
+        event_category=canonical.event_title, materiality=canonical_materiality,
+        direction="BULLISH" if intent.action == "BUY" else "BEARISH",
+        confidence=canonical.confidence,
+    )
+    thesis_text = " ".join(str(r) for r in (intent.extra or {}).get("reasoning_points", []))
+    consistency = validate_evidence_consistency(thesis_evidence, {"bull": thesis_text, "confidence": intent.confidence})
+    if not consistency.consistent:
+        return False, f"thesis-vs-canonical drift: {consistency.reason}"
 
     return True, "canonical event verified"
 
@@ -419,6 +463,40 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
                         f"strategy={intent.strategy} reason={_event_reason}")
         await _log_intent_audit(intent, mode, result, session)
         return AuthorizationResult(approved=False, mode=mode, reason=_event_reason, outcome=result.outcome)
+
+    # Phase 2.3 — second-order candidates are "just another candidate mode,"
+    # not a separate strategy (News-Only Target Architecture Contract §4b):
+    # second_order_confidence = event_strength x causal_relationship_strength
+    # x company_exposure x market_confirmation. sector_graph.py's
+    # get_second_order_trades() does not yet compute causal_relationship_strength/
+    # company_exposure/market_confirmation for a candidate — per the user's own
+    # explicit fallback clause ("if the full scoring system cannot safely be
+    # implemented in Phase 2, keep second-order candidate generation disabled
+    # for execution, preserve the candidate as WATCHLIST_ONLY, do not create a
+    # tradeable TradeIntent"), any second-order intent missing one of these
+    # factors is routed to WATCHLIST_ONLY here — before the confidence_source
+    # check below — so it can never slip through even if a future caller
+    # attaches a genuinely CALCULATED confidence_source to it. No default, no
+    # fallback number, no fake confidence: an absent factor blocks, it is
+    # never substituted.
+    if intent.event_directness == EventDirectness.SECOND_ORDER:
+        _required_factors = ("relationship_type", "relationship_strength", "company_exposure", "market_confirmation")
+        _missing = [f for f in _required_factors if intent.extra.get(f) is None]
+        if _missing:
+            reason = (
+                f"second-order candidate missing required scoring factor(s) {_missing} — "
+                f"cannot compute second_order_confidence; preserved as WATCHLIST_ONLY, not auto-tradable"
+            )
+            result = RoutingResult(
+                outcome=RoutingOutcome.WATCHLIST_ONLY, mode=mode, reason=reason,
+                metadata={"strategy": intent.strategy, "missing_factors": _missing, "event_id": intent.event_id},
+            )
+            logger.info(
+                f"[execution_gate] WATCHLIST_ONLY (second-order incomplete scoring) {intent.symbol} "
+                f"strategy={intent.strategy} missing={_missing}"
+            )
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     if intent.confidence_source != ConfidenceSource.CALCULATED:
         reason = (
@@ -532,6 +610,14 @@ async def _log_intent_audit(
                 "event_id":          intent.event_id,
                 "event_directness":  intent.event_directness.value,
                 "evidence_ids":      intent.evidence_ids,
+                # Phase 2 §3 (canonical News->Candidate handoff): every automatic
+                # candidate must carry event_category/event_direction/event_materiality
+                # in addition to event_id/evidence_ids/event_directness — these live on
+                # intent.evidence (a DecisionEvidence), not on TradeIntent directly, so
+                # they must be pulled out explicitly or this audit trail loses them.
+                "event_category":    intent.evidence.event_category if intent.evidence else None,
+                "event_direction":   intent.evidence.direction if intent.evidence else None,
+                "event_materiality": intent.evidence.materiality if intent.evidence else None,
                 "entry":             intent.entry_price,
                 "stop_loss":         intent.stop_loss,
                 "take_profit":       intent.take_profit,

@@ -162,7 +162,7 @@ async def _compute_news_trade_levels(ticker: str, side: str, entry_price: float)
 async def _execute_news_trade(
     ticker: str, side: str, headline: str, verdict: dict, *,
     event_directness=None, confidence_source=None, evidence_ids: list[str] | None = None,
-    event_id: int | None = None, evidence=None,
+    event_id: int | None = None, evidence=None, extra_factors: dict | None = None,
 ) -> bool:
     """Build a TradeIntent from a TAKE verdict and route it through the central
     execution gate (engine.decision_router.execute_trade_intent), so a
@@ -222,6 +222,10 @@ async def _execute_news_trade(
     confidence = float(verdict.get("confidence") or 60)
     product = "MIS" if side == "SELL" else "CNC"  # NSE: equity shorts must be intraday
 
+    extra = {"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]}
+    if extra_factors:
+        extra.update(extra_factors)
+
     intent = TradeIntent(
         strategy="NEWS_CASCADE" if event_directness == EventDirectness.SECOND_ORDER else "NEWS_DIRECT",
         symbol=ticker, action=side, instrument_type="EQUITY",
@@ -231,7 +235,7 @@ async def _execute_news_trade(
         event_directness=event_directness, evidence_ids=evidence_ids or [],
         event_id=event_id, evidence=evidence,
         product=product,
-        extra={"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]},
+        extra=extra,
     )
 
     async with AsyncSessionLocal() as session:
@@ -262,11 +266,59 @@ def _intent_to_signal_for_alert(ticker: str, side: str, entry_price: float, conf
     )
 
 
+async def _find_canonical_event(headline: str, session) -> "tuple[object, int] | None":
+    """Phase 2 (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md, "no duplicate
+    LLM classification"): before classifying this headline fresh, check
+    whether crawler/event_pipeline.py's independent pipeline already
+    classified an equivalent headline recently. That pipeline always links
+    news_id to a real NewsItem row, so its CausalEvent rows are the only ones
+    we can reliably recover original headline text for (this file's own
+    CausalEvent writes have news_id=None — see docstring below and
+    docs/PHASE_2_CANONICAL_EVENT_INTEGRATION_REPORT.md §5 for why that gap
+    isn't closed here: extending the CausalEvent schema wasn't judged
+    "genuinely necessary" per the contract's Rule 1 — this dedup already
+    catches the cross-pipeline duplication that matters most).
+
+    Reuses the exact same difflib similarity approach and 0.5 threshold as
+    engine/news_discovery_engine.py::DuplicateEventEngine, for consistency
+    with the one clustering mechanism that already exists in this codebase.
+
+    Returns (CausalEvent, news_item_headline) for the best match within the
+    last 6 hours, or None if nothing matches.
+    """
+    import difflib
+    from datetime import timedelta
+    from sqlalchemy import select as _select
+    from db.models import CausalEvent, NewsItem
+
+    cutoff = datetime.utcnow() - timedelta(hours=6)
+    rows = (await session.execute(
+        _select(CausalEvent, NewsItem.headline)
+        .join(NewsItem, CausalEvent.news_id == NewsItem.id)
+        .where(CausalEvent.created_at >= cutoff)
+        .order_by(CausalEvent.created_at.desc())
+        .limit(100)
+    )).all()
+
+    for causal, ni_headline in rows:
+        if not ni_headline:
+            continue
+        similarity = difflib.SequenceMatcher(None, headline.lower(), ni_headline.lower()).ratio()
+        if similarity > 0.5:
+            return causal, ni_headline
+    return None
+
+
 async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
     """Classify this event (headline + summary, not headline-only) and persist
     a CausalEvent row for traceability, connecting the previously-disconnected
     event-classification pipeline (crawler/event_pipeline.py) to the actual
     trade-decision path for the first time.
+
+    Phase 2 addition: first checks _find_canonical_event() — if
+    crawler/event_pipeline.py's independent pipeline already classified an
+    equivalent headline recently, that classification is reused (no second,
+    independent LLM call, no second CausalEvent row for the same real event).
 
     Returns (DecisionEvidence, event_id) — event_id is the persisted
     CausalEvent.id (the canonical row the central gate will look up and
@@ -279,6 +331,33 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
     caller-supplied evidence snapshot)."""
     from engine.event_classifier import classify_event, DecisionEvidence
     from db.models import CausalEvent
+
+    # Phase 2 — reuse the canonical classification if event_pipeline.py's
+    # independent pipeline already produced one for this same real event,
+    # instead of a second, independent LLM call that could disagree with it.
+    try:
+        async with AsyncSessionLocal() as dedup_session:
+            found = await _find_canonical_event(headline, dedup_session)
+    except Exception as exc:
+        logger.debug(f"[news_engine] {ticker}: canonical-event lookup failed, proceeding to classify fresh: {exc}")
+        found = None
+
+    if found is not None:
+        canonical, matched_headline = found
+        bare = ticker.replace(".NS", "").replace(".BO", "").upper()
+        bullish = {s.upper() for s in (canonical.bullish_stocks or [])}
+        bearish = {s.upper() for s in (canonical.bearish_stocks or [])}
+        direction = "BULLISH" if bare in bullish else ("BEARISH" if bare in bearish else ("BULLISH" if side == "BUY" else "BEARISH"))
+        evidence = DecisionEvidence(
+            source_type="CANONICAL_REUSE", source_id=str(canonical.id), title=matched_headline,
+            summary=summary or "", event_category=canonical.event_title,
+            materiality=canonical.country, direction=direction, confidence=canonical.confidence,
+        )
+        logger.info(
+            f"[news_engine] {ticker}: reusing canonical CausalEvent id={canonical.id} "
+            f"(matched headline: '{matched_headline[:60]}...') — skipping a second classify_event() call"
+        )
+        return evidence, canonical.id
 
     classification = await classify_event(headline, summary)
     if classification is None:
@@ -406,24 +485,32 @@ async def process_ticker(ticker, side, headline, summary):
                             st_side = trade["action"]
                             st_reason = trade["reason"]
                             logger.info(f"⚡ Candidate 2nd-Order Trade: {st_ticker} {st_side} - {st_reason}")
-                            # sector_graph.py proposes the candidate but never independently
-                            # scores it — this "confidence" is a fixed override, not a real
-                            # evaluation, so the gate blocks it (BLOCKED_CONFIDENCE_INTEGRITY)
-                            # until sector_graph.py produces a genuine per-candidate score.
-                            mock_result = {"confidence": 80, "bull": st_reason, "bear": st_reason}
-                            # event_id is the SAME primary event (SG Mart's news is what
-                            # caused this candidate to be proposed) — but no `evidence`
-                            # snapshot, since sector_graph.py hasn't independently verified
-                            # this symbol's own materiality/direction (that's the still-open
-                            # causal_relationship_strength/company_exposure work from
-                            # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §4b). Still
-                            # blocked today by confidence_source=HARDCODED regardless.
+                            # Phase 2.3 (News-Only Target Architecture Contract §4b):
+                            # second_order_confidence = event_strength x causal_relationship_strength
+                            # x company_exposure x market_confirmation. sector_graph.py's
+                            # get_second_order_trades() does not compute
+                            # relationship_strength/company_exposure/market_confirmation for
+                            # this candidate — no default, no fallback number, no fake
+                            # confidence is substituted for them (confidence=0, not a made-up
+                            # 80%). Passing them through as explicit None (not omitted) is what
+                            # the gate's new SECOND_ORDER factor check in
+                            # authorize_trade_intent() keys on to route this straight to
+                            # WATCHLIST_ONLY — the candidate is preserved for visibility but
+                            # cannot become a tradeable position until sector_graph.py actually
+                            # produces these factors.
+                            no_score_result = {"confidence": 0, "bull": st_reason, "bear": st_reason}
                             await _execute_news_trade(
-                                st_ticker, st_side, f"2nd Order Event from {ticker}: {headline}", mock_result,
+                                st_ticker, st_side, f"2nd Order Event from {ticker}: {headline}", no_score_result,
                                 event_directness=EventDirectness.SECOND_ORDER,
                                 confidence_source=ConfidenceSource.HARDCODED,
                                 evidence_ids=[f"cascade_from:{ticker}", str(event_id)],
                                 event_id=event_id,
+                                extra_factors={
+                                    "relationship_type": trade.get("relationship_type"),
+                                    "relationship_strength": trade.get("relationship_strength"),
+                                    "company_exposure": trade.get("company_exposure"),
+                                    "market_confirmation": trade.get("market_confirmation"),
+                                },
                             )
                 
                 return success
