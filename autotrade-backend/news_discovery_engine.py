@@ -162,14 +162,15 @@ async def _compute_news_trade_levels(ticker: str, side: str, entry_price: float)
 async def _execute_news_trade(
     ticker: str, side: str, headline: str, verdict: dict, *,
     event_directness=None, confidence_source=None, evidence_ids: list[str] | None = None,
+    event_id: int | None = None, evidence=None,
 ) -> bool:
     """Build a TradeIntent from a TAKE verdict and route it through the central
     execution gate (engine.decision_router.execute_trade_intent), so a
     news-triggered trade obeys the same guardrails — cash buffer, sector caps,
     correlation limits, duplicate-position guard, drawdown breakers, AND the
-    gate's confidence-provenance/event-directness checks — rather than
-    bypassing risk management. Returns True only if a position was actually
-    opened.
+    gate's confidence-provenance/event-directness/NO-EVENT-NO-TRADE checks —
+    rather than bypassing risk management. Returns True only if a position was
+    actually opened.
 
     event_directness/confidence_source default to DIRECT/CALCULATED (a primary
     TAKE verdict from llm_tooluse_candidate is a real evaluation). The 2nd-order
@@ -177,6 +178,12 @@ async def _execute_news_trade(
     "confidence" is a fixed override, not an independent evaluation — the gate
     blocks that by design (BLOCKED_CONFIDENCE_INTEGRITY) until sector_graph.py
     produces a real per-candidate score.
+
+    event_id: the canonical CausalEvent.id this trade traces back to (per
+    docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md's "NO EVENT -> NO TRADE"
+    invariant). The gate re-verifies this against the DB itself — it does not
+    trust `evidence` (a caller-provided DecisionEvidence snapshot, used only
+    for audit-log convenience) as the authority.
     """
     from crawler.live_prices import get_price, yfinance_ltp_batch
     from engine.decision_router import (
@@ -222,6 +229,7 @@ async def _execute_news_trade(
         confidence=confidence, confidence_source=confidence_source,
         strategy_family=StrategyFamily.EVENT_DRIVEN,
         event_directness=event_directness, evidence_ids=evidence_ids or [],
+        event_id=event_id, evidence=evidence,
         product=product,
         extra={"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]},
     )
@@ -258,25 +266,34 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
     """Classify this event (headline + summary, not headline-only) and persist
     a CausalEvent row for traceability, connecting the previously-disconnected
     event-classification pipeline (crawler/event_pipeline.py) to the actual
-    trade-decision path for the first time. Returns a DecisionEvidence, or
-    None if classification fails (callers must treat None as "no evidence to
-    validate against", not as a free pass)."""
+    trade-decision path for the first time.
+
+    Returns (DecisionEvidence, event_id) — event_id is the persisted
+    CausalEvent.id (the canonical row the central gate will look up and
+    verify against per docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md's
+    "NO EVENT -> NO TRADE" invariant). Returns (None, None) if classification
+    fails or the row couldn't be persisted — callers must treat this as "no
+    event, no trade," not as a free pass (this was a real fail-open bug,
+    documented in docs/COMPLETE_SYSTEM_DEEP_AUDIT_HINGLISH.md P0-2, fixed by
+    the gate itself now requiring a real event_id rather than trusting a
+    caller-supplied evidence snapshot)."""
     from engine.event_classifier import classify_event, DecisionEvidence
     from db.models import CausalEvent
 
     classification = await classify_event(headline, summary)
     if classification is None:
-        logger.warning(f"[news_engine] {ticker}: event classification failed — proceeding without structured evidence")
-        return None
+        logger.warning(f"[news_engine] {ticker}: event classification failed — no event, no trade")
+        return None, None
 
     evidence = DecisionEvidence.from_classification(
         classification, source_type="NSE_ANNOUNCEMENT_OR_RSS", source_id=None,
         title=headline, summary=summary or "",
     )
 
+    event_id = None
     try:
         async with AsyncSessionLocal() as session:
-            session.add(CausalEvent(
+            causal = CausalEvent(
                 news_id=None,  # this pipeline doesn't have a NewsItem row to link — see audit doc §3.6
                 event_title=classification.category,
                 country=classification.impact,  # matches crawler/event_pipeline.py's existing (mis)use of this column
@@ -287,12 +304,21 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
                 bullish_stocks=classification.entities.get("companies", []) if classification.bullish else [],
                 bearish_stocks=classification.entities.get("companies", []) if not classification.bullish else [],
                 duration=str(classification.expected_half_life_hours),
-            ))
+            )
+            session.add(causal)
             await session.commit()
+            event_id = causal.id
     except Exception as exc:
         logger.warning(f"[news_engine] {ticker}: failed to persist CausalEvent: {exc}")
 
-    return evidence
+    if event_id is None:
+        # Classification succeeded but persistence failed — under the
+        # "NO EVENT -> NO TRADE" invariant there is no canonical row to trace
+        # this trade to, so treat it the same as a classification failure.
+        logger.warning(f"[news_engine] {ticker}: CausalEvent not persisted — no event, no trade")
+        return None, None
+
+    return evidence, event_id
 
 
 async def _log_evidence_gate_audit(ticker, side, evidence, verdict, consistency) -> None:
@@ -327,7 +353,14 @@ async def process_ticker(ticker, side, headline, summary):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
-    cand.evidence = await _build_evidence(ticker, side, headline, summary)
+    cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary)
+
+    if event_id is None:
+        # "NO EVENT -> NO TRADE" (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §5) —
+        # no canonical CausalEvent means this candidate can never legally pass the
+        # gate, so don't spend an LLM call deliberating over it.
+        logger.info(f"[news_engine] {ticker}: no canonical event — skipping (no LLM call)")
+        return False
 
     try:
         result = await llm_tooluse_candidate(ticker, cand, dec)
@@ -355,7 +388,10 @@ async def process_ticker(ticker, side, headline, summary):
                 return False
 
             try:
-                success = await _execute_news_trade(ticker, side, headline, result)
+                success = await _execute_news_trade(
+                    ticker, side, headline, result,
+                    event_id=event_id, evidence=cand.evidence, evidence_ids=[str(event_id)],
+                )
                 if success:
                     # Trigger 2nd-order graph trades
                     from engine.sector_graph import get_second_order_trades
@@ -375,11 +411,19 @@ async def process_ticker(ticker, side, headline, summary):
                             # evaluation, so the gate blocks it (BLOCKED_CONFIDENCE_INTEGRITY)
                             # until sector_graph.py produces a genuine per-candidate score.
                             mock_result = {"confidence": 80, "bull": st_reason, "bear": st_reason}
+                            # event_id is the SAME primary event (SG Mart's news is what
+                            # caused this candidate to be proposed) — but no `evidence`
+                            # snapshot, since sector_graph.py hasn't independently verified
+                            # this symbol's own materiality/direction (that's the still-open
+                            # causal_relationship_strength/company_exposure work from
+                            # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §4b). Still
+                            # blocked today by confidence_source=HARDCODED regardless.
                             await _execute_news_trade(
                                 st_ticker, st_side, f"2nd Order Event from {ticker}: {headline}", mock_result,
                                 event_directness=EventDirectness.SECOND_ORDER,
                                 confidence_source=ConfidenceSource.HARDCODED,
-                                evidence_ids=[f"cascade_from:{ticker}"],
+                                evidence_ids=[f"cascade_from:{ticker}", str(event_id)],
+                                event_id=event_id,
                             )
                 
                 return success

@@ -309,17 +309,22 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     # Pre-fetch hub scores for the whole universe in one call (avoids N+1 queries)
     hub_scores: dict[str, dict] = await _fetch_hub_scores(universe, session)
 
-    # New entries must never be opened outside real NSE market hours, even on a
-    # force=True manual trigger — force is meant to let admins re-run exit/risk
-    # management (check_and_close_positions, MIS squareoff above) anytime, not
-    # to open fresh positions priced off a closed/stale feed. Without this,
-    # POST /cycle/trigger (which hardcodes force=True) could open a brand-new
-    # position at any hour, since only the whole-cycle force bypass gated
-    # _is_market_hours() before this point.
-    entries_allowed = _is_market_hours()
+    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────────
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: this equity Hub scan
+    # (and the F&O passes it drives below) is a "Technical stock scanner" that
+    # independently originates trades from MasterIntelligenceScore alone, with
+    # no news event. That authority is FORBIDDEN under the News-Only
+    # architecture, unconditionally — not just outside market hours (the
+    # market-hours gate below predates this and is now subsumed by it).
+    # Exit/risk management above this line (check_and_close_positions, MIS
+    # squareoff) is explicitly KEPT — only new-trade origination is blocked.
+    # Hardcoded, not a settings flag, so it can't be silently re-enabled.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    entries_allowed = _is_market_hours() and not _NEWS_ONLY_BLOCKS_HUB_ENTRIES
     if not entries_allowed:
         logger.info(
-            f"[agent] force cycle outside market hours "
+            f"[agent] new-entry scan disabled — News-Only architecture hard-block "
+            f"(docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md) and/or outside market hours "
             f"({settings.AGENT_SESSION_START}-{settings.AGENT_SESSION_END} IST) "
             f"— exits/risk checks ran above, but skipping new-entry scan for {len(universe)} symbol(s)"
         )

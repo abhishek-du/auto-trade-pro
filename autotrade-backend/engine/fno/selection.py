@@ -580,6 +580,14 @@ async def evaluate_index_options(session: AsyncSession, equity: float) -> list[d
     underlying if a position on it is already open (by tradingsymbol prefix).
     Returns a list of opened-trade summaries.
     """
+    # HARD BLOCK — News-Only Target Architecture (Phase 1). See
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: "Independent F&O
+    # spread strategy" — no news catalyst, FORBIDDEN. Hardcoded ahead of the
+    # existing ENABLE_FNO/ENABLE_OPTIONS flags so this can't be silently
+    # re-enabled by flipping those unrelated feature flags.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        return []
     if not (settings.ENABLE_FNO and settings.ENABLE_OPTIONS):
         return []
 

@@ -20,18 +20,20 @@ async def evaluate_news_flash(headline: str, summary: str, source: str, session:
     If the LLM determines it's a massive surprise event (black swan or massive catalyst),
     we immediately execute an instant paper trade.
 
-    DISABLED by default (2026-07-20 execution-authority audit): _execute_instant_trade()
-    hardcodes confidence=99/master_score=99 in a MockDecision instead of a real evaluation,
-    and routes through AgentExecutionManager.execute() — the same manager that can reach
-    place_real_order() if AGENT_PAPER_MODE is ever False. This is called from two live
-    schedulers (crawler/news_crawler.py, tasks/india_tasks.py), so disabling it here (before
-    any LLM call, not just before execution) is the safest single choke point. Re-enable via
-    EVENT_ARBITRAGE_ENABLED=true only after this is migrated to build a TradeIntent with a
-    real confidence_source=CALCULATED value and routed through execute_trade_intent().
+    HARD BLOCKED (Phase 1, docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6):
+    classified as MERGE, not KEEP — this is a second, parallel news-decision
+    stack (own LLM prompt, own confidence logic, own SL/TP model) duplicating
+    News Direct's job, not a distinct strategy. It stays blocked until merged
+    into the canonical news_discovery_engine.py pipeline, not just until its
+    original bug (hardcoded confidence=99, fixed 2026-07-20) is patched.
+    Upgraded from a settings-flag disable to a hardcoded one here — the
+    contract explicitly calls out that a feature flag "is reversible by
+    anyone who flips it without knowing this contract exists"; a hardcoded
+    block is not.
     """
-    from utils.config import settings
-    if not getattr(settings, "EVENT_ARBITRAGE_ENABLED", False):
-        logger.debug(f"[event_arbitrage] disabled (EVENT_ARBITRAGE_ENABLED=false) — skipping: {headline[:80]}")
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        logger.debug(f"[event_arbitrage] disabled — News-Only architecture hard-block: {headline[:80]}")
         return
 
     prompt = f"""You are an elite event-driven algorithmic trading engine for the NSE.

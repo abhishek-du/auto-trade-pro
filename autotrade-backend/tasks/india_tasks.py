@@ -594,8 +594,20 @@ async def _india_trade_loop():
             logger.warning("[india_trade_loop] SHOCK COOLDOWN active — exits done, no new entries")
             return
 
-        if not is_entry_window:
-            logger.info("[india_trade_loop] Past 15:20 IST — exits done, no new entries")
+        # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────
+        # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: this is the "main
+        # equity/short loop" — a technical-only BUY/SELL loop with no news
+        # catalyst requirement. FORBIDDEN from originating trades under the
+        # News-Only architecture. Exit/risk management above (Step 1 auto-close,
+        # dynamic SL/TP, circuit breaker) already ran unconditionally and is
+        # KEPT — only the new-entry portion below this line is blocked.
+        # Hardcoded, not a settings flag, so it can't be silently re-enabled.
+        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+        if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window:
+            logger.info(
+                "[india_trade_loop] new-entry origination disabled — News-Only architecture "
+                "hard-block and/or past 15:20 IST — exits done, no new entries"
+            )
             return
 
         # Step 2: read actionable signals from market_shortlist — the SINGLE source of
@@ -1720,6 +1732,22 @@ async def _intraday_entry_task():
       7. Optionally add 1 NIFTY/BN option trade (if ENABLE_FNO=True)
       8. Telegram summary with all 7-factor subscores + entry/SL/TP
     """
+    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────────
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: this entire function is
+    # new-entry origination from MasterIntelligenceScore alone, no news event
+    # (its own docstring: "this task only opens NEW positions" — there is no
+    # exit/risk-management component to preserve, unlike _india_trade_loop or
+    # run_master_intelligence_cycle). FORBIDDEN in full under the News-Only
+    # architecture. Hardcoded, not a settings flag, so it can't be silently
+    # re-enabled by flipping an unrelated config value.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        logger.info(
+            "[intraday_entry] disabled — News-Only architecture hard-block "
+            "(docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md)"
+        )
+        return
+
     import pandas as pd
     from sqlalchemy import select, func as _func, and_
 
@@ -2097,6 +2125,17 @@ async def _open_index_option_mis(
 
     Returns True if a trade was placed, False otherwise.
     """
+    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────────
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: "Independent NIFTY
+    # option scalp" — a market-wide macro-score-only direction bet, no news
+    # event. FORBIDDEN. This function's only caller (_intraday_entry_task) is
+    # already hard-blocked above; blocked here too, directly, for defense in
+    # depth in case a future caller is added without checking this contract.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        logger.info("[intraday_entry] NIFTY option scalp disabled — News-Only architecture hard-block")
+        return False
+
     import dataclasses
     from sqlalchemy import select, func as _func
     from db.models import MasterIntelligenceScore
@@ -3040,7 +3079,29 @@ def run_master_intelligence_cycle():
                     _hub_short_strat  = _HubShort()
 
                     tried = 0
-                    for stock in scored:
+                    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ────────
+                    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6/§8: this loop is
+                    # the "Master Intelligence strategy" that independently originates
+                    # NEW equity/short entries straight from MasterIntelligenceScore, with
+                    # no news event and no central-gate authorization (it calls
+                    # executor.execute() directly). That authority is FORBIDDEN under the
+                    # News-Only architecture. Everything ABOVE this line (scoring,
+                    # persist_scores, check_and_close_positions, sector-bearish exits) is
+                    # explicitly KEPT — Hub scoring and existing-position risk management
+                    # continue; only new-trade origination from this loop is blocked.
+                    # This is a deliberate empty-list swap, not a deletion (Phase A, not
+                    # Phase B) — the real decision/execution logic below is untouched and
+                    # can be re-enabled by restoring `for stock in scored:` if this
+                    # contract is ever revised. Not a soft settings flag: intentionally
+                    # hardcoded so it cannot be re-enabled by an unrelated config change.
+                    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+                    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+                        logger.info(
+                            "[hub] new-entry origination disabled under News-Only architecture "
+                            "(Phase 1 hard-block, docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md) "
+                            "— scoring + exit management still ran normally above this line"
+                        )
+                    for stock in (scored if not _NEWS_ONLY_BLOCKS_HUB_ENTRIES else []):
                         if stock.is_blocked:
                             continue
                         is_buy  = stock.signal in ("STRONG_BUY", "BUY")
