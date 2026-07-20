@@ -161,6 +161,14 @@ async def evaluate_volatility(session: AsyncSession, equity: float) -> list[dict
     Gated by ENABLE_OPTIONS (long straddle = bought options, defined risk).
     Skips an underlying that already has any open option position.
     """
+    # HARD BLOCK — News-Only Target Architecture (Phase 1). See
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: "Independent
+    # volatility strategy" (straddle + iron condor, both handled below in this
+    # function) — no news catalyst, FORBIDDEN. Hardcoded ahead of the existing
+    # feature flags so this can't be silently re-enabled by flipping them.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        return []
     if not (settings.ENABLE_FNO and settings.ENABLE_OPTIONS):
         return []
 

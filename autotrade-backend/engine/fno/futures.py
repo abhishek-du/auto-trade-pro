@@ -239,6 +239,13 @@ def future_pnl(pos: OpenPosition, cur: float) -> tuple[float, float]:
 
 async def evaluate_index_futures(session: AsyncSession, equity: float) -> list[dict]:
     """Evaluate each index for a directional futures trade (gated by ENABLE_FUTURES)."""
+    # HARD BLOCK — News-Only Target Architecture (Phase 1). See
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: "Independent futures
+    # strategy" — no news catalyst, FORBIDDEN. Hardcoded ahead of the existing
+    # feature flags so this can't be silently re-enabled by flipping them.
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
+        return []
     if not (settings.ENABLE_FNO and settings.ENABLE_FUTURES):
         return []
 

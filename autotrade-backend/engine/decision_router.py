@@ -49,6 +49,8 @@ class RoutingOutcome(str, Enum):
     BLOCKED_DISABLED = "BLOCKED_AGENT_DISABLED"
     BLOCKED_CONFIDENCE_INTEGRITY = "BLOCKED_CONFIDENCE_INTEGRITY"
     BLOCKED_SECOND_ORDER         = "BLOCKED_SECOND_ORDER_CONFIDENCE"
+    BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
+    BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
     WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
 
@@ -112,6 +114,18 @@ class TradeIntent:
     position_size_hint: dict | None = None
     product:            str = "CNC"
     extra:              dict = field(default_factory=dict)
+    # ── News-Only architecture fields (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md) ──
+    # event_id: the CausalEvent.id this trade traces back to. Mandatory for
+    # strategy_family=EVENT_DRIVEN — the gate enforces "NO EVENT -> NO TRADE" (see
+    # authorize_trade_intent). None is legal only for TECHNICAL/FNO intents (still
+    # gated on confidence/risk, just not on an event).
+    event_id:           int | None = None
+    # evidence: a caller-provided SNAPSHOT of the classification (for audit/logging
+    # convenience) — NOT the authority. The gate re-derives the canonical evidence
+    # from the CausalEvent row itself (by event_id) and checks the snapshot against
+    # it; a caller cannot get a trade approved by passing a rosier DecisionEvidence
+    # than what's actually stored. See _verify_canonical_event() below.
+    evidence:           "DecisionEvidence | None" = None
 
 
 @dataclass
@@ -322,8 +336,65 @@ class AuthorizationResult:
     balance:  float | None = None            # wallet balance fetched during equity validation — reuse for sizing
 
 
+async def _verify_canonical_event(intent: TradeIntent, session: AsyncSession) -> tuple[bool, str]:
+    """"NO EVENT -> NO TRADE" invariant (News-Only Target Architecture Contract,
+    §5/§2). Two checks, not one:
+
+      1. event_id must reference a REAL CausalEvent row. A dangling/fake id is
+         rejected, not silently treated as "no event."
+      2. The caller's own DecisionEvidence SNAPSHOT (intent.evidence) — if
+         provided — must agree with what's actually stored in that row. The
+         canonical DB row is the authority; the snapshot is only a convenience
+         for audit logging. A caller cannot get a trade approved by attaching a
+         rosier DecisionEvidence than what the classifier actually persisted.
+
+    Only enforced for strategy_family == EVENT_DRIVEN — TECHNICAL/FNO intents
+    have no event to check (event_id stays None for them, by design).
+    """
+    if intent.strategy_family != StrategyFamily.EVENT_DRIVEN:
+        return True, "not event-driven — no event check required"
+
+    if not intent.event_id or not intent.evidence_ids:
+        return False, "NO EVENT -> NO TRADE: event_id/evidence_ids missing for an EVENT_DRIVEN intent"
+
+    from db.models import CausalEvent
+    canonical = await session.get(CausalEvent, intent.event_id)
+    if canonical is None:
+        return False, f"event_id={intent.event_id} does not reference an existing CausalEvent row"
+
+    if intent.evidence is not None:
+        canonical_materiality = (canonical.country or "").upper()  # country column stores impact/materiality (event_pipeline.py convention)
+        snapshot_materiality  = (intent.evidence.materiality or "").upper()
+        if canonical_materiality and snapshot_materiality and canonical_materiality != snapshot_materiality:
+            return False, (
+                f"evidence drift: snapshot claims materiality={snapshot_materiality} but canonical "
+                f"CausalEvent id={intent.event_id} has materiality={canonical_materiality}"
+            )
+
+        bare_symbol = intent.symbol.replace(".NS", "").replace(".BO", "").upper()
+        bullish = {s.upper() for s in (canonical.bullish_stocks or [])}
+        bearish = {s.upper() for s in (canonical.bearish_stocks or [])}
+        snapshot_direction = (intent.evidence.direction or "").upper()
+        if snapshot_direction == "BULLISH" and bearish and bare_symbol in bearish and bare_symbol not in bullish:
+            return False, (
+                f"evidence drift: snapshot claims BULLISH for {intent.symbol} but canonical "
+                f"CausalEvent id={intent.event_id} lists it under bearish_stocks"
+            )
+        if snapshot_direction == "BEARISH" and bullish and bare_symbol in bullish and bare_symbol not in bearish:
+            return False, (
+                f"evidence drift: snapshot claims BEARISH for {intent.symbol} but canonical "
+                f"CausalEvent id={intent.event_id} lists it under bullish_stocks"
+            )
+
+    return True, "canonical event verified"
+
+
 async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> AuthorizationResult:
     """Runs the gate's pass/fail checks WITHOUT executing anything:
+      0. "NO EVENT -> NO TRADE" — for EVENT_DRIVEN intents, event_id must
+         reference a real, canonical CausalEvent, and any caller-provided
+         evidence snapshot must agree with it (gate is the authority, not the
+         caller). See _verify_canonical_event().
       1. Confidence provenance — only CALCULATED may auto-execute.
       2. Event-directness tier — SPECULATIVE never auto-trades; SECOND_ORDER
          needs a stricter confidence bar and evidence_ids.
@@ -337,6 +408,17 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     if `approved` is True. Rejections are still centrally audit-logged here.
     """
     mode = await resolve_mode(session)
+
+    _event_ok, _event_reason = await _verify_canonical_event(intent, session)
+    if not _event_ok:
+        _outcome = (RoutingOutcome.BLOCKED_EVIDENCE_DRIFT if "drift" in _event_reason
+                    else RoutingOutcome.BLOCKED_NO_EVENT)
+        result = RoutingResult(outcome=_outcome, mode=mode, reason=_event_reason,
+                                metadata={"strategy": intent.strategy, "event_id": intent.event_id})
+        logger.warning(f"[execution_gate] BLOCKED (no-event invariant) {intent.symbol} {intent.action} "
+                        f"strategy={intent.strategy} reason={_event_reason}")
+        await _log_intent_audit(intent, mode, result, session)
+        return AuthorizationResult(approved=False, mode=mode, reason=_event_reason, outcome=result.outcome)
 
     if intent.confidence_source != ConfidenceSource.CALCULATED:
         reason = (
@@ -447,6 +529,7 @@ async def _log_intent_audit(
                 "confidence":        intent.confidence,
                 "confidence_source": intent.confidence_source.value,
                 "strategy_family":   intent.strategy_family.value,
+                "event_id":          intent.event_id,
                 "event_directness":  intent.event_directness.value,
                 "evidence_ids":      intent.evidence_ids,
                 "entry":             intent.entry_price,
