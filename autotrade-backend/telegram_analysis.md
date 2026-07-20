@@ -1,117 +1,125 @@
-# Eagle Eyes Market Analysis (July 13, 2026)
+# Eagle Eyes Market Analysis (July 15-16, 2026)
 
-### 2026-07-13T06:17:28+00:00
-Watch Epack Prefeb above 280 
+### 2026-07-15T09:17:09+00:00
+Avanti feed may pick momentum 
 👀
 
 ---
-### 2026-07-13T06:25:50+00:00
-Do you have any Cybersecurity stock???
+### 2026-07-15T09:21:39+00:00
+ROLEX Rings technical setup is good cmp 142   Buyback open from 09 july to 15 july price at 180
 
 ---
-### 2026-07-13T06:29:34+00:00
-GM breweries weak result on QoQ
-📊
- GM BREWERIES Q1 FY27 RESULTS
-• Net Profit: ₹37.74 Cr ↑ 46% (YoY) | ↓ 30% (QoQ)
-• Revenue: ₹802 Cr ↑ 26% (YoY) | ↓ 1% (QoQ)
-• EBITDA: ₹46.45 Cr ↑ 50% (YoY) | ↓ 11% (QoQ)
-• EBITDA Margin: 5.78% ↑ vs 4.84% (YoY) | ↓ vs 6.45% (QoQ)
-We don't hold
+### 2026-07-15T09:24:57+00:00
+I'm Bottom buying in  Avanti feed CMP 978 Risk 
+🙃
+ 930 Upside 1050-1100-1150 Holding for short Swing
 
 ---
-### 2026-07-13T06:39:49+00:00
-KOSPI Falls 8.95% in Sharp Selloff, Hits Lowest Closing Level Since April 30
-
----
-### 2026-07-13T06:39:56+00:00
-Indian hume pipe 15% 421 full tgt done 
-✅
-   See the arrow tgt full done   Book now & enjoy day
-
----
-### 2026-07-13T06:42:55+00:00
-KOSPI Falls 8.95% in Sharp Selloff, Hits Lowest Closing Level Since April 30
-
----
-### 2026-07-13T06:53:05+00:00
-Gift nifty is indicating around 200 points gap down opening.   Nifty support near 23800 if it breaks then nifty may fill gap near 23600 level.   Crude jumps 5% now 79$ ~ Negative for equity market 
-👍
-  Small & Midcap index has given breakout on daily chart 
-✅
-…
-
----
-### 2026-07-13T07:36:09+00:00
-IT sector leading from front index 3.5% 
+### 2026-07-15T12:47:00+00:00
+Nifty above 24200 
 👌
 👌
-  Nifty Auto is ready to join 
+  Follow up buying is very low in broader market stocks 
+😒
+
+---
+### 2026-07-15T12:49:10+00:00
+India UK FTA is going to be effective from tomorrow 
 👍
-  Nifty may come in the green territory soon 
+  Textile, engineering, footwear and Seafood stocks will be in focus 
 👀
 
 ---
-### 2026-07-13T07:46:29+00:00
-JBM AUTO , OLECTRA  GOVT PLANS RS 20,000-CRORE EV INCENTIVE SCHEME FOR PRIVATE BUSES AMID FUEL SECURITY WORRIES; UP TO RS 20,000 CRORE OUTLAY OVER FIVE YEARS - MC
+### 2026-07-15T14:54:15+00:00
+President Trump says Iran called a while ago and wants a deal.
+US market open hogaya 
+😁
 
 ---
-### 2026-07-13T09:00:23+00:00
-Gift nifty is indicating around 200 points gap down opening.   Nifty support near 23800 if it breaks then nifty may fill gap near 23600 level.   Crude jumps 5% now 79$ ~ Negative for equity market 
-👍
-  Small & Midcap index has given breakout on daily chart 
+### 2026-07-15T15:48:28+00:00
+President Trump says Iran called a while ago and wants a deal.  US market open hogaya 
+😁
+
+---
+### 2026-07-15T17:35:30+00:00
+We r working on AI + Algorithm based stock picking up   Soon we will launch classroom once all back testing is completed  This is why our few stocks are blasting once AI + algo set-up is locked 
+🔐
+
+---
+### 2026-07-15T17:37:36+00:00
+Trade like Pro in Intraday & swing  Enter before breakout by AI based operator tracking.
 ✅
-…
+ From Investor to Professional AI-Powered Trader ..
+✅
+  Fundamental + Technical+ psychological+AI assisted   Earning with learning  Connect SEBI registered team  @Conceptual_investor…
 
 ---
-### 2026-07-13T09:12:34+00:00
-Nifty IT index 4.5% up 
-🔥
-🔥
-   Nifty green 
-💚
-💚
+### 2026-07-16T03:18:57+00:00
+Global war+ Tariff war + Rate hike 
+US attacking Iran badly
+More attack planned.
+US imposed 
+25% fresh Tariff on Brazil & threatening India for new Tariff if India US deal fails.
+Korea raised 
+interest rate &
+ Massive sell off in Korean mkt -7% down Semiconductor chip stocks crashed 
+Japan Interest 
+rate hike possible if war continue 
+Retailers are buying every dip in hope of big bounce, I think it can be dangerous if crude cross 90-95
 
 ---
-### 2026-07-13T09:17:05+00:00
-Nifty and Bank Nifty green 
-💚
-💚
-   Ready for BTST 
-👀
+### 2026-07-16T03:26:56+00:00
+Global war+ Tariff war + Rate hike  US attacking Iran badly More attack planned.  US imposed 25% fresh Tariff on Brazil & threatening India for new Tariff if India US deal fails.  Korea raised interest rate & Massive sell off in Korean mkt -7% down Semiconductor…
 
 ---
-### 2026-07-13T09:18:35+00:00
-WELSPUN living is looking good for BTST Cmp 172   support 165  upside possible :: 185 ++
+### 2026-07-16T03:27:52+00:00
+Trade like Pro in Intraday & swing  Enter before breakout by AI based operator tracking.
+✅
+ From Investor to Professional AI-Powered Trader ..
+✅
+  Fundamental + Technical+ psychological+AI assisted   Earning with learning  Connect SEBI registered team  @Conceptual_investor…
 
 ---
-### 2026-07-13T09:20:09+00:00
-Big breakout before big event
+### 2026-07-16T03:46:15+00:00
+I'm Bottom buying in  Avanti feed CMP 978 Risk 
+🙃
+ 930 Upside 1050-1100-1150 Holding for short Swing
 
 ---
-### 2026-07-13T09:26:38+00:00
-India UK FTA is going to be effective from 15 july.  Textile export stocks in focus 
+### 2026-07-16T03:49:28+00:00
+I'm Bottom buying in  Avanti feed CMP 978 Risk 
+🙃
+ 930 Upside 1050-1100-1150 Holding for short Swing
+
+---
+### 2026-07-16T03:51:39+00:00
+I'm Bottom buying in  Avanti feed CMP 978 Risk 
+🙃
+ 930 Upside 1050-1100-1150 Holding for short Swing
+
+---
+### 2026-07-16T04:02:29+00:00
+SPML infra Vijay Kedia bought almost 2% stake in March quarter 
+😍
 😍
 
 ---
-### 2026-07-13T09:31:23+00:00
-High conviction momentum trade coming
+### 2026-07-16T04:51:13+00:00
+SPML infra 207
+ Looking good for breakout loading 
+Downside 195 
+Upside 220-240
+Vijay Kedia bought 1.88% stake 
+Company work in water management & BESS management
 
 ---
-### 2026-07-13T09:35:10+00:00
-High conviction momentum trade coming
+### 2026-07-16T04:53:34+00:00
+SPML infra 207  Looking good for breakout loading  Downside 195  Upside 220-240 Vijay Kedia bought 1.88% stake   Company work in water management & BESS management
 
 ---
-### 2026-07-13T09:36:45+00:00
-Apex frozen CMP 406  Support 385 Upside 430-450   Big benefit from India UK FTA active from tomorrow   It will blast like shown in past
-
----
-### 2026-07-13T09:37:25+00:00
-Apex frozen CMP 406  Support 385 Upside 430-450   Big benefit from India UK FTA active from tomorrow   It will blast like shown in past
-
----
-### 2026-07-13T09:45:44+00:00
-APEX FROZEN is showing reversal after forming base 
-👀
+### 2026-07-16T05:14:30+00:00
+I'm Bottom buying in  Avanti feed CMP 978 Risk 
+🙃
+ 930 Upside 1050-1100-1150 Holding for short Swing
 
 ---

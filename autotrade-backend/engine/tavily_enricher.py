@@ -110,58 +110,24 @@ async def fetch_news_score(symbol: str, company_name: str = "") -> tuple[float, 
     query = f"{query_name} NSE stock news India latest"
 
     try:
-        from duckduckgo_search import DDGS
+        client = _client()
+        if client is None:
+            return 0.0, []
         loop = asyncio.get_running_loop()
-        def _ddg_run():
-            with DDGS() as ddgs:
-                return [r for r in ddgs.news(query, max_results=5)]
-        
-        results = await loop.run_in_executor(None, _ddg_run)
-        if not results:
-            def _ddg_text_run():
-                with DDGS() as ddgs:
-                    return [r for r in ddgs.text(query, max_results=5)]
-            results = await loop.run_in_executor(None, _ddg_text_run)
-            
-        headlines = [r.get("title", "") or r.get("body", "")[:120] for r in results[:5]]
-        headlines = [h for h in headlines if h]
-        if not headlines: raise ValueError("Empty DDG")
+        resp = await loop.run_in_executor(
+            None,
+            lambda: client.search(
+                query, search_depth="basic", topic="finance",
+                max_results=5, include_answer=False, time_range="week",
+            )
+        )
+        results = resp.get("results") or []
+        headlines = [r.get("title", "") or r.get("content", "")[:120] for r in results[:5]]
+        if not headlines:
+            raise ValueError("Empty Tavily results")
     except Exception as e:
-        logger.debug(f"[ddg/news] {bare} DDG failed: {e}. Falling back to Google News RSS.")
-        try:
-            import urllib.request
-            import urllib.parse
-            import xml.etree.ElementTree as ET
-            
-            def _gnews_run():
-                url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    root = ET.fromstring(response.read())
-                return [item.findtext('title') for item in root.findall('.//item')[:5] if item.findtext('title')]
-                
-            loop = asyncio.get_running_loop()
-            headlines = await loop.run_in_executor(None, _gnews_run)
-            if not headlines: raise ValueError("Empty GNews")
-        except Exception as e2:
-            logger.debug(f"[gnews/news] {bare} GNews failed: {e2}. Falling back to Tavily.")
-            client = _client()
-            if client is None:
-                return 0.0, []
-            try:
-                loop = asyncio.get_running_loop()
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: client.search(
-                        query, search_depth="basic", topic="finance",
-                        max_results=5, include_answer=False, time_range="week",
-                    )
-                )
-                results = resp.get("results") or []
-                headlines = [r.get("title", "") or r.get("content", "")[:120] for r in results[:5]]
-            except Exception as exc:
-                logger.debug(f"[tavily/news] {bare}: {exc}")
-                return 0.0, []
+        logger.debug(f"[tavily/news] {bare} failed: {e}")
+        return 0.0, []
 
     headlines = [h for h in headlines if h]
     score = _score_headlines_finbert(headlines)
@@ -191,19 +157,19 @@ async def enrich_missing_news(
 
     now = time.monotonic()
 
-    # Candidates: no RSS/DB coverage AND cache expired (or never fetched)
+    # Candidates: cache expired (or never fetched)
     missing = [
         s for s in symbol_list
-        if s not in existing_scores and s.endswith(".NS")
+        if s.endswith(".NS")
         and (s.replace(".NS", "") not in _enriched_cache
              or now - _enriched_cache[s.replace(".NS", "")][2] >= _CACHE_TTL_S)
     ]
 
-    # Also include symbols whose cache is still fresh but not in existing_scores
+    # Also include symbols whose cache is still fresh
     fresh_hits: dict[str, tuple[float, list[str]]] = {}
     for s in symbol_list:
         bare = s.replace(".NS", "")
-        if s not in existing_scores and s.endswith(".NS") and bare in _enriched_cache:
+        if s.endswith(".NS") and bare in _enriched_cache:
             cv = _enriched_cache[bare]
             if now - cv[2] < _CACHE_TTL_S:
                 fresh_hits[s] = (cv[0], cv[1])

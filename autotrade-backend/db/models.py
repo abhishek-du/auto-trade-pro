@@ -1109,6 +1109,34 @@ class AgentDecision(Base):
         return f"<AgentDecision {self.action} {self.symbol} conf={self.confidence} {self.strategy}>"
 
 
+class MasterEvent(Base):
+    """
+    Persistent Event Store: Represents a unified, deduplicated market event.
+    Stores the lifecycle, confidence, and analytical impact of an event.
+    """
+    __tablename__ = "master_events"
+    __table_args__ = (
+        Index("ix_master_event_status", "status"),
+        Index("ix_master_event_category", "category"),
+    )
+
+    event_id:      Mapped[str]      = mapped_column(String(36), primary_key=True, default=lambda: f"EVT_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}")
+    category:      Mapped[str]      = mapped_column(String(50), nullable=False)
+    companies:     Mapped[list[str]]= mapped_column(JSON,       nullable=False, default=list) # E.g. ["LT", "ABB"]
+    sector:        Mapped[str]      = mapped_column(String(100),nullable=False, default="")
+    priority:      Mapped[int]      = mapped_column(Integer,    nullable=False, default=50)
+    surprise:      Mapped[float]    = mapped_column(Float,      nullable=False, default=0.5)
+    confidence:    Mapped[float]    = mapped_column(Float,      nullable=False, default=1.0)
+    sources:       Mapped[list[str]]= mapped_column(JSON,       nullable=False, default=list)
+    status:        Mapped[str]      = mapped_column(String(20), nullable=False, default="ACTIVE") # ACTIVE, DECAYED, PRICED_IN
+    decay_rate:    Mapped[float]    = mapped_column(Float,      nullable=False, default=1.0)
+    created_at:    Mapped[datetime] = mapped_column(DateTime,   server_default=func.now(), nullable=False)
+    expires_at:    Mapped[datetime] = mapped_column(DateTime,   nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<MasterEvent {self.event_id} {self.category} {self.companies}>"
+
+
 class AgentTrade(Base):
     """Open and closed agent trades with P&L tracking."""
     __tablename__ = "agent_trades"
@@ -1119,6 +1147,7 @@ class AgentTrade(Base):
 
     id:            Mapped[str]          = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     decision_id:   Mapped[str | None]   = mapped_column(String(36), ForeignKey("agent_decisions.id", ondelete="SET NULL"), nullable=True)
+    event_id:      Mapped[str | None]   = mapped_column(String(36), ForeignKey("master_events.event_id", ondelete="SET NULL"), nullable=True)
     symbol:        Mapped[str]          = mapped_column(String(30),  nullable=False)
     side:          Mapped[str]          = mapped_column(String(10),  nullable=False)
     qty:           Mapped[int]          = mapped_column(Integer,     nullable=False)
@@ -1147,6 +1176,7 @@ class AgentTrade(Base):
     regime:        Mapped[str]          = mapped_column(String(30),  nullable=False, default="")
     brokerage:     Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
     is_paper:      Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=True)
+    analytics_json:Mapped[dict]         = mapped_column(JSON,        nullable=False, default=dict)
     created_at:    Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     def __repr__(self) -> str:
@@ -1677,3 +1707,26 @@ class PreMarketNewsQueue(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, PROCESSED
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class CausalEvent(Base):
+    """Event Intelligence Layer: Maps news to broad macro/sector/stock impacts via Knowledge Graph."""
+    __tablename__ = "causal_events"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    news_id: Mapped[int | None] = mapped_column(ForeignKey("news_items.id"), nullable=True)
+    
+    event_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    country: Mapped[str] = mapped_column(String(50), nullable=False)
+    importance: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    
+    affected_sectors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    affected_indices: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    bullish_stocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    bearish_stocks: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    
+    duration: Mapped[str] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<CausalEvent id={self.id} event={self.event_title!r} imp={self.importance}>"

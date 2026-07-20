@@ -1,0 +1,1 @@
+30 8 * * 1-5 /home/cis/windows/auto-trade-pro/autotrade-backend/refresh_upstox.sh

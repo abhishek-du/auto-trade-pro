@@ -657,7 +657,7 @@ async def run_india_price_crawl(
                 candles_5m = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda s=symbol: fetch_nse_candles(s, interval="5m", period="5d"),
+                        lambda s=symbol: fetch_nse_candles(s, interval="5m", period="1d"),
                     ),
                     timeout=20.0,
                 )
@@ -674,7 +674,7 @@ async def run_india_price_crawl(
                 candles_1h = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda s=symbol: fetch_nse_candles(s, interval="1h"),
+                        lambda s=symbol: fetch_nse_candles(s, interval="1h", period="5d"),
                     ),
                     timeout=20.0,
                 )

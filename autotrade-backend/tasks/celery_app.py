@@ -81,10 +81,10 @@ celery_app.conf.beat_schedule = {
     },
     # ── Indian market tasks ───────────────────────────────────────────────────
 
-    # Every 30 s during NSE hours: OHLCV candles + index snapshots + VIX
-    "india-price-scan-every-30s": {
+    # Every 5 min during NSE hours: OHLCV candles + index snapshots + VIX
+    "india-price-scan-every-5min": {
         "task":     "tasks.india_price_scan",
-        "schedule": 30,
+        "schedule": 300,
         "options":  {"countdown": 5},
     },
 

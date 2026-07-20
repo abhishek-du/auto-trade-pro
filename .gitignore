@@ -8,4 +8,5 @@ __pycache__/
 # ── Secrets — never commit credentials ────────────────────────────────────────
 .env
 .env.*
+!**/.env.example
 *.bak

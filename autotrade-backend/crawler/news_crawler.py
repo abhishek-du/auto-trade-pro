@@ -21,8 +21,16 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import NewsItem
+
 from utils.config import settings
 from utils.logger import logger
+
+from crawler.macro_crawler import fetch_rbi_press_releases, fetch_pib_releases, fetch_sebi_circulars
+from crawler.exchange_crawler import fetch_bulk_deals, fetch_block_deals
+from crawler.media_crawler import fetch_financial_media
+from crawler.event_pipeline import process_latest_events
+
+# Ensure NLTK vader_lexicon is available. Used as fallback by SentimentAnalyser.
 
 # How many recent matching headlines feed into the symbol-level sentiment average.
 # Single source of truth so future tuning is easy.
@@ -42,7 +50,7 @@ _FINBERT_MODEL = "ProsusAI/finbert"
 # operator can notice a quiet outage instead of discovering it via empty news
 # feeds in the UI. Keyed by the same source-name strings the source_counts
 # dict uses.
-_SOURCE_ZERO_STREAK: dict[str, int] = {"rss": 0, "newsdata": 0, "finnhub": 0, "newsapi": 0, "yfinance": 0}
+_SOURCE_ZERO_STREAK: dict[str, int] = {"rss": 0, "newsdata": 0, "finnhub": 0, "newsapi": 0, "yfinance": 0, "rbi": 0, "pib": 0, "sebi": 0}
 _SOURCE_FAIL_THRESHOLD: int = 3
 
 _POSITIVE_WORDS = [
@@ -1081,12 +1089,18 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     yf_symbols = await _yf_news_symbols(session)
 
     # ── Fetch from all sources in parallel ───────────────────────────────────
-    newsapi_rows, finnhub_rows, newsdata_rows, rss_rows, yf_rows = await asyncio.gather(
+    newsapi_rows, finnhub_rows, newsdata_rows, rss_rows, yf_rows, rbi_rows, pib_rows, sebi_rows, bulk_rows, block_rows, media_rows = await asyncio.gather(
         fetch_newsapi_headlines(),
         fetch_finnhub_news(),
         fetch_newsdata_india(),
         fetch_free_rss_news(),
         fetch_yfinance_news(yf_symbols),
+        fetch_rbi_press_releases(),
+        fetch_pib_releases(),
+        fetch_sebi_circulars(),
+        fetch_bulk_deals(),
+        fetch_block_deals(),
+        fetch_financial_media(),
         return_exceptions=True,
     )
 
@@ -1102,6 +1116,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     newsdata_rows = _unwrap("newsdata",  newsdata_rows)
     rss_rows      = _unwrap("rss",       rss_rows)
     yf_rows       = _unwrap("yfinance",  yf_rows)
+    rbi_rows      = _unwrap("rbi",       rbi_rows)
+    pib_rows      = _unwrap("pib",       pib_rows)
+    sebi_rows     = _unwrap("sebi",      sebi_rows)
+    bulk_rows     = _unwrap("bulk",      bulk_rows)
+    block_rows    = _unwrap("block",     block_rows)
+    media_rows    = _unwrap("media",     media_rows)
 
     source_counts = {
         "newsapi":   len(newsapi_rows),
@@ -1109,6 +1129,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         "newsdata":  len(newsdata_rows),
         "rss":       len(rss_rows),
         "yfinance":  len(yf_rows),
+        "rbi":       len(rbi_rows),
+        "pib":       len(pib_rows),
+        "sebi":      len(sebi_rows),
+        "bulk":      len(bulk_rows),
+        "block":     len(block_rows),
+        "media":     len(media_rows),
     }
 
     # ── Per-source health check ───────────────────────────────────────────────
@@ -1118,6 +1144,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     _expects_data = {
         "rss":      True,
         "yfinance": True,          # no key required — always expected
+        "rbi":      True,
+        "pib":      True,
+        "sebi":     True,
+        "bulk":     True,
+        "block":    True,
+        "media":    True,
         "finnhub":  bool(getattr(settings, "FINNHUB_KEY", "")),
         "newsdata": bool(getattr(settings, "NEWSDATA_KEY", "")),
         "newsapi":  bool(getattr(settings, "NEWSAPI_KEY", "")),
@@ -1136,8 +1168,8 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         else:
             _SOURCE_ZERO_STREAK[src] = 0
 
-    # RSS + yfinance first (India-first, symbol-tagged); then NewsData, NewsAPI, Finnhub
-    all_raw: list[dict] = rss_rows + yf_rows + newsdata_rows + newsapi_rows + finnhub_rows
+    # RSS + yfinance first (India-first, symbol-tagged); then NewsData, NewsAPI, Finnhub, macro
+    all_raw: list[dict] = rss_rows + yf_rows + newsdata_rows + newsapi_rows + finnhub_rows + rbi_rows + pib_rows + sebi_rows + bulk_rows + block_rows + media_rows
     total_fetched = len(all_raw)
 
     # Normalize headlines: RSS feeds often double-escape (`&amp;amp;`), Finnhub
@@ -1262,6 +1294,15 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         f"━━ News crawl DONE ━━  fetched={total_fetched}  "
         f"saved={total_saved}  sources={source_counts}  errors={len(errors)}"
     )
+    
+    # ── AI Causal Event Processing ────────────────────────────────────────────
+    # Trigger LLM Event Classifier for top latest unstructured news items
+    # (runs silently in the background, updating Intelligence Hub cache on next loop)
+    try:
+        await process_latest_events(session)
+    except Exception as exc:
+        logger.error(f"[event_pipeline] Failed to process causal events: {exc}")
+
     return {
         "total_fetched": total_fetched,
         "total_saved":   total_saved,

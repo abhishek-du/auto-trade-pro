@@ -141,13 +141,30 @@ class NewsItemOut(BaseModel):
     headline:         str
     source:           str
     url:              Optional[str]
-    sentiment:        Optional[str]
+    sentiment:        str
     score:            float
-    tickers_affected: Optional[list]
+    tickers_affected: Optional[list[str]]
     published_at:     Optional[datetime]
     crawled_at:       datetime
-    high_impact:      bool = False   # market-shock catalyst + strong negative sentiment
-    category:         Optional[str] = None   # NSE-Announcements rows only, e.g. "Acquisition"
+    high_impact:      bool = False
+    category:         Optional[str] = None
+    company:          Optional[str] = None
+
+class CausalEventOut(BaseModel):
+    id:               int
+    news_id:          int
+    event_title:      str
+    country:          str
+    importance:       float
+    confidence:       float
+    affected_sectors: list[str]
+    affected_indices: list[str]
+    bullish_stocks:   list[str]
+    bearish_stocks:   list[str]
+    duration:         str
+    created_at:       datetime
+    headline:         Optional[str] = None
+    source:           Optional[str] = None   # NSE-Announcements rows only, e.g. "Acquisition"
     company:          Optional[str] = None   # NSE-Announcements rows only
 
 
