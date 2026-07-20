@@ -763,10 +763,10 @@ export default function Trades() {
                   const isExpanded = expandedId === (t.id ?? i);
 
                   /* P&L: open → live pos (paper) OR candle-based (agent), closed → recorded pnl */
-                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0) : (t.pnl ?? 0);
-                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
+                  const pnl      = isOpen ? (t.unrealised_pnl ?? pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
+                  const pnlPct   = isOpen ? (t.unrealised_pct ?? pos?.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
                   const invested = t.size_usd ?? 0;
-                  const curPrice = isOpen ? (pos?.current_price ?? t.current_price ?? null) : (t.exit_price ?? null);
+                  const curPrice = isOpen ? (t.current_price ?? pos?.current_price ?? null) : (t.exit_price ?? null);
                   const tradeIsBuy = (t.direction ?? t.side ?? '').toUpperCase() === 'BUY';
                   /* BUY: invested + pnl = qty×cur  SELL: invested − pnl = qty×cur */
                   const curVal   = invested + (tradeIsBuy ? pnl : -pnl);
