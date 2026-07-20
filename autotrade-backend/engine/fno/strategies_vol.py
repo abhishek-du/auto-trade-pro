@@ -101,11 +101,12 @@ async def open_long_straddle(underlying: str, spot: float, equity: float,
         logger.debug(f"[fno/vol] {underlying}: cannot build both straddle legs")
         return None
 
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
     _intent = TradeIntent(
         strategy="FNO_LONG_STRADDLE", symbol=ce.tradingsymbol, action="BUY", instrument_type="CE",
         entry_price=ce.premium, stop_loss=ce.stop, take_profit=ce.target,
         confidence=confidence, confidence_source=ConfidenceSource.CALCULATED,
+        strategy_family=StrategyFamily.FNO,
         event_directness=EventDirectness.NOT_APPLICABLE,
     )
     _auth = await authorize_trade_intent(_intent, session)
@@ -199,11 +200,12 @@ async def evaluate_volatility(session: AsyncSession, equity: float) -> list[dict
             elif rank > _IV_RANK_HIGH:
                 res = await select_iron_condor(under, float(spot), equity, session)
                 if res:
-                    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+                    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
                     _intent = TradeIntent(
                         strategy="FNO_IRON_CONDOR", symbol=res.ts_short_ce, action="SELL", instrument_type="CE",
                         entry_price=res.net_credit, stop_loss=0.0, take_profit=0.0,
                         confidence=round(rank, 1), confidence_source=ConfidenceSource.CALCULATED,
+                        strategy_family=StrategyFamily.FNO,
                         event_directness=EventDirectness.NOT_APPLICABLE,
                     )
                     _auth = await authorize_trade_intent(_intent, session)

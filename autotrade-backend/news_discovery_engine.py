@@ -105,7 +105,7 @@ async def _execute_news_trade(
     """
     from crawler.live_prices import get_price, yfinance_ltp_batch
     from engine.decision_router import (
-        TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome,
+        TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome,
     )
     from utils.config import settings
 
@@ -146,6 +146,7 @@ async def _execute_news_trade(
         symbol=ticker, action=side, instrument_type="EQUITY",
         entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit,
         confidence=confidence, confidence_source=confidence_source,
+        strategy_family=StrategyFamily.EVENT_DRIVEN,
         event_directness=event_directness, evidence_ids=evidence_ids or [],
         product=product,
         extra={"reasoning_points": [f"News catalyst: {headline}", str(verdict.get("bull", ""))[:200]]},
@@ -233,6 +234,7 @@ async def _log_evidence_gate_audit(ticker, side, evidence, verdict, consistency)
                 message=f"BLOCKED | {side} | {consistency.reason}",
                 data={
                     "action": side,
+                    "strategy_family": "EVENT_DRIVEN",
                     "verdict_confidence": verdict.get("confidence"),
                     "verdict_bull": verdict.get("bull"),
                     "evidence_materiality": getattr(evidence, "materiality", None),

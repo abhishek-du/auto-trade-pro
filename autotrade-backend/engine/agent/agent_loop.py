@@ -915,12 +915,13 @@ async def _process_symbol(
     #    by /api/v1/agent/decisions and /api/v1/agent/trades), has its own
     #    idempotency guard, and subscribes the live ticker. The gate only
     #    decides whether the trade is authorized; execution mechanics stay here.
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
     _intent = TradeIntent(
         strategy=decision.strategy, symbol=decision.symbol, action=decision.action,
         instrument_type=getattr(decision, "instrument_type", "EQUITY"),
         entry_price=decision.entry, stop_loss=decision.stop, take_profit=decision.target,
         confidence=decision.confidence, confidence_source=ConfidenceSource.CALCULATED,
+        strategy_family=StrategyFamily.TECHNICAL,
         event_directness=EventDirectness.NOT_APPLICABLE,
     )
     _auth = await authorize_trade_intent(_intent, session)

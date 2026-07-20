@@ -276,11 +276,12 @@ async def evaluate_index_futures(session: AsyncSession, equity: float) -> list[d
             if spec is None:
                 continue
 
-            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
             _intent = TradeIntent(
                 strategy="FNO_FUTURE", symbol=spec.tradingsymbol, action=direction, instrument_type="FUTURE",
                 entry_price=spec.entry, stop_loss=0.0, take_profit=0.0,
                 confidence=confidence, confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.FNO,
                 event_directness=EventDirectness.NOT_APPLICABLE,
             )
             _auth = await authorize_trade_intent(_intent, session)

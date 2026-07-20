@@ -114,11 +114,12 @@ async def _execute_instant_trade(
 
     # Central execution gate — confidence is the LLM's real actionability score
     # (CALCULATED), not the hardcoded 99 this used to carry.
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
     _intent = TradeIntent(
         strategy="EVENT_ARBITRAGE", symbol=symbol, action=action, instrument_type="EQUITY",
         entry_price=round(price, 2), stop_loss=round(sl, 2), take_profit=round(t1, 2),
         confidence=float(confidence), confidence_source=ConfidenceSource.CALCULATED,
+        strategy_family=StrategyFamily.EVENT_DRIVEN,
         event_directness=EventDirectness.DIRECT,
         extra={"reasoning_points": [reasoning or ""]},
     )
