@@ -28,9 +28,40 @@ class DuplicateEventEngine:
     being falsely interpreted as 4 independent bullish catalysts.
     """
     async def cluster_news(self, raw_articles: List[Dict]) -> List[Dict]:
-        # TODO: Implement semantic clustering via embeddings or LLM similarity.
-        # Example output: Groups 4 related articles into 1 Master Event.
+        import difflib
+        
+        clusters = []
+        for article in raw_articles:
+            headline = article.get("headline", "")
+            if not headline:
+                continue
+            
+            matched_cluster = None
+            for cluster in clusters:
+                primary_headline = cluster["articles"][0]["headline"]
+                similarity = difflib.SequenceMatcher(None, headline.lower(), primary_headline.lower()).ratio()
+                
+                if similarity > 0.5: # 50% similarity threshold
+                    matched_cluster = cluster
+                    break
+            
+            if matched_cluster:
+                matched_cluster["articles"].append(article)
+            else:
+                clusters.append({
+                    "primary_headline": headline,
+                    "articles": [article],
+                    "cluster_size": 1
+                })
+                
         clustered_events = []
+        for c in clusters:
+            clustered_events.append({
+                "headline": c["primary_headline"],
+                "source_count": len(c["articles"]),
+                "articles": c["articles"]
+            })
+            
         return clustered_events
 
 class EventLifecycleTracker:
