@@ -1239,11 +1239,21 @@ async def _india_trade_loop():
                 _price_age = _lp.get("age_seconds", 0.0) if _lp else 0.0
                 logger.info(f"[hub_instrumentation] PATH: B_live_loop | SYMBOL: {signal.symbol} | SCORE_AGE: {_score_age}s | PRICE_AGE: {_price_age}s")
             except Exception: pass
-            
-            try:
-                trade = await open_paper_trade(signal, pos_size, session, product=_product)
-            except ValueError as exc:
-                logger.warning(f"[india_trade_loop] {exc}")
+
+            # Central execution gate — confidence_source=CALCULATED since this
+            # signal already passed validate_signal + apply_reasoning_gate above;
+            # event_directness=NOT_APPLICABLE (technical/hub scan, not a news
+            # cascade). position_size_hint preserves the sizing already computed.
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome
+            _intent = TradeIntent(
+                strategy=_strat, symbol=signal.symbol, action=signal.action, instrument_type="EQUITY",
+                entry_price=signal.entry_price, stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                confidence=signal.confidence, confidence_source=ConfidenceSource.CALCULATED,
+                event_directness=EventDirectness.NOT_APPLICABLE, position_size_hint=pos_size, product=_product,
+            )
+            _gate_result = await execute_trade_intent(_intent, session)
+            if _gate_result.outcome not in (RoutingOutcome.EXECUTED_PAPER, RoutingOutcome.EXECUTED_LIVE):
+                logger.info(f"[india_trade_loop] gate blocked {signal.symbol}: {_gate_result.outcome.value} — {_gate_result.reason}")
                 continue
             balance -= pos_size["usd_value"]
             opened  += 1
@@ -1255,9 +1265,13 @@ async def _india_trade_loop():
             pos_result     = await session.execute(select(OpenPosition))
             open_positions = list(pos_result.scalars().all())
 
-            explanation  = await generate_trade_explanation(signal)
-            notification = format_paper_trade_notification(trade, explanation)
-            logger.info(notification)
+            from db.models import PaperTrade as _PaperTrade
+            _trade_id = (_gate_result.metadata or {}).get("trade_id")
+            trade = await session.get(_PaperTrade, _trade_id) if _trade_id else None
+            if trade is not None:
+                explanation  = await generate_trade_explanation(signal)
+                notification = format_paper_trade_notification(trade, explanation)
+                logger.info(notification)
 
             from utils.config import settings as _s
             if _s.telegram_available:
@@ -2003,10 +2017,19 @@ async def _intraday_entry_task():
                 logger.debug(f"[intraday_entry] {sig.symbol}: insufficient cash (₹{balance:.0f})")
                 continue
 
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, execute_trade_intent, RoutingOutcome
+            _intent = TradeIntent(
+                strategy="INTRADAY_MIS", symbol=sig.symbol, action="BUY", instrument_type="EQUITY",
+                entry_price=sig.entry_price, stop_loss=sig.stop_loss, take_profit=sig.take_profit,
+                confidence=sig.confidence, confidence_source=ConfidenceSource.CALCULATED,
+                event_directness=EventDirectness.NOT_APPLICABLE,
+                position_size_hint={"units": units, "usd_value": cost}, product="MIS",
+            )
             try:
-                await open_paper_trade(
-                    sig, {"units": units, "usd_value": cost}, session, product="MIS"
-                )
+                _gate_result = await execute_trade_intent(_intent, session)
+                if _gate_result.outcome not in (RoutingOutcome.EXECUTED_PAPER, RoutingOutcome.EXECUTED_LIVE):
+                    logger.info(f"[intraday_entry] gate blocked {sig.symbol}: {_gate_result.outcome.value} — {_gate_result.reason}")
+                    continue
                 balance -= cost
                 opened  += 1
                 opened_details.append({
@@ -2077,6 +2100,7 @@ async def _open_index_option_mis(
     from db.models import MasterIntelligenceScore
     from engine.fno.expiry import _spot_for
     from engine.fno.selection import select_index_option, open_option_paper_trade
+    from utils.config import settings
 
     # Determine market direction from Hub scores (use latest batch, up to 2 h old)
     _latest_subq = (
@@ -2089,7 +2113,15 @@ async def _open_index_option_mis(
         .where(MasterIntelligenceScore.scored_at >= _latest_subq - datetime.timedelta(hours=2))
     )).one()
     avg_score = float(agg.avg_score or 0)
-    if abs(avg_score) < 10:
+    # Interim safety raise (2026-07-20 execution-authority audit): this was the
+    # weakest of ~5 independent confidence floors in the codebase (10, vs.
+    # equity's 30 / F&O spreads' 55) and is what let a "Hub avg +13" NIFTY CE
+    # buy through on 2026-07-20. This instrument is CE/PE, so it can't yet
+    # route through the central gate (execute_trade_intent() is EQUITY-only
+    # pending Phase 2c) — raising the floor here is the interim fix until that
+    # migration lands.
+    _min_score = float(getattr(settings, "NIFTY_MIS_OPTION_MIN_SCORE", 30.0))
+    if abs(avg_score) < _min_score:
         return False   # market too ambiguous for directional option
 
     direction = "BUY" if avg_score > 0 else "SELL"   # select_index_option: BUY->CE, SELL->PE

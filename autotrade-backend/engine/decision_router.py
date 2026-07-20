@@ -297,31 +297,40 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
     )
 
 
-async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> RoutingResult:
-    """Central execution gate. Every strategy must call this instead of
-    open_paper_trade / open_option_paper_trade / AgentExecutionManager.execute /
-    place_real_order directly.
+@dataclass
+class AuthorizationResult:
+    approved: bool
+    mode:     TradeMode
+    reason:   str
+    outcome:  RoutingOutcome | None = None   # populated only when approved=False
+    signal:   Any = None                     # TradingSignal built from the intent — reuse it, don't rebuild
+    balance:  float | None = None            # wallet balance fetched during equity validation — reuse for sizing
 
-    Checks, in order:
+
+async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> AuthorizationResult:
+    """Runs the gate's pass/fail checks WITHOUT executing anything:
       1. Confidence provenance — only CALCULATED may auto-execute.
       2. Event-directness tier — SPECULATIVE never auto-trades; SECOND_ORDER
          needs a stricter confidence bar and evidence_ids.
       3. Equity risk validation (validate_signal) when instrument_type == EQUITY.
-         F&O intents are not yet supported here — those strategies still call
-         their own open_option_paper_trade/open_spread_paper_trade/
-         open_future_paper_trade directly (Phase 2 migration).
-      4. Existing mode/threshold/execution routing via route_decision().
+
+    Use this directly (instead of execute_trade_intent()) when the caller has
+    its own execution mechanics that do more than plain open_paper_trade —
+    e.g. AgentExecutionManager, which writes AgentDecision/AgentTrade audit
+    tables, has its own idempotency guard, and subscribes the live ticker.
+    Call authorize_trade_intent() first; only proceed with your own executor
+    if `approved` is True. Rejections are still centrally audit-logged here.
     """
     mode = await resolve_mode(session)
 
     if intent.confidence_source != ConfidenceSource.CALCULATED:
+        reason = (
+            f"confidence_source={intent.confidence_source.value} — only 'calculated' "
+            f"confidence may auto-execute; a hardcoded/override value is not a real "
+            f"evaluation and cannot silently authorize a trade"
+        )
         result = RoutingResult(
-            outcome=RoutingOutcome.BLOCKED_CONFIDENCE_INTEGRITY, mode=mode,
-            reason=(
-                f"confidence_source={intent.confidence_source.value} — only 'calculated' "
-                f"confidence may auto-execute; a hardcoded/override value is not a real "
-                f"evaluation and cannot silently authorize a trade"
-            ),
+            outcome=RoutingOutcome.BLOCKED_CONFIDENCE_INTEGRITY, mode=mode, reason=reason,
             metadata={"strategy": intent.strategy, "confidence": intent.confidence,
                       "event_directness": intent.event_directness.value},
         )
@@ -330,44 +339,40 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
             f"strategy={intent.strategy} source={intent.confidence_source.value} conf={intent.confidence}"
         )
         await _log_intent_audit(intent, mode, result, session)
-        return result
+        return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     if intent.event_directness == EventDirectness.SPECULATIVE:
+        reason = "speculative inferred event — candidate only, not auto-tradable"
         result = RoutingResult(
-            outcome=RoutingOutcome.WATCHLIST_ONLY, mode=mode,
-            reason="speculative inferred event — candidate only, not auto-tradable",
+            outcome=RoutingOutcome.WATCHLIST_ONLY, mode=mode, reason=reason,
             metadata={"strategy": intent.strategy, "confidence": intent.confidence},
         )
         logger.info(f"[execution_gate] WATCHLIST_ONLY {intent.symbol} strategy={intent.strategy}")
         await _log_intent_audit(intent, mode, result, session)
-        return result
+        return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     if intent.event_directness == EventDirectness.SECOND_ORDER:
         if not intent.evidence_ids:
-            result = RoutingResult(
-                outcome=RoutingOutcome.BLOCKED_GATE, mode=mode,
-                reason="second-order intent has no evidence_ids — cannot verify the originating event",
-                metadata={"strategy": intent.strategy},
-            )
+            reason = "second-order intent has no evidence_ids — cannot verify the originating event"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
             await _log_intent_audit(intent, mode, result, session)
-            return result
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
         _min_second_order = float(getattr(settings, "SECOND_ORDER_MIN_CONFIDENCE", 70.0))
         if intent.confidence < _min_second_order:
-            result = RoutingResult(
-                outcome=RoutingOutcome.BLOCKED_SECOND_ORDER, mode=mode,
-                reason=f"second-order candidate conf={intent.confidence:.1f} below stricter bar {_min_second_order:.1f}",
-                metadata={"strategy": intent.strategy},
-            )
+            reason = f"second-order candidate conf={intent.confidence:.1f} below stricter bar {_min_second_order:.1f}"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_SECOND_ORDER, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
             await _log_intent_audit(intent, mode, result, session)
-            return result
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
-    signal = _intent_to_signal(intent)
-    position_size = intent.position_size_hint
+    signal  = _intent_to_signal(intent)
+    balance = None
 
     if intent.instrument_type == "EQUITY":
         from sqlalchemy import select as _select
         from paper_trading.virtual_wallet import VirtualWallet
-        from engine.risk_manager import validate_signal, calculate_position_size
+        from engine.risk_manager import validate_signal
         from db.models import OpenPosition
 
         summary = await VirtualWallet.get_summary(session)
@@ -375,19 +380,37 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
         open_positions = list((await session.execute(_select(OpenPosition))).scalars().all())
         ok, reason = await validate_signal(signal, balance, open_positions, session)
         if not ok:
-            result = RoutingResult(
-                outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
-                metadata={"strategy": intent.strategy},
-            )
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
             await _log_intent_audit(intent, mode, result, session)
-            return result
-        if position_size is None:
-            position_size = calculate_position_size(signal, balance)
-    elif position_size is None:
-        position_size = {"units": 1, "usd_value": intent.entry_price}
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
-    result = await route_decision(signal, session, position_size=position_size, source=intent.strategy)
-    await _log_intent_audit(intent, mode, result, session)
+    return AuthorizationResult(approved=True, mode=mode, reason="approved", signal=signal, balance=balance)
+
+
+async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> RoutingResult:
+    """Central execution gate for callers happy with generic execution
+    semantics (open_paper_trade for PAPER mode). Wraps authorize_trade_intent()
+    + route_decision(). Every strategy must call this (or authorize_trade_intent()
+    directly, if it needs its own executor) instead of open_paper_trade /
+    open_option_paper_trade / AgentExecutionManager.execute / place_real_order
+    directly.
+    """
+    auth = await authorize_trade_intent(intent, session)
+    if not auth.approved:
+        return RoutingResult(outcome=auth.outcome, mode=auth.mode, reason=auth.reason,
+                              metadata={"strategy": intent.strategy})
+
+    position_size = intent.position_size_hint
+    if position_size is None:
+        if intent.instrument_type == "EQUITY":
+            from engine.risk_manager import calculate_position_size
+            position_size = calculate_position_size(auth.signal, auth.balance)
+        else:
+            position_size = {"units": 1, "usd_value": intent.entry_price}
+
+    result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy)
+    await _log_intent_audit(intent, auth.mode, result, session)
     return result
 
 
