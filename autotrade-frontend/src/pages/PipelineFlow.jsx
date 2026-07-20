@@ -382,10 +382,10 @@ export default function PipelineFlow() {
           <SmallNode
             Icon={Newspaper}
             accent="amber"
-            title="News-First Discovery Engine"
-            subtitle="Standalone 24/7 RSS poller — keyword-filters headlines, extracts ticker, runs a multi-tool LLM debate. See Path C below."
-            timing="every 15s (when running)"
-            badge="EXPERIMENTAL"
+            title="Event Discovery & Clustering"
+            subtitle="Scrapes RSS/APIs, runs semantic clustering to prevent duplication, extracts category, half-life, and structured entities via LLM."
+            timing="every 15s"
+            badge="V4 ENGINE"
           />
           <SmallNode
             Icon={Gauge}
@@ -446,59 +446,99 @@ export default function PipelineFlow() {
 
       <Connector active label="rescored ~every 15 min" />
 
-      {/* ── STEP 4: Master Intelligence Scorer ───────────────────────────────── */}
+      {/* ── STEP 4: Master Intelligence Scorer (V4 Multi-Strategy) ───────────── */}
       <div className="flex justify-center">
         <Node
           Icon={BrainCircuit}
-          title="Master Intelligence Scorer"
-          subtitle="engine/intelligence_hub.py — computes a composite score per symbol, two weight profiles"
+          title="Master Intelligence Scorer (V4 Multi-Strategy)"
+          subtitle="engine/intelligence_hub.py — dynamic strategy gating based on market regime and signal strength"
           timing="every 15 min (:14/:29/:44/:59 marks)"
           accent="purple"
           wide
         >
-          <div className="mt-3 space-y-3">
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Normal mode (effective weights, post-normalisation)</p>
-              <div className="grid grid-cols-1 gap-1">
-                {[
-                  { factor: 'Technical',   weight: '58%', color: 'bg-cyan' },
-                  { factor: 'Volume',      weight: '13%', color: 'bg-blue-500' },
-                  { factor: 'News',        weight: '11%', color: 'bg-amber-500' },
-                  { factor: 'Sector',      weight: '9%',  color: 'bg-emerald-500' },
-                  { factor: 'Macro',       weight: '9%',  color: 'bg-indigo-500' },
-                  { factor: 'Earnings / Fundamental / Options', weight: '0%', color: 'bg-slate-600' },
-                ].map(f => (
-                  <div key={f.factor} className="flex items-center gap-3 text-xs">
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
-                    <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
-                    <span className="text-cyan/80 font-bold w-10 text-right shrink-0">{f.weight}</span>
-                  </div>
-                ))}
+          <div className="mt-3 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-emerald-400 mb-1 font-bold flex items-center gap-1"><Zap size={10} /> Event Swing Strategy</p>
+                <div className="grid grid-cols-1 gap-1">
+                  {[
+                    { factor: 'News/Catalyst', weight: '40%', color: 'bg-amber-500' },
+                    { factor: 'Technical', weight: '30%', color: 'bg-cyan' },
+                    { factor: 'Sector', weight: '10%', color: 'bg-emerald-500' },
+                    { factor: 'Macro', weight: '10%', color: 'bg-indigo-500' },
+                    { factor: 'Volume', weight: '10%', color: 'bg-blue-500' },
+                  ].map(f => (
+                    <div key={f.factor} className="flex items-center gap-3 text-[11px]">
+                      <span className={`w-1 h-1 rounded-full shrink-0 ${f.color}`} />
+                      <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                      <span className="text-cyan/80 font-bold w-8 text-right shrink-0">{f.weight}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Swing mode (when swing regime active)</p>
-              <div className="grid grid-cols-1 gap-1">
-                {[
-                  { factor: 'Technical',      weight: '49%', color: 'bg-cyan' },
-                  { factor: 'Sector',         weight: '13%', color: 'bg-emerald-500' },
-                  { factor: 'Volume',         weight: '13%', color: 'bg-blue-500' },
-                  { factor: 'News',           weight: '11%', color: 'bg-amber-500' },
-                  { factor: 'Macro',          weight: '9%',  color: 'bg-indigo-500' },
-                  { factor: '12-month momentum', weight: '4%', color: 'bg-purple-500' },
-                ].map(f => (
-                  <div key={f.factor} className="flex items-center gap-3 text-xs">
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${f.color}`} />
-                    <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
-                    <span className="text-cyan/80 font-bold w-10 text-right shrink-0">{f.weight}</span>
-                  </div>
-                ))}
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-cyan mb-1 font-bold flex items-center gap-1"><TrendingUp size={10} /> Technical Swing Strategy</p>
+                <div className="grid grid-cols-1 gap-1">
+                  {[
+                    { factor: 'Technical', weight: '45%', color: 'bg-cyan' },
+                    { factor: 'News', weight: '20%', color: 'bg-amber-500' },
+                    { factor: 'Volume', weight: '15%', color: 'bg-blue-500' },
+                    { factor: 'Sector', weight: '10%', color: 'bg-emerald-500' },
+                    { factor: 'Macro', weight: '10%', color: 'bg-indigo-500' },
+                  ].map(f => (
+                    <div key={f.factor} className="flex items-center gap-3 text-[11px]">
+                      <span className={`w-1 h-1 rounded-full shrink-0 ${f.color}`} />
+                      <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                      <span className="text-cyan/80 font-bold w-8 text-right shrink-0">{f.weight}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-blue-400 mb-1 font-bold flex items-center gap-1"><Activity size={10} /> Intraday Momentum</p>
+                <div className="grid grid-cols-1 gap-1">
+                  {[
+                    { factor: 'Technical', weight: '50%', color: 'bg-cyan' },
+                    { factor: 'Volume', weight: '25%', color: 'bg-blue-500' },
+                    { factor: 'Options (PCR/IV)', weight: '15%', color: 'bg-purple-500' },
+                    { factor: 'News', weight: '5%', color: 'bg-amber-500' },
+                    { factor: 'Macro', weight: '5%', color: 'bg-indigo-500' },
+                  ].map(f => (
+                    <div key={f.factor} className="flex items-center gap-3 text-[11px]">
+                      <span className={`w-1 h-1 rounded-full shrink-0 ${f.color}`} />
+                      <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                      <span className="text-cyan/80 font-bold w-8 text-right shrink-0">{f.weight}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-slate-300 mb-1 font-bold flex items-center gap-1"><Database size={10} /> Positional Investment</p>
+                <div className="grid grid-cols-1 gap-1">
+                  {[
+                    { factor: 'Fundamentals', weight: '40%', color: 'bg-slate-400' },
+                    { factor: 'Earnings', weight: '20%', color: 'bg-amber-200' },
+                    { factor: 'Technical', weight: '20%', color: 'bg-cyan' },
+                    { factor: 'Macro', weight: '10%', color: 'bg-indigo-500' },
+                    { factor: 'Sector', weight: '10%', color: 'bg-emerald-500' },
+                  ].map(f => (
+                    <div key={f.factor} className="flex items-center gap-3 text-[11px]">
+                      <span className={`w-1 h-1 rounded-full shrink-0 ${f.color}`} />
+                      <span className="text-slate-300 font-medium flex-1">{f.factor}</span>
+                      <span className="text-cyan/80 font-bold w-8 text-right shrink-0">{f.weight}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-          <p className="mt-3 text-[10px] text-muted italic border-t border-border pt-2">
-            Code note: raw weights sum to 1.12, not 1.0 — the values above are already divided through, so they're the true effective weights.
-            Earnings/fundamental/options are computed but zero-weighted (not live in the score yet). A flat −20 penalty applies when the Nifty macro regime reads BEAR.
+          <p className="mt-3 text-[10px] text-muted italic border-t border-border pt-2 flex gap-1 items-start">
+            <ShieldCheck size={12} className="text-amber-500 shrink-0 mt-0.5" />
+            <span>
+              <strong>Gating Logic:</strong> Engine automatically picks Event Swing if News ≥ 85 & Tech ≥ 60. 
+              Picks Technical Swing if Tech ≥ 85 & Vol ≥ 70. 
+              A flat −20 penalty applies across all swing strategies when Nifty macro regime is BEAR.
+            </span>
           </p>
           <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
             <div className="rounded-lg border border-emerald-500/20 px-2 py-1.5 bg-emerald-500/5">
@@ -563,12 +603,13 @@ export default function PipelineFlow() {
           ]}
         />
         <PathCard
-          letter="C" title="News-First Discovery Engine" Icon={Newspaper} accent="amber" active={true}
+          letter="C" title="V4 Event-Driven Discovery Engine" Icon={Newspaper} accent="amber" active={true}
           timing="24/7, running as a systemd --user service"
           points={[
-            'Standalone script (news_discovery_engine.py) — polls free RSS, keyword-filters, extracts an NSE ticker, then runs a multi-tool ReAct "debate" LLM (fundamentals/news/options/price/depth/sector/macro/predict-candle tools) → TAKE/SKIP.',
-            'Running now (autotrade-news-engine.service, Restart=always) — real RSS ingestion and real LLM analysis, queuing overnight candidates to PreMarketNewsQueue for the next market open.',
-            'Wired to execution: on TAKE it now routes through the same validate_signal() risk gate and open_paper_trade() path as the India Trade Loop — fixed 3%/7.5% stop/target (no technical S/R for a news catalyst), full guardrails (cash buffer, sector caps, correlation, duplicate-position, drawdown breakers) apply before any position opens.',
+            'Clustering & Deduplication: difflib merges multiple articles (e.g., ET, Mint) into a single Master Event to prevent score inflation.',
+            'LLM Categorization: Extracts subcategories, impact horizon, decay half-life, bullish/bearish flags, and mapped entities.',
+            'Surprise Engine: Scores the catalyst strength (1-100) vs expectations. Only top clustered candidates proceed to filtering.',
+            'Execution: On TAKE, routes through validate_signal() using technicals strictly as a timing filter before paper trading.',
           ]}
         />
       </div>
