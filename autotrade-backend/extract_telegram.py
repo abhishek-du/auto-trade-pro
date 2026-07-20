@@ -27,12 +27,12 @@ def fetch_telegram_messages():
                 "text": msg_text
             })
             
-    # Filter for today (July 13, 2026)
-    target_dates = ['2026-07-13']
+    # Filter for today and yesterday
+    target_dates = ['2026-07-16', '2026-07-15']
     filtered = [m for m in extracted if any(d in m['time'] for d in target_dates)]
     
     with open('telegram_analysis.md', 'w') as f:
-        f.write("# Eagle Eyes Market Analysis (July 13, 2026)\n\n")
+        f.write("# Eagle Eyes Market Analysis (July 15-16, 2026)\n\n")
         if not filtered:
             f.write("No messages found for today or yesterday.\n")
         else:

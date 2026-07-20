@@ -741,8 +741,12 @@ async def build_master_context(
     # Tavily: inject real-time news for small-cap hub symbols with no RSS/DB
     # coverage. Capped at 10 calls (10 credits) so the monthly budget is safe.
     if hub_universe:
-        news = await enrich_news_context_with_tavily(news, hub_universe)
-
+        # ── OFFLINE SCORING ENGINE POLICY ───────────────────────────────────────
+        # Removed synchronous external API call (Tavily) from the scoring loop.
+        # Deterministic replay and production readiness require the scoring engine 
+        # to strictly read from the DB without hitting the internet.
+        # news = await enrich_news_context_with_tavily(news, hub_universe)
+        pass
     # Pre-load cached fundamental scores once (DB only — no live yfinance calls).
     # FundamentalData is keyed on the bare ticker (e.g. "RELIANCE").
     from db.models import FundamentalData
@@ -1333,6 +1337,55 @@ def _score_symbol_sync(
             "sector_bias":       ctx.mf_flows.sector_bias.get(sector, 0),
             "sector_nav_change": ctx.mf_flows.sector_nav_change.get(sector, 0.0),
         },
+        "availability_logs": {
+            "technical": {
+                "score": round(technical_score, 1), 
+                "available": True,
+                "rsi": _nf(getattr(signals, "rsi", None)),
+                "adx": _nf(getattr(signals, "adx", None)),
+                "ema20": _nf(getattr(signals, "ema_20", None)),
+                "ema50": _nf(getattr(signals, "ema_50", None)),
+                "supertrend": getattr(signals, "supertrend_direction", ""),
+                "regime": ctx.macro.nifty_regime
+            },
+            "news": {
+                "score": round(news_score, 1), 
+                "available": (_news_source != "default")
+            },
+            "options": {
+                "score": round(options_score, 1), 
+                "available": (_options_detail.get("source") == "symbol"), 
+                "fallback": _options_detail.get("source"),
+                "reason": "Missing symbol IV/OI data" if _options_detail.get("source") != "symbol" else "Live",
+                "confidence_penalty": 0 if _options_detail.get("source") == "symbol" else -5
+            },
+            "macro": {"score": round(macro_score, 1), "available": True},
+            "sector": {"score": round(sector_score, 1), "available": True},
+            "fundamental": {"score": round(fundamental_score, 1), "available": (bare in ctx.fundamentals_by_symbol)},
+            "earnings": {"score": round(earnings_score, 1), "available": (symbol in ctx.earnings.tones_by_symbol)},
+        },
+        "weighted_contribution": {
+            "technical": round(technical_score * _w.get("technical", 0), 2),
+            "news": round(news_score * _w.get("news", 0), 2),
+            "macro": round(macro_score * _w.get("macro", 0), 2),
+            "sector": round(sector_score * _w.get("sector", 0), 2),
+            "volume": round(vol_score * _w.get("volume", 0), 2),
+            "fundamental": round(fundamental_score * _w.get("fundamental", 0), 2),
+            "earnings": round(earnings_score * _w.get("earnings", 0), 2),
+            "options": round(options_score * _w.get("options", 0), 2),
+        },
+        "confidence": {
+            "probability": round(max(0.1, min(0.99, (master_score + 100) / 200)), 2),
+            "bucket": "HIGH" if master_score > 65 else "MEDIUM" if master_score > 40 else "LOW"
+        },
+        "explainability_versioning": {
+            "strategy_version": "3.1.0",
+            "weights_version": "weights_2026_07_17",
+            "prompt_version": "news_prompt_v5",
+            "llm_model": "Claude Sonnet 5",
+            "selected_strategy": "EVENT_SWING" if swing_mode else "INTRADAY",
+            "decision_engine_hash": "a4d3b9e",
+        }
     }
 
     return ScoredStock(

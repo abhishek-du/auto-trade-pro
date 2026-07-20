@@ -1,3 +1,4 @@
+// Run with: node --env-file=.env capture.cjs (requires CAPTURE_EMAIL / CAPTURE_PASSWORD, see .env.example)
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 
@@ -54,25 +55,35 @@ const PAGES = [
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
 
+    // 1. Explicit Login Step
+    console.log('Logging in with provided credentials...');
+    await page.goto('http://localhost:5173/login', { waitUntil: 'domcontentloaded' });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const captureEmail = process.env.CAPTURE_EMAIL;
+    const capturePassword = process.env.CAPTURE_PASSWORD;
+    if (!captureEmail || !capturePassword) {
+        console.log('CAPTURE_EMAIL / CAPTURE_PASSWORD not set in env; skipping login.');
+    }
+
+    const emailInput = await page.$('input[type="email"], input[type="text"]');
+    if (emailInput && captureEmail) {
+        await emailInput.type(captureEmail);
+    }
+    const passInput = await page.$('input[type="password"]');
+    if (passInput && capturePassword) {
+        await passInput.type(capturePassword);
+        await page.keyboard.press('Enter');
+        console.log('Submitted login. Waiting for redirect...');
+        await new Promise(resolve => setTimeout(resolve, 4000));
+    }
+
+    // 2. Loop through pages
     for (let p of PAGES) {
         console.log(`Capturing ${p.name}...`);
         try {
             await page.goto(`http://localhost:5173${p.route}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            // Wait an extra 3 seconds for React animations/charts to settle
             await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            // Try typing admin into password if we got redirected to login
-            const isLogin = await page.evaluate(() => window.location.href.includes('/login'));
-            if (isLogin) {
-                console.log('Redirected to login. Attempting to bypass or capture login state.');
-                const passInput = await page.$('input[type="password"]');
-                if (passInput) {
-                    await passInput.type('admin');
-                    await page.keyboard.press('Enter');
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                }
-            }
-
             await page.screenshot({ path: `screenshots/${p.name}.png`, fullPage: true });
         } catch (e) {
             console.log(`Failed to capture ${p.name}: ${e.message}`);

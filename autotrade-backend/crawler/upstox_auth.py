@@ -2,11 +2,9 @@ import os
 import sys
 from dotenv import load_dotenv, set_key
 
-# Load existing environment variables
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(env_path)
 
-# Ensure our local upstox_totp is in path
 sys.path.insert(0, os.path.dirname(__file__))
 from upstox_totp import UpstoxTOTP
 
@@ -22,7 +20,7 @@ def generate_and_save_upstox_token():
             totp_secret=os.environ.get("UPSTOX_TOTP_SECRET"),
             client_id=os.environ.get("UPSTOX_API_KEY"),
             client_secret=os.environ.get("UPSTOX_API_SECRET"),
-            redirect_uri="https://localhost:8000/api/v1/upstox/callback",
+            redirect_uri=os.environ.get("UPSTOX_REDIRECT_URL", "http://localhost:8000/api/v1/upstox/callback"),
             debug=False
         )
         

@@ -1,27 +1,32 @@
 import asyncio
+from sqlalchemy import select
 from db.database import AsyncSessionLocal
-from sqlalchemy import text
+from db.models import MasterIntelligenceScore
 
-async def main():
-    async with AsyncSessionLocal() as db:
-        # Latest scores
-        scores = (await db.execute(text("""
-            SELECT symbol, master_score, signal, is_blocked, blocked_reason, regime
-            FROM master_intelligence_scores
-            ORDER BY scored_at DESC
-            LIMIT 50
-        """))).fetchall()
+async def check_scores():
+    async with AsyncSessionLocal() as session:
+        print("=== Today's Master Scores (Multi-Strategy) ===")
+        res = await session.execute(
+            select(MasterIntelligenceScore)
+            .where(MasterIntelligenceScore.symbol.in_(['ITC.NS', 'TECHM.NS', 'WIPRO.NS', 'IEX.NS']))
+            .order_by(MasterIntelligenceScore.bar_time.desc())
+            .limit(10)
+        )
+        scores = res.scalars().all()
         
-        print("=== LATEST SCORES ===")
-        buys = 0
-        sells = 0
-        blocks = 0
-        for r in scores:
-            if r.signal in ('BUY', 'STRONG_BUY'): buys += 1
-            if r.signal in ('SELL', 'STRONG_SELL'): sells += 1
-            if r.is_blocked: blocks += 1
-            print(f"{r.symbol:10} | {r.master_score:6.2f} | {r.signal:11} | Blocked: {r.is_blocked} ({r.blocked_reason}) | {r.regime}")
-        
-        print(f"\nSummary of last 50: Buys: {buys}, Sells: {sells}, Blocked: {blocks}")
+        seen = set()
+        for s in scores:
+            if s.symbol in seen:
+                continue
+            seen.add(s.symbol)
+            print(f"[{s.bar_time}] {s.symbol} | Master Health: {s.master_score} | Blocked: {s.is_blocked}")
+            reasoning = s.reasoning or {}
+            strat = reasoning.get("strategy_scores", {})
+            print(f"   Event Swing:     {strat.get('event_swing')}")
+            print(f"   Technical Swing: {strat.get('technical_swing')}")
+            print(f"   Positional:      {strat.get('positional')}")
+            print(f"   Intraday:        {strat.get('intraday')}")
+            print("-" * 50)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(check_scores())

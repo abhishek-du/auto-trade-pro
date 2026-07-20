@@ -5,10 +5,10 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
-from api.schemas import NewsItemOut, SentimentOut, SSEAnnouncementOut
+from api.schemas import NewsItemOut, SentimentOut, SSEAnnouncementOut, CausalEventOut
 from crawler.news_crawler import get_market_sentiment
 from db.database import get_db
-from db.models import NewsItem, SSEAnnouncement
+from db.models import NewsItem, SSEAnnouncement, CausalEvent
 from engine.news_impact import is_high_impact_news
 from utils.config import settings
 
@@ -173,17 +173,59 @@ async def get_sse_announcements(
     result = await db.execute(
         select(SSEAnnouncement).order_by(desc(SSEAnnouncement.crawled_at)).limit(limit)
     )
-    return [
-        SSEAnnouncementOut(
-            id=item.id, seq_id=item.seq_id, comp_name=item.comp_name,
-            symbol=item.symbol, an_desc=item.an_desc, text=item.text,
-            an_attach=item.an_attach, att_file_size=item.att_file_size,
-            has_xbrl=item.has_xbrl, ann_date=item.ann_date,
-            ann_tstamp=item.ann_tstamp, diff_time=item.diff_time,
-            sentiment=item.sentiment, score=item.score, crawled_at=item.crawled_at,
-        )
-        for item in result.scalars().all()
-    ]
+    out = []
+    for row in result.scalars().all():
+        out.append(SSEAnnouncementOut(
+            id=row.id,
+            comp_name=row.comp_name,
+            symbol=row.symbol,
+            an_desc=row.an_desc,
+            text=row.text,
+            an_attach=row.an_attach,
+            att_file_size=row.att_file_size,
+            has_xbrl=row.has_xbrl,
+            ann_date=row.ann_date,
+            crawled_at=row.crawled_at,
+            diff_time=row.diff_time,
+            sentiment=row.sentiment,
+            score=row.score
+        ))
+    return out
 
 
-
+@router.get(
+    "/causal",
+    response_model=list[CausalEventOut],
+    summary="Get recent AI-classified Causal Events (Knowledge Graph nodes)"
+)
+async def get_causal_events(
+    limit: int = Query(500, le=1000),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = (
+        select(CausalEvent, NewsItem.headline, NewsItem.source)
+        .outerjoin(NewsItem, CausalEvent.news_id == NewsItem.id)
+        .order_by(desc(CausalEvent.created_at))
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    
+    out = []
+    for event, headline, source in result.all():
+        out.append(CausalEventOut(
+            id=event.id,
+            news_id=event.news_id,
+            event_title=event.event_title or "",
+            country=event.country or "Global",
+            importance=event.importance or 0.0,
+            confidence=event.confidence or 0.0,
+            affected_sectors=event.affected_sectors or [],
+            affected_indices=event.affected_indices or [],
+            bullish_stocks=event.bullish_stocks or [],
+            bearish_stocks=event.bearish_stocks or [],
+            duration=event.duration or "",
+            created_at=event.created_at,
+            headline=headline,
+            source=source
+        ))
+    return out
