@@ -275,6 +275,19 @@ async def evaluate_index_futures(session: AsyncSession, equity: float) -> list[d
             spec = await select_index_future(under, direction, spot, equity, session)
             if spec is None:
                 continue
+
+            from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, authorize_trade_intent
+            _intent = TradeIntent(
+                strategy="FNO_FUTURE", symbol=spec.tradingsymbol, action=direction, instrument_type="FUTURE",
+                entry_price=spec.entry, stop_loss=0.0, take_profit=0.0,
+                confidence=confidence, confidence_source=ConfidenceSource.CALCULATED,
+                event_directness=EventDirectness.NOT_APPLICABLE,
+            )
+            _auth = await authorize_trade_intent(_intent, session)
+            if not _auth.approved:
+                logger.info(f"[fno/fut] {under} gate blocked: {_auth.reason}")
+                continue
+
             trade = await open_future_paper_trade(spec, session, confidence=confidence)
             if trade:
                 opened.append({
