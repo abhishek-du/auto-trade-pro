@@ -3275,6 +3275,53 @@ def zerodha_ensure_token_task():
     return zerodha_token_refresh_task()
 
 
+@celery_app.task(name="tasks.refresh_upstox_token")
+def refresh_upstox_token_task():
+    """Auto-refresh the Upstox access token daily at 08:15 IST (02:45 UTC) —
+    Upstox tokens expire daily. Unlike Zerodha's flow this is fully headless
+    (TOTP, no OAuth browser hop), so it can run standalone in the Celery
+    process. On repeated failure it alerts via Telegram, so the company-
+    intelligence enrichment layer going dark doesn't fail silently."""
+    from crawler.upstox_auth import refresh_upstox_token_with_retry
+    from utils.config import settings
+    if not (settings.UPSTOX_API_KEY and settings.UPSTOX_API_SECRET):
+        return {"skipped": "no_credentials"}
+    ok = _run_async(refresh_upstox_token_with_retry(retries=3))
+    if not ok:
+        logger.error("[upstox_token_refresh] Token refresh failed after 3 attempts")
+        try:
+            from integrations.telegram_service import send
+            _run_async(send(
+                "⚠️ <b>Upstox token refresh failed</b> (3 attempts).\n"
+                "Company-intelligence enrichment (fundamentals/shareholding/"
+                "corporate actions) will be unavailable until this is fixed — "
+                "check UPSTOX_TOTP_SECRET/UPSTOX_PIN in .env, or visit "
+                "<code>/api/v1/upstox/login</code> to re-authenticate manually."
+            ))
+        except Exception as exc:
+            logger.warning(f"[upstox_token_refresh] telegram alert failed: {exc}")
+        return {"status": "failed"}
+    logger.info("[upstox_token_refresh] Token refreshed successfully")
+    return {"status": "ok"}
+
+
+@celery_app.task(name="tasks.upstox_ensure_token")
+def upstox_ensure_token_task():
+    """Catch-up refresh on worker boot — mirrors zerodha_ensure_token_task so a
+    missed 08:15 IST slot (e.g. machine was off overnight) doesn't leave the
+    Upstox enrichment layer dark until the next day's cron slot."""
+    from utils.config import settings
+    if not (settings.UPSTOX_API_KEY and settings.UPSTOX_API_SECRET):
+        return {"skipped": "no_credentials"}
+    from crawler.upstox_auth import verify_upstox_token
+    valid = _run_async(verify_upstox_token())
+    if valid:
+        logger.info("[upstox_ensure_token] Token still valid — no refresh needed")
+        return {"valid": True, "refreshed": False}
+    logger.info("[upstox_ensure_token] Token missing/expired — running auto-login now")
+    return refresh_upstox_token_task()
+
+
 @worker_ready.connect
 def _on_worker_ready(**_kwargs):
     """When the worker boots, schedule a token catch-up. Delayed so the backend
@@ -3285,6 +3332,11 @@ def _on_worker_ready(**_kwargs):
         logger.info("[worker_ready] scheduled Zerodha token catch-up (+45s)")
     except Exception as exc:
         logger.warning(f"[worker_ready] could not schedule token catch-up: {exc}")
+    try:
+        upstox_ensure_token_task.apply_async(countdown=50)
+        logger.info("[worker_ready] scheduled Upstox token catch-up (+50s)")
+    except Exception as exc:
+        logger.warning(f"[worker_ready] could not schedule Upstox token catch-up: {exc}")
 
 
 @celery_app.task(name="tasks.kite_start_ticker")

@@ -377,6 +377,15 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=45),
     },
 
+    # Daily 02:45 UTC = 08:15 IST: auto-refresh Upstox access token before
+    # market open (15 min after Zerodha's 08:00 IST slot). Upstox tokens expire
+    # daily; this is headless (TOTP), no OAuth browser hop required. Failure
+    # after retries alerts via Telegram (see tasks.refresh_upstox_token).
+    "upstox-token-refresh-daily": {
+        "task":     "tasks.refresh_upstox_token",
+        "schedule": crontab(hour=2, minute=45),
+    },
+
     # Every 5 min: warn (Telegram) if the live price feed has gone stale during
     # NSE hours — early warning for a frozen feed (expired token / dead ticker /
     # wedged worker). The task self-gates on market hours.

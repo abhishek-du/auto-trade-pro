@@ -25,6 +25,7 @@ import asyncio
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, HTMLResponse
 
+from crawler.upstox_auth import get_upstox_status
 from crawler.upstox_data import (
     get_auth_url, exchange_code_for_token,
     get_news, get_company_profile,
@@ -69,9 +70,9 @@ async def upstox_callback(code: str = ""):
 async def upstox_status():
     return {
         "api_key_set":    settings.upstox_available,
-        "authenticated":  settings.upstox_authenticated,
         "token_preview":  settings.UPSTOX_ACCESS_TOKEN[:12] + "…" if settings.UPSTOX_ACCESS_TOKEN else None,
         "login_url":      "/api/v1/upstox/login",
+        **get_upstox_status(),   # status/authenticated/last_verified_ts/last_refresh_ts/failures
     }
 
 
