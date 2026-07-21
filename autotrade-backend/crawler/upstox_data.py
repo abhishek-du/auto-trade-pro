@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from crawler.upstox_auth import ensure_upstox_token_fresh
 from utils.config import settings
 from utils.logger import logger
 
@@ -146,7 +147,7 @@ async def get_news(symbol: str, limit: int = 10) -> list[dict]:
     if cached := _get_cache(ck):
         return cached
 
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return []
 
     ikey = await get_instrument_key(symbol)
@@ -185,44 +186,73 @@ def _parse_news_item(a: dict) -> dict:
 
 # ── Fundamentals ──────────────────────────────────────────────────────────────
 
-async def _fundamentals(endpoint: str, isin: str, cache_key: str, params: dict | None = None) -> dict:
-    ck = f"{cache_key}:{isin}"
+async def _fundamentals(endpoint: str, path_id: str, cache_key: str, params: dict | None = None) -> dict:
+    """path_id is whatever identifier this specific endpoint wants in its URL
+    path (ISIN for most; `competitors` is the one exception — see
+    get_competitors below), and endpoint is the URL segment after it, e.g.
+    "profile", "key-ratios".
+
+    Real shape confirmed against live Upstox API docs + live calls (2026-07-21):
+    GET /v2/fundamentals/{path_id}/{endpoint} — the identifier is a PATH
+    segment, not a query param. The previous ?isin=... query-param form
+    404'd on every single call (verified live against RELIANCE — profile/
+    income-statement/balance-sheet/cash-flow/key-ratios/shareholding/
+    corporate-actions all returned UDAPI100060 "Resource not Found" before
+    this fix); market-data endpoints (ltp/historical/market_intel) were
+    unaffected since they don't go through this helper.
+    """
+    ck = f"{cache_key}:{endpoint}:{path_id}:{sorted((params or {}).items())}"
     if cached := _get_cache(ck):
         return cached
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return {}
     try:
-        p = {"isin": isin, **(params or {})}
+        from urllib.parse import quote
+        encoded_id = quote(path_id, safe="")   # instrument_key contains "|" — must be percent-encoded
         async with httpx.AsyncClient(timeout=12) as c:
-            r = await c.get(f"{_V2}/fundamentals/{endpoint}", headers=_headers(), params=p)
+            r = await c.get(f"{_V2}/fundamentals/{encoded_id}/{endpoint}", headers=_headers(), params=params or {})
             if r.status_code == 200:
                 data = r.json().get("data", r.json())
                 _set_cache(ck, data, cache_key)
                 return data
-            logger.warning(f"[upstox/{endpoint}] {isin} → {r.status_code}: {r.text[:200]}")
+            logger.warning(f"[upstox/{endpoint}] {path_id} → {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        logger.warning(f"[upstox/{endpoint}] {isin} failed: {e}")
+        logger.warning(f"[upstox/{endpoint}] {path_id} failed: {e}")
     return {}
 
 
 async def get_company_profile(symbol: str) -> dict:
     isin = await get_isin(symbol)
-    return await _fundamentals("company-profile", isin, "profile") if isin else {}
+    # Upstox's path segment for this one is "profile", not "company-profile".
+    return await _fundamentals("profile", isin, "profile") if isin else {}
 
 
 async def get_income_statement(symbol: str, period: str = "annual") -> dict:
     isin = await get_isin(symbol)
-    return await _fundamentals("income-statement", isin, "financials", {"period": period}) if isin else {}
+    time_period = "quarterly" if period == "quarterly" else "yearly"
+    return await _fundamentals(
+        "income-statement", isin, "financials",
+        {"type": "consolidated", "time_period": time_period, "fs": "true"},
+    ) if isin else {}
 
 
 async def get_balance_sheet(symbol: str, period: str = "annual") -> dict:
+    # Upstox's balance-sheet endpoint has no yearly/quarterly param — only
+    # `type` (consolidated/standalone) and `fs` (line-item detail). `period`
+    # is accepted for call-signature compatibility with the other two
+    # statement fetchers but has no effect here.
     isin = await get_isin(symbol)
-    return await _fundamentals("balance-sheet", isin, "financials", {"period": period}) if isin else {}
+    return await _fundamentals(
+        "balance-sheet", isin, "financials", {"type": "consolidated", "fs": "true"},
+    ) if isin else {}
 
 
 async def get_cash_flow(symbol: str, period: str = "annual") -> dict:
+    # Same caveat as get_balance_sheet — no time_period param on Upstox's side.
     isin = await get_isin(symbol)
-    return await _fundamentals("cash-flow", isin, "financials", {"period": period}) if isin else {}
+    return await _fundamentals(
+        "cash-flow", isin, "financials", {"type": "consolidated", "fs": "true"},
+    ) if isin else {}
 
 
 async def get_key_ratios(symbol: str) -> dict:
@@ -244,10 +274,13 @@ async def get_corporate_actions(symbol: str) -> list:
 
 
 async def get_competitors(symbol: str) -> list:
-    isin = await get_isin(symbol)
-    if not isin:
+    # Unlike every other fundamentals endpoint, /competitors rejects a bare
+    # ISIN (verified live: HTTP 400 "Invalid Instrument key") and requires the
+    # full instrument_key (e.g. "NSE_EQ|INE002A01018") in the path instead.
+    ikey = await get_instrument_key(symbol)
+    if not ikey:
         return []
-    data = await _fundamentals("competitors", isin, "competitors")
+    data = await _fundamentals("competitors", ikey, "competitors")
     return data if isinstance(data, list) else data.get("competitors", [])
 
 
@@ -258,7 +291,7 @@ async def get_market_intel(symbol: str) -> dict:
     ck = f"market_intel:{symbol}"
     if cached := _get_cache(ck):
         return cached
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return {}
     ikey = await get_instrument_key(symbol)
     if not ikey:
@@ -286,7 +319,7 @@ async def get_ltp(symbol: str) -> float | None:
     ck = f"ltp:{symbol}"
     if cached := _get_cache(ck):
         return cached
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return None
     ikey = await get_instrument_key(symbol)
     if not ikey:
@@ -332,7 +365,7 @@ async def get_historical(
     ck = f"hist:{symbol}:{interval}:{from_date}:{to_date}"
     if cached := _get_cache(ck):
         return cached
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return []
     ikey = await get_instrument_key(symbol)
     if not ikey:
@@ -363,7 +396,7 @@ async def get_historical(
 
 async def get_option_chain(symbol: str, expiry: str | None = None) -> dict:
     """Get option chain with OI from Upstox — cross-check against Zerodha quote OI."""
-    if not settings.upstox_authenticated:
+    if not await ensure_upstox_token_fresh():
         return {}
     ikey = await get_instrument_key(symbol)
     if not ikey:

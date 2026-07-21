@@ -8,6 +8,7 @@ Pipeline order:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
@@ -481,23 +482,430 @@ async def _tool_intraday_candles(symbol: str) -> str:
     except Exception as exc:
         return f"intraday_candles: error ({exc})"
 
+
+def _fmt_stmt_point(d: dict | None) -> str:
+    """income_statement/cash_flow points look like {"value", "period", "change"}."""
+    if not d or d.get("value") is None:
+        return "n/a"
+    s = f"{d['value']}"
+    if d.get("period"):
+        s += f"@{d['period']}"
+    if d.get("change"):
+        s += f"({d['change']})"
+    return s
+
+
+def _fmt_ownership_trend(d: dict | None) -> str:
+    if not d or d.get("latest_pct") is None:
+        return "n/a"
+    chg = d.get("change_qoq")
+    if chg is None:
+        return f"{d['latest_pct']}%"
+    arrow = "↑" if chg > 0 else ("↓" if chg < 0 else "→")
+    return f"{d['latest_pct']}% ({arrow}{abs(chg)}pp QoQ)"
+
+
+async def _tool_company_intelligence(symbol: str) -> str:
+    """Level-3 agentic tool (Phase U3): normalized Upstox-primary company
+    intelligence — financial statements, corporate actions, ownership trend,
+    competitors — via engine/company_intelligence.py's single aggregator
+    rather than exposing eight separate Upstox endpoints as eight separate
+    tools (that would let the model pit "Upstox says X" against "yfinance
+    says Y" itself, recreating the reconciliation problem the aggregator
+    exists to resolve upstream). Always reports completeness/failed_sections
+    so the model can tell "no cash-flow data exists for this company" apart
+    from "the enrichment layer happened to be down right now"."""
+    try:
+        from engine.company_intelligence import get_company_intelligence
+        ci = await get_company_intelligence(symbol)
+        meta = ci["metadata"]
+        lines = [f"company_intelligence (status={meta['status']}, completeness={meta['completeness']})"]
+
+        identity = ci.get("identity")
+        if identity:
+            if identity.get("sector"):
+                lines.append(f"sector={identity['sector']}")
+            desc = identity.get("business_description")
+            if desc:
+                lines.append(f"business: {desc[:220]}{'...' if len(desc) > 220 else ''}")
+
+        fs = ci.get("financial_statements")
+        if fs:
+            lines.append(
+                f"financials ({fs['units']}): revenue={_fmt_stmt_point(fs.get('revenue'))} "
+                f"op_profit={_fmt_stmt_point(fs.get('operating_profit'))} "
+                f"net_profit={_fmt_stmt_point(fs.get('net_profit'))} "
+                f"op_cash_flow={_fmt_stmt_point(fs.get('operating_cash_flow'))} "
+                f"total_assets={fs.get('total_assets')} total_liabilities={fs.get('total_liabilities')}"
+            )
+        else:
+            lines.append("financials: UNAVAILABLE (no fallback source exists for statement-level data)")
+
+        val, qual = ci.get("valuation"), ci.get("quality")
+        if val or qual:
+            parts = []
+            if val:
+                parts.append(f"PE={val.get('pe')} PB={val.get('pb')} MktCap={val.get('market_cap_cr')}Cr")
+            if qual:
+                parts.append(
+                    f"ROE={qual.get('roe')}% ROCE={qual.get('roce')}% "
+                    f"D/E={qual.get('debt_to_equity')} CurrentRatio={qual.get('current_ratio')}"
+                )
+            lines.append("ratios: " + " | ".join(parts))
+
+        own = ci.get("ownership")
+        if own:
+            lines.append(
+                f"ownership: promoter={_fmt_ownership_trend(own.get('promoter'))} "
+                f"fii={_fmt_ownership_trend(own.get('fii'))} dii={_fmt_ownership_trend(own.get('dii'))} "
+                f"public={_fmt_ownership_trend(own.get('public'))}"
+            )
+
+        events = ci.get("corporate_events")
+        if events:
+            ev_strs = [f"{e.get('name')} (ex-date {e.get('expiry_date')}, amt {e.get('amount')})" for e in events[:3]]
+            lines.append("corporate_events: " + "; ".join(ev_strs))
+
+        comp = ci.get("competitors")
+        if comp:
+            lines.append(f"competitors: {len(comp)} peers identified in {comp[0].get('sector')} sector")
+
+        if meta["failed_sections"]:
+            lines.append(f"NOTE: unavailable this call = {meta['failed_sections']}")
+
+        return " | ".join(lines)
+    except Exception as exc:
+        return f"company_intelligence: error ({exc})"
+
+
 _LLM_TOOLS = {
-    "fundamentals":     _tool_fundamentals,
-    "news":             _tool_news,
-    "options":          _tool_options,
-    "price_action":     _tool_price_action,
-    "market_depth":     _tool_market_depth,
-    "intraday_candles": _tool_intraday_candles,
-    "sector":           _tool_sector_analysis,
-    "macro":            _tool_macro_environment,
-    "earnings":         _tool_earnings_report,
-    "predict_candle":   _tool_predict_next_candle,
-    "screener_deep":    _tool_screener_deep,
-    "expert_research":  _tool_expert_research,
+    "fundamentals":         _tool_fundamentals,
+    "news":                 _tool_news,
+    "options":              _tool_options,
+    "price_action":         _tool_price_action,
+    "market_depth":         _tool_market_depth,
+    "intraday_candles":     _tool_intraday_candles,
+    "sector":               _tool_sector_analysis,
+    "macro":                _tool_macro_environment,
+    "earnings":             _tool_earnings_report,
+    "predict_candle":       _tool_predict_next_candle,
+    "screener_deep":        _tool_screener_deep,
+    "expert_research":      _tool_expert_research,
+    "company_intelligence": _tool_company_intelligence,
 }
 
 
 _NEWS_AUTHORITY_TOOLS = ("news", "expert_research")
+
+
+# Deterministic provenance backstop for _check_grounding(). A first attempt at
+# this check used an LLM judge alone and was demonstrably too lenient in
+# testing: a verdict citing "Options data (PCR 0.75, max-pain 1350)" and
+# "Macro shows net FII inflow" was scored grounded=True even though `options`
+# and `macro` were never called that session — there is categorically no
+# source for those numbers, but the judge model didn't catch it. Whether a
+# claim TYPE requires a specific tool is a fact about this codebase, not a
+# judgment call, so it belongs in a fixed table, not another model's opinion —
+# same reasoning engine/event_classifier.py::validate_evidence_consistency()
+# already applies to its own (narrower) case.
+_PROVENANCE_ONLY_TERMS: dict[str, tuple[str, ...]] = {
+    "options": ("pcr", "max pain", "max-pain", "open interest", "call oi", "put oi", "option chain"),
+    "macro":   ("fii inflow", "fii outflow", "dii inflow", "dii outflow", "net fii", "net dii",
+                "fii buying", "fii selling", "dii buying", "dii selling"),
+    "earnings": ("earnings beat", "earnings miss", "guidance raised", "guidance cut", "eps beat"),
+}
+# Claim types no tool in this system provides AT ALL, regardless of what was
+# called this session — analyst ratings/price targets aren't sourced anywhere.
+_NO_SOURCE_TERMS = (
+    "analyst upgrade", "analyst downgrade", "rating upgrade", "rating downgrade",
+    "brokerage upgrade", "brokerage downgrade", "target price raised", "target price cut",
+)
+
+
+def _deterministic_provenance_check(claim_text: str, used_tools: list[str]) -> list[str]:
+    text = claim_text.lower()
+    violations = []
+    for tool, terms in _PROVENANCE_ONLY_TERMS.items():
+        if tool in used_tools:
+            continue
+        for term in terms:
+            if term in text:
+                violations.append(f'"{term}" cited but the `{tool}` tool was never called this session')
+    for term in _NO_SOURCE_TERMS:
+        if term in text:
+            violations.append(f'"{term}" cited but no tool in this system provides analyst ratings/price targets')
+    return violations
+
+
+# Second deterministic backstop, added after the LLM semantic layer missed
+# TWO separate invented catalysts in back-to-back live tests ("5G partnership",
+# "regulatory approval for a renewable project", "earnings surprise (8% beat)"
+# — none present in any tool output, all scored grounded=True by the judge
+# model anyway). _deterministic_provenance_check only catches a claim TYPE
+# tied to an uncalled tool; it says nothing about a freely-invented event
+# narrative dressed up in confident language. A fixed vocabulary of discrete-
+# event words is a second, narrower net: if the verdict names one of these
+# event TYPES, that specific word must actually appear somewhere the model
+# was legitimately given (candidate_context or a tool output this session) —
+# not proof of truth, but a real, mechanical trip-wire for exactly the
+# fabrication pattern observed twice so far.
+_EVENT_CLAIM_TERMS = (
+    "partnership", "joint venture", "merger", "acquisition", "acquire",
+    "stake sale", "contract win", "order win", "regulatory approval",
+    "approval from", "license", "licence", "patent", "litigation", "lawsuit",
+    "penalty", "recall", "strike", "buyback", "delisting", "restructuring",
+    "earnings surprise", "profit surge", "record profit",
+)
+
+
+def _deterministic_entity_overlap_check(claim_text: str, evidence_pool: str) -> list[str]:
+    text, pool = claim_text.lower(), evidence_pool.lower()
+    return [
+        f'"{term}" cited but does not appear in any tool output or candidate context this session'
+        for term in _EVENT_CLAIM_TERMS
+        if term in text and term not in pool
+    ]
+
+
+# Third deterministic backstop — catches a DISTORTED figure, not just an
+# invented one. Neither check above would flag a model citing a real
+# category (cash flow, revenue) with a number that doesn't match what was
+# actually retrieved: a verdict claiming "1.2 L cr" cash flow when the real
+# tool output said 192113 crore (~1.92 L cr, ~37% off) uses a real word
+# ("cash flow") that IS in the evidence, so layer 2 passes it; and it's not
+# tied to an uncalled tool, so layer 1 passes it too. Only comparing the
+# actual number catches this.
+_LAKH_CRORE_RE   = re.compile(r"(\d+(?:\.\d+)?)\s*(?:l\.?|lakh)\s*cr", re.IGNORECASE)
+_CRORE_RE        = re.compile(r"(\d+(?:\.\d+)?)\s*cr(?:ore)?s?\b", re.IGNORECASE)
+_LARGE_NUMBER_RE = re.compile(r"(?<![\d.])(\d{3,}(?:\.\d+)?)(?![\d])")   # bare numbers >= 100
+_KV_RE           = re.compile(r"([a-zA-Z_]+)\s*=\s*(\d+(?:\.\d+)?)")     # e.g. "op_cash_flow=192113.0"
+
+# A keyword that might appear in the model's prose near a claimed figure,
+# mapped to the specific evidence label(s) it should be checked against.
+# Built from the exact field names engine/company_intelligence.py's
+# financial_statements section / _tool_company_intelligence's formatting
+# emit — see _fmt_stmt_point call sites there. Kept narrow and specific
+# rather than trying to be exhaustive; an unrecognized category falls back
+# to the broad (weaker) magnitude-only comparison below.
+_FIGURE_CATEGORY_LABELS: dict[str, tuple[str, ...]] = {
+    "cash flow":         ("op_cash_flow", "operating_cash_flow", "investing_cash_flow", "financing_cash_flow"),
+    "operating profit":  ("op_profit", "operating_profit"),
+    "net profit":        ("net_profit",),
+    "profit":            ("net_profit", "operating_profit"),
+    "revenue":           ("revenue",),
+    "total assets":      ("total_assets",),
+    "assets":            ("total_assets",),
+    "total liabilities": ("total_liabilities",),
+    "liabilities":       ("total_liabilities",),
+    "debt":              ("total_liabilities",),
+    "market cap":        ("market_cap_cr",),
+}
+
+
+def _extract_crore_claim_matches(text: str) -> list[tuple[float, int]]:
+    """Currency figures the CLAIM explicitly labels as crore-denominated
+    ('X cr' / 'X crore' / 'X lakh cr', where 1 lakh crore = 100,000 crore),
+    paired with their position in `text` so the caller can look at nearby
+    words to infer which financial-statement category a figure refers to.
+    Deliberately narrow — only a figure the model itself frames as a rupee
+    amount is checked; this must not fire on RSI/R:R/percentages/prices."""
+    matches: list[tuple[float, int]] = []
+    consumed: list[tuple[int, int]] = []
+    for m in _LAKH_CRORE_RE.finditer(text):
+        try:
+            matches.append((float(m.group(1)) * 100_000, m.start()))
+            consumed.append(m.span())
+        except ValueError:
+            pass
+    for m in _CRORE_RE.finditer(text):
+        if any(s <= m.start() <= e for s, e in consumed):
+            continue   # don't double-count the trailing "cr" of an already-matched "X lakh cr"
+        try:
+            matches.append((float(m.group(1)), m.start()))
+        except ValueError:
+            pass
+    return matches
+
+
+def _extract_reference_numbers(text: str) -> list[float]:
+    """Any number >= 100 appearing anywhere in the evidence pool — used only
+    as the broad fallback comparison set when no specific category can be
+    inferred. Evidence-side numbers don't need a currency label to be
+    trustworthy; they came from an actual tool output, not the model."""
+    out = []
+    for m in _LARGE_NUMBER_RE.finditer(text):
+        try:
+            out.append(float(m.group(1)))
+        except ValueError:
+            pass
+    return out
+
+
+def _extract_labeled_numbers(text: str) -> dict[str, float]:
+    """key=value pairs from tool-output text, e.g. 'op_cash_flow=192113.0'."""
+    out: dict[str, float] = {}
+    for m in _KV_RE.finditer(text):
+        try:
+            out[m.group(1).lower()] = float(m.group(2))
+        except ValueError:
+            pass
+    return out
+
+
+def _nearby_category(claim_text: str, match_start: int, window: int = 40) -> tuple[str, ...] | None:
+    """Picks the category keyword whose LAST occurrence in the window is
+    closest to the number — not just the first one found in dict order.
+    A window can legitimately contain more than one category keyword (e.g.
+    "...cash flow (1.2 L cr), revenue growth of 1086181.0 crore..." — both
+    "cash flow" and "revenue" appear before the second number), and the
+    nearer one is what the figure actually refers to."""
+    context = claim_text[max(0, match_start - window):match_start].lower()
+    best_labels, best_pos = None, -1
+    for keyword, labels in _FIGURE_CATEGORY_LABELS.items():
+        idx = context.rfind(keyword)
+        if idx > best_pos:
+            best_pos, best_labels = idx, labels
+    return best_labels
+
+
+def _deterministic_numeric_consistency_check(claim_text: str, evidence_pool: str, tolerance: float = 0.25) -> list[str]:
+    """Flags a claimed crore-figure with no matching retrieved number within
+    `tolerance` relative distance.
+
+    Category-aware where possible: if the words near the claimed figure name
+    a recognized category ("cash flow", "revenue", ...), the figure is
+    checked ONLY against that category's labeled evidence value(s) — not
+    against every number in the pool. This matters in practice: a first,
+    magnitude-only version of this check was tested against a real fabricated
+    "1.2 L cr cash flow" claim (real op_cash_flow=192113, ~37% off) and MISSED
+    it, because 120,000 happened to land within tolerance of the unrelated
+    real op_profit=123162 figure — a coincidental collision between two
+    genuinely different line items of similar scale, which is common in a
+    single company's financial statements. Category-scoping avoids that.
+    Falls back to the broad pool (weaker, magnitude-only) when no category is
+    recognized or that category isn't present in the labeled evidence.
+
+    A generous default tolerance (25%) is deliberate: this is a trip-wire for
+    a clear mismatch, not an exact-match requirement that would flag ordinary
+    rounding.
+    """
+    claim_matches = _extract_crore_claim_matches(claim_text)
+    if not claim_matches:
+        return []
+    labeled = _extract_labeled_numbers(evidence_pool)
+    pool_values = [v for v in _extract_reference_numbers(evidence_pool) if v > 0]
+    if not pool_values:
+        return []   # nothing to compare against — not this check's job to flag "no data"
+
+    violations = []
+    for cv, pos in claim_matches:
+        if cv <= 0:
+            continue
+        category_labels = _nearby_category(claim_text, pos)
+        candidates = (
+            [labeled[lbl] for lbl in category_labels if lbl in labeled and labeled[lbl] > 0]
+            if category_labels else []
+        )
+        compare_pool = candidates or pool_values
+        best_rel_diff = min(abs(cv - pv) / pv for pv in compare_pool)
+        if best_rel_diff > tolerance:
+            scope = "for its stated category" if candidates else "anywhere in evidence"
+            violations.append(
+                f"figure ~{cv:.0f} crore cited but no retrieved figure {scope} is within "
+                f"{int(tolerance * 100)}% of it (closest differs by {best_rel_diff * 100:.0f}%)"
+            )
+    return violations
+
+
+async def _check_grounding(
+    symbol: str, verdict_step: dict, tool_outputs: list[str], used_tools: list[str], candidate_context: str = "",
+) -> dict:
+    """Does the verdict's bull/bear/thesis/thought text cite specific factual
+    claims (named catalysts, partnerships, flows, figures) that never
+    appeared anywhere this candidate was legitimately given — either a tool
+    output gathered THIS session, or the original candidate_context (entry/
+    stop/target/strategy/hub_subscores/chart_brief/canonical event) it started
+    from? Only the latter is "given"; a fact of neither type is fabricated.
+
+    Three layers, not one — the first two are the reliable backbone, the third
+    is best-effort:
+      1. Provenance check (_deterministic_provenance_check) — catches claim
+         TYPES that require a specific tool (options PCR/max-pain, FII/DII
+         flows) when that tool was never called, or types (analyst ratings)
+         no tool provides at all.
+      2. Event-vocabulary overlap check (_deterministic_entity_overlap_check)
+         — catches a fixed vocabulary of discrete-event words (partnership,
+         acquisition, regulatory approval, earnings surprise, ...) cited
+         without appearing anywhere in the tool outputs or candidate context.
+         Added after the LLM layer below missed exactly this twice in back-
+         to-back live tests ("5G partnership", "regulatory approval for a
+         renewable project", "earnings surprise (8% beat)" — none present
+         anywhere, all scored grounded=True by the judge model regardless).
+      3. Numeric consistency check (_deterministic_numeric_consistency_check)
+         — catches a DISTORTED figure for a real category, not just an
+         invented one (e.g. claiming "1.2 L cr" cash flow when the tool
+         output said 192113 crore, ~1.92 L cr, ~37% off) — a failure mode
+         layers 1-2 can't catch since the word "cash flow" IS in evidence.
+      4. LLM semantic check — catches whatever free-text fabrication neither
+         fixed vocabulary anticipates. Demonstrated in testing to be lenient
+         on its own — kept as a defense-in-depth pass, NOT the primary
+         defense; layers 1-3 are what's actually reliable here.
+
+    Fail-open on the LLM layer's OWN failure (error / bad JSON) — an inability
+    to verify grounding is not the same as detected ungroundedness. The
+    deterministic layers' findings are never discarded by an LLM-layer
+    failure. Returns {"grounded": bool, "unsupported_claims": list[str]}.
+    """
+    claim_text = " ".join(str(verdict_step.get(k) or "") for k in ("bull", "bear", "thesis", "thought"))
+    evidence_pool = f"{candidate_context}\n" + "\n".join(tool_outputs)
+    deterministic_claims = (
+        _deterministic_provenance_check(claim_text, used_tools)
+        + _deterministic_entity_overlap_check(claim_text, evidence_pool)
+        + _deterministic_numeric_consistency_check(claim_text, evidence_pool)
+    )
+
+    llm_claims: list[str] = []
+    check_failed = False
+    try:
+        from utils.llm import call_llm_chat
+        transcript = "\n".join(tool_outputs) if tool_outputs else "(no tool outputs gathered this session)"
+        prompt = (
+            f"Tools actually called this session: {used_tools}\n"
+            f"Original candidate context given to the model before investigation "
+            f"(entry/stop/target/strategy/scores/chart/canonical-event — these are "
+            f"GIVEN facts, never unsupported even if not repeated in a tool output):\n"
+            f"{candidate_context or '(none provided)'}\n\n"
+            f"Tool outputs actually retrieved this session for {symbol}:\n{transcript}\n\n"
+            f"Trade verdict text to check:\n{claim_text}\n\n"
+            "List any SPECIFIC factual claims in the verdict text (named catalysts, "
+            "partnerships, deals, analyst actions, capital flows, or figures) that are "
+            "NOT stated or directly implied by EITHER the original candidate context OR "
+            "the tool outputs above. Do NOT flag the candidate's own given entry/stop/"
+            "target/strategy/scores — those are legitimate inputs, not claims to verify. "
+            "If a claim's TYPE would normally come from a tool that was never called this "
+            "session, it is automatically unsupported. General reasoning, opinion, or "
+            "synthesis of the given numbers is fine — only flag concrete factual "
+            "assertions that have no support above.\n"
+            'Reply with ONLY a JSON object: {"unsupported_claims": ["..."], "grounded": true|false}'
+        )
+        resp = await call_llm_chat(
+            [
+                {"role": "system", "content": "You are a strict fact-checker. Output only the requested JSON, nothing else."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1024, temperature=0.0,
+        )
+        parsed = _parse_first_json(resp) or {}
+        llm_claims = [c for c in (parsed.get("unsupported_claims") or []) if c]
+    except Exception as exc:
+        check_failed = True
+        logger.debug(f"[agent/grounding_check] {symbol} LLM layer failed (fail-open on this layer only): {exc}")
+
+    all_claims = deterministic_claims + llm_claims
+    result = {"grounded": not all_claims, "unsupported_claims": all_claims}
+    if check_failed:
+        result["llm_layer_failed"] = True
+    return result
 
 
 async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None:
@@ -529,6 +937,7 @@ async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None
 
         tool_table_rows = [
             "| `fundamentals` | Swing only: Need debt, promoter holding, growth. IGNORE for Intraday. |",
+            "| `company_intelligence` | Swing/event only: revenue/profit/cash-flow scale, ownership trend (FII/DII/promoter direction, not just level), pending corporate actions (dividends/splits — ex-dates that move price independent of the thesis). Use when checking whether a news event's materiality is actually big relative to this company's financials. IGNORE for Intraday. |",
             "| `options` | Index or heavily traded stocks – check OI and PCR. |",
             "| `price_action` | Current LTP, daily trend, recent returns. |",
             "| `market_depth` | Order book – bid/ask imbalance, pending volumes (Critical for Intraday). |",
@@ -544,7 +953,12 @@ async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None
         # The "core tools" list the model is forced to use before it may decide —
         # swap `news` out for `options` when a canonical event already exists, so
         # the requirement never demands a tool that no longer exists.
-        core_tools = ["fundamentals", "sector", "price_action", "market_depth", "intraday_candles"]
+        # company_intelligence joined this list (Phase U3) as the primary
+        # structured company-intelligence source (financial statements,
+        # ownership trend, corporate actions) the news-only architecture is
+        # meant to lean on — not a de-prioritized optional alongside
+        # earnings/macro/screener_deep.
+        core_tools = ["fundamentals", "company_intelligence", "sector", "price_action", "market_depth", "intraday_candles"]
         core_tools.append("options" if has_canonical_event else "news")
 
         news_authority_notice = (
@@ -634,6 +1048,8 @@ Now, based on the user's context below, follow your workflow and produce your fi
             {"role": "user",   "content": ctx0},
         ]
         used: list[str] = []
+        tool_outputs: list[str] = []
+        grounding_retries = 0
         for _ in range(15):  # max 15 LLM rounds (≤14 tool calls + a decide)
             resp = await call_llm_chat(messages, max_tokens=32768, temperature=0.2)
             step = _parse_first_json(resp)
@@ -645,6 +1061,7 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 if tool in available_tools:
                     result = await available_tools[tool](symbol)
                     used.append(tool)
+                    tool_outputs.append(f"[{tool}] {result}")
                     messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
                 elif tool in _NEWS_AUTHORITY_TOOLS:
                     messages.append({"role": "user", "content": (
@@ -657,13 +1074,45 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     messages.append({"role": "user", "content": f"TOOL[{tool}] → unknown tool. Available tools: {list(available_tools)}"})
                 continue
             if step.get("action") == "decide" or "verdict" in step:
-                # Force the agent to actually use tools instead of hallucinating a decision early
-                if len(set(used)) < 5:
+                # Force the agent to actually call every CORE tool by name. The
+                # previous check (len(set(used)) < 5) only counted how many
+                # DISTINCT tools were used — any 5 satisfied it, so a model
+                # could skip fundamentals/company_intelligence entirely as
+                # long as it called 5 of something else, despite the prompt
+                # claiming those specific tools were required. This checks
+                # identity, not count.
+                missing_core = [t for t in core_tools if t not in used]
+                if missing_core:
                     messages.append({"role": "assistant", "content": resp})
-                    messages.append({"role": "user", "content": f"You have not met the minimum tool requirement. You must use at least 5-6 core tools ({', '.join(core_tools)}) to debate facts before taking the final call. Continue investigating."})
+                    messages.append({"role": "user", "content": f"You have not met the minimum tool requirement. You must still call: {', '.join(missing_core)}. Continue investigating."})
                     continue
-                
+
+                # Hallucination-vs-tool-output grounding check: does bull/bear/
+                # thesis/thought cite a specific fact never returned by any tool
+                # this session? Give the model ONE chance to self-correct; a
+                # second ungrounded verdict rejects the candidate outright
+                # (fail-closed) rather than silently accepting a known-fabricated
+                # thesis — matching Flow B's existing fail-closed reasoning gate.
+                grounding = await _check_grounding(symbol, step, tool_outputs, used, ctx0)
+                if not grounding["grounded"]:
+                    if grounding_retries >= 1:
+                        logger.info(
+                            f"[agent/llm_tooluse] {symbol} rejected — ungrounded claims "
+                            f"persisted after retry: {grounding['unsupported_claims']}"
+                        )
+                        return None
+                    grounding_retries += 1
+                    messages.append({"role": "assistant", "content": resp})
+                    messages.append({"role": "user", "content": (
+                        "GROUNDING CHECK FAILED: your verdict asserts claims not supported "
+                        f"by any tool output gathered this session: {grounding['unsupported_claims']}. "
+                        "Revise your verdict to rely only on facts actually returned above "
+                        "(call an additional tool first if you need to verify a claim)."
+                    )})
+                    continue
+
                 step["tools_used"] = used
+                step["grounding"] = grounding
                 return step
         return None  # ran out of rounds without deciding
     except Exception as exc:
