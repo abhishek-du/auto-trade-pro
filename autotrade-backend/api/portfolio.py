@@ -17,6 +17,7 @@ from paper_trading.pnl_calculator import PnLCalculator
 from paper_trading.position_tracker import PositionTracker
 from paper_trading.simulation_logger import SimLogger
 from paper_trading.virtual_wallet import VirtualWallet
+from utils.logger import logger
 
 router = APIRouter(tags=["Portfolio"])
 
