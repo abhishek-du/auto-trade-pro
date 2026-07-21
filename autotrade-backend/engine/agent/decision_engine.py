@@ -397,26 +397,21 @@ async def _tool_market_depth(symbol: str) -> str:
         return f"market_depth: error ({exc})"
 
 
-# symbol -> sector_key reverse lookup, built once from the static
-# SECTOR_DEFINITIONS (crawler/sector_data.py). Needed because SECTOR_CACHE
-# itself is keyed by SECTOR NAME ("IT", "Banking", "Auto", ...), not by
-# symbol — _tool_sector_analysis previously did SECTOR_CACHE.get(symbol,
-# "Unknown"), which could never match anything: it was looking for a key
-# like "RELIANCE.NS" inside a dict whose only keys are sector names. This
-# returned "Unknown" for every symbol, unconditionally, including ones
-# (like RELIANCE, correctly listed under "Energy") the sector definitions
-# do cover — confirmed live before this fix.
-_SYMBOL_TO_SECTOR_KEY: dict[str, str] | None = None
-
-
+# Resolve a symbol's sector via utils.sector_cache.get_sector() — a
+# persistent, disk-backed cache (data/sector_cache.json, ~1,500+ NSE symbols
+# already resolved, weekly rebuild + live yfinance fallback on miss) that
+# engine/intelligence_hub.py already relies on for the exact same purpose.
+# _tool_sector_analysis previously built its own reverse-lookup off the
+# ~45-stock SECTOR_DEFINITIONS["stocks"] lists directly — confirmed live
+# that those lists didn't even cover TVS Motor, while get_sector() already
+# had it cached ("Consumer"). get_sector() returns one of the same 10
+# canonical keys SECTOR_CACHE/SECTOR_DEFINITIONS use, or "GENERAL" on a
+# genuine miss.
 def _symbol_to_sector_key(symbol: str) -> str | None:
-    global _SYMBOL_TO_SECTOR_KEY
-    if _SYMBOL_TO_SECTOR_KEY is None:
-        from crawler.sector_data import SECTOR_DEFINITIONS
-        _SYMBOL_TO_SECTOR_KEY = {
-            s: key for key, definition in SECTOR_DEFINITIONS.items() for s in definition["stocks"]
-        }
-    return _SYMBOL_TO_SECTOR_KEY.get(symbol.upper())
+    from utils.sector_cache import get_sector
+    bare = symbol.upper().replace(".NS", "").replace(".BO", "")
+    sector_key = get_sector(bare)
+    return sector_key if sector_key != "GENERAL" else None
 
 
 async def _tool_sector_analysis(symbol: str) -> str:
@@ -425,8 +420,9 @@ async def _tool_sector_analysis(symbol: str) -> str:
         sector_key = _symbol_to_sector_key(symbol)
         if not sector_key:
             return (
-                f"sector_analysis: {symbol} is not in the covered sector list "
-                f"(10 sectors, ~45 large-caps) — no sector classification available for it."
+                f"sector_analysis: no sector classification available for {symbol} "
+                f"(genuine data gap, not a coverage limit — checked against a "
+                f"~1,500+ symbol cache with live yfinance fallback)."
             )
         cache = SECTOR_CACHE or get_sector_cache()
         data = cache.get(sector_key)

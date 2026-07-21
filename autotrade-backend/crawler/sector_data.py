@@ -142,31 +142,48 @@ def _find_sector_leaders(sectors: dict) -> str:
 # ── Core computation ──────────────────────────────────────────────────────────
 
 def compute_sector_from_cache() -> dict:
-    """Synchronously compute sector data from PRICE_CACHE. Never fails."""
+    """Synchronously compute sector data from PRICE_CACHE, grouped by
+    utils.sector_cache.get_sector() — a persistent, disk-backed cache
+    (data/sector_cache.json, ~1,500+ NSE symbols already resolved, weekly
+    rebuild + live yfinance fallback on miss) instead of the previous
+    ~45-stock SECTOR_DEFINITIONS["stocks"] lists.
+
+    Confirmed live: those hardcoded lists didn't even cover TVS Motor, while
+    get_sector() already had it cached ("Consumer"). SECTOR_DEFINITIONS is
+    still consulted per sector for its display name/index_symbol/color —
+    get_sector() returns the SAME 10 canonical keys (Banking/IT/Energy/
+    Pharma/FMCG/Auto/Metals/Infra/Consumer/Telecom) plus "GENERAL" for
+    anything unclassified, by design (see _YF_SECTOR_MAP in that module) —
+    GENERAL is excluded here rather than lumped into one noisy catch-all
+    bucket. Never fails.
+    """
     from crawler.live_prices import PRICE_CACHE
+    from utils.sector_cache import get_sector
+
+    by_sector: dict[str, list[dict]] = {}
+    for symbol, cached in PRICE_CACHE.items():
+        if not cached or symbol.startswith("^"):   # skip index entries themselves
+            continue
+        sector_key = get_sector(symbol)
+        if sector_key == "GENERAL":
+            continue
+        by_sector.setdefault(sector_key, []).append({
+            "symbol":       symbol,
+            "name":         cached.get("name", symbol.replace(".NS", "")),
+            "price":        cached.get("price", 0),
+            "change_pct":   cached.get("change_pct", 0),
+            "change":       cached.get("change", 0),
+            "volume":       cached.get("volume", 0),
+            "market_cap_cr": cached.get("market_cap") or 0,
+        })
 
     result: dict[str, Any] = {}
     now = datetime.now(_IST).isoformat()
 
-    for sector_key, sector_def in SECTOR_DEFINITIONS.items():
-        stocks_data = []
-
-        for symbol in sector_def["stocks"]:
-            cached = PRICE_CACHE.get(symbol)
-            if not cached:
-                continue
-            stocks_data.append({
-                "symbol":       symbol,
-                "name":         cached.get("name", symbol.replace(".NS", "")),
-                "price":        cached.get("price", 0),
-                "change_pct":   cached.get("change_pct", 0),
-                "change":       cached.get("change", 0),
-                "volume":       cached.get("volume", 0),
-                "market_cap_cr": cached.get("market_cap") or 0,
-            })
-
+    for sector_key, stocks_data in by_sector.items():
         if not stocks_data:
             continue
+        sector_def = SECTOR_DEFINITIONS.get(sector_key, {})
 
         total     = len(stocks_data)
         advances  = sum(1 for s in stocks_data if s["change_pct"] > 0)
@@ -190,14 +207,14 @@ def compute_sector_from_cache() -> dict:
         top_loser     = min(stocks_data, key=lambda x: x["change_pct"])
 
         # Sector index from PRICE_CACHE if available
-        idx = PRICE_CACHE.get(sector_def["index_symbol"], {})
+        idx = PRICE_CACHE.get(sector_def.get("index_symbol", ""), {})
 
         result[sector_key] = {
             "sector_key":       sector_key,
-            "name":             sector_def["name"],
-            "short":            sector_def["short"],
-            "index_symbol":     sector_def["index_symbol"],
-            "color_base":       sector_def["color_base"],
+            "name":             sector_def.get("name", sector_key),
+            "short":            sector_def.get("short", sector_key),
+            "index_symbol":     sector_def.get("index_symbol"),
+            "color_base":       sector_def.get("color_base", "gray"),
             "stocks":           sorted_by_cap,
             "advances":         advances,
             "declines":         declines,
