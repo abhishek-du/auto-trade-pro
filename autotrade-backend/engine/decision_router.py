@@ -51,6 +51,7 @@ class RoutingOutcome(str, Enum):
     BLOCKED_SECOND_ORDER         = "BLOCKED_SECOND_ORDER_CONFIDENCE"
     BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
     BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
+    BLOCKED_TECHNICAL_ORIGIN     = "BLOCKED_TECHNICAL_ORIGIN"      # News-Only hard-block: TECHNICAL may not originate trades (2026-07-21)
     WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
 
@@ -452,6 +453,46 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     if `approved` is True. Rejections are still centrally audit-logged here.
     """
     mode = await resolve_mode(session)
+
+    # ── News-Only architecture hard-block (2026-07-21) ─────────────────────────
+    # User-directed strategic pivot: "Make the system pure News-Only. Hard-block
+    # all independent TECHNICAL strategy trade origination... The final
+    # automatic trade origin must be a canonical CausalEvent-backed EVENT_DRIVEN
+    # TradeIntent." TECHNICAL-family trade origination (agent_loop.py's equity
+    # scan, tasks/india_tasks.py's MIS/swing entry loops) is blocked HERE, in the
+    # one place every trade-creation call site already funnels through (verified
+    # by the Phase 2 zero-bypass sweep: open_paper_trade/place_real_order have no
+    # caller that reaches them without first passing authorize_trade_intent()) —
+    # not via a scattered settings flag in each caller, which "is reversible by
+    # anyone who flips it without knowing this decision exists" (the same
+    # reasoning event_arbitrage.py's own hard block already used). A hardcoded
+    # boolean here is not.
+    #
+    # This does NOT affect position exits/stop-losses — confirmed by reading
+    # tasks/india_tasks.py::_fast_sl_check() and the slower exit path: both close
+    # positions directly via close_paper_trade() on OpenPosition rows and never
+    # construct a TradeIntent, so they are structurally untouched by this block.
+    #
+    # TECHNICAL-family logic itself is NOT deleted and keeps serving the
+    # News-Only pipeline as context/validation: entry timing, trend confirmation,
+    # SL/TP placement, position sizing, risk validation, and market context for
+    # EVENT_DRIVEN candidates. It may no longer independently create, authorize,
+    # or execute a trade of its own.
+    _TECHNICAL_TRADE_ORIGINATION_BLOCKED = True
+    if _TECHNICAL_TRADE_ORIGINATION_BLOCKED and intent.strategy_family == StrategyFamily.TECHNICAL:
+        reason = (
+            "TECHNICAL strategy_family trade origination is hard-blocked — the system is "
+            "News-Only by design. Technical signals may inform timing/sizing/risk for an "
+            "EVENT_DRIVEN candidate but may not independently originate a trade."
+        )
+        result = RoutingResult(outcome=RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN, mode=mode, reason=reason,
+                                metadata={"strategy": intent.strategy})
+        logger.warning(
+            f"[execution_gate] BLOCKED (News-Only hard-block) {intent.symbol} {intent.action} "
+            f"strategy={intent.strategy}"
+        )
+        await _log_intent_audit(intent, mode, result, session)
+        return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     _event_ok, _event_reason = await _verify_canonical_event(intent, session)
     if not _event_ok:
