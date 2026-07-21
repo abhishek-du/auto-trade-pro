@@ -1438,6 +1438,35 @@ class HubUniverse(Base):
         return f"<HubUniverse #{self.rank} {self.symbol} ₹{self.turnover_cr:.1f}Cr/day>"
 
 
+class SymbolISINMap(Base):
+    """Persistent symbol -> ISIN cache, populated by a background task
+    (tasks.refresh_isin_map, daily) rather than resolved inline during a live
+    trading decision. Upstox's fundamentals API needs an ISIN per call;
+    before this table existed, crawler/upstox_data.py::get_isin() resolved it
+    on the hot path via yfinance first and, on miss, a gzip CSV download from
+    assets.upstox.com -- a real network call inside the live
+    company_intelligence tool, and the one observed failing (SSL cert issue)
+    in a sandboxed environment. Identity resolution is a data-ingestion
+    concern, not a trading-decision concern -- this table lets get_isin()
+    serve from the DB first and only fall back to live resolution for
+    symbols the background job hasn't covered yet (new listings, universe
+    changes since the last daily run).
+    """
+    __tablename__ = "symbol_isin_map"
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uq_symbol_isin_map_symbol"),
+    )
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:     Mapped[str]      = mapped_column(String(30), nullable=False, unique=True)  # bare, no .NS/.BO
+    isin:       Mapped[str]      = mapped_column(String(20), nullable=False)
+    source:     Mapped[str]      = mapped_column(String(20), nullable=False, default="yfinance")  # yfinance | upstox_csv
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<SymbolISINMap {self.symbol} -> {self.isin} ({self.source})>"
+
+
 # ── Portfolio Capital Model ────────────────────────────────────────────────────
 
 class PortfolioPolicy(Base):

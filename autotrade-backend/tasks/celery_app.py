@@ -172,6 +172,15 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=30),
     },
 
+    # Daily 03:40 UTC — after the universe rebuild above, so newly-added
+    # symbols get an ISIN resolved the same night. Moves Upstox identity
+    # resolution (yfinance / assets.upstox.com CSV) off the live
+    # company_intelligence tool-call path and into a background job instead.
+    "refresh-isin-map-daily": {
+        "task":     "tasks.refresh_isin_map",
+        "schedule": crontab(hour=3, minute=40),
+    },
+
     # Daily 03:10 UTC (08:40 IST): backfill yesterday's 1d close for all Hub symbols.
     # Runs AFTER universe rebuild so the symbol list is fresh. Ensures Hub scoring
     # always has the latest daily candle even if intraday crawl missed symbols.

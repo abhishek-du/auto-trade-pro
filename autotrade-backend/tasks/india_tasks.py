@@ -3633,6 +3633,55 @@ def rebuild_hub_universe_task(top_n: int | None = None, min_turnover_cr: float |
     return _run_async(_rebuild_hub_universe(top_n, min_turnover_cr))
 
 
+async def _refresh_isin_map():
+    """Background ISIN resolution (2026-07-21 fix) — populates SymbolISINMap
+    for every HubUniverse symbol not yet cached, so
+    crawler/upstox_data.py::get_isin() can serve from the DB during a live
+    trading decision instead of resolving (via yfinance / an
+    assets.upstox.com CSV download) on that hot path. Identity resolution is
+    a data-ingestion concern, not a trading-decision concern.
+
+    Only resolves symbols missing from the table — ISINs don't change for a
+    listed company, so there's nothing to refresh once a symbol is cached."""
+    from tasks._db import celery_session
+    from sqlalchemy import select
+    from db.models import HubUniverse, SymbolISINMap
+    from crawler.upstox_data import _resolve_isin_live
+
+    async with celery_session() as session:
+        universe = (await session.execute(select(HubUniverse.symbol))).scalars().all()
+        existing = {
+            s.upper().replace(".NS", "").replace(".BO", "")
+            for s in (await session.execute(select(SymbolISINMap.symbol))).scalars().all()
+        }
+        missing = [s for s in universe if s.upper().replace(".NS", "").replace(".BO", "") not in existing]
+
+        resolved = failed = 0
+        for symbol in missing:
+            bare = symbol.upper().replace(".NS", "").replace(".BO", "")
+            result = await _resolve_isin_live(bare)
+            if result:
+                isin, source = result
+                session.add(SymbolISINMap(symbol=bare, isin=isin, source=source))
+                resolved += 1
+            else:
+                failed += 1
+            await asyncio.sleep(0.3)  # polite to yfinance/Upstox — runs unattended overnight
+        await session.commit()
+
+    logger.info(f"[refresh_isin_map] resolved={resolved} failed={failed} (of {len(missing)} missing)")
+    return {"resolved": resolved, "failed": failed, "total_missing": len(missing)}
+
+
+@celery_app.task(name="tasks.refresh_isin_map")
+def refresh_isin_map_task():
+    """Daily: resolve + persist symbol->ISIN for any HubUniverse symbol not
+    yet in SymbolISINMap. Scheduled after rebuild_hub_universe so newly-added
+    universe symbols get picked up the same night."""
+    logger.info("[refresh_isin_map] starting background ISIN resolution")
+    return _run_async(_refresh_isin_map())
+
+
 async def _backfill_hub_1d_candles():
     """Fetch yesterday's 1d candle for EVERY NSE EQ symbol in kite_instruments.
 

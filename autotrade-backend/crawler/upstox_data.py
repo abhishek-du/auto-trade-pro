@@ -86,17 +86,26 @@ def _set_cache(key: str, data: Any, ttl_key: str) -> None:
 
 
 # ── ISIN mapping ──────────────────────────────────────────────────────────────
+#
+# Priority (per the 2026-07-21 fix — identity resolution moved off the live
+# trading-decision hot path):
+#   1. In-memory cache (this process).
+#   2. DB SymbolISINMap — populated by tasks.refresh_isin_map (background,
+#      daily), NOT resolved inline here. Primary path for any symbol the
+#      background job has already covered.
+#   3. Live resolution (_resolve_isin_live: yfinance, then the Upstox
+#      instrument CSV) — fallback for symbols the background job hasn't
+#      reached yet (new listings, universe changes). This is the network
+#      path observed failing (SSL cert issue on the assets.upstox.com CSV)
+#      inside a live company_intelligence tool call in a sandboxed
+#      environment — identity resolution is a data-ingestion concern, not a
+#      trading-decision concern, so it should rarely fire here in practice
+#      once the background job has run.
 
-async def get_isin(symbol: str) -> str | None:
-    """Resolve NSE symbol (e.g. 'RELIANCE') → ISIN via Upstox instrument master.
-
-    Falls back to yfinance .info if the Upstox instrument list doesn't match.
-    """
-    bare = symbol.upper().replace(".NS", "").replace(".BO", "")
-    if bare in _ISIN_CACHE:
-        return _ISIN_CACHE[bare]
-
-    # Try yfinance first — fast and doesn't need Upstox token
+async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
+    """Live yfinance -> Upstox-CSV resolution, no DB/in-memory cache involved.
+    Returns (isin, source) so callers (get_isin's fallback, and the
+    background populator) can both use and persist the same logic."""
     try:
         import yfinance as yf
         info = yf.Ticker(f"{bare}.NS").fast_info
@@ -105,19 +114,17 @@ async def get_isin(symbol: str) -> str | None:
             t = yf.Ticker(f"{bare}.NS")
             isin = t.isin
         if isin and len(isin) == 12:
-            _ISIN_CACHE[bare] = isin
-            return isin
+            return isin, "yfinance"
     except Exception:
         pass
 
-    # Fallback: Upstox instrument CSV (public, no token needed)
     try:
-        ck = f"isin_csv"
+        ck = "isin_csv"
         csv_text = _get_cache(ck)
         if csv_text is None:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.get("https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz")
-                import gzip, io
+                import gzip
                 csv_text = gzip.decompress(r.content).decode("utf-8")
                 _set_cache(ck, csv_text, "isin_map")
         for line in csv_text.splitlines()[1:]:
@@ -125,11 +132,39 @@ async def get_isin(symbol: str) -> str | None:
             if len(parts) >= 5 and parts[3].strip().upper() == bare:
                 isin = parts[1].strip()
                 if isin and len(isin) == 12:
-                    _ISIN_CACHE[bare] = isin
-                    return isin
+                    return isin, "upstox_csv"
     except Exception as e:
-        logger.debug(f"[upstox] ISIN CSV lookup failed: {e}")
+        logger.debug(f"[upstox] ISIN CSV lookup failed for {bare}: {e}")
 
+    return None
+
+
+async def get_isin(symbol: str) -> str | None:
+    """Resolve NSE symbol (e.g. 'RELIANCE') → ISIN. See module comment above
+    for the priority order."""
+    bare = symbol.upper().replace(".NS", "").replace(".BO", "")
+    if bare in _ISIN_CACHE:
+        return _ISIN_CACHE[bare]
+
+    try:
+        from db.database import AsyncSessionLocal
+        from db.models import SymbolISINMap
+        from sqlalchemy import select as _select
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                _select(SymbolISINMap).where(SymbolISINMap.symbol == bare)
+            )).scalar_one_or_none()
+        if row and row.isin:
+            _ISIN_CACHE[bare] = row.isin
+            return row.isin
+    except Exception as e:
+        logger.debug(f"[upstox] ISIN DB-cache lookup failed for {bare}: {e}")
+
+    resolved = await _resolve_isin_live(bare)
+    if resolved:
+        isin, _source = resolved
+        _ISIN_CACHE[bare] = isin
+        return isin
     return None
 
 

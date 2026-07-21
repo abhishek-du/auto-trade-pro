@@ -280,6 +280,31 @@ def _intent_to_signal_for_alert(ticker: str, side: str, entry_price: float, conf
     )
 
 
+# Generic financial-headline vocabulary excluded when extracting the
+# "which company is this actually about" signal from a headline's leading
+# words — see _leading_entity_tokens().
+_GENERIC_HEADLINE_WORDS = {
+    "ltd", "limited", "company", "india", "q1", "q2", "q3", "q4", "results",
+    "result", "net", "profit", "loss", "revenue", "rises", "declines", "jumps",
+    "falls", "surges", "soars", "plunges", "yoy", "quarter", "quarterly",
+    "consolidated", "standalone", "reports", "announces", "the", "and", "of",
+    "in", "to", "for", "on", "with", "crore", "cr", "stock", "shares", "share",
+}
+
+
+def _leading_entity_tokens(text: str) -> set[str]:
+    """Rough company-identity extraction from a headline: the words before
+    the first ':' (or the whole headline if there's no colon), minus generic
+    financial-headline vocabulary. An Indian financial headline's company
+    name is almost always in this leading segment ("TVS Motor Company Q1
+    results: ...", "ABSL AMC Q1 Results: ...") — good enough to distinguish
+    two different companies without needing a ticker->company-name resolver,
+    which this file doesn't have."""
+    head = text.split(":")[0]
+    tokens = {w.strip(".,()'\"").lower() for w in head.split()}
+    return {t for t in tokens if t and t not in _GENERIC_HEADLINE_WORDS and len(t) > 2}
+
+
 async def _find_canonical_event(headline: str, session) -> "tuple[object, int] | None":
     """Phase 2 (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md, "no duplicate
     LLM classification"): before classifying this headline fresh, check
@@ -296,6 +321,28 @@ async def _find_canonical_event(headline: str, session) -> "tuple[object, int] |
     Reuses the exact same difflib similarity approach and 0.5 threshold as
     engine/news_discovery_engine.py::DuplicateEventEngine, for consistency
     with the one clustering mechanism that already exists in this codebase.
+
+    Two guards added after a live run matched TVS Motor's trade to a
+    zeroed-out CausalEvent whose actual news item was about Aditya Birla Sun
+    Life AMC — a completely different company. Template-heavy financial
+    headlines ("X Q1 Results: profit rises N% YoY to ₹Y crore") cross the 0.5
+    similarity threshold for two unrelated companies purely from shared
+    boilerplate phrasing:
+      1. Skip crawler/event_pipeline.py's own "duplicate stub" rows
+         (country="DUPLICATE", confidence=0.0, importance=0 — a deliberate
+         marker for "folded into another cluster's primary classification,
+         not real signal"). Reusing one as if it were a genuine canonical
+         event attaches an empty/zero-confidence event to a real candidate.
+      2. Require the two headlines to share a distinctive leading word (the
+         company name almost always leads an Indian financial headline —
+         "TVS Motor Company Q1 results...", "ABSL AMC Q1 Results...").
+         Deliberately NOT implemented as a ticker-vs-bullish_stocks/
+         bearish_stocks check: those lists store full company names ("BANDHAN
+         BANK", "Reliance Industries"), not bare tickers, so a bare-ticker
+         comparison against them silently fails even for genuine same-company
+         matches — tried that first, verified live that it broke real matches
+         (Bandhan Bank, Reliance) before switching to this headline-text
+         approach, which needs no ticker->company-name resolver at all.
 
     Returns (CausalEvent, news_item_headline) for the best match within the
     last 6 hours, or None if nothing matches.
@@ -314,12 +361,19 @@ async def _find_canonical_event(headline: str, session) -> "tuple[object, int] |
         .limit(100)
     )).all()
 
+    target_entities = _leading_entity_tokens(headline)
+
     for causal, ni_headline in rows:
         if not ni_headline:
             continue
+        if causal.country == "DUPLICATE":
+            continue
         similarity = difflib.SequenceMatcher(None, headline.lower(), ni_headline.lower()).ratio()
-        if similarity > 0.5:
-            return causal, ni_headline
+        if similarity <= 0.5:
+            continue
+        if target_entities and not (target_entities & _leading_entity_tokens(ni_headline)):
+            continue
+        return causal, ni_headline
     return None
 
 
