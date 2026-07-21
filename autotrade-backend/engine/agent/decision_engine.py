@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 
 from utils.config import settings
 from utils.logger import logger
@@ -635,16 +636,72 @@ _NEWS_AUTHORITY_TOOLS = ("news", "expert_research")
 # testing: a verdict citing "Options data (PCR 0.75, max-pain 1350)" and
 # "Macro shows net FII inflow" was scored grounded=True even though `options`
 # and `macro` were never called that session — there is categorically no
-# source for those numbers, but the judge model didn't catch it. Whether a
-# claim TYPE requires a specific tool is a fact about this codebase, not a
-# judgment call, so it belongs in a fixed table, not another model's opinion —
-# same reasoning engine/event_classifier.py::validate_evidence_consistency()
-# already applies to its own (narrower) case.
-_PROVENANCE_ONLY_TERMS: dict[str, tuple[str, ...]] = {
-    "options": ("pcr", "max pain", "max-pain", "open interest", "call oi", "put oi", "option chain"),
-    "macro":   ("fii inflow", "fii outflow", "dii inflow", "dii outflow", "net fii", "net dii",
-                "fii buying", "fii selling", "dii buying", "dii selling"),
-    "earnings": ("earnings beat", "earnings miss", "guidance raised", "guidance cut", "eps beat"),
+# source for those numbers, but the judge model didn't catch it.
+#
+# CAPABILITY-based, not tool-name-based (2026-07-21 refactor). A first
+# version of this check mapped a claim keyword directly to one REQUIRED TOOL
+# NAME (e.g. "earnings beat" -> must have called `earnings`). That produced a
+# real false-positive rejection: `earnings` is a literal alias of
+# `fundamentals` (`_tool_earnings_report` just calls `_tool_fundamentals` and
+# relabels the string), so a verdict grounded in `fundamentals` data (which
+# WAS called) or `company_intelligence`'s real financial statements (also
+# called, healthy) got rejected anyway because neither is named "earnings".
+# Tying grounding to a specific function name means every alias becomes a
+# separate, brittle requirement — the fix is to validate the EVIDENCE
+# CAPABILITY a claim needs, and let any tool that actually provides that
+# capability satisfy it, rather than growing an ever-longer per-keyword list
+# of "acceptable tool names". New tools (a Screener API, an annual-report
+# parser, ...) automatically satisfy existing claim checks the moment they're
+# tagged with the capability they provide — no per-keyword list to maintain.
+class EvidenceCapability(str, Enum):
+    PRICE_ACTION           = "PRICE_ACTION"
+    ORDER_BOOK             = "ORDER_BOOK"
+    FINANCIAL_PERFORMANCE  = "FINANCIAL_PERFORMANCE"   # revenue/profit/earnings/growth
+    VALUATION              = "VALUATION"                # PE/PB/market cap
+    SHAREHOLDING           = "SHAREHOLDING"
+    CORPORATE_ACTION       = "CORPORATE_ACTION"
+    OPTIONS_FLOW           = "OPTIONS_FLOW"
+    SECTOR                 = "SECTOR"
+    MACRO                  = "MACRO"
+    NEWS                   = "NEWS"
+    CANDLES                = "CANDLES"
+    COMPANY_PROFILE        = "COMPANY_PROFILE"
+
+
+# What evidence capability each registered tool actually provides. This is
+# the ONE place a new tool (or a new alias of an existing one) needs to be
+# taught what it's good for — every claim-side check below reads through
+# this table instead of naming tools directly.
+_TOOL_CAPABILITIES: dict[str, tuple[EvidenceCapability, ...]] = {
+    "fundamentals":         (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
+    "earnings":             (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
+    "screener_deep":        (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
+    "company_intelligence": (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION,
+                              EvidenceCapability.SHAREHOLDING, EvidenceCapability.CORPORATE_ACTION,
+                              EvidenceCapability.COMPANY_PROFILE, EvidenceCapability.SECTOR),
+    "news":                 (EvidenceCapability.NEWS,),
+    "expert_research":      (EvidenceCapability.NEWS,),
+    "options":              (EvidenceCapability.OPTIONS_FLOW,),
+    "price_action":         (EvidenceCapability.PRICE_ACTION,),
+    "market_depth":         (EvidenceCapability.ORDER_BOOK,),
+    "intraday_candles":     (EvidenceCapability.CANDLES,),
+    "predict_candle":       (EvidenceCapability.CANDLES,),
+    "sector":               (EvidenceCapability.SECTOR,),
+    "macro":                (EvidenceCapability.MACRO,),
+}
+
+# Claim vocabulary -> the evidence capability it requires (not a tool name).
+_CLAIM_CAPABILITY_TERMS: dict[EvidenceCapability, tuple[str, ...]] = {
+    EvidenceCapability.OPTIONS_FLOW: (
+        "pcr", "max pain", "max-pain", "open interest", "call oi", "put oi", "option chain",
+    ),
+    EvidenceCapability.MACRO: (
+        "fii inflow", "fii outflow", "dii inflow", "dii outflow", "net fii", "net dii",
+        "fii buying", "fii selling", "dii buying", "dii selling",
+    ),
+    EvidenceCapability.FINANCIAL_PERFORMANCE: (
+        "earnings beat", "earnings miss", "guidance raised", "guidance cut", "eps beat",
+    ),
 }
 # Claim types no tool in this system provides AT ALL, regardless of what was
 # called this session — analyst ratings/price targets aren't sourced anywhere.
@@ -654,15 +711,26 @@ _NO_SOURCE_TERMS = (
 )
 
 
+def _capabilities_from_tools(used_tools: list[str]) -> set[EvidenceCapability]:
+    caps: set[EvidenceCapability] = set()
+    for tool in used_tools:
+        caps.update(_TOOL_CAPABILITIES.get(tool, ()))
+    return caps
+
+
 def _deterministic_provenance_check(claim_text: str, used_tools: list[str]) -> list[str]:
     text = claim_text.lower()
+    available = _capabilities_from_tools(used_tools)
     violations = []
-    for tool, terms in _PROVENANCE_ONLY_TERMS.items():
-        if tool in used_tools:
+    for capability, terms in _CLAIM_CAPABILITY_TERMS.items():
+        if capability in available:
             continue
         for term in terms:
             if term in text:
-                violations.append(f'"{term}" cited but the `{tool}` tool was never called this session')
+                violations.append(
+                    f'"{term}" cited but no called tool provides {capability.value} evidence '
+                    f'(tools called: {used_tools or "none"})'
+                )
     for term in _NO_SOURCE_TERMS:
         if term in text:
             violations.append(f'"{term}" cited but no tool in this system provides analyst ratings/price targets')
@@ -861,10 +929,16 @@ async def _check_grounding(
 
     Three layers, not one — the first two are the reliable backbone, the third
     is best-effort:
-      1. Provenance check (_deterministic_provenance_check) — catches claim
-         TYPES that require a specific tool (options PCR/max-pain, FII/DII
-         flows) when that tool was never called, or types (analyst ratings)
-         no tool provides at all.
+      1. Provenance check (_deterministic_provenance_check) — capability-
+         based, not tool-name-based (2026-07-21 refactor, after a tool-name
+         version rejected a genuinely-grounded TVS Motor verdict: "earnings
+         beat" required the `earnings` tool by name, but `earnings` is a
+         literal alias of `fundamentals` — same data, different label — and
+         `fundamentals`/`company_intelligence` had both been called with
+         real supporting figures). Catches claim TYPES that need an evidence
+         CAPABILITY (options flow, macro flows, financial performance) no
+         called tool actually provides, or types (analyst ratings) no tool
+         provides at all — see EvidenceCapability/_TOOL_CAPABILITIES above.
       2. Event-vocabulary overlap check (_deterministic_entity_overlap_check)
          — catches a fixed vocabulary of discrete-event words (partnership,
          acquisition, regulatory approval, earnings surprise, ...) cited
