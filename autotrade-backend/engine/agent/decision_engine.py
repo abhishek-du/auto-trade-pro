@@ -1158,9 +1158,35 @@ Now, based on the user's context below, follow your workflow and produce your fi
         tool_outputs: list[str] = []
         grounding_retries = 0
         for _ in range(15):  # max 15 LLM rounds (≤14 tool calls + a decide)
-            resp = await call_llm_chat(messages, max_tokens=32768, temperature=0.2)
-            step = _parse_first_json(resp)
+            # gpt-oss/Mantle occasionally returns empty content (reasoning
+            # consumed the whole token budget) or a transport-level error
+            # (500/timeout) on a single round — confirmed live on the
+            # 2026-07-21 TVSMOTOR earnings event, where 3 of 4 independent
+            # process_ticker() invocations were silently discarded by this
+            # exact spot (single empty/unparseable response -> immediate
+            # `return None`, indistinguishable from a genuine SKIP), and only
+            # the 4th, ~46 minutes after the news broke, happened to get a
+            # clean response. Retrying the SAME round a couple of times is
+            # far cheaper than waiting for the next independent headline to
+            # re-trigger a whole new evaluation.
+            step = None
+            for attempt in range(3):
+                resp = await call_llm_chat(messages, max_tokens=32768, temperature=0.2)
+                step = _parse_first_json(resp)
+                if step:
+                    break
+                if attempt < 2:
+                    logger.warning(
+                        f"[agent/llm_tooluse] {symbol}: empty/unparseable LLM "
+                        f"response (attempt {attempt + 1}/3) — retrying"
+                    )
+                    import asyncio
+                    await asyncio.sleep(2 * (attempt + 1))
             if not step:
+                logger.info(
+                    f"[agent/llm_tooluse] {symbol}: giving up after 3 consecutive "
+                    "empty/unparseable LLM responses"
+                )
                 return None
             if step.get("action") == "tool":
                 tool = step.get("tool")
