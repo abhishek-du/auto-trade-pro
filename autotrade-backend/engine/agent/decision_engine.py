@@ -397,16 +397,52 @@ async def _tool_market_depth(symbol: str) -> str:
         return f"market_depth: error ({exc})"
 
 
+# symbol -> sector_key reverse lookup, built once from the static
+# SECTOR_DEFINITIONS (crawler/sector_data.py). Needed because SECTOR_CACHE
+# itself is keyed by SECTOR NAME ("IT", "Banking", "Auto", ...), not by
+# symbol — _tool_sector_analysis previously did SECTOR_CACHE.get(symbol,
+# "Unknown"), which could never match anything: it was looking for a key
+# like "RELIANCE.NS" inside a dict whose only keys are sector names. This
+# returned "Unknown" for every symbol, unconditionally, including ones
+# (like RELIANCE, correctly listed under "Energy") the sector definitions
+# do cover — confirmed live before this fix.
+_SYMBOL_TO_SECTOR_KEY: dict[str, str] | None = None
+
+
+def _symbol_to_sector_key(symbol: str) -> str | None:
+    global _SYMBOL_TO_SECTOR_KEY
+    if _SYMBOL_TO_SECTOR_KEY is None:
+        from crawler.sector_data import SECTOR_DEFINITIONS
+        _SYMBOL_TO_SECTOR_KEY = {
+            s: key for key, definition in SECTOR_DEFINITIONS.items() for s in definition["stocks"]
+        }
+    return _SYMBOL_TO_SECTOR_KEY.get(symbol.upper())
+
+
 async def _tool_sector_analysis(symbol: str) -> str:
     try:
-        from crawler.live_prices import PRICE_CACHE
-        from crawler.sector_data import SECTOR_CACHE
-        sector = SECTOR_CACHE.get(symbol, "Unknown")
-        sec_idx = {"IT":"NIFTY IT", "Banking":"NIFTY BANK", "Auto":"NIFTY AUTO"}.get(sector, None)
-        if sec_idx and sec_idx in PRICE_CACHE:
-            chg = PRICE_CACHE[sec_idx].get("change_pct", 0)
-            return f"sector_analysis: Sector is {sector}. Index {sec_idx} is at {chg}% today. Momentum is {'Bullish' if chg > 0 else 'Bearish'}."
-        return f"sector_analysis: Sector is {sector}. No live index data."
+        from crawler.sector_data import SECTOR_CACHE, get_sector_cache
+        sector_key = _symbol_to_sector_key(symbol)
+        if not sector_key:
+            return (
+                f"sector_analysis: {symbol} is not in the covered sector list "
+                f"(10 sectors, ~45 large-caps) — no sector classification available for it."
+            )
+        cache = SECTOR_CACHE or get_sector_cache()
+        data = cache.get(sector_key)
+        if not data:
+            return f"sector_analysis: Sector is {sector_key}. No live index data."
+        idx_chg = data.get("index_change_pct")
+        mood = data.get("mood", "NEUTRAL")
+        if idx_chg is not None:
+            return (
+                f"sector_analysis: Sector is {data.get('name', sector_key)}. "
+                f"Index {data.get('index_symbol')} is at {idx_chg}% today. Mood: {mood}."
+            )
+        return (
+            f"sector_analysis: Sector is {data.get('name', sector_key)}. Mood: {mood} "
+            f"(avg peer move {data.get('avg_change_pct')}%). No live index quote."
+        )
     except Exception as exc:
         return f"sector_analysis: error ({exc})"
 

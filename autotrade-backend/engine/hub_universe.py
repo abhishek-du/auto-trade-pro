@@ -52,6 +52,17 @@ async def rebuild_hub_universe(
     """
 
     # Primary: 1d candles (most accurate for daily turnover).
+    #
+    # The HAVING clause's second condition excludes NaN turnover (corrupted
+    # candle data — e.g. a bad close/volume write during a corporate action)
+    # explicitly: PostgreSQL's float sort/comparison semantics treat NaN as
+    # EQUAL to itself and GREATER than every other value (unlike IEEE-754/
+    # most languages), so a plain `ORDER BY turnover DESC` puts a NaN-turnover
+    # symbol at rank #1 ahead of even the largest genuine mega-cap turnover —
+    # confirmed live (THELEELA.NS/LTFOODS.NS outranking HDFCBANK.NS). Because
+    # NaN = NaN is TRUE in Postgres, `<> 'NaN'` correctly evaluates to FALSE
+    # for a NaN value and excludes it — this is the standard Postgres-idiomatic
+    # NaN guard, not a generic float-equality check.
     rows = (await session.execute(text(f"""
         SELECT symbol, AVG(volume * close) AS turnover
         FROM candles
@@ -60,6 +71,7 @@ async def rebuild_hub_universe(
           {_exclude}
         GROUP BY symbol
         HAVING AVG(volume * close) >= :min_t
+           AND AVG(volume * close) <> 'NaN'
         ORDER BY turnover DESC
         LIMIT :n
     """), {"min_t": min_turnover, "n": top_n})).all()
@@ -84,6 +96,7 @@ async def rebuild_hub_universe(
             ) daily
             GROUP BY symbol
             HAVING AVG(daily_turnover) >= :min_t
+               AND AVG(daily_turnover) <> 'NaN'
             ORDER BY turnover DESC
             LIMIT :n
         """), {"min_t": min_turnover, "n": top_n})).all()
