@@ -52,6 +52,98 @@
 
 ---
 
+## 1a. As-Built Flow (updated 2026-07-21, after Phases 1–3C)
+
+The diagram in §1 is the original target sketch and is left unchanged above as
+the historical record of intent. Implementation collapsed/renamed a few
+stages along the way — "Event Intelligence," "Entity Graph," and "Candidate
+Ranking" turned out not to need separate discrete stages; they're subsumed
+into `classify_event()`'s single output and the `NewsCandidate` it produces.
+"Technical Validation" is not a standalone stage either — it happens *inside*
+the LLM's own reasoning loop, as one of several tool calls it makes before
+producing a verdict, not as a separate step after it. This is what's actually
+running today:
+
+```text
+                    ┌──────────────────────────┐
+                    │    REAL NEWS / FILING     │
+                    └────────────┬─────────────┘
+                                 ↓
+                    ┌──────────────────────────┐
+                    │      CANONICAL EVENT      │
+                    │   CausalEvent — deduped:   │
+                    │   an existing recent row   │
+                    │   is reused before a new    │
+                    │   classify_event() call     │
+                    │   is ever made               │
+                    └────────────┬─────────────┘
+                                 ↓
+                    ┌──────────────────────────┐
+                    │      NEWS CANDIDATE       │
+                    │  event_id + DecisionEvidence│
+                    │  snapshot attached          │
+                    └────────────┬─────────────┘
+                                 ↓
+                    ┌─────────────────────────────────────┐
+                    │       LLM TRADEABILITY LOOP           │
+                    │  think → call ONE tool → observe →    │
+                    │  repeat until decided. Tools:          │
+                    │  price_action, market_depth, sector,   │
+                    │  macro, fundamentals, options,          │
+                    │  intraday_candles, predict_candle.      │
+                    │  news / expert_research tools are       │
+                    │  structurally REMOVED from the menu —   │
+                    │  the canonical event is already given,  │
+                    │  the LLM cannot fetch an alternate one.  │
+                    └────────────┬─────────────────────────┘
+                                 ↓
+                    ┌──────────────────────────┐
+                    │          VERDICT          │
+                    │  action, confidence,       │
+                    │  bull/bear, thesis,         │
+                    │  market_confirmation         │
+                    └────────────┬─────────────┘
+                                 ↓
+                    ┌──────────────────────────┐
+                    │  EVIDENCE CONSISTENCY     │
+                    │  CHECK (pre-gate)          │
+                    │  validate_evidence_        │
+                    │  consistency() — blocks     │
+                    │  before a TradeIntent is     │
+                    │  even built                   │
+                    └────────────┬─────────────┘
+                                 ↓ survives
+                    ┌──────────────────────────┐
+                    │        TRADE INTENT       │
+                    └────────────┬─────────────┘
+                                 ↓
+                    ┌─────────────────────────────────────┐
+                    │      CENTRAL EXECUTION GATE           │
+                    │  canonical-event re-verification       │
+                    │  (materiality floor, direction          │
+                    │  affirmation, thesis-vs-canonical) →     │
+                    │  second-order factor check → confidence  │
+                    │  provenance → equity risk/wallet checks   │
+                    └────────────┬─────────────────────────┘
+                                 ↓
+                  ┌──────────────┴───────────────┐
+                  ↓                               ↓
+             PAPER / LIVE                   WATCHLIST_ONLY
+           (approved trade)          (second-order with incomplete
+                                       scoring, or speculative —
+                                       logged, never executed)
+```
+
+**Not shown above, but true today**: `TECHNICAL`-family candidates
+(`agent_loop.py`'s equity scan, `india_tasks.py`'s MIS/swing loops) still run
+their own scoring + LLM-reasoning-gate pipeline, but are hard-blocked at the
+Central Execution Gate before anything can execute — they never reach "Paper
+/ Live." `FNO`-family paths are separate and gated off by default. Position
+exits/stop-losses bypass this entire diagram — they close positions directly
+against `OpenPosition` rows and never construct a `TradeIntent`.
+
+---
+
 ## 2. What Qualifies as a News-Driven Trade — Formal Definition
 
 A trade is **news-driven** if and only if it can be traced, without a gap, through this exact chain:
