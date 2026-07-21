@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from crawler.news_crawler import _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES
 from news_discovery_engine import (
     _build_evidence,
     _find_canonical_event,
@@ -273,3 +274,36 @@ class TestBuildEvidence:
              patch("db.models.CausalEvent", side_effect=lambda **kw: persisted_causal):
             evidence, event_id = await _build_evidence("TVSMOTOR.NS", "BUY", "headline", "summary")
         assert event_id == 777
+
+
+# ── NSE high-impact category matching (crawler/news_crawler.py) ───────────────
+
+def _is_high_impact(category: str) -> bool:
+    return any(kw in category.lower() for kw in _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES)
+
+
+class TestHighImpactCategoryMatching:
+    def test_real_nse_board_meeting_outcome_phrasing_matches(self):
+        # THE regression guard: confirmed live against NSE's actual API
+        # (2026-07-21) that the mandatory results-approval disclosure is
+        # phrased "Outcome of Board Meeting" -- this category previously
+        # NEVER matched (the allow-list had "board meeting outcome", the
+        # reverse word order, which is never a substring of NSE's real
+        # phrasing) despite being explicitly intended as high-impact. This
+        # is what let TVS Motor's ~2:07-2:15 PM board-approved-results
+        # filing go completely undetected for ~20 minutes.
+        assert _is_high_impact("Outcome of Board Meeting") is True
+
+    def test_press_release_still_matches(self):
+        assert _is_high_impact("Press Release") is True
+
+    def test_credit_rating_still_matches(self):
+        assert _is_high_impact("Credit Rating") is True
+
+    def test_routine_investor_meet_update_does_not_match(self):
+        # Deliberately excluded -- no near-term price relevance, shouldn't
+        # burn an LLM call.
+        assert _is_high_impact("Analysts/Institutional Investor Meet/Con. Call Updates") is False
+
+    def test_shareholders_meeting_does_not_match(self):
+        assert _is_high_impact("Shareholders meeting") is False

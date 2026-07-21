@@ -311,8 +311,23 @@ async def fetch_free_rss_news() -> list[dict]:
 # compliance filings (SEBI DP certificates, AGM notices, investor-meet
 # intimations) are deliberately excluded so the news engine doesn't burn LLM
 # tokens on filings with no near-term price relevance.
+#
+# Root-caused 2026-07-21: NSE's actual `desc` string for the mandatory
+# results-approval disclosure is "Outcome of Board Meeting" (confirmed live
+# against /api/corporate-announcements — e.g. "AAVAS | Outcome of Board
+# Meeting"), NOT "Board Meeting Outcome" as this list previously had it. The
+# `in` check below is a literal substring match, so word order matters —
+# "board meeting outcome" is never a substring of "outcome of board
+# meeting", meaning this category had silently never matched anything,
+# ever, for the entire time this crawler has been running. This is what let
+# TVS Motor's ~2:07-2:15 PM board-approved-results filing go completely
+# undetected until an unrelated "Press Release" category item surfaced
+# ~20 minutes later from a different announcement. "financial result"/
+# "result" are kept even though NSE doesn't appear to use that literal
+# phrase for this disclosure type (harmless no-ops, not the bug) — the
+# fix that matters is "outcome of board meeting".
 _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES: tuple[str, ...] = (
-    "financial result", "result", "board meeting outcome", "dividend",
+    "financial result", "result", "outcome of board meeting", "board meeting outcome", "dividend",
     "acquisition", "merger", "amalgamation", "demerger",
     "scheme of arrangement", "credit rating", "resignation",
     "fund raising", "preferential issue", "rights issue",
