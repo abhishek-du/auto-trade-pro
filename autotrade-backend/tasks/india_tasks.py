@@ -88,6 +88,9 @@ def india_price_scan():
 
 # ── 2. india_fii_dii_fetch — daily 13:00 UTC (18:30 IST) ─────────────────────
 
+_last_fii_dii_stale_alert = None   # module-level cooldown (per worker process)
+
+
 async def _india_fii_dii_fetch():
     import datetime
     from zoneinfo import ZoneInfo
@@ -101,13 +104,40 @@ async def _india_fii_dii_fetch():
 
     today_ist = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).date()
     data_date = data.get("date")
-    freshness = "FRESH" if data_date == today_ist else f"STALE ({data_date} vs today {today_ist})"
+    is_fresh = data_date == today_ist
+    freshness = "FRESH" if is_fresh else f"STALE ({data_date} vs today {today_ist})"
     logger.info(
         f"[india_fii_dii] {freshness}  "
         f"fii_net={data.get('fii_net_buy', 0):+,.0f} Cr  "
         f"dii_net={data.get('dii_net_buy', 0):+,.0f} Cr  "
         f"direction={data.get('market_direction', '?')}"
     )
+
+    # Alert on stale data — fetch_fii_dii_data() already DETECTS this (the
+    # freshness check above) but previously only logged it, with no alert of
+    # any kind, unlike its sibling _candle_staleness_watchdog. NSE's Akamai/
+    # Cloudflare bot detection intermittently blocks both curl_cffi and the
+    # httpx fallback on a given day — confirmed via a live audit of the DB
+    # (2026-07-14 and 2026-07-06 both silently missing) — and because
+    # save_fii_dii_to_db() upserts keyed on the FALLBACK data's own date (not
+    # today's), a failed day leaves no row of its own at all, just a
+    # redundant re-save of the previous day's row. 1-hour cooldown mirrors
+    # _candle_staleness_watchdog's pattern so a multi-day outage doesn't spam.
+    global _last_fii_dii_stale_alert
+    if not is_fresh:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if not _last_fii_dii_stale_alert or (now - _last_fii_dii_stale_alert).total_seconds() >= 3600:
+            _last_fii_dii_stale_alert = now
+            try:
+                from integrations.telegram_service import send
+                await send(
+                    f"⚠️ <b>FII/DII data stale</b> — latest available is {data_date}, "
+                    f"today is {today_ist}. NSE fetch (curl_cffi + httpx fallback) likely "
+                    f"blocked or today's data not yet published. The macro tool will keep "
+                    f"serving this stale figure until the next successful crawl."
+                )
+            except Exception as exc:
+                logger.warning(f"[india_fii_dii] stale-data telegram alert failed: {exc}")
 
 
 @celery_app.task(name="tasks.india_fii_dii_fetch")

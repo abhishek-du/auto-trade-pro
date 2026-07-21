@@ -24,6 +24,7 @@ Authentication:
   - Token is saved to .env automatically
 """
 import asyncio
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -87,25 +88,76 @@ def _set_cache(key: str, data: Any, ttl_key: str) -> None:
 
 # ── ISIN mapping ──────────────────────────────────────────────────────────────
 #
-# Priority (per the 2026-07-21 fix — identity resolution moved off the live
-# trading-decision hot path):
+# Priority (per the 2026-07-21 fixes — identity resolution moved off the live
+# trading-decision hot path, then the live-fallback source itself corrected):
 #   1. In-memory cache (this process).
 #   2. DB SymbolISINMap — populated by tasks.refresh_isin_map (background,
 #      daily), NOT resolved inline here. Primary path for any symbol the
 #      background job has already covered.
-#   3. Live resolution (_resolve_isin_live: yfinance, then the Upstox
-#      instrument CSV) — fallback for symbols the background job hasn't
-#      reached yet (new listings, universe changes). This is the network
-#      path observed failing (SSL cert issue on the assets.upstox.com CSV)
-#      inside a live company_intelligence tool call in a sandboxed
-#      environment — identity resolution is a data-ingestion concern, not a
-#      trading-decision concern, so it should rarely fire here in practice
-#      once the background job has run.
+#   3. Live resolution (_resolve_isin_live): Upstox's own /v2/instruments/
+#      search first (api.upstox.com — the same host every other Upstox call
+#      this session already uses reliably, needs the access token), then
+#      yfinance, then the Upstox instrument CSV (assets.upstox.com) as a last
+#      resort. yfinance was tried first originally, but confirmed live to
+#      return a placeholder ("-", not a real ISIN) for INFY specifically —
+#      a genuine Yahoo-side data gap, not a rate limit — so it's no longer
+#      the first thing tried. assets.upstox.com is last because it's the one
+#      network path observed failing on an SSL cert issue in this sandboxed
+#      environment; api.upstox.com has had no such problem all session.
+
+# NSE trading-series/segment suffixes (SME, trade-to-trade, restricted
+# settlement, etc.) that this codebase's own symbol strings carry (e.g.
+# "SRIVASAVI-SM", "KANORICHEM-BE") but that Upstox's instrument-search API
+# strips from its own `trading_symbol` field. Confirmed live: querying
+# "SRIVASAVI-SM" correctly returns the right instrument, but its
+# trading_symbol is plain "SRIVASAVI" — an exact-string match against the
+# suffixed form silently rejected an otherwise-correct hit for ~29 of 31
+# symbols checked. Order matters (longer suffixes not prefixes of shorter
+# ones here, so no ambiguity).
+_NSE_SEGMENT_SUFFIX_RE = re.compile(r"-(SM|ST|BE|BZ|SG|E1|E2|IL|IT|IQ)$")
+
+
+async def _search_upstox_isin(query: str, expect_symbol: str) -> str | None:
+    """One /v2/instruments/search call, matched against expect_symbol (which
+    may differ from `query` when the caller is retrying with a suffix
+    stripped from the query but still needs to confirm the RIGHT instrument
+    came back, not an unrelated fuzzy match)."""
+    if not await ensure_upstox_token_fresh():
+        return None
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(f"{_V2}/instruments/search", headers=_headers(), params={"query": query})
+    if r.status_code != 200:
+        return None
+    for item in r.json().get("data", []):
+        if item.get("trading_symbol") == expect_symbol and item.get("segment") == "NSE_EQ":
+            isin = item.get("isin")
+            if isin and len(isin) == 12:
+                return isin
+    return None
+
 
 async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
-    """Live yfinance -> Upstox-CSV resolution, no DB/in-memory cache involved.
-    Returns (isin, source) so callers (get_isin's fallback, and the
-    background populator) can both use and persist the same logic."""
+    """Live Upstox-search -> yfinance -> Upstox-CSV resolution, no DB/
+    in-memory cache involved. Returns (isin, source) so callers (get_isin's
+    fallback, and the background populator) can both use and persist the
+    same logic."""
+    # 1. Upstox's own instrument search (api.upstox.com) — confirmed live to
+    # return the exact real ISIN for INFY ("INE009A01021") when yfinance
+    # returned a placeholder. Try the symbol as-is first (matches the common
+    # case), then — if that fails — strip a trailing NSE segment suffix and
+    # retry, since Upstox's trading_symbol field doesn't carry that suffix
+    # even though this codebase's own symbol strings do.
+    try:
+        isin = await _search_upstox_isin(bare, bare)
+        if not isin:
+            stripped = _NSE_SEGMENT_SUFFIX_RE.sub("", bare)
+            if stripped != bare:
+                isin = await _search_upstox_isin(stripped, stripped)
+        if isin:
+            return isin, "upstox_search"
+    except Exception as e:
+        logger.debug(f"[upstox] instrument-search ISIN lookup failed for {bare}: {e}")
+
     try:
         import yfinance as yf
         info = yf.Ticker(f"{bare}.NS").fast_info
