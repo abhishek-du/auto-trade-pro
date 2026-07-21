@@ -351,26 +351,28 @@ async def _tool_options(symbol: str) -> str:
 
 async def _tool_price_action(symbol: str) -> str:
     try:
-        from crawler.zerodha_market import get_kite_historical, get_live_prices
+        from crawler.zerodha_market import get_kite_historical
+        from crawler.market_snapshot import get_market_snapshot
         from datetime import datetime, timedelta
-        
+
         now = datetime.now()
         start = now - timedelta(days=35)
         # 1. Fetch live historical daily candles from Zerodha directly
         from db.database import AsyncSessionLocal
         async with AsyncSessionLocal() as session:
             candles = await get_kite_historical(symbol, start.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"), "day", session=session)
-        
+
         if not candles:
             return "price_action: live historical data unavailable"
-            
+
         cl = [float(c["close"]) for c in reversed(candles)] # recent first
-        
-        # 2. Merge LIVE LTP for today
-        live_data = await get_live_prices([symbol])
-        if live_data and symbol in live_data and live_data[symbol].get('last_price'):
-            cl.insert(0, live_data[symbol]['last_price'])
-            
+
+        # 2. Merge LIVE LTP for today — via the shared MarketSnapshot cache so
+        #    this reasoning step and _execute_news_trade() see the same tick.
+        snap = await get_market_snapshot(symbol)
+        if snap:
+            cl.insert(0, snap.ltp)
+
         if len(cl) < 6:
             return "price_action: insufficient history"
         last = cl[0]
@@ -384,15 +386,14 @@ async def _tool_price_action(symbol: str) -> str:
 
 async def _tool_market_depth(symbol: str) -> str:
     try:
-        from crawler.zerodha_market import get_live_prices
-        resp = await get_live_prices([symbol])
-        data = resp.get(symbol)
+        from crawler.market_snapshot import get_market_snapshot
+        data = await get_market_snapshot(symbol)
         if not data:
             return "market_depth: live data unavailable"
-        
-        buy_qty = sum([b.get("quantity", 0) for b in data.get("buy_depth", [])])
-        sell_qty = sum([s.get("quantity", 0) for s in data.get("sell_depth", [])])
-        return (f"market_depth: Live LTP={data.get('last_price')} | Volume={data.get('volume')} | "
+
+        buy_qty = sum([b.get("quantity", 0) for b in data.buy_depth])
+        sell_qty = sum([s.get("quantity", 0) for s in data.sell_depth])
+        return (f"market_depth: Live LTP={data.ltp} | Volume={data.volume} | "
                 f"Total Buy Pending: {buy_qty} | Total Sell Pending: {sell_qty}")
     except Exception as exc:
         return f"market_depth: error ({exc})"
@@ -467,11 +468,11 @@ async def _tool_earnings_report(symbol: str) -> str:
 async def _tool_predict_next_candle(symbol: str) -> str:
     # Uses short-term momentum to give a rough mathematical probability for the next candle
     try:
-        from crawler.zerodha_market import get_live_prices
-        data = await get_live_prices([symbol])
-        if not data or not data.get(symbol):
+        from crawler.market_snapshot import get_market_snapshot
+        data = await get_market_snapshot(symbol)
+        if not data:
             return "predict_next_candle: Need live LTP for ML prediction."
-        chg = data[symbol].get("change_pct", 0.0)
+        chg = data.change_pct or 0.0
         prob_bull = min(max(50 + (chg * 10), 10), 90) # Simple momentum-based probability mapping
         return f"predict_next_candle: Current Momentum = {chg}%. Probability of NEXT CANDLE being GREEN is ~{prob_bull:.1f}%. Probability of RED is ~{100-prob_bull:.1f}%."
     except Exception as exc:

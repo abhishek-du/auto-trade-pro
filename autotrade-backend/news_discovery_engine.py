@@ -191,7 +191,7 @@ async def _execute_news_trade(
     trust `evidence` (a caller-provided DecisionEvidence snapshot, used only
     for audit-log convenience) as the authority.
     """
-    from crawler.live_prices import get_price, yfinance_ltp_batch
+    from crawler.market_snapshot import get_market_snapshot
     from engine.decision_router import (
         TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome,
     )
@@ -202,17 +202,17 @@ async def _execute_news_trade(
     if confidence_source is None:
         confidence_source = ConfidenceSource.CALCULATED
 
-    # 1. Live entry price — process-local cache first, yfinance backstop second
-    #    (this script runs as its own process, so it never shares the FastAPI/
-    #    Celery worker's in-memory PRICE_CACHE for a symbol they haven't touched).
-    snap = get_price(ticker)
-    entry_price = snap["price"] if snap else None
-    if not entry_price:
-        batch = await yfinance_ltp_batch([ticker])
-        entry_price = batch.get(ticker)
+    # 1. Live entry price via the same MarketSnapshot service the LLM's
+    #    price_action/market_depth tools read from (Zerodha WS tick ->
+    #    Zerodha REST full quote -> yfinance). This is what makes decision
+    #    and execution observe the same tick instead of independently
+    #    racing two different price paths.
+    snap = await get_market_snapshot(ticker)
+    entry_price = snap.ltp if snap else None
     if not entry_price or entry_price <= 0:
         logger.warning(f"[news_engine] {ticker}: no live price available — skipping execution")
         return False
+    logger.info(f"[news_engine] {ticker}: entry price ₹{entry_price} (source={snap.source}, fetched_at={snap.fetched_at_ist})")
 
     # 2. Structural/ATR-based SL/TP (Step 5, event-driven-pipeline-audit.md) —
     #    replaces the previous fixed 3%/7.5% template. See
