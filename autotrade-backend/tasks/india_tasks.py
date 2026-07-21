@@ -2930,9 +2930,6 @@ def run_master_intelligence_cycle():
             _get_portfolio, _is_market_hours, _is_trading_day,
         )
         from engine.agent.execution import AgentExecutionManager
-        from engine.agent.selector import StrategySelectorAgent
-        from engine.agent.decision_engine import DecisionEngine
-        from engine.agent.risk_manager import RiskManagerAgent
         from engine.mf_signal_engine import (
             get_portfolio_mf_holdings, score_mf_universe, persist_mf_scores,
         )
@@ -3031,10 +3028,19 @@ def run_master_intelligence_cycle():
 
                 decisions_made = 0
                 if _is_market_hours():
+                    # `selector`/`de`/`rm` (StrategySelectorAgent/DecisionEngine/
+                    # RiskManagerAgent) previously instantiated here were used
+                    # exclusively by the hub-inline new-entry loop removed below
+                    # (Phase 3C Phase B, docs/PHASE_3C_PHASE_B_DEPENDENCY_AUDIT.md
+                    # §6 — that loop called executor.execute() directly with no
+                    # TradeIntent/authorize_trade_intent() in between, a genuine
+                    # central-gate bypass, latent only because the loop had been
+                    # hard-blocked to iterate an empty list since Phase 1). Removed
+                    # along with the loop, not kept as unused scaffolding. `executor`
+                    # itself stays — it's still needed immediately below for exit
+                    # management (check_and_close_positions), which is unrelated to
+                    # trade origination and was never part of the bypass.
                     executor = AgentExecutionManager()
-                    selector = StrategySelectorAgent()
-                    de       = DecisionEngine()
-                    rm       = RiskManagerAgent(portfolio.to_risk_ctx())
 
                     await executor.check_and_close_positions(portfolio, PRICE_CACHE, session)
 
@@ -3047,201 +3053,34 @@ def run_master_intelligence_cycle():
                                 portfolio.close_position(sym, price)
                                 logger.warning(f"[hub] exited {sym}: sector {sec} STRONGLY_BEARISH")
 
-                    # Per-cycle funnel counter — how many candidates fall out at
-                    # each stage. Emitted as one [trade_flow] line so the monitor can
-                    # show the BUY/short/F&O/risk-veto/shadow-skip drop-off.
-                    flow = {"candidates": 0, "no_data": 0, "no_candidate": 0,
-                            "fuse_drop": 0, "shadow_skip": 0, "risk_veto": 0,
-                            "executed": 0, "exec_error": 0}
-                    _intraday_on      = getattr(settings, "INTRADAY_ENABLED", False)
-                    _short_enabled    = getattr(settings, "EQUITY_SHORT_ENABLED", False)
-                    from engine.agent.strategies.hub_short import HubShortStrategy as _HubShort
-                    _hub_short_strat  = _HubShort()
-
-                    tried = 0
-                    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ────────
-                    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6/§8: this loop is
-                    # the "Master Intelligence strategy" that independently originates
-                    # NEW equity/short entries straight from MasterIntelligenceScore, with
-                    # no news event and no central-gate authorization (it calls
-                    # executor.execute() directly). That authority is FORBIDDEN under the
-                    # News-Only architecture. Everything ABOVE this line (scoring,
-                    # persist_scores, check_and_close_positions, sector-bearish exits) is
-                    # explicitly KEPT — Hub scoring and existing-position risk management
-                    # continue; only new-trade origination from this loop is blocked.
-                    # This is a deliberate empty-list swap, not a deletion (Phase A, not
-                    # Phase B) — the real decision/execution logic below is untouched and
-                    # can be re-enabled by restoring `for stock in scored:` if this
-                    # contract is ever revised. Not a soft settings flag: intentionally
-                    # hardcoded so it cannot be re-enabled by an unrelated config change.
-                    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
-                    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
-                        logger.info(
-                            "[hub] new-entry origination disabled under News-Only architecture "
-                            "(Phase 1 hard-block, docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md) "
-                            "— scoring + exit management still ran normally above this line"
-                        )
-                    for stock in (scored if not _NEWS_ONLY_BLOCKS_HUB_ENTRIES else []):
-                        if stock.is_blocked:
-                            continue
-                        is_buy  = stock.signal in ("STRONG_BUY", "BUY")
-                        is_sell = stock.signal in ("STRONG_SELL", "SELL")
-                        if not is_buy and not is_sell:
-                            continue   # HOLD/unknown — skip
-                        if is_sell and not (_intraday_on and _short_enabled):
-                            continue   # shorts need intraday + short enabled
-                        if is_sell and stock.regime == "STRONG_BULL":
-                            continue   # never short a strong bull market
-                        if tried >= 10 or decisions_made >= settings.AGENT_MAX_NEW_ENTRIES_DAY:
-                            break
-                        tried += 1
-                        flow["candidates"] += 1
-                        try:
-                            candles = await get_latest_candles(stock.symbol, settings.AGENT_TIMEFRAME, 300, session)
-                            if not candles or len(candles) < 20:
-                                flow["no_data"] += 1
-                                continue
-                            cs = sorted(candles, key=lambda c: c.timestamp)
-                            df = pd.DataFrame([{
-                                "open": float(c.open), "high": float(c.high), "low": float(c.low),
-                                "close": float(c.close), "volume": float(c.volume),
-                                "timestamp": c.timestamp,
-                            } for c in cs])
-                            df.set_index("timestamp", inplace=True)
-
-                            # Bridge hub score → features so HubSignalStrategy fires.
-                            # If score_symbol failed to compute features (exception path),
-                            # recompute from the df we already loaded for this candidate.
-                            if stock.features is None:
-                                try:
-                                    from engine.agent.analyzer import TechnicalAnalyzer
-                                    stock.features = TechnicalAnalyzer().compute_features(df)
-                                except Exception as _fe:
-                                    logger.debug(f"[hub] {stock.symbol} features recompute failed: {_fe}")
-                            if stock.features is not None:
-                                stock.features.hub_composite_score = stock.master_score
-                                stock.features.hub_signal          = stock.signal
-                            # SELL signals use HubShortStrategy directly (MIS intraday short).
-                            # BUY signals go through the full StrategySelectorAgent.
-                            if is_sell:
-                                candidate = _hub_short_strat.evaluate(
-                                    stock.symbol, df, stock.features,
-                                    macro_bias=ctx.macro.total_macro_bias,
-                                    fund_grade=stock.fund_grade,
-                                )
-                            else:
-                                candidate = selector.propose(
-                                    stock.symbol, df, stock.features,
-                                    macro_bias=ctx.macro.total_macro_bias,
-                                    fund_grade=stock.fund_grade,
-                                )
-                            if candidate is None:
-                                flow["no_candidate"] += 1
-                                continue
-                                
-                            # ── Live-snap + divergence guard ──
-                            live_px = None
-                            price_age = 0.0
-                            try:
-                                from crawler.live_prices import get_price
-                                lp = get_price(stock.symbol)
-                                live_px = float(lp["price"]) if lp and lp.get("price") else None
-                                price_age = float(lp.get("age_seconds", 0.0)) if lp else 0.0
-
-                                if live_px is None:
-                                    try:
-                                        from crawler.zerodha_market import get_live_prices
-                                        _sym_ns = stock.symbol if stock.symbol.endswith(".NS") else f"{stock.symbol}.NS"
-                                        _quotes = await get_live_prices([_sym_ns])
-                                        _q = _quotes.get(_sym_ns) or _quotes.get(stock.symbol)
-                                        if _q:
-                                            _px = _q.get("price") or _q.get("last_price")
-                                            if _px and float(_px) > 0:
-                                                live_px = float(_px)
-                                    except Exception as _exc:
-                                        logger.debug(f"[hub] REST LTP fallback failed for {stock.symbol}: {_exc}")
-
-                            except Exception as exc:
-                                logger.warning(f"[hub] {stock.symbol}: live entry-price confirmation errored ({exc})")
-                                continue
-
-                            if live_px is None:
-                                logger.warning(f"[hub] {stock.symbol}: cannot confirm live price, skipping trade")
-                                continue
-
-                            if candidate.entry:
-                                divergence = abs(live_px - candidate.entry) / candidate.entry
-                                if divergence < 0.05:
-                                    delta = live_px - candidate.entry
-                                    candidate.entry = round(live_px, 2)
-                                    if getattr(candidate, "stop", None):
-                                        candidate.stop = round(candidate.stop + delta, 2)
-                                    for attr in ("target", "target_1", "target_2"):
-                                        v = getattr(candidate, attr, None)
-                                        if v:
-                                            setattr(candidate, attr, round(v + delta, 2))
-                                else:
-                                    logger.warning(f"[hub] {stock.symbol}: candle price ₹{candidate.entry:.2f} vs live ₹{live_px:.2f} — {divergence*100:.1f}% divergence, skipping trade")
-                                    continue
-                            # ── End Live-snap ──
-
-                            try:
-                                import datetime as _dt
-                                score_age = (_dt.datetime.utcnow() - stock.scored_at).total_seconds() if getattr(stock, "scored_at", None) else 0.0
-                                logger.info(f"[hub_instrumentation] PATH: A_inline | SYMBOL: {stock.symbol} | SCORE_AGE: {score_age}s | PRICE_AGE: {price_age}s")
-                            except Exception: pass
-                            
-                            decision, _reject = de.fuse(
-                                symbol=stock.symbol, candidate=candidate, regime=stock.regime,
-                                macro_bias=ctx.macro.total_macro_bias, fund_score=0,
-                                fund_grade=stock.fund_grade, equity=portfolio.equity,
-                            )
-                            if decision is None:
-                                flow["fuse_drop"] += 1
-                                if _reject:
-                                    logger.debug(f"[hub] {stock.symbol} fuse-filtered: {_reject}")
-                                continue
-                            # Level-1/2/3 LLM reasoning gate (opt-in flags; runs only
-                            # on already-qualified candidates, fail-open). Mirrors
-                            # agent_loop._process_symbol so both execution paths reason.
-                            from engine.agent.decision_engine import apply_reasoning_gate
-                            decision, _llm_reject = await apply_reasoning_gate(
-                                stock.symbol, candidate, decision
-                            )
-                            if decision is None:
-                                flow["shadow_skip"] += 1
-                                logger.info(f"[hub] {stock.symbol} LLM-reason SKIP: {_llm_reject}")
-                                continue
-                            ok, why = rm.can_take_trade(candidate, portfolio.equity)
-                            if not ok:
-                                flow["risk_veto"] += 1
-                                logger.info(f"[hub] blocked {stock.symbol}: {why}")
-                                continue
-                            order_id = await executor.execute(decision, session)
-                            if order_id:
-                                flow["executed"] += 1
-                                portfolio.add_position(decision)
-                                # Multi-target exit keys (mirror agent_loop._process_symbol)
-                                _sym  = decision.symbol
-                                _risk = abs(decision.entry - decision.stop)
-                                portfolio.open_positions[_sym]["target1"]      = round(decision.entry + 1.0 * _risk, 2)
-                                portfolio.open_positions[_sym]["target2"]      = round(decision.entry + 2.0 * _risk, 2)
-                                portfolio.open_positions[_sym]["partial_done"] = False
-                                portfolio.open_positions[_sym]["trailing_sl"]  = None
-                                portfolio.open_positions[_sym]["entry_ts"]     = datetime.utcnow().isoformat()
-                                decisions_made += 1
-                                logger.info(
-                                    f"[hub] TRADE {decision.action} {decision.qty} {stock.symbol} "
-                                    f"score={stock.master_score:.1f} conf={decision.confidence}%"
-                                )
-                        except Exception as exc:
-                            flow["exec_error"] += 1
-                            logger.error(f"[hub] exec error {stock.symbol}: {exc}")
-
-                    # One structured funnel line per cycle (greppable by the monitor):
-                    # shows exactly where candidates dropped out this cycle.
+                    # ── REMOVED (Phase 3C Phase B, 2026-07-21) ───────────────────────
+                    # docs/PHASE_3C_PHASE_B_DEPENDENCY_AUDIT.md §6/§8: this used to be a
+                    # ~200-line inline loop (the "Master Intelligence strategy") that
+                    # independently originated NEW equity/short entries straight from
+                    # MasterIntelligenceScore, with no news event involved. It had been
+                    # hard-blocked since Phase 1 by swapping its iterable for an empty
+                    # list (`_NEWS_ONLY_BLOCKS_HUB_ENTRIES = True`), but the loop BODY —
+                    # left in place — called `executor.execute(decision, session)`
+                    # directly, with no `TradeIntent` construction and no call to
+                    # `authorize_trade_intent()`/`execute_trade_intent()` anywhere in
+                    # between. That is a genuine central-gate bypass: if the empty-list
+                    # guard above it were ever reverted without also wiring this loop
+                    # through the gate, trades would originate with zero
+                    # confidence-provenance check, zero event check, and zero of the
+                    # gate's risk validation beyond the loop's own `rm.can_take_trade()`.
+                    # The dependency audit confirmed this loop body was the ONLY thing
+                    # `selector`/`de`/`rm`/`flow`/`_hub_short_strat`/`_intraday_on`/
+                    # `_short_enabled` existed for — none of them are used anywhere else
+                    # in this function or file — so removing the loop meant removing all
+                    # of that scaffolding with it, not leaving it as dead weight.
+                    # Scoring (score_universe/persist_scores), exit management
+                    # (check_and_close_positions, the sector-bearish exit loop above),
+                    # and MF scoring below are untouched — none of them depended on this
+                    # loop or its variables.
                     logger.info(
-                        "[trade_flow] " + " ".join(f"{k}={v}" for k, v in flow.items())
+                        "[hub] new-entry origination via this inline loop was permanently "
+                        "removed under the News-Only architecture (Phase 3C Phase B) — "
+                        "scoring + exit management ran normally above this line"
                     )
 
                 # Score MF portfolio
