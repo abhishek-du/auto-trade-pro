@@ -203,10 +203,15 @@ def check_risk_quality(
         fund   = fundamentals.get(symbol, {})
         issues = []
 
-        pe        = fund.get("pe_ratio")
-        de        = fund.get("debt_to_equity")
-        roe       = fund.get("roe")           # already in %
-        rev_growth = fund.get("revenue_growth_ttm")  # already in %
+        def _safe_float(v):
+            if v is None: return None
+            try: return float(v)
+            except (ValueError, TypeError): return None
+            
+        pe        = _safe_float(fund.get("pe_ratio"))
+        de        = _safe_float(fund.get("debt_to_equity"))
+        roe       = _safe_float(fund.get("roe"))           # already in %
+        rev_growth = _safe_float(fund.get("revenue_growth_ttm"))  # already in %
 
         if pe and pe > 80:
             issues.append(f"PE ratio {pe:.0f}x — extremely expensive vs market avg 20–25x")
