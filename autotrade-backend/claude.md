@@ -1,69 +1,43 @@
-# Deep Dive Analysis: Stock Signal Timestamps & Quant Architecture Evolution
+# V4 Architecture & Quant Review Notes
 
-This document is a comprehensive breakdown of the architectural roadmap and PM review provided in the "Stock Signal Timestamps.pdf" document. The document outlines a critical pivot from a retail-style technical scanner to an institutional-grade event-driven quant engine.
+Based on the detailed review from the "Stock Signal Timestamps" document, here is the roadmap for moving towards an institutional-grade, Event-Driven V4 architecture.
 
-## 1. Initial Observations & Signal Rejections
-The document begins by analyzing why the AI system skipped specific signals (ITC, Tech Mahindra, Wipro, IEX) generated after market close (19:43) on 16 July when the market opened on 17 July.
+## 1. News Categorization & Exponential Decay (Highest Alpha Potential)
+- **Structured Events:** Move away from a single `surprise_score` to a structured JSON object for news:
+  - `category` (e.g., ORDER_WIN, EARNINGS, FDA_APPROVAL, PROMOTER)
+  - `impact` (e.g., HIGH)
+  - `confidence` (e.g., 0.94)
+  - `time_horizon` (e.g., 2_5_DAYS)
+  - `expected_half_life_hours` (e.g., 72)
+- **Exponential Decay:** Replace linear decay with `score(t) = score0 * e^(-λt)`. Use category-specific half-lives (e.g., Regulatory Approval = 10 days, Earnings = 5 days, Rumor = 4 hours).
+- *Action Item:* Implement this backward-compatibly in `news_crawler.py` by saving metadata alongside the existing score.
 
-**Key Reasons for Rejection:**
-- **Market Hours & Flash News Rule:** The Event Arbitrage module requires instant execution. Since the market was closed, the system aborted instant execution (`No live price for ITC.NS, aborting instant execution`). The system correctly avoids placing blind AMC orders because overnight gap-ups/gap-downs drastically alter the risk-to-reward ratio.
-- **Morning Gap-Up Pricing:** If a stock opens significantly higher due to overnight news, the AI will not chase it, as the risk-to-reward is no longer favorable.
-- **Strict Thresholds (Master Score):** The system requires a Master Score of `> 75`. During morning re-analysis, indicators like RSI/MACD may have been overbought, dropping the score below 75, resulting in a safe `SKIP`.
+## 2. Event Clustering & Deduplication
+- **Problem:** If Mint, CNBC, and ET all report "L&T wins order", the system might parse 3 separate news events and artificially inflate the score.
+- **Solution:** Add an **Event Intelligence Layer** to deduplicate news headlines into single **Structured Events**. Only score the 1 consolidated event.
 
-## 2. Validation & Missing Evidence
-The reviewer notes that while the theoretical explanations are sound, they need concrete evidence from logs:
-- Must verify if `market_closed` check explicitly aborts trades.
-- Must verify log entries showing `Gap = +3.8% -> Risk reward unacceptable`.
-- Must verify the morning re-evaluation actually occurred.
+## 3. Strategy-Specific Weighting Engine
+- **Problem:** The current universal `Master Score` (`Tech: 65%, News: 12%, Sector: 10%, Macro: 10%, Vol: 15%`) underweights news for event-driven trades and overweights it for pure technical setups.
+- **Solution:** Shift to a multi-strategy scoring engine:
+  - **Technical Swing:** Tech 45%, News 20%, Vol 15%, Sector 10%, Macro 10%
+  - **Event Swing:** News 40%, Tech 30%, Sector 10%, Macro 10%, Vol 10%
+  - **Intraday Momentum:** Tech 50%, Vol 25%, Options 15%, News 5%, Macro 5%
 
-*Later in the document, database logs from `17 July, 09:00:37 UTC` confirm that the morning re-analysis DID occur, proving the system works as intended.*
+## 4. Feature Availability & Immutable Decision Snapshot
+- **Problem:** The system doesn't log *exactly* what data was available at `T_0` (e.g., did Options feed fail and fallback to Index? Was the RSI value 68 or 70?).
+- **Solution:** Persist a heavy JSON snapshot with every trade decision including:
+  - `feature_vector` (Exact RSI, EMA, News Score, Macro Score)
+  - `availability_logs` (Which features were available vs fallback)
+  - `explainability_versioning` (Git commit SHA, LLM Prompt version, Strategy version)
 
-## 3. Thresholds & Score Composition
-The document critiques the hardcoded threshold of `75`.
-- A score of `74.9` skips, while `75.0` executes. This rigid binary logic is suboptimal.
-- **Proposed Solution:** Implement a tiered system:
-  - `>= 85`: Auto Execute
-  - `75-85`: LLM Review
-  - `50-75`: Watchlist / Re-evaluate velocity
-  - `< 50`: Reject
-- **Score Velocity ($\Delta$Score):** Track how fast a score is moving. An accelerating score (`61 -> 66 -> 71`) is more valuable than a decaying score (`78 -> 74 -> 69`).
+## 5. Better Universe Selection
+- **Problem:** Fixed Top 3000 cap and hardcoded ₹1 Cr minimum turnover.
+- **Solution:** 
+  - Exclude SME, BE, BZ (illiquid/Trade-to-Trade).
+  - Use adaptive scoring based on 30-Day Turnover + 7-Day Acceleration + Premarket Activity.
+  - Implement dynamic configurable liquidity and bid-ask spread filters.
 
-## 4. The Weighting Problem
-The document identifies an issue where "News" is underweighted in the Master Score:
-- Technical: 0.65
-- Volume: 0.15
-- News: 0.12
-- Sector: 0.10
-- Macro: 0.10
-*(Total normalized: Tech ~58%, News ~11%)*
-
-Because News is only 11%, even a perfect 100/100 news event cannot trigger a trade if the macro environment is negative (-24). 
-**Solution:** Strategy-specific weighting. A "News/Event Swing Strategy" should weight News at 40% and Technicals at 30%, while a "Technical Breakout Strategy" weights Technicals at 58%.
-
-## 5. The V4 Architectural Roadmap (Highest Priority)
-The reviewer dictates a massive pivot. Instead of scanning 3000 stocks to see if they have news, the system should monitor news and only score the affected stocks.
-
-**The Ultimate Event-Driven Pipeline:**
-1. **News Collection:** Official Filings, Media, Macro.
-2. **Deduplication & Clustering:** Merge 4 articles about the same event into ONE event.
-3. **Event Intelligence:** Calculate Surprise, Confidence, Novelty, and Duration via LLM.
-4. **Dependency Graph (Ripple Effect):** Map the primary stock (e.g., L&T) to secondary peers (ABB, Siemens).
-5. **Candidate Ranking:** Rank the 5-30 affected stocks based on event impact.
-6. **Technical Execution Filter:** Use technicals *only* to time the entry (wait for EMA breakout, avoid gap-ups).
-7. **Risk & Portfolio Engine:** Block trades if sector exposure is too high.
-
-## 6. System Audit & "Quant-Ready" State
-The document performs a rigorous code review of the system's temporal correctness (Look-Ahead Bias).
-- **Timezones:** Perfect UTC alignment.
-- **Feature Timestamps:** Candles and news strictly use `datetime.utcnow()` bounds.
-- **Event Sourcing:** A minor drift was found during deterministic replay because code logic changed and exact raw dataframes were not serialized.
-- **Verdict:** The system is "Research-ready and Paper Trading-ready" (Institutional-inspired).
-
-## 7. The Final Mandate
-Before any new AI features are built, the next 2-4 weeks MUST focus exclusively on:
-1. **Persistent Event Store:** Log every event with a lifecycle, decay, and map all trades to an `event_id`.
-2. **Duplicate Event Clustering:** Prevent a single news event from inflating scores due to multiple media reports.
-3. **Paper-Trading Analytics Dashboard:** Track Event Win-Rate, Maximum Favorable Excursion (MFE), and Maximum Adverse Excursion (MAE).
-
----
-*Summary compiled by Claude AI based on direct document analysis.*
+## Implementation Guidelines
+- **One major change at a time, then measure.**
+- Do not let category tags influence live trade execution until they are validated through paper-trading.
+- Freeze weights and strategies for 2-4 weeks and run deterministic replays to generate statistical evidence.

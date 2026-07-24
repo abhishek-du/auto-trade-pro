@@ -73,6 +73,17 @@ Output exactly valid JSON matching the following structure and nothing else. No 
     try:
         response_text = await call_llm_chat(messages, max_tokens=2500, temperature=0.1)
         if not response_text:
+            # Root-caused 2026-07-23: this used to be completely silent, which
+            # is why a Bedrock circuit-breaker cascade (utils/llm.py) killing
+            # 45-50 candidates in a row looked identical to routine
+            # classification misses in the logs -- see
+            # docs/NEWS_INGESTION_LATENCY_FORENSIC_AUDIT.md-adjacent
+            # investigation. call_llm_chat() returns falsy for two reasons:
+            # the circuit breaker is open (blocking ALL calls, not just this
+            # one -- see utils.llm's own block-window log), or a genuine
+            # empty-content response survived both of call_mantle_chat's
+            # internal retries. Either way, this is worth a trace.
+            logger.warning(f"[event_classifier] classify_event: no response for '{headline[:60]}' (LLM call failed or circuit breaker open)")
             return None
 
         import re

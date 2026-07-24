@@ -15,6 +15,7 @@ router = APIRouter(tags=["Trades"])
 
 
 def _trade_out(t: PaperTrade) -> PaperTradeOut:
+    snap = t.indicator_snapshot or {}
     return PaperTradeOut(
         id=t.id,
         symbol=t.symbol,
@@ -35,6 +36,7 @@ def _trade_out(t: PaperTrade) -> PaperTradeOut:
         slippage_applied=t.slippage_applied,
         opened_at=t.opened_at,
         closed_at=t.closed_at,
+        confidence_factors=snap.get("confidence_factors") or {},
     )
 
 

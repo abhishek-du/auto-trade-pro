@@ -142,4 +142,12 @@ export const getWatchlistSector  = (sector) => api.get(`/api/v1/india/watchlist/
 export const getWatchlistSymbol  = (symbol) => api.get(`/api/v1/india/watchlist/${symbol}`);
 export const refreshWatchlist    = ()       => api.post('/api/v1/india/watchlist/refresh');
 
+// ── Upstox API ──────────────────────────────────────────────────────────────────
+export const getUpstoxLoginUrl    = () => api.get('/api/v1/upstox/login');
+export const getUpstoxStatus      = () => api.get('/api/v1/upstox/status');
+export const getUpstoxMargins     = () => api.get('/api/v1/upstox/margins');
+export const getUpstoxHoldings    = () => api.get('/api/v1/upstox/holdings');
+export const autoLoginUpstox      = () => api.post('/api/v1/upstox/auto-login');
+export const syncUpstoxHoldings   = () => api.post('/api/v1/portfolios/sync-upstox');
+
 export default api;

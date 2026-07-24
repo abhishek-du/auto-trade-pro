@@ -184,13 +184,20 @@ def fetch_fundamentals_yfinance(symbol: str) -> dict:
         import yfinance as yf
     except ImportError:
         logger.error("fetch_fundamentals_yfinance: yfinance not installed")
-        return {}
+        return {"_error": "unavailable", "_reason": "yfinance not installed"}
 
     try:
         info: dict = yf.Ticker(symbol).info
     except Exception as exc:
         logger.warning(f"fetch_fundamentals_yfinance {symbol}: {exc}")
-        return {}
+        # 2026-07-23 fix: a bare {} on failure was indistinguishable from a
+        # genuine "this stock has no fundamentals" result -- callers
+        # (engine/agent/decision_engine.py::_tool_fundamentals) need to know
+        # whether retrying could ever help (never, if rate-limited) or not.
+        _msg = str(exc).lower()
+        if "429" in _msg or "too many requests" in _msg:
+            return {"_error": "rate_limited"}
+        return {"_error": "fetch_failed", "_reason": str(exc)[:120]}
 
     def _g(key: str) -> Any:
         return info.get(key)
@@ -261,7 +268,7 @@ async def fetch_fundamentals_screener(symbol_bare: str) -> dict:
     """
     if not _BS4_AVAILABLE:
         logger.error("fetch_fundamentals_screener: beautifulsoup4 not installed")
-        return {}
+        return {"_error": "unavailable", "_reason": "beautifulsoup4 not installed"}
 
     sym = symbol_bare.replace(".NS", "").replace(".BO", "").upper()
     urls = [
@@ -270,6 +277,11 @@ async def fetch_fundamentals_screener(symbol_bare: str) -> dict:
     ]
 
     html: str | None = None
+    # 2026-07-23 fix: a 404 on both URLs is genuine absence (this company
+    # isn't on screener.in) -- must stay distinguishable from a real failure
+    # (429/network error), which callers need to know is retry-futile this
+    # session, not "no data exists."
+    failure: dict | None = None
     async with httpx.AsyncClient(
         headers=_HEADERS, timeout=_REQUEST_TIMEOUT, follow_redirects=True
     ) as client:
@@ -280,19 +292,25 @@ async def fetch_fundamentals_screener(symbol_bare: str) -> dict:
                     continue
                 resp.raise_for_status()
                 html = resp.text
+                failure = None
                 break
             except httpx.HTTPStatusError as exc:
                 logger.warning(
                     f"fetch_fundamentals_screener {sym}: HTTP {exc.response.status_code}"
                 )
+                if exc.response.status_code == 429:
+                    failure = {"_error": "rate_limited"}
+                else:
+                    failure = {"_error": "fetch_failed", "_reason": f"HTTP {exc.response.status_code}"}
             except httpx.RequestError as exc:
                 logger.warning(f"fetch_fundamentals_screener {sym}: {exc}")
+                failure = {"_error": "fetch_failed", "_reason": str(exc)[:120]}
 
     # Always wait 2 seconds after the HTTP call (even on failure)
     await asyncio.sleep(2)
 
     if not html:
-        return {}
+        return failure if failure else {}
 
     soup = BeautifulSoup(html, "lxml")
     result: dict = {}

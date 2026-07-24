@@ -191,13 +191,48 @@ async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
     return None
 
 
+# In-flight ISIN resolutions, keyed by bare symbol -- see get_isin()'s
+# single-flight de-duplication.
+_ISIN_INFLIGHT: dict[str, "asyncio.Future[str | None]"] = {}
+
+
 async def get_isin(symbol: str) -> str | None:
     """Resolve NSE symbol (e.g. 'RELIANCE') → ISIN. See module comment above
-    for the priority order."""
+    for the priority order.
+
+    Single-flight de-duplication (2026-07-23 fix): engine/company_intelligence.py
+    fires 8 Upstox sub-fetchers concurrently via asyncio.gather, each of which
+    independently calls this function for the same symbol. All 8 start in the
+    same event-loop tick, so none can see another's in-flight resolution --
+    confirmed live to fire 8 (sometimes 16, when company_intelligence itself
+    got called twice) redundant instruments/search round-trips per candidate.
+    Concurrent callers for the same not-yet-cached symbol now await the same
+    in-flight resolution instead of each starting their own.
+    """
     bare = symbol.upper().replace(".NS", "").replace(".BO", "")
     if bare in _ISIN_CACHE:
         return _ISIN_CACHE[bare]
 
+    inflight = _ISIN_INFLIGHT.get(bare)
+    if inflight is not None:
+        return await inflight
+
+    fut: "asyncio.Future[str | None]" = asyncio.get_running_loop().create_future()
+    _ISIN_INFLIGHT[bare] = fut
+    try:
+        result = await _resolve_isin_uncached(bare)
+        fut.set_result(result)
+        return result
+    except Exception as exc:
+        fut.set_exception(exc)
+        raise
+    finally:
+        _ISIN_INFLIGHT.pop(bare, None)
+
+
+async def _resolve_isin_uncached(bare: str) -> str | None:
+    """The real DB-then-live resolution, called at most once concurrently per
+    symbol -- see get_isin()'s single-flight wrapper above."""
     try:
         from db.database import AsyncSessionLocal
         from db.models import SymbolISINMap
@@ -398,6 +433,41 @@ async def get_market_intel(symbol: str) -> dict:
         logger.debug(f"[upstox/market_intel] {symbol}: {e}")
     return {}
 
+
+# ── Portfolio & Margins ───────────────────────────────────────────────────────
+
+async def get_funds(segment: str = "SEC") -> dict:
+    """Get Upstox funds and margin details. segment: SEC (Equities) or COM (Commodities)."""
+    if not await ensure_upstox_token_fresh():
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{_V2}/user/get-funds-and-margin",
+                headers=_headers(),
+                params={"segment": segment},
+            )
+            if r.status_code == 200:
+                return r.json().get("data", {})
+    except Exception as e:
+        logger.debug(f"[upstox/funds] {e}")
+    return {}
+
+async def get_holdings() -> list[dict]:
+    """Get Upstox long term holdings."""
+    if not await ensure_upstox_token_fresh():
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{_V2}/portfolio/long-term-holdings",
+                headers=_headers(),
+            )
+            if r.status_code == 200:
+                return r.json().get("data", [])
+    except Exception as e:
+        logger.debug(f"[upstox/holdings] {e}")
+    return []
 
 # ── Cross-check: Live price (Zerodha primary → Upstox fallback) ───────────────
 

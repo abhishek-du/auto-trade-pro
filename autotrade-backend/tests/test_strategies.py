@@ -212,9 +212,12 @@ class TestTrendBreakoutLong:
         c = self._call()
         assert c.risk_reward >= 2.0
 
-    def test_confidence_base_is_75(self):
+    def test_confidence_base_is_65(self):
+        # Base confidence is 65 (confirmed by reading trend_breakout.py
+        # directly: `conf = 65`); defaults add supertrend's +2 (st_dir=1),
+        # no macro/fund/pattern bonus -> 67.
         c = self._call()
-        assert c.confidence >= 75
+        assert c.confidence == 67
 
     # ── Regime gate ──────────────────────────────────────────────────────────
     def test_fails_bear_trending_regime(self):
@@ -391,12 +394,13 @@ class TestPullbackTrendLong:
     def test_fails_ema20_below_ema50(self):
         assert self._call(fkw={"ema20": 950.0, "ema50": 1000.0}) is None
 
-    # ── ADX gate ─────────────────────────────────────────────────────────────
-    def test_fails_adx_below_15(self):
-        assert self._call(fkw={"adx14": 14.9}) is None
+    # ── ADX gate (2026-07-23: current gate is `adx14 < 20`, not 15 --
+    #    confirmed by reading engine/agent/strategies/pullback_trend.py) ───────
+    def test_fails_adx_below_20(self):
+        assert self._call(fkw={"adx14": 19.9}) is None
 
-    def test_passes_adx_exactly_15(self):
-        assert self._call(fkw={"adx14": 15.0}) is not None
+    def test_passes_adx_exactly_20(self):
+        assert self._call(fkw={"adx14": 20.0}) is not None
 
     # ── Minimum df length ─────────────────────────────────────────────────────
     def test_fails_with_single_row_df(self):
@@ -649,6 +653,20 @@ class TestRangeReversalLong:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestHubSignalStrategy:
+    """2026-07-23: rewritten to match "Phase 7 tightening" (see
+    engine/agent/strategies/hub_signal.py's own module docstring), a
+    deliberate, documented strategy change made after these tests were
+    originally written -- not code drift:
+      - BUY only now (SELL requires a separate short-side review elsewhere;
+        this strategy itself never returns a SELL candidate any more).
+      - Min hub score raised 10 -> 40 (STRONG_BUY only).
+      - Five additional trend-quality gates: EMA50>EMA200, ADX>25,
+        regime != BEAR_TRENDING, vol_spike required, RSI in [45, 70].
+      - Stop tightened 2xATR -> 1xATR; target 4xATR -> 2xATR (same 2:1 R:R).
+      - Confidence: base 70, +brackets at score>=40/55/70 (74/78/82), regime/
+        supertrend/macro/fund-grade bonuses, capped at 92, hard floor of 80
+        (returns None below it -- confirmed by reading the source directly).
+    """
 
     def setup_method(self):
         self.strat = HubSignalStrategy()
@@ -658,7 +676,8 @@ class TestHubSignalStrategy:
         f = _features(**fkw)
         return self.strat.evaluate(self.sym, _df(), f, macro_bias=0, fund_grade="NONE")
 
-    # ── Golden path ──────────────────────────────────────────────────────────
+    # ── Golden path (defaults: score=45, regime=BULL_TRENDING, ema50>ema200,
+    #    adx14=28, rsi14=62, vol_spike=True -- all Phase 7 gates already pass) ──
     def test_golden_path_returns_buy(self):
         c = self._call()
         assert c is not None and c.side == "BUY"
@@ -670,13 +689,13 @@ class TestHubSignalStrategy:
         c = self._call(close=1050.0)
         assert c.entry == pytest.approx(1050.0)
 
-    def test_stop_is_2_atr_below_entry(self):
+    def test_stop_is_1_atr_below_entry(self):
         c = self._call(close=1050.0, atr14=15.0)
-        assert c.stop == pytest.approx(1050.0 - 2 * 15.0)
+        assert c.stop == pytest.approx(1050.0 - 1 * 15.0)
 
-    def test_target_is_4_atr_above_entry(self):
+    def test_target_is_2_atr_above_entry(self):
         c = self._call(close=1050.0, atr14=15.0)
-        assert c.target == pytest.approx(1050.0 + 4 * 15.0)
+        assert c.target == pytest.approx(1050.0 + 2 * 15.0)
 
     def test_rr_is_2_to_1(self):
         c = self._call(close=1050.0, atr14=15.0)
@@ -686,11 +705,10 @@ class TestHubSignalStrategy:
     def test_returns_none_when_no_hub_score(self):
         assert self._call(hub_composite_score=None) is None
 
-    # ── Signal direction ──────────────────────────────────────────────────────
-    def test_sell_signal_produces_sell_candidate(self):
-        c = self._call(hub_signal="SELL", hub_composite_score=40.0,
-                       regime="RANGE")  # avoid bear_trending gate block
-        assert c is not None and c.side == "SELL"
+    # ── Signal direction -- BUY only, Phase 7 ──────────────────────────────────
+    def test_sell_signal_returns_none(self):
+        # Phase 7: this strategy no longer originates SELL candidates at all.
+        assert self._call(hub_signal="SELL", hub_composite_score=40.0, regime="RANGE") is None
 
     def test_hold_signal_returns_none(self):
         assert self._call(hub_signal="HOLD") is None
@@ -698,35 +716,51 @@ class TestHubSignalStrategy:
     def test_neutral_signal_returns_none(self):
         assert self._call(hub_signal="NEUTRAL") is None
 
-    # ── Minimum score gate ────────────────────────────────────────────────────
-    def test_fails_score_below_10(self):
-        assert self._call(hub_composite_score=9.9) is None
+    # ── Minimum score gate (Phase 7: raised 10 -> 40) ──────────────────────────
+    def test_fails_score_below_40(self):
+        assert self._call(hub_composite_score=39.9) is None
 
-    def test_passes_score_exactly_10(self):
-        assert self._call(hub_composite_score=10.0) is not None
+    def test_passes_score_exactly_40(self):
+        assert self._call(hub_composite_score=40.0) is not None
 
     def test_fails_score_zero(self):
         assert self._call(hub_composite_score=0.0) is None
 
     def test_negative_score_uses_abs_value(self):
-        # hub_score = -45 → abs = 45 → passes threshold, SELL side
-        c = self._call(hub_composite_score=-45.0, hub_signal="SELL", regime="RANGE")
-        assert c is not None
+        # hub_score = -75 -> abs = 75 -> passes the score threshold, but Phase 7
+        # is BUY-only so a SELL signal (even with a passing abs score) is None.
+        c = self._call(hub_composite_score=-75.0, hub_signal="SELL", regime="RANGE")
+        assert c is None
+        # A BUY signal with the same abs score does pass (defaults keep it
+        # comfortably above the 80 hard floor: 70-bracket 82 + regime +6 + st +4).
+        assert self._call(hub_composite_score=-75.0, hub_signal="BUY") is not None
 
-    # ── Regime gates for BUY ─────────────────────────────────────────────────
-    def test_buy_fails_in_bear_trending(self):
-        assert self._call(hub_signal="BUY", regime="BEAR_TRENDING") is None
+    # ── Phase 7 trend-quality gates ────────────────────────────────────────────
+    def test_fails_when_ema50_below_ema200(self):
+        assert self._call(ema50=900.0, ema200=950.0) is None
 
-    def test_buy_fails_unknown_regime_low_adx(self):
-        assert self._call(hub_signal="BUY", regime="UNKNOWN", adx14=14.9) is None
+    def test_fails_in_bear_trending_regime(self):
+        assert self._call(regime="BEAR_TRENDING") is None
 
-    def test_buy_passes_unknown_regime_higher_adx(self):
-        assert self._call(hub_signal="BUY", regime="UNKNOWN", adx14=15.0) is not None
+    def test_fails_adx_at_25_inclusive_boundary(self):
+        # Gate is `adx14 <= 25: return None` -- exactly 25 must fail.
+        assert self._call(adx14=25.0) is None
 
-    def test_sell_not_blocked_by_bear_trending(self):
-        # Bear regime blocks BUY but should not block SELL
-        c = self._call(hub_signal="SELL", hub_composite_score=40.0, regime="BEAR_TRENDING")
-        assert c is not None
+    def test_passes_adx_just_above_25(self):
+        assert self._call(adx14=25.1) is not None
+
+    def test_fails_without_volume_spike(self):
+        assert self._call(vol_spike=False) is None
+
+    def test_fails_rsi_below_45(self):
+        assert self._call(rsi14=44.9) is None
+
+    def test_fails_rsi_above_70(self):
+        assert self._call(rsi14=70.1) is None
+
+    def test_passes_rsi_at_boundaries(self):
+        assert self._call(rsi14=45.0) is not None
+        assert self._call(rsi14=70.0) is not None
 
     # ── ATR guard ─────────────────────────────────────────────────────────────
     def test_fails_zero_atr(self):
@@ -735,41 +769,58 @@ class TestHubSignalStrategy:
     def test_fails_negative_atr(self):
         assert self._call(atr14=-5.0) is None
 
-    # ── Confidence scoring ────────────────────────────────────────────────────
-    def test_confidence_score_50_is_75_plus(self):
-        c = self._call(hub_composite_score=50.0)
-        assert c.confidence >= 75
+    # ── Confidence scoring (base 70, brackets at 40/55/70 -> 74/78/82) ─────────
+    def test_confidence_score_45_is_74(self):
+        # score=45 -> 40-bracket (74) + BULL_TRENDING (+6) + st_dir=1 default (+4) = 84
+        c = self._call(hub_composite_score=45.0)
+        assert c.confidence == 84
 
-    def test_confidence_score_30_is_55_plus(self):
-        c = self._call(hub_composite_score=30.0)
-        assert c.confidence >= 55
+    def test_confidence_score_60_is_78_bracket(self):
+        # regime=RANGE/st_dir=0 removes the two bonuses that would otherwise
+        # be added on top of the bracket value, but 78 alone would sit below
+        # the 80 hard floor -- keep the default st_dir=1 (+4) just to clear
+        # it and isolate the bracket-vs-bonus math precisely: 78 + 4 = 82.
+        c = self._call(hub_composite_score=60.0, regime="RANGE")
+        assert c.confidence == 82
 
-    def test_confidence_score_10_is_40_plus(self):
-        c = self._call(hub_composite_score=10.0)
-        assert c.confidence >= 40
+    def test_confidence_score_75_is_82_bracket(self):
+        c = self._call(hub_composite_score=75.0, regime="RANGE")
+        assert c.confidence == 86  # 82 (70-bracket) + st_dir default (+4)
 
     def test_bull_regime_adds_bonus_for_buy(self):
-        base = self._call(regime="RANGE", hub_composite_score=45.0).confidence
-        bull = self._call(regime="BULL_TRENDING", hub_composite_score=45.0).confidence
-        assert bull > base
+        # score=75 (82 base) keeps both sides above the 80 floor even with
+        # st_dir=0, isolating just the regime bonus.
+        base = self._call(regime="RANGE", hub_composite_score=75.0, st_dir=0)
+        bull = self._call(regime="BULL_TRENDING", hub_composite_score=75.0, st_dir=0)
+        assert base is not None and bull is not None
+        assert bull.confidence > base.confidence
 
     def test_supertrend_bull_adds_bonus(self):
-        without = self._call(st_dir=0).confidence
-        with_st = self._call(st_dir=1).confidence
-        assert with_st > without
+        without = self._call(st_dir=0, regime="RANGE", hub_composite_score=75.0)
+        with_st = self._call(st_dir=1, regime="RANGE", hub_composite_score=75.0)
+        assert without is not None and with_st is not None
+        assert with_st.confidence > without.confidence
 
     def test_investment_grade_adds_bonus(self):
-        base = self.strat.evaluate(self.sym, _df(), _features(), 0, "NONE").confidence
-        inv  = self.strat.evaluate(self.sym, _df(), _features(), 0, "INVESTMENT").confidence
-        assert inv > base
+        base = self.strat.evaluate(self.sym, _df(), _features(), 0, "NONE")
+        inv  = self.strat.evaluate(self.sym, _df(), _features(), 0, "INVESTMENT")
+        assert base is not None and inv is not None
+        assert inv.confidence > base.confidence
 
-    def test_confidence_capped_at_90(self):
+    def test_confidence_capped_at_92(self):
         c = self.strat.evaluate(
             self.sym, _df(),
             _features(hub_composite_score=90, regime="BULL_TRENDING", st_dir=1),
             macro_bias=5, fund_grade="INVESTMENT",
         )
-        assert c.confidence <= 90
+        assert c.confidence == 92  # 82 + 6 + 4 + 3 + 5 = 100, capped at 92
+
+    def test_hard_floor_of_80_returns_none_below_it(self):
+        # score=40 (lowest passing bracket, conf=74) with every bonus disabled
+        # stays below the Phase 7 hard floor of 80 -> must return None, not a
+        # low-confidence candidate.
+        c = self._call(hub_composite_score=40.0, regime="RANGE", st_dir=0)
+        assert c is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -837,19 +888,50 @@ class TestStrategySelectorAgent:
         c = self.sel.propose(self.sym, _df(), f, 0, "NONE")
         assert c is None
 
-    def test_trend_breakout_beats_hub_signal_on_same_bar(self):
-        """TrendBreakoutLong (conf 75+) beats HubSignalStrategy (conf ~55) on identical data."""
-        # Set up features where TrendBreakout fires AND hub fires
+    def test_trend_breakout_not_registered_even_when_its_own_gates_fire(self):
+        # 2026-07-23: TrendBreakoutLong was deliberately removed from the
+        # live selector (engine/agent/selector.py: "disabled (Phase 5):
+        # backtest mean_R=-0.003 over 400+ trades -- zero statistical edge"),
+        # though the strategy class itself still exists and is directly
+        # unit-tested elsewhere in this file. Confirms the selector's real
+        # output can never be TREND_BREAKOUT_LONG any more, even on a bar
+        # that would satisfy that strategy's own gates in isolation.
         f = _features(
             regime="BULL_TRENDING",
             close=1050.0, swing_high_20=1045.0,
             vol_spike=True, rsi14=62.0, adx14=28.0,
             ema20=1020.0, ema50=990.0, atr14=15.0,
-            hub_composite_score=30.0, hub_signal="BUY",
+            hub_composite_score=45.0, hub_signal="BUY",
         )
+        from engine.agent.strategies.trend_breakout import TrendBreakoutLong
+        assert TrendBreakoutLong().evaluate(self.sym, _df(), f, 0, "NONE") is not None  # would fire in isolation
+
         c = self.sel.propose(self.sym, _df(), f, 0, "NONE")
+        assert c is None or c.strategy != "TREND_BREAKOUT_LONG"
+
+    def test_selector_picks_the_higher_confidence_registered_strategy(self):
+        # Replaces the old TrendBreakoutLong-vs-HubSignal comparison with the
+        # equivalent check among strategies actually registered today:
+        # PullbackTrendLong vs HubSignalStrategy on a bar where both fire.
+        from engine.agent.strategies.pullback_trend import PullbackTrendLong
+        from engine.agent.strategies.hub_signal import HubSignalStrategy
+
+        f = _features(
+            regime="BULL_TRENDING", close=1035.0, ema20=1020.0, ema50=990.0,
+            ema200=950.0, atr14=15.0, adx14=28.0, rsi14=58.0, vol_spike=True,
+            hub_composite_score=45.0, hub_signal="BUY",
+        )
+        df = _df_pullback(ema20=1020.0)
+
+        pullback_result = PullbackTrendLong().evaluate(self.sym, df, f, 0, "NONE")
+        hub_result = HubSignalStrategy().evaluate(self.sym, df, f, 0, "NONE")
+        assert pullback_result is not None and hub_result is not None  # both must actually fire
+
+        winner = pullback_result if pullback_result.confidence >= hub_result.confidence else hub_result
+        c = self.sel.propose(self.sym, df, f, 0, "NONE")
         assert c is not None
-        assert c.strategy == "TREND_BREAKOUT_LONG"
+        assert c.strategy == winner.strategy
+        assert c.confidence == winner.confidence
 
     def test_rr_exactly_1_5_passes(self):
         """RR = 1.5 is exactly the minimum — must be accepted."""
@@ -1335,10 +1417,16 @@ class TestSwingScenarios:
         # HubSignal may score higher when hub_composite_score >= 50 stacks bull_regime bonus.
         assert c.strategy in ("TREND_BREAKOUT_LONG", "HUB_SIGNAL")
 
-    def test_scenario_breakout_without_hub_score_fires_trend_breakout(self):
+    def test_scenario_breakout_without_hub_score_now_fires_nothing(self):
         """
         SCENARIO: Same breakout conditions but NO hub score (stock not in shortlist).
-        With hub_composite_score=None, HubSignal is blocked → TrendBreakout wins.
+        2026-07-23: previously TrendBreakoutLong would win here once HubSignal
+        was blocked by the missing hub score. TrendBreakoutLong has since been
+        deliberately removed from the live selector (engine/agent/selector.py:
+        "disabled (Phase 5): backtest mean_R=-0.003 over 400+ trades -- zero
+        statistical edge") -- a real, backtest-driven decision, not drift. A
+        pure breakout (not a pullback, not a range reversal) with no hub
+        score now correctly matches no currently-registered strategy at all.
         """
         f = _features(
             regime="BULL_TRENDING", close=1055.0, swing_high_20=1048.0,
@@ -1347,8 +1435,7 @@ class TestSwingScenarios:
             hub_composite_score=None,  # not in shortlist
         )
         c = self.sel.propose("BREAKOUT.NS", _df(), f, macro_bias=0, fund_grade="NONE")
-        assert c is not None
-        assert c.strategy == "TREND_BREAKOUT_LONG"
+        assert c is None
 
     # ── Scenario 2: Pullback in uptrend ──────────────────────────────────────
     def test_scenario_pullback_to_20ema_in_uptrend(self):
@@ -1391,7 +1478,11 @@ class TestSwingScenarios:
         """
         SCENARIO: Stock in trading range. Price hits BB lower, RSI 25,
         forms hammer candle. Classic mean reversion long.
-        EXPECTED: RANGE_REVERSAL_LONG fires.
+        2026-07-23: RANGE_REVERSAL_LONG has since been deliberately removed
+        from the live selector (engine/agent/selector.py: "disabled (Phase 7):
+        n=2 in full backtest, mean_R=-0.336" -- a real, backtest-driven
+        decision, not drift). No other currently-registered strategy handles
+        this long-side range-support setup, so it now correctly fires nothing.
         """
         entry = 895.0
         f = _features(
@@ -1401,9 +1492,7 @@ class TestSwingScenarios:
         )
         df = _df_hammer(entry)
         c = self.sel.propose("HAMMER.NS", df, f, macro_bias=0, fund_grade="NONE")
-        assert c is not None
-        assert c.strategy == "RANGE_REVERSAL_LONG"
-        assert c.side == "BUY"
+        assert c is None
 
     # ── Scenario 5: Bear market — no new longs ────────────────────────────────
     def test_scenario_bear_market_no_long_entry(self):
@@ -1440,12 +1529,21 @@ class TestSwingScenarios:
         specific Varsity setup fires (no breakout, no pullback). Hub signal
         is the safety net.
         EXPECTED: HUB_SIGNAL fires.
+
+        2026-07-23: HubSignalStrategy's own "Phase 7 tightening" (see
+        engine/agent/strategies/hub_signal.py) added vol_spike and ADX>25 as
+        hard requirements -- the original vol_spike=False/adx14=22 no longer
+        clears HubSignal's own gates either, so this scenario needed updating
+        to still represent "no breakout, no pullback pattern" while
+        satisfying Phase 7 (vol_spike=True, adx14=28 here; close is still
+        nowhere near swing_high_20 so TrendBreakoutLong's gates -- moot
+        anyway, it's unregistered -- wouldn't fire regardless).
         """
         f = _features(
             regime="BULL_TRENDING",
             close=500.0, swing_high_20=520.0,   # not a breakout
-            vol_spike=False, rsi14=52.0,          # RSI not in breakout zone
-            adx14=22.0, ema20=490.0, ema50=475.0,
+            vol_spike=True, rsi14=52.0,
+            adx14=28.0, ema20=490.0, ema50=475.0, ema200=400.0,  # ema50>ema200 (Phase 7 gate)
             atr14=8.0,
             hub_composite_score=58.0, hub_signal="BUY",
         )
@@ -1640,13 +1738,21 @@ class TestRegressions:
 class TestSelectorRoundTrip:
 
     def test_all_strategies_registered_in_selector(self):
+        # 2026-07-23: updated to the current, deliberate roster --
+        # engine/agent/selector.py's own comments document real backtest-
+        # driven removals, not drift: "TREND_BREAKOUT_LONG disabled (Phase 5):
+        # backtest mean_R=-0.003 over 400+ trades -- zero statistical edge"
+        # and "RANGE_REVERSAL_LONG disabled (Phase 7): n=2 in full backtest,
+        # mean_R=-0.336." ExhaustionShort was added in their place. The
+        # TrendBreakoutLong/RangeReversalLong strategy classes still exist
+        # and are still directly unit-tested elsewhere in this file -- they
+        # are just no longer wired into the live selector.
         sel = StrategySelectorAgent()
         names = {s.name for s in sel.strategies}
         expected = {
-            "TREND_BREAKOUT_LONG",
             "PULLBACK_LONG",
             "MEAN_REVERSION_SHORT",
-            "RANGE_REVERSAL_LONG",
+            "EXHAUSTION_SHORT",
             "HUB_SIGNAL",
         }
         assert names == expected

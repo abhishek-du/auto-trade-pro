@@ -1,0 +1,57 @@
+{
+  "generated_at": "2026-07-24T13:05:31.256986",
+  "events_replayed": 143,
+  "records": 572,
+  "decision_distribution": {
+    "NO_TRADE": 572
+  },
+  "long_summary": {
+    "decision": "LONG",
+    "n_matched": 0,
+    "by_cutoff": {
+      "T-30": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-15": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-5": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-1": {
+        "n_long": 0,
+        "windows": {}
+      }
+    }
+  },
+  "wait_summary": {
+    "decision": "WAIT",
+    "n_matched": 0,
+    "by_cutoff": {
+      "T-30": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-15": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-5": {
+        "n_long": 0,
+        "windows": {}
+      },
+      "T-1": {
+        "n_long": 0,
+        "windows": {}
+      }
+    }
+  },
+  "verdict": {
+    "edge_status": "INSUFFICIENT SAMPLE",
+    "statement": "Only 0 LONG predictions across history \u2014 need 20+ for a meaningful verdict. Backfill more historical events/candles, or widen the universe/date range.",
+    "recommendation": "Do NOT use real money. Gather more evidence before drawing conclusions."
+  }
+}

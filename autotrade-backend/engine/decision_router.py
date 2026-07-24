@@ -96,6 +96,18 @@ class StrategyFamily(str, Enum):
     EVENT_DRIVEN = "EVENT_DRIVEN"   # news_discovery_engine.py, event_arbitrage.py
     TECHNICAL    = "TECHNICAL"      # agent_loop.py equity scan, india_tasks.py equity/MIS loops
     FNO          = "FNO"            # engine/fno/* — spreads, futures, straddles, NIFTY MIS options
+    # PRE_EVENT (added 2026-07-24): the parallel Pre-Event Expectation Gap
+    # strategy — a scheduled-event-anticipation trade, NOT news-driven. It is
+    # deliberately NOT TECHNICAL (so the News-Only hard-block does not apply)
+    # and NOT EVENT_DRIVEN (its trigger is a scheduled MarketEvent, not a
+    # news-derived CausalEvent, so _verify_canonical_event has nothing to
+    # verify). A PRE_EVENT intent therefore routes through this gate on its own
+    # merits: it must still carry a CALCULATED confidence and pass full equity
+    # risk validation (validate_signal) exactly like every other family — it
+    # simply isn't subject to the two family-specific blocks above. No new gate
+    # branch is required; adding this member is sufficient (verified: nothing
+    # switches exhaustively on StrategyFamily).
+    PRE_EVENT    = "PRE_EVENT"
 
 
 @dataclass
@@ -115,6 +127,19 @@ class TradeIntent:
     position_size_hint: dict | None = None
     product:            str = "CNC"
     extra:              dict = field(default_factory=dict)
+    # target_2/atr: the FINAL target and ATR-at-entry a caller (e.g.
+    # _execute_news_trade's _compute_news_trade_levels) already computed.
+    # Bug found 2026-07-22: these were computed but never threaded through
+    # TradeIntent -> TradingSignal -> trade_meta, so open_paper_trade()'s
+    # `target_2 = signal.target_2 or target_1` fallback silently collapsed
+    # EVERY News-Only trade's final target to target_1 -- the position's
+    # hard take_profit coincided with T1, so "ride the second half to T2"
+    # never actually happened; both halves closed at the same price tick.
+    # 0.0 (the field default) preserves the old collapse-to-target_1
+    # behavior for any caller that doesn't set these (TECHNICAL/FNO, where
+    # take_profit IS the only real target and this doesn't apply).
+    target_2:           float = 0.0
+    atr:                float = 0.0
     # ── News-Only architecture fields (docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md) ──
     # event_id: the CausalEvent.id this trade traces back to. Mandatory for
     # strategy_family=EVENT_DRIVEN — the gate enforces "NO EVENT -> NO TRADE" (see
@@ -127,6 +152,15 @@ class TradeIntent:
     # it; a caller cannot get a trade approved by passing a rosier DecisionEvidence
     # than what's actually stored. See _verify_canonical_event() below.
     evidence:           "DecisionEvidence | None" = None
+    # Confidence transparency (2026-07-22): the full factor breakdown behind
+    # `confidence` -- never just the number. Found live: a SECOND_ORDER
+    # cascade's confidence was hardcoded to a fake 80% with zero record of
+    # WHY, indistinguishable from a real evaluation until the raw source was
+    # read. Every caller must now populate this — bull/bear/key_risk/thesis/
+    # tools_used/grounding for a DIRECT LLM verdict, or event_strength/
+    # relationship_strength/company_exposure/market_confirmation for a
+    # SECOND_ORDER formula result — so the UI can show its provenance.
+    confidence_factors: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -324,6 +358,9 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
         final_score=intent.confidence,
         reasoning_points=intent.extra.get("reasoning_points", []),
         regime=intent.extra.get("regime", ""),
+        target_2=intent.target_2, atr=intent.atr,
+        event_id=intent.event_id, evidence_ids=list(intent.evidence_ids or []),
+        confidence_factors=dict(intent.confidence_factors or {}),
     )
 
 

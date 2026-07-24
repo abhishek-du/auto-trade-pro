@@ -25,13 +25,14 @@ import asyncio
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, HTMLResponse
 
-from crawler.upstox_auth import get_upstox_status
+from crawler.upstox_auth import get_upstox_status, refresh_upstox_token_with_retry
 from crawler.upstox_data import (
     get_auth_url, exchange_code_for_token,
     get_news, get_company_profile,
     get_income_statement, get_balance_sheet, get_cash_flow,
     get_key_ratios, get_shareholding, get_corporate_actions, get_competitors,
     get_ltp, get_historical, get_option_chain, get_market_intel,
+    get_funds, get_holdings,
 )
 from utils.config import settings
 from utils.logger import logger
@@ -40,6 +41,14 @@ router = APIRouter(tags=["upstox"])
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+
+@router.post("/auto-login", summary="Trigger Upstox Auto-Login via TOTP")
+async def upstox_auto_login():
+    from fastapi import HTTPException
+    ok = await refresh_upstox_token_with_retry()
+    if ok:
+        return {"success": True, "message": "Upstox Auto-Login successful"}
+    raise HTTPException(status_code=500, detail="Upstox Auto-Login failed. Check environment variables (UPSTOX_TOTP_SECRET, etc).")
 
 @router.get("/login", summary="Get Upstox OAuth URL — open in browser to authenticate")
 async def upstox_login():
@@ -57,13 +66,34 @@ async def upstox_callback(code: str = ""):
     try:
         token = await exchange_code_for_token(code)
         return HTMLResponse(
-            f"<h2>Upstox authenticated!</h2>"
-            f"<p>Access token saved. You can close this tab.</p>"
-            f"<p><small>Token: {token[:12]}…</small></p>"
+            f"""
+            <html><body>
+            <h2>Upstox authenticated!</h2>
+            <p>Access token saved. You can close this tab.</p>
+            <p><small>Token: {token[:12]}…</small></p>
+            <script>
+                if (window.opener) {{
+                    window.opener.postMessage('upstox_connected', '*');
+                    setTimeout(() => window.close(), 1500);
+                }}
+            </script>
+            </body></html>
+            """
         )
     except Exception as e:
         logger.error(f"[upstox/callback] {e}")
-        return HTMLResponse(f"<h2>Auth failed: {e}</h2>", status_code=500)
+        return HTMLResponse(
+            f"""
+            <html><body>
+            <h2>Auth failed: {e}</h2>
+            <script>
+                if (window.opener) {{
+                    window.opener.postMessage('upstox_error', '*');
+                    setTimeout(() => window.close(), 3000);
+                }}
+            </script>
+            </body></html>
+            """, status_code=500)
 
 
 @router.get("/status", summary="Check Upstox connection status")
@@ -74,6 +104,18 @@ async def upstox_status():
         "login_url":      "/api/v1/upstox/login",
         **get_upstox_status(),   # status/authenticated/last_verified_ts/last_refresh_ts/failures
     }
+
+
+# ── Portfolio & Margins ───────────────────────────────────────────────────────
+
+@router.get("/margins", summary="Get Upstox funds and margin details")
+async def upstox_margins():
+    return await get_funds()
+
+
+@router.get("/holdings", summary="Get Upstox long term holdings")
+async def upstox_holdings():
+    return await get_holdings()
 
 
 # ── News ──────────────────────────────────────────────────────────────────────

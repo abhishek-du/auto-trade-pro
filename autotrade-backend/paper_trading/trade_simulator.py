@@ -17,13 +17,13 @@ TradeSimulator.execute_buy / execute_sell / size_from_risk
 
 import random
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from db.models import AgentTrade, Candle, OpenPosition, PaperTrade, TradeDirection, TradeStatus
+from db.models import AgentTrade, Candle, OpenPosition, PaperTrade, ReentryWatch, TradeDirection, TradeStatus
 from paper_trading.simulation_logger import SimulationLogger
 from paper_trading.virtual_wallet import VirtualWallet
 from utils.config import settings
@@ -246,6 +246,12 @@ async def open_paper_trade(
         # MFE/MAE running trackers (updated every tick in update_positions_…)
         "peak_upnl":   0.0,
         "trough_upnl": 0.0,
+        # News-Only traceability (2026-07-22, T1-reanalysis/re-entry feature)
+        # -- see TradingSignal.event_id's docstring. None/[] for non-event-
+        # driven signals, which is exactly when the re-entry watcher must
+        # not try to re-authorize a trade with no event to trace to.
+        "event_id":      getattr(signal, "event_id", None),
+        "evidence_ids":  list(getattr(signal, "evidence_ids", None) or []),
     }
 
     # ── Attribution values (already in signal, just not persisted until now) ─
@@ -274,6 +280,9 @@ async def open_paper_trade(
             "sentiment_score": signal.sentiment_score,
             "final_score":     signal.final_score,
             "trade_mgmt":      trade_meta,
+            # Confidence transparency (2026-07-22) -- see TradeIntent.confidence_factors's
+            # docstring. {} for legacy/TECHNICAL callers that don't set it.
+            "confidence_factors": dict(getattr(signal, "confidence_factors", None) or {}),
         },
         news_sentiment_score=signal.sentiment_score / 100.0,
         slippage_applied=round(slippage_applied, 6),
@@ -596,6 +605,60 @@ async def compute_live_pnl(
     return out
 
 
+async def _t1_reversal_exit(pos: OpenPosition, price: float, analysis: dict, session: AsyncSession) -> dict:
+    """Full-close a position on a T1-reanalysis EXIT decision (see
+    engine/agent/t1_reanalysis.py) and register a ReentryWatch IF the
+    position traces back to a real canonical event -- NO EVENT -> NO TRADE
+    still applies to any re-entry, so a position with no event_id on record
+    (e.g. a legacy/technical position predating this feature) just closes,
+    with no watch registered rather than a made-up one.
+    """
+    closed_trade = await close_paper_trade(pos, price, "T1_REVERSAL_EXIT", session)
+
+    snap = (closed_trade.indicator_snapshot or {}) if closed_trade else {}
+    tm = snap.get("trade_mgmt") or {}
+    event_id = tm.get("event_id")
+    evidence_ids = tm.get("evidence_ids") or []
+    direction = pos.direction.value
+
+    reasoning = str(analysis.get("reasoning") or "")[:500]
+    watch_level = analysis.get("watch_level")
+    if watch_level is None:
+        # Deterministic fallback so SOME level is always watched even if the
+        # LLM didn't name one: a modest confirmation buffer beyond the exit
+        # price in the trade's original direction.
+        watch_level = round(price * (1.01 if direction == "BUY" else 0.99), 2)
+
+    if event_id is not None:
+        session.add(ReentryWatch(
+            symbol=pos.symbol, direction=direction, watch_level=watch_level,
+            event_id=event_id, evidence_ids=evidence_ids, reason=reasoning,
+            status="WATCHING",
+            original_confidence=float(getattr(closed_trade, "signal_confidence", 0.0) or 0.0),
+            expires_at=datetime.utcnow() + timedelta(hours=6),
+        ))
+        logger.warning(
+            f"[t1_reanalysis] {pos.symbol}: T1-REVERSAL EXIT @ ₹{price:.2f} | watching for "
+            f"re-entry {'above' if direction == 'BUY' else 'below'} ₹{watch_level:.2f} | {reasoning[:150]}"
+        )
+    else:
+        logger.warning(
+            f"[t1_reanalysis] {pos.symbol}: T1-REVERSAL EXIT @ ₹{price:.2f} | no canonical "
+            f"event on this position -- re-entry watch not registered | {reasoning[:150]}"
+        )
+
+    return {
+        "trade_id":    closed_trade.id,
+        "symbol":      closed_trade.symbol,
+        "reason":      "T1_REVERSAL_EXIT",
+        "exit_price":  price,
+        "pnl":         closed_trade.pnl,
+        "entry_price": closed_trade.entry_price,
+        "size_units":  closed_trade.size_units,
+        "direction":   direction,
+    }
+
+
 async def update_positions_with_current_prices(session: AsyncSession) -> list[dict]:
     """Refresh all open positions with the latest candle prices.
 
@@ -718,10 +781,35 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         logger.warning(f"update_positions: {pos.symbol} F&O SL/TP close failed: {exc}")
             continue
 
-        # Prefer the LIVE Kite price; fall back to the freshest recent candle.
+        # Prefer the LIVE Kite price. If the batched LTP call missed this
+        # symbol, try ONE direct Zerodha fetch for it before ever trusting our
+        # own DB's Candle table — that table is only as fresh as its last sync
+        # job, and 2026-07-22 surfaced SL/TP firing off a price that had
+        # already drifted from the real live Zerodha/Upstox tape.
         price = live_px.get(pos.symbol)
         if price is None:
-            # Freshest candle across ALL timeframes — small/SME stocks often have
+            try:
+                from crawler.zerodha_market import get_kite_historical
+                _today = now.strftime("%Y-%m-%d")
+                _candles = await get_kite_historical(
+                    pos.symbol, _today, _today, interval="minute", session=session,
+                )
+            except Exception as exc:
+                logger.debug(f"update_positions: direct Zerodha fetch failed for {pos.symbol}: {exc}")
+                _candles = []
+            if _candles:
+                _last = _candles[-1]
+                _age = (now - _last["timestamp"]).total_seconds()
+                if _age <= 120:
+                    price = _last["close"]
+                else:
+                    logger.debug(
+                        f"update_positions: {pos.symbol} freshest direct-Zerodha candle is "
+                        f"{_age / 60:.1f} min old — not fresh enough, trying DB fallback"
+                    )
+
+        if price is None:
+            # Last resort: our own DB candle table. Small/SME stocks often have
             # fresh 1m candles but no 1h, so a '1h'-only read froze the price at
             # entry (fake ₹0.00 P&L observed 9-Jul: TBZ +15% shown as 0).
             from crawler.price_feed import get_freshest_candle
@@ -729,15 +817,20 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             if _cl is None or _c_ts is None:
                 logger.debug(f"update_positions: no price for {pos.symbol} — skipping")
                 continue
-            # B14 fix: bound the candle-fallback age. Marking (and possibly firing
-            # SL/TP) off a candle days old would "close" at a phantom price. Skip
-            # this cycle if the newest print is >4 days old (covers a long weekend).
             if getattr(_c_ts, "tzinfo", None):
                 _c_ts = _c_ts.replace(tzinfo=None)
-            if (now - _c_ts).total_seconds() > 4 * 86400:
+            # B14 fix (tightened 2026-07-22): during market hours a DB candle
+            # is expected to be seconds-to-minutes old, not hours — bound it
+            # tightly so a stalled sync job can't feed a stale price into an
+            # SL/TP decision. Outside market hours the last real print IS
+            # legitimately from hours ago, so keep the old 4-day/weekend bound.
+            from tasks.india_tasks import _is_india_trading_window
+            _max_age = 900 if _is_india_trading_window() else 4 * 86400
+            _age = (now - _c_ts).total_seconds()
+            if _age > _max_age:
                 logger.warning(
-                    f"update_positions: {pos.symbol} newest candle is "
-                    f"{(now - _c_ts).days}d old — skipping (stale, no phantom close)"
+                    f"update_positions: {pos.symbol} newest DB candle is "
+                    f"{_age / 60:.1f} min old — skipping (stale, no phantom close)"
                 )
                 continue
             price = _cl
@@ -797,6 +890,20 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 peak = max(peak, price)
                 # T1 hit: always book 50% regardless of exit policy
                 if not tm.get("partial_done") and t1 and price >= t1:
+                    # Fresh re-analysis right at the T1 tick (2026-07-22,
+                    # user-requested) -- decide CONTINUE (existing mechanical
+                    # partial+trail below) vs EXIT (reversal risk -> close
+                    # the WHOLE remaining position now, watch for re-entry).
+                    from engine.agent.t1_reanalysis import analyze_t1_hit
+                    t1_analysis = await analyze_t1_hit(
+                        symbol=pos.symbol, direction="BUY", entry_price=pos.entry_price,
+                        price=price, t1=t1, t2=tm.get("target_2") or t1,
+                        unrealised_pct=pos.unrealised_pct, session=session,
+                    )
+                    if t1_analysis["decision"] == "EXIT":
+                        closed = await _t1_reversal_exit(pos, price, t1_analysis, session)
+                        auto_closed.append(closed)
+                        continue
                     partial_qty = int(pos.size_units * 0.5)
                     if partial_qty > 0:
                         partial_pnl = round((price - pos.entry_price) * partial_qty, 4)
@@ -830,6 +937,16 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             else:  # SELL
                 peak = min(peak, price)
                 if not trailing and t1 and price <= t1:
+                    from engine.agent.t1_reanalysis import analyze_t1_hit
+                    t1_analysis = await analyze_t1_hit(
+                        symbol=pos.symbol, direction="SELL", entry_price=pos.entry_price,
+                        price=price, t1=t1, t2=tm.get("target_2") or t1,
+                        unrealised_pct=pos.unrealised_pct, session=session,
+                    )
+                    if t1_analysis["decision"] == "EXIT":
+                        closed = await _t1_reversal_exit(pos, price, t1_analysis, session)
+                        auto_closed.append(closed)
+                        continue
                     trailing = True
                 if trailing and trail_dist > 0:
                     new_stop = peak + trail_dist

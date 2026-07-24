@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-07-24T13:11:10.705402",
+  "total_predictions": 572,
+  "stage_pass_counts": {
+    "total": 572,
+    "valid_event_timestamp": 572,
+    "candles_available": 572,
+    "sector_resolved": 572,
+    "adapter_available": 108,
+    "nowcast_available": 108,
+    "expectation_anchor_available": 0,
+    "price_discount_available": 0,
+    "relative_strength_available": 0,
+    "reached_decision": 0
+  },
+  "exclusion_reason_distribution": {
+    "no_adapter_for_sector": 464,
+    "no_expectation_anchor": 108
+  },
+  "sector_distribution": {
+    "FMCG": 204,
+    "AUTO": 108,
+    "METALS": 104,
+    "IT": 80,
+    "PHARMA": 76
+  },
+  "decision_distribution": {},
+  "long_count": 0,
+  "wait_count": 0,
+  "no_trade_count": 0,
+  "data_exclusion_rate": 1.0,
+  "diagnosis": "COVERAGE-LIMITED (B): only 108/572 predictions produced a nowcast; dominant drop-out = 'no_adapter_for_sector'. Zero-LONG is driven by missing sector adapters / fundamental data, not by strategy restrictiveness.",
+  "version": "v0.1"
+}

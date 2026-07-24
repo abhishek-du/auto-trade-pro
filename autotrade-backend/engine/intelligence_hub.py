@@ -349,6 +349,9 @@ async def build_news_context(session: AsyncSession) -> NewsContext:
     }
     raw_scores: dict[str, list] = {}
     headlines: dict[str, list] = {}
+    import math
+    now = datetime.utcnow()
+    
     for item in items:
         for ticker in (item.tickers_affected or []):
             t = str(ticker).strip().upper()
@@ -360,8 +363,24 @@ async def build_news_context(session: AsyncSession) -> NewsContext:
                 sym = t
             else:
                 sym = f"{t}.NS"
+            
             if item.score is not None:
-                raw_scores.setdefault(sym, []).append(item.score)
+                # Calculate Exponential Decay: score(t) = score0 * e^(-λt)
+                # Determine half-life
+                half_life_hours = 72 # default to 3 days
+                if item.news_metadata and isinstance(item.news_metadata, dict):
+                    half_life_hours = item.news_metadata.get("expected_half_life_hours", 72)
+                
+                # Calculate age in hours
+                published_time = item.published_at or item.crawled_at or now
+                age_hours = (now - published_time).total_seconds() / 3600.0
+                age_hours = max(0.0, age_hours)
+                
+                # Calculate lambda from half-life: lambda = ln(2) / half_life
+                decay_lambda = 0.693147 / max(half_life_hours, 1.0)
+                decayed_score = item.score * math.exp(-decay_lambda * age_hours)
+                
+                raw_scores.setdefault(sym, []).append(decayed_score)
             headlines.setdefault(sym, []).append(item.headline or "")
 
     avg = {s: sum(v) / len(v) for s, v in raw_scores.items() if v}

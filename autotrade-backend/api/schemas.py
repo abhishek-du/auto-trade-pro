@@ -92,6 +92,13 @@ class PaperTradeOut(BaseModel):
     slippage_applied:     float
     opened_at:            datetime
     closed_at:            Optional[datetime]
+    # Confidence transparency (2026-07-22): the factor breakdown behind
+    # `signal_confidence` -- bull/bear/key_risk/thesis/tools_used/grounding/
+    # model_reasoning for a DIRECT LLM verdict, or event_strength/
+    # relationship_strength/company_exposure/market_confirmation for a
+    # SECOND_ORDER cascade formula result. {} for legacy trades predating
+    # this field or non-event-driven (TECHNICAL/FNO) strategies.
+    confidence_factors:   dict = {}
 
 
 class TradeSummaryOut(BaseModel):
@@ -152,7 +159,14 @@ class NewsItemOut(BaseModel):
 
 class CausalEventOut(BaseModel):
     id:               int
-    news_id:          int
+    # Optional: news_discovery_engine.py's own CausalEvent writes intentionally
+    # leave this None (that pipeline doesn't link back to a NewsItem row) --
+    # crawler/event_pipeline.py's rows do set it. Was `int` (required), so
+    # ANY row with news_id=None crashed the whole /causal endpoint with a
+    # pydantic ValidationError -> 500, silently swallowed by the frontend's
+    # .catch() as "no causal events" (2026-07-22, found via the News page
+    # redesign's Market Events tab showing blank).
+    news_id:          Optional[int] = None
     event_title:      str
     country:          str
     importance:       float

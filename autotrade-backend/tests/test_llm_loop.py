@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from engine.agent.decision_engine import llm_tooluse_candidate
+from engine.agent.decision_engine import llm_tooluse_candidate, get_last_tooluse_rejection_reason
 
 
 def make_candidate(has_event: bool = True):
@@ -244,3 +244,165 @@ class TestUnknownToolAndRoundLimit:
         with p1, p2, p3, p4:
             result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
         assert result is None
+
+
+class TestCrossRoundToolDedup:
+    """2026-07-23 round-exhaustion fix: confirmed live (e.g. TRISHIK.NS,
+    INDOSM.NS) that a tool could be re-requested by the model several rounds
+    after its first use, burning a whole extra round re-executing identical
+    work. The loop must feed back the cached prior result instead of
+    re-invoking the tool a second time."""
+
+    @pytest.mark.asyncio
+    async def test_repeated_tool_call_is_not_re_executed(self):
+        call_count = {"fundamentals": 0}
+
+        async def _counting_fundamentals(symbol: str) -> str:
+            call_count["fundamentals"] += 1
+            return f"fundamentals: result #{call_count['fundamentals']} for {symbol}"
+
+        tools = _make_stub_tools()
+        tools["fundamentals"] = _counting_fundamentals
+
+        responses = (
+            [tool_step("fundamentals")]  # first call -- real execution
+            + [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS if t != "fundamentals"]
+            + [tool_step("fundamentals")]  # repeat -- must NOT re-execute
+            + [decide_step()]
+        )
+        with patch("utils.llm.call_llm_chat", AsyncMock(side_effect=responses)), \
+             patch("engine.agent.decision_engine._LLM_TOOLS", tools), \
+             patch("engine.agent.decision_engine._candidate_context", AsyncMock(return_value="CONTEXT")), \
+             patch("engine.agent.decision_engine._check_grounding",
+                   AsyncMock(return_value={"grounded": True, "unsupported_claims": []})):
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert call_count["fundamentals"] == 1  # NOT 2 -- the repeat was served from cache
+
+    @pytest.mark.asyncio
+    async def test_repeated_tool_call_feeds_back_a_note_not_silence(self):
+        # The model must be told explicitly it already has this data, not
+        # just get an empty/blocked response with no explanation.
+        captured_messages: list = []
+
+        real_call_llm_chat = AsyncMock()
+
+        async def _capturing_side_effect(messages, **kwargs):
+            captured_messages.append(list(messages))
+            return next(_response_iter)
+
+        responses = (
+            [tool_step("fundamentals")]
+            + [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS if t != "fundamentals"]
+            + [tool_step("fundamentals"), decide_step()]
+        )
+        _response_iter = iter(responses)
+        real_call_llm_chat.side_effect = _capturing_side_effect
+
+        with patch("utils.llm.call_llm_chat", real_call_llm_chat), \
+             patch("engine.agent.decision_engine._LLM_TOOLS", _make_stub_tools()), \
+             patch("engine.agent.decision_engine._candidate_context", AsyncMock(return_value="CONTEXT")), \
+             patch("engine.agent.decision_engine._check_grounding",
+                   AsyncMock(return_value={"grounded": True, "unsupported_claims": []})):
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        all_user_content = " ".join(
+            m["content"] for msgs in captured_messages for m in msgs if m.get("role") == "user"
+        )
+        assert "already called" in all_user_content
+
+    @pytest.mark.asyncio
+    async def test_repeated_tool_does_not_duplicate_tools_used_entry(self):
+        responses = (
+            [tool_step("fundamentals")]
+            + [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS if t != "fundamentals"]
+            + [tool_step("fundamentals"), decide_step()]
+        )
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert result["tools_used"].count("fundamentals") == 1
+
+
+class TestRejectionReasonSurfacing:
+    """2026-07-23 fix: llm_tooluse_candidate() returning None used to be
+    indistinguishable to callers -- four genuinely different situations
+    (empty/unparseable LLM output, a grounding rejection, real
+    round-exhaustion, an unexpected exception) all produced the exact same
+    generic "Agent failed to reach a decision (Timed out/Insufficient info)"
+    message downstream. Live-tested 2026-07-23: 3 of 7 real candidates in one
+    run showed this misleading generic text while the real reason (a
+    grounding rejection) was sitting in the debug log, invisible to anyone
+    reading the trade-rejection reason alone. get_last_tooluse_rejection_reason()
+    now surfaces the real one, mirroring utils.llm.get_last_reasoning()'s
+    existing contextvar pattern."""
+
+    @pytest.mark.asyncio
+    async def test_empty_response_giveup_sets_specific_reason(self):
+        responses = ["", "", ""]
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4, patch("asyncio.sleep", AsyncMock()):
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is None
+        reason = get_last_tooluse_rejection_reason()
+        assert reason is not None and "empty" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_grounding_rejection_sets_specific_reason_not_generic(self):
+        responses = (
+            [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS]
+            + [decide_step(), decide_step()]  # both ungrounded
+        )
+        grounding_mock = AsyncMock(return_value={
+            "grounded": False, "unsupported_claims": ["fabricated ₹800cr figure"],
+        })
+        p1, p2, p3, _ = _patch_common(responses)
+        with p1, p2, p3, patch("engine.agent.decision_engine._check_grounding", grounding_mock):
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is None
+        reason = get_last_tooluse_rejection_reason()
+        assert reason is not None
+        assert "ungrounded" in reason.lower() or "grounded" in reason.lower()
+        assert "fabricated ₹800cr figure" in reason
+        # Must NOT be the old generic, misleading message.
+        assert "timed out" not in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_genuine_round_exhaustion_sets_specific_reason(self):
+        # 15 rounds, all "tool" -- never reaches "decide" -- genuine
+        # round-exhaustion, distinct from every other None-path.
+        responses = [tool_step("fundamentals") for _ in range(20)]
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is None
+        reason = get_last_tooluse_rejection_reason()
+        assert reason is not None
+        assert "round" in reason.lower() or "exhaust" in reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_successful_decide_leaves_no_stale_rejection_reason(self):
+        responses = [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS] + [decide_step()]
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert get_last_tooluse_rejection_reason() is None
+
+    @pytest.mark.asyncio
+    async def test_reason_cleared_at_start_of_each_call(self):
+        # A prior call's rejection reason must not leak into a later,
+        # successful call's read of the contextvar.
+        fail_responses = ["", "", ""]
+        p1, p2, p3, p4 = _patch_common(fail_responses)
+        with p1, p2, p3, p4, patch("asyncio.sleep", AsyncMock()):
+            await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert get_last_tooluse_rejection_reason() is not None
+
+        success_responses = [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS] + [decide_step()]
+        p1, p2, p3, p4 = _patch_common(success_responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert get_last_tooluse_rejection_reason() is None

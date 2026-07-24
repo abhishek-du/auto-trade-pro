@@ -420,14 +420,23 @@ async def get_latest_candles(
     timeframe: str,
     limit: int,
     session: AsyncSession,
+    before: "datetime | None" = None,
 ) -> list[Candle]:
     """Return the last N candles for a symbol/timeframe, newest first.
 
+    `before`, when given, excludes candles at/after that timestamp -- used
+    by scripts/backtest_pre_event_engine.py to simulate "only what was
+    knowable as of a historical date" without a separate point-in-time query
+    path (same function, same behaviour, just an extra optional filter).
+
     Returns [] if no data exists yet.
     """
+    filters = [Candle.symbol == symbol, Candle.timeframe == timeframe]
+    if before is not None:
+        filters.append(Candle.timestamp < before)
     result = await session.execute(
         select(Candle)
-        .where(Candle.symbol == symbol, Candle.timeframe == timeframe)
+        .where(*filters)
         .order_by(Candle.timestamp.desc())
         .limit(limit)
     )
