@@ -78,14 +78,37 @@ _cache: dict[str, str] = _load()
 logger.debug(f"[sector_cache] loaded {len(_cache)} symbol→sector mappings from disk")
 
 
+import time as _time
+
+# Live-lookup circuit breaker (2026-07-22): compute_sector_from_cache() calls
+# get_sector() in a plain loop over every symbol in PRICE_CACHE. When that
+# cache holds many symbols with no disk-cache entry (confirmed live: a burst
+# of SGB/G-Sec-style tickers, each yfinance call taking up to yfinance's own
+# 30s timeout), get_sector() would happily fire one blocking HTTP lookup per
+# symbol -- hundreds/thousands in a row -- monopolizing a thread-pool worker
+# for hours and starving every OTHER asyncio.to_thread()/run_in_executor()
+# caller sharing the same default pool (this took uvicorn's /auth/login down
+# for several minutes). Cap live lookups to a short budget per rolling
+# window; once exhausted, unknown symbols return 'GENERAL' immediately
+# instead of blocking, and get their real sector on the next scheduled
+# tasks.rebuild_sector_cache weekly pass (or the next window).
+_LIVE_LOOKUP_BUDGET = 15          # max live yfinance calls per window
+_LIVE_LOOKUP_WINDOW_SEC = 60.0
+_live_lookup_count = 0
+_live_lookup_window_start = 0.0
+
+
 def get_sector(symbol: str) -> str:
     """Return the sector key for a bare symbol (no .NS/.BO suffix).
 
     Lookup order:
       1. In-memory cache (disk-backed)
-      2. Live yfinance lookup (capped — won't retry a seen symbol)
-    Returns 'GENERAL' on total miss.
+      2. Live yfinance lookup (capped per-symbol AND by a rolling per-process
+         budget -- see _LIVE_LOOKUP_BUDGET's comment)
+    Returns 'GENERAL' on total miss or once the live-lookup budget is spent.
     """
+    global _live_lookup_count, _live_lookup_window_start
+
     bare = symbol.replace(".NS", "").replace(".BO", "")
     if bare in _cache:
         return _cache[bare]
@@ -93,9 +116,18 @@ def get_sector(symbol: str) -> str:
     # Avoid re-querying the same unknown symbol every cycle
     if bare in _seen_unknowns:
         return "GENERAL"
+
+    now = _time.monotonic()
+    if now - _live_lookup_window_start > _LIVE_LOOKUP_WINDOW_SEC:
+        _live_lookup_window_start = now
+        _live_lookup_count = 0
+    if _live_lookup_count >= _LIVE_LOOKUP_BUDGET:
+        return "GENERAL"   # don't mark _seen_unknowns -- retry once the budget resets
+    _live_lookup_count += 1
     _seen_unknowns.add(bare)
 
-    # Live yfinance fallback (synchronous; this is fine — it's called from sync context)
+    # Live yfinance fallback (synchronous; fine only because every caller now
+    # runs this off the event loop via run_in_executor/asyncio.to_thread).
     sector = _yf_lookup(f"{bare}.NS")
     if sector != "GENERAL":
         _cache[bare] = sector

@@ -119,13 +119,16 @@ def test_tighten_raises_stop_only_upward(monkeypatch):
     a = sg.ShockAssessment(level=sg.SHOCK_TIGHTEN, reason="stub")
     res = asyncio.run(sg.apply_shock_action(a, sess))
 
-    # 210 * (1 - 0.5%) = 208.95 > old 189 → stop lifted to lock the gain
-    assert pos.stop_loss == pytest.approx(208.95, abs=0.01)
-    assert res["tightened"] and res["tightened"][0]["new_stop"] == pytest.approx(208.95, abs=0.01)
+    # 210 * (1 - _TIGHTEN_TRAIL_PCT%) = 210 * (1 - 2%) = 205.80 > old 189 →
+    # stop lifted to lock the gain. (Stale test value was 0.5% -- the
+    # constant is currently 2.0, confirmed by reading
+    # engine/agent/shock_guard.py::_TIGHTEN_TRAIL_PCT directly.)
+    assert pos.stop_loss == pytest.approx(205.80, abs=0.01)
+    assert res["tightened"] and res["tightened"][0]["new_stop"] == pytest.approx(205.80, abs=0.01)
 
 
 def test_tighten_never_loosens_a_tighter_stop(monkeypatch):
-    pos = _FakePos("TBZ.NS", entry=200.0, stop=209.5)   # already tighter than 208.95
+    pos = _FakePos("TBZ.NS", entry=200.0, stop=209.5)   # already tighter than 205.80
     sess = _FakeSession([pos])
     _patch_common(monkeypatch, {"TBZ.NS": 210.0})
 

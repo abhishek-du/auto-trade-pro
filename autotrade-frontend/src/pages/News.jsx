@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert, Landmark, FileText, HeartHandshake, FileCheck2, Paperclip, Activity, ArrowRight, BrainCircuit, Network } from 'lucide-react';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert, Landmark, FileText, HeartHandshake, FileCheck2, Paperclip, Activity, ArrowRight, BrainCircuit, Rss, Gauge } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getNews, getNewsAlerts, getCorporateAnnouncements, getSSEAnnouncements, getCausalEvents, apiFetch } from '../api/client';
 import { useLivePrices } from '../contexts/LivePricesContext';
@@ -57,6 +57,36 @@ function SentimentGauge({ articles }) {
   );
 }
 
+/* ── Causal-event display helpers ──────────────────────────────
+   The backend stores event_title as a raw classifier category code
+   ("MANAGEMENT_CHANGE") for every event, in both writer pipelines --
+   confirmed 2026-07-22 in both news_discovery_engine.py and
+   crawler/event_pipeline.py. The `country` column is also a deliberate
+   (if confusingly-named) reuse: it actually holds the classifier's impact
+   tier (HIGH/MEDIUM/LOW), per news_discovery_engine.py's own comment "matches
+   crawler/event_pipeline.py's existing (mis)use of this column". Rather than
+   touch the classification pipeline (which can't retroactively fix already-
+   written rows anyway), format what's actually there. */
+function humanizeCategory(code) {
+  if (!code) return 'Market Event';
+  return code.toLowerCase().split('_').map(w => w[0]?.toUpperCase() + w.slice(1)).join(' ');
+}
+
+function impactMeta(level) {
+  const l = (level ?? '').toString().toUpperCase();
+  if (l === 'HIGH')   return { label: 'High Impact',   cls: 'text-loss bg-loss/15 border-loss/30' };
+  if (l === 'MEDIUM') return { label: 'Medium Impact', cls: 'text-amber-400 bg-amber-400/15 border-amber-400/30' };
+  if (l === 'LOW')    return { label: 'Low Impact',     cls: 'text-muted bg-surface border-border' };
+  return { label: l || 'Unknown Impact', cls: 'text-muted bg-surface border-border' };
+}
+
+function humanizeDuration(raw) {
+  const hrs = parseInt(raw, 10);
+  if (isNaN(hrs) || hrs <= 0) return null;
+  if (hrs < 24) return `~${hrs}h expected impact`;
+  return `~${Math.round(hrs / 24)}d expected impact`;
+}
+
 /* ── AI Event Intelligence Engine (Knowledge Graph) ───────────── */
 function EventIntelligencePanel() {
   const [events, setEvents] = useState([]);
@@ -76,77 +106,47 @@ function EventIntelligencePanel() {
 
   const refresh = () => { setLoading(true); fetchEvents(); };
 
-  // Premium Dummy Data for presentation if DB is empty
-  const displayEvents = events.length > 0 ? events : [
-    {
-      id: "dummy_1",
-      event_title: "RBI Unexpectedly Cuts Repo Rate by 50 bps",
-      headline: "RBI reduces repo rate to boost economic growth ahead of festive season.",
-      country: "India",
-      importance: 9.5,
-      confidence: 0.98,
-      duration: "Short/Medium Term",
-      created_at: new Date().toISOString(),
-      affected_sectors: ["Banking", "Real Estate", "Auto"],
-      bullish_stocks: ["HDFCBANK", "DLF", "MARUTI", "ICICIBANK"],
-      bearish_stocks: ["FMCG (Defensive)"]
-    },
-    {
-      id: "dummy_2",
-      event_title: "Israel Escalates Middle East Tensions",
-      headline: "Global oil supply chain fears rise as tensions escalate overnight.",
-      country: "Global",
-      importance: 8.8,
-      confidence: 0.91,
-      duration: "Medium Term",
-      created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-      affected_sectors: ["Oil & Gas", "Aviation", "Paints"],
-      bullish_stocks: ["ONGC", "OIL", "RELIANCE"],
-      bearish_stocks: ["INDIGO", "ASIANPAINT"]
-    },
-    {
-      id: "dummy_3",
-      event_title: "US CPI Inflation Comes in Hotter than Expected",
-      headline: "US Inflation at 4.2%, dashing hopes of a Fed pivot this year.",
-      country: "US",
-      importance: 9.0,
-      confidence: 0.95,
-      duration: "Short Term",
-      created_at: new Date(Date.now() - 86400000 * 5).toISOString(),
-      affected_sectors: ["IT Services", "High-PE Growth"],
-      bullish_stocks: ["USDINR"],
-      bearish_stocks: ["TCS", "INFY", "WIPRO"]
-    }
-  ];
-
   // Helper to split into Today vs Older
   const today = new Date().toDateString();
-  const todayEvents = displayEvents.filter(ev => new Date(ev.created_at).toDateString() === today);
-  const oldEvents = displayEvents.filter(ev => new Date(ev.created_at).toDateString() !== today);
+  const todayEvents = events.filter(ev => new Date(ev.created_at).toDateString() === today);
+  const oldEvents = events.filter(ev => new Date(ev.created_at).toDateString() !== today);
 
-  const EventCard = ({ ev, i }) => (
+  // Nothing real to show and not mid-fetch -- don't render a panel full of
+  // fabricated placeholder events (2026-07-22 redesign: this used to fall
+  // back to 3 hardcoded sample events labeled "LIVE AI" whenever the causal-
+  // events API returned empty, which is exactly what was happening live).
+  if (!loading && events.length === 0) return null;
+
+  const EventCard = ({ ev, i }) => {
+    const impact = impactMeta(ev.country);       // `country` actually holds HIGH/MEDIUM/LOW, see helper docstring above
+    const durationLabel = humanizeDuration(ev.duration);
+    const title = ev.headline || humanizeCategory(ev.event_title);
+    return (
     <div key={ev.id ?? i} className="bg-slate-900/60 backdrop-blur-sm border border-slate-700/50 hover:border-accent/60 rounded-xl p-5 transition-all duration-300 hover:shadow-[0_0_25px_rgba(99,102,241,0.2)] hover:bg-slate-800/80 group">
       {/* Top Row: Event Info */}
-      <div className="flex justify-between items-start mb-5 border-b border-slate-700/50 pb-4">
-        <div className="space-y-2 max-w-[70%]">
+      <div className="flex flex-wrap justify-between items-start gap-3 mb-5 border-b border-slate-700/50 pb-4">
+        <div className="space-y-2 flex-1 min-w-[240px]">
           <h4 className="text-white font-extrabold text-base leading-tight flex items-center gap-2 group-hover:text-accent transition-colors">
             <Activity size={16} className="text-accent shrink-0" />
-            {ev.event_title}
+            {title}
           </h4>
-          <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed border-l-2 border-accent/40 pl-3 italic">
-            {ev.headline}
-          </p>
+          {ev.headline && (
+            <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed border-l-2 border-accent/40 pl-3 italic">
+              {humanizeCategory(ev.event_title)}
+            </p>
+          )}
         </div>
         <div className="flex flex-col items-end gap-2 shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase font-bold text-slate-300 bg-slate-800 px-2.5 py-1 rounded-md border border-slate-600">{ev.country}</span>
-            <span className="text-[11px] font-black text-accent bg-accent/15 px-3 py-1 rounded-md border border-accent/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]">
-              Impact: {ev.importance}/10
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <span className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-md border whitespace-nowrap ${impact.cls}`}>{impact.label}</span>
+            <span className="text-[11px] font-black text-accent bg-accent/15 px-3 py-1 rounded-md border border-accent/30 shadow-[0_0_10px_rgba(99,102,241,0.2)] whitespace-nowrap">
+              Surprise: {ev.importance}/100
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono font-semibold bg-black/30 px-2 py-0.5 rounded flex items-center gap-1.5">
+          <span className="text-[10px] text-slate-400 font-mono font-semibold bg-black/30 px-2 py-0.5 rounded flex items-center gap-1.5 whitespace-nowrap">
             <Clock size={10} />
             {new Date(ev.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            {durationLabel ? ` · ${durationLabel}` : ''}
           </span>
           <span className="text-[9px] text-slate-500 font-mono font-semibold px-1">
             AI: {(ev.confidence * 100).toFixed(0)}%
@@ -221,7 +221,7 @@ function EventIntelligencePanel() {
         </div>
       </div>
     </div>
-  );
+  );};
 
   return (
     <div className="glass-panel border border-accent/40 rounded-xl p-6 space-y-6 relative overflow-hidden shadow-[0_0_30px_rgba(99,102,241,0.2)]">
@@ -725,7 +725,7 @@ export default function News() {
   [articles]);
 
   const filtered = useMemo(() => {
-    return normalised.filter((a) => {
+    const f = normalised.filter((a) => {
       const { label } = sentimentMeta(a.sentiment);
       if (filter !== 'All' && label !== filter) return false;
       if (search) {
@@ -734,133 +734,175 @@ export default function News() {
       }
       return true;
     });
+    // Signal over noise: high-impact items float to the top of the feed
+    // regardless of timestamp, then newest-first within each group.
+    return [...f].sort((a, b) => {
+      if (!!b.high_impact !== !!a.high_impact) return b.high_impact ? 1 : -1;
+      return new Date(b.published_at ?? b.crawled_at ?? 0) - new Date(a.published_at ?? a.crawled_at ?? 0);
+    });
   }, [normalised, filter, search]);
+
+  const [activeTab, setActiveTab] = useState('feed');
+  const TABS = [
+    { id: 'feed',     label: 'Feed',              Icon: Rss },
+    { id: 'filings',  label: 'Corporate Filings',  Icon: Landmark },
+    { id: 'events',   label: 'Market Events',      Icon: BrainCircuit },
+    { id: 'sentiment',label: 'Sentiment',          Icon: Gauge },
+  ];
 
   if (loading) return <LoadingSpinner message="Fetching market news…" />;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 fade-in">
 
-      {/* AI Event Intelligence Engine - Placed at the very top for WOW factor */}
-      <EventIntelligencePanel />
-
-      {/* High-impact market alerts (shock / geopolitical news) — surfaced on top */}
+      {/* High-impact market alerts (shock / geopolitical news) — always
+          visible above the tabs, never buried a click away. */}
       <MarketAlertsStrip />
 
-      {/* NSE corporate announcements — separate source from the RSS feed below */}
-      <CorporateAnnouncements />
-
-      {/* NSE Social Stock Exchange (NPO) announcements — its own section, its own table */}
-      <SSEAnnouncements />
-
-      {/* Two-col: sentiment gauge + source breakdown */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="md:col-span-2">
-          <SentimentGauge articles={normalised} />
-        </div>
-        <SourceBreakdown articles={normalised} />
+      {/* ── Tab bar ── */}
+      <div className="flex items-center gap-0.5 glass-panel border border-border rounded-xl p-1 w-fit overflow-x-auto">
+        {TABS.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
+            className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+              activeTab === id ? 'bg-accent/20 text-accent' : 'text-muted hover:text-slate-300'
+            }`}
+          >
+            <Icon size={13} /> {label}
+          </button>
+        ))}
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-40">
-          <Newspaper size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <input
-            type="text"
-            placeholder="Search news…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full glass-panel border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
-          />
-        </div>
-        <div className="flex rounded-lg overflow-hidden border border-border">
-          {SENTIMENT_FILTERS.map((f) => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={['px-3 py-2 text-xs font-medium transition-colors',
-                filter === f ? 'bg-accent text-white' : 'text-muted hover:text-slate-300 hover:bg-surface',
-              ].join(' ')}>
-              {f}
-            </button>
-          ))}
-        </div>
-        <span className="text-muted text-xs">{filtered.length} articles</span>
-        <span
-          className={['inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full border',
-            wsStatus === 'connected'
-              ? 'text-profit border-profit/30 bg-profit/10'
-              : 'text-muted border-border bg-surface',
-          ].join(' ')}
-          title={wsStatus === 'connected'
-            ? `Live feed connected${liveCount ? ` · ${liveCount} new since open` : ''}`
-            : 'Live feed disconnected — using last fetch'}
-        >
-          {wsStatus === 'connected' ? <Wifi size={11} /> : <WifiOff size={11} />}
-          {wsStatus === 'connected' ? 'Live' : 'Offline'}
-          {liveCount > 0 && wsStatus === 'connected' ? ` · ${liveCount}` : ''}
-        </span>
-      </div>
+      {/* ── Feed tab ── */}
+      {activeTab === 'feed' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-40">
+              <Newspaper size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                placeholder="Search news…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full glass-panel border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex rounded-lg overflow-hidden border border-border">
+              {SENTIMENT_FILTERS.map((f) => (
+                <button key={f} onClick={() => setFilter(f)}
+                  className={['px-3 py-2 text-xs font-medium transition-colors',
+                    filter === f ? 'bg-accent text-white' : 'text-muted hover:text-slate-300 hover:bg-surface',
+                  ].join(' ')}>
+                  {f}
+                </button>
+              ))}
+            </div>
+            <span className="text-muted text-xs">{filtered.length} articles</span>
+            <span
+              className={['inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full border',
+                wsStatus === 'connected'
+                  ? 'text-profit border-profit/30 bg-profit/10'
+                  : 'text-muted border-border bg-surface',
+              ].join(' ')}
+              title={wsStatus === 'connected'
+                ? `Live feed connected${liveCount ? ` · ${liveCount} new since open` : ''}`
+                : 'Live feed disconnected — using last fetch'}
+            >
+              {wsStatus === 'connected' ? <Wifi size={11} /> : <WifiOff size={11} />}
+              {wsStatus === 'connected' ? 'Live' : 'Offline'}
+              {liveCount > 0 && wsStatus === 'connected' ? ` · ${liveCount}` : ''}
+            </span>
+          </div>
 
-      {/* Article list */}
-      {filtered.length === 0 ? (
-        <div className="glass-panel border border-border rounded-xl p-10 text-center text-muted text-sm">
-          No news articles match the current filter.
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {filtered.map((a, i) => (
-            <article key={a.id ?? a.url ?? i}
-              className={['glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
-                a.high_impact ? 'border-loss/40 shadow-[0_0_0_1px_rgba(239,68,68,0.15)]'
-                  : a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
-              ].join(' ')}>
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex-1 min-w-0 space-y-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <SentimentBadge sentiment={a.sentiment} />
-                    {a.high_impact && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-loss border border-loss/40 bg-loss/10 px-1.5 py-0.5 rounded-full">
-                        <AlertTriangle size={9} />HIGH IMPACT
-                      </span>
-                    )}
-                    {a._live && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-accent border border-accent/30 bg-accent/10 px-1.5 py-0.5 rounded-full animate-pulse">
-                        <Radio size={8} />LIVE
-                      </span>
-                    )}
-                    {a.source && (
-                      <span className="text-muted text-xs font-medium">{a.source}</span>
-                    )}
-                    {a.symbols?.length > 0 && (
-                      <div className="flex gap-1">
-                        {a.symbols.slice(0, 3).map((sym) => (
-                          <span key={sym} className="bg-accent/20 text-accent text-xs px-1.5 py-0.5 rounded font-mono">
-                            {sym}
+          {filtered.length === 0 ? (
+            <div className="glass-panel border border-border rounded-xl p-10 text-center text-muted text-sm">
+              No news articles match the current filter.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {filtered.map((a, i) => (
+                <article key={a.id ?? a.url ?? i}
+                  className={['glass-panel border rounded-xl p-5 hover:border-accent/40 transition-colors group',
+                    a.high_impact ? 'border-loss/40 shadow-[0_0_0_1px_rgba(239,68,68,0.15)]'
+                      : a._live ? 'border-accent/50 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]' : 'border-border',
+                  ].join(' ')}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <SentimentBadge sentiment={a.sentiment} />
+                        {a.high_impact && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-loss border border-loss/40 bg-loss/10 px-1.5 py-0.5 rounded-full">
+                            <AlertTriangle size={9} />HIGH IMPACT
                           </span>
-                        ))}
+                        )}
+                        {a._live && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-accent border border-accent/30 bg-accent/10 px-1.5 py-0.5 rounded-full animate-pulse">
+                            <Radio size={8} />LIVE
+                          </span>
+                        )}
+                        {a.source && (
+                          <span className="text-muted text-xs font-medium">{a.source}</span>
+                        )}
+                        {a.symbols?.length > 0 && (
+                          <div className="flex gap-1">
+                            {a.symbols.slice(0, 3).map((sym) => (
+                              <span key={sym} className="bg-accent/20 text-accent text-xs px-1.5 py-0.5 rounded font-mono">
+                                {sym}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
+                      <h4 className="text-slate-200 font-medium text-sm leading-snug">
+                        {a.title ?? 'Untitled article'}
+                      </h4>
+                      {a.summary && (
+                        <p className="text-muted text-xs leading-relaxed line-clamp-2">{a.summary}</p>
+                      )}
+                      <div className="flex items-center gap-1.5 text-muted text-xs">
+                        <Clock size={11} />
+                        <span>{relTime(a.published_at ?? a.crawled_at ?? a.date)}</span>
+                      </div>
+                    </div>
+                    {a.url && (
+                      <a href={a.url} target="_blank" rel="noopener noreferrer"
+                        className="p-2 text-muted hover:text-accent rounded-lg hover:bg-surface transition-colors shrink-0 opacity-0 group-hover:opacity-100"
+                        title="Open article">
+                        <ExternalLink size={14} />
+                      </a>
                     )}
                   </div>
-                  <h4 className="text-slate-200 font-medium text-sm leading-snug">
-                    {a.title ?? 'Untitled article'}
-                  </h4>
-                  {a.summary && (
-                    <p className="text-muted text-xs leading-relaxed line-clamp-2">{a.summary}</p>
-                  )}
-                  <div className="flex items-center gap-1.5 text-muted text-xs">
-                    <Clock size={11} />
-                    <span>{relTime(a.published_at ?? a.crawled_at ?? a.date)}</span>
-                  </div>
-                </div>
-                {a.url && (
-                  <a href={a.url} target="_blank" rel="noopener noreferrer"
-                    className="p-2 text-muted hover:text-accent rounded-lg hover:bg-surface transition-colors shrink-0 opacity-0 group-hover:opacity-100"
-                    title="Open article">
-                    <ExternalLink size={14} />
-                  </a>
-                )}
-              </div>
-            </article>
-          ))}
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Corporate Filings tab ── */}
+      {activeTab === 'filings' && (
+        <div className="space-y-4">
+          <CorporateAnnouncements />
+          <SSEAnnouncements />
+        </div>
+      )}
+
+      {/* ── Market Events tab (Event Intelligence Engine / knowledge graph) ── */}
+      {activeTab === 'events' && (
+        <EventIntelligencePanel />
+      )}
+
+      {/* ── Sentiment tab ── */}
+      {activeTab === 'sentiment' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="md:col-span-2">
+              <SentimentGauge articles={normalised} />
+            </div>
+            <SourceBreakdown articles={normalised} />
+          </div>
+          <NarrativePanel />
         </div>
       )}
     </div>

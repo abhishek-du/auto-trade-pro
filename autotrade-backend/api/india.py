@@ -2311,30 +2311,52 @@ async def refresh_breadth():
 
 @router.get("/sectors")
 async def get_sectors_full():
-    """Return full SECTOR_CACHE dict keyed by sector name."""
+    """Return full SECTOR_CACHE dict keyed by sector name.
+
+    2026-07-22: get_sector_cache() falls back to compute_sector_from_cache()
+    when SECTOR_CACHE is empty (true for every uvicorn process right after a
+    restart -- it's an in-process global nothing in main.py's lifespan
+    pre-populates) -- and that fallback makes a SYNCHRONOUS yfinance call per
+    uncached symbol in PRICE_CACHE. Called directly from this async endpoint,
+    that blocked the entire event loop for minutes on every restart, causing
+    unrelated concurrent requests (confirmed: /auth/login) to hang/502. Moved
+    to a worker thread so it can be slow without stalling anything else.
+    """
+    import asyncio
     from crawler.sector_data import get_sector_cache
-    return get_sector_cache()
+    return await asyncio.to_thread(get_sector_cache)
 
 
 @router.get("/sectors/summary")
 async def get_sectors_summary():
-    """Compact sorted list for heatmap rendering."""
+    """Compact sorted list for heatmap rendering.
+
+    See get_sectors_full()'s docstring -- same event-loop-blocking fallback
+    (get_sector_summary() calls get_sector_cache() internally), same fix.
+    """
+    import asyncio
     from crawler.sector_data import get_sector_summary
-    return get_sector_summary()
+    return await asyncio.to_thread(get_sector_summary)
 
 
 @router.get("/sectors/rotation")
 async def get_sector_rotation():
-    """Sector rotation signal — outperforming/underperforming vs NIFTY 50."""
+    """Sector rotation signal — outperforming/underperforming vs NIFTY 50.
+
+    See get_sectors_full()'s docstring -- same event-loop-blocking fallback,
+    same fix (offload to a worker thread).
+    """
+    import asyncio
     from crawler.sector_data import get_sector_rotation_signal
-    return get_sector_rotation_signal()
+    return await asyncio.to_thread(get_sector_rotation_signal)
 
 
 @router.get("/sectors/{sector_key}")
 async def get_sector_detail(sector_key: str):
     """Full data for one sector including all stocks."""
+    import asyncio
     from crawler.sector_data import get_sector_cache
-    cache = get_sector_cache()
+    cache = await asyncio.to_thread(get_sector_cache)
     data  = cache.get(sector_key)
     if not data:
         raise HTTPException(status_code=404, detail=f"Sector '{sector_key}' not found")

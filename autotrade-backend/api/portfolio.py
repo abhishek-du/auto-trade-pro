@@ -145,6 +145,9 @@ async def get_paper_trades(
             "signal_confidence":r.signal_confidence,
             "pattern_name":     r.pattern_name,
             "ai_reason":        r.ai_reason,
+            # Confidence transparency (2026-07-22): full factor breakdown behind
+            # signal_confidence -- see TradeIntent.confidence_factors's docstring.
+            "confidence_factors": (r.indicator_snapshot or {}).get("confidence_factors") or {},
             "opened_at":        r.opened_at.isoformat() if r.opened_at else None,
             "closed_at":        r.closed_at.isoformat() if r.closed_at else None,
             "exit_reason":      None,

@@ -114,18 +114,57 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""   # required — set in .env
 
     # ── LLM ───────────────────────────────────────────────────────────────────
-    # Mantle (AWS Bedrock, OpenAI-compatible) — PRIMARY intelligence layer.
-    # All analysis/decision LLM calls route through call_llm_chat, which tries
-    # Mantle first (openai.gpt-oss-120b) and falls back to Gemini→Groq→Ollama.
+    # "Mantle" naming kept for backward compat (MANTLE_API_KEY etc. are read
+    # in ~8 other files) even though, as of 2026-07-24, the underlying provider
+    # is Amazon Nova Pro via boto3's native Bedrock Runtime Converse API, NOT
+    # the Mantle OpenAI-compatible gateway -- AWS's own model card confirms
+    # Nova Pro does NOT support the bedrock-mantle endpoint (only
+    # bedrock-runtime), unlike the previous provider (openai.gpt-oss-120b).
+    # Same Bedrock long-term API key works for both (AWS_BEARER_TOKEN_BEDROCK),
+    # confirmed live. MANTLE_BASE_URL is now unused (boto3 resolves the
+    # bedrock-runtime endpoint from MANTLE_REGION instead) but left in place
+    # since nothing reads it as a hard dependency.
     # Key lives in .env only (never hardcoded / committed).
     MANTLE_API_KEY:  str  = ""
     MANTLE_BASE_URL: str  = "https://bedrock-mantle.us-east-1.api.aws/v1"
-    MANTLE_MODEL:    str  = "openai.gpt-oss-120b"
+    # Cross-region inference profile ("us." prefix), not the bare in-region
+    # model ID -- confirmed live 2026-07-24 via AWS's service-quotas API that
+    # on-demand Nova Pro is capped at just 13 requests/minute, but the
+    # cross-region profile gets 25 RPM (AWS load-balances the same model
+    # across multiple US regions). The ReAct tool-use loop can burn many
+    # calls per single candidate, so this ceiling was the dominant cause of
+    # "3 consecutive empty/unparseable responses" rejections under normal
+    # production load, not just this session's own testing burst.
+    MANTLE_MODEL:    str  = "us.amazon.nova-pro-v1:0"
+    MANTLE_REGION:   str  = "us-east-1"
     MANTLE_PROJECT:  str  = "default"
     MANTLE_ENABLED:  bool = True
-    # gpt-oss is a reasoning model: reasoning tokens share the max_tokens budget,
-    # so a tiny budget yields empty content. Floor every Mantle request here.
+    # Floor every request here so a caller can't accidentally request a
+    # budget too small to get a useful answer back.
     MANTLE_MIN_TOKENS: int = 512
+    # Nova Pro's real ceiling on THIS account/endpoint, confirmed live
+    # 2026-07-24 via the API's own ValidationException (not the ~5K figure
+    # AWS's model card page shows, and not the 300K context-window figure --
+    # context window and max OUTPUT tokens are different limits): requesting
+    # 16384 was rejected with "maximum tokens you requested exceeds the model
+    # limit of 10000"; 10000 itself was accepted. Unlike gpt-oss-120b, Nova
+    # Pro is not a chain-of-thought reasoning model with a separate reasoning
+    # channel sharing this budget -- so the previous "reasoning consumed the
+    # budget, empty content" failure mode this constant was originally added
+    # to guard against (see utils/llm.py) should not apply to Nova at all;
+    # the ceiling is still enforced so no caller can request more than the
+    # account is actually allowed.
+    MANTLE_MAX_OUTPUT_TOKENS: int = 10000
+    # Added 2026-07-24: the account's Nova Pro RPM quota can't be increased
+    # (user decision), so instead of periodically hammering AWS's hard 25 RPM
+    # cross-region ceiling and eating ThrottlingException failures, every
+    # process sharing this AWS account (news-engine service, Celery workers,
+    # uvicorn API) coordinates through a Redis-backed shared rate limiter
+    # (see utils/llm.py::_acquire_llm_rate_slot) that proactively caps
+    # combined LLM request volume at this number per 60s window. Set below
+    # the real 25 RPM ceiling for safety margin (Redis coordination isn't
+    # perfectly precise, and other ad hoc scripts/tests also share the quota).
+    MANTLE_MAX_RPM: int = 20
     # Ollama: local inference — no rate limits, runs on localhost
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL:    str = "qwen2.5:3b"
@@ -256,6 +295,19 @@ class Settings(BaseSettings):
     # Strikes kept each side of ATM (bounds quote size; near-ATM PCR is cleaner
     # than full-chain PCR where far-OTM OI is stale).
     HUB_OPTIONS_STRIKE_WINDOW:  int   = 12
+
+    # ── Pre-Event Expectation Gap strategy (parallel to News Strategy) ─────────
+    # Independent, scheduled-event-anticipation strategy (engine/pre_event_expectation_gap/).
+    # Three-level gating, all default OFF (fail-closed): the master flag gates
+    # whether the engine runs its ANALYSIS at all; paper/live independently gate
+    # trade execution. Per the strategy spec, live must stay OFF until the replay
+    # harness + paper validation produce a documented positive verdict — none of
+    # these being True is what guarantees the News Strategy is completely
+    # unaffected while this is built out phase by phase. Flip PRE_EVENT_GAP_ENABLED
+    # on first to observe predictions with no execution.
+    PRE_EVENT_GAP_ENABLED:        bool  = False   # master: run the analysis engine
+    PRE_EVENT_GAP_PAPER_TRADING:  bool  = False   # allow paper (virtual) execution
+    PRE_EVENT_GAP_LIVE_TRADING:   bool  = False   # allow live capital (keep OFF until validated)
 
     # Exit policy — validated OOS in Phase 2 backtest
     # partial_fixed: book 50% at T1, hold remaining to fixed T2 target (no trailing)
@@ -421,6 +473,13 @@ class Settings(BaseSettings):
     # Default ₹25,00,000 — matches AGENT_EQUITY so the simulator wallet and the
     # AI Trading Agent equity start from the same base.
     PAPER_TRADING_BALANCE: float = 2_500_000.0
+    # Late-entry gate (2026-07-22 post-mortem, news_discovery_engine.py::
+    # _execute_news_trade): skip a news-triggered entry if price already moved
+    # more than this % in the trade's own direction over the prior ~30min —
+    # NESTLEIND was bought at the exact top of an 11:19 IST spike, TVSMOTOR at
+    # a 2-session +10% extended high. Chasing a move that already happened is
+    # buying someone else's exit liquidity, not anticipating the catalyst.
+    NEWS_MAX_PRE_ENTRY_SPIKE_PCT: float = 2.0
     MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
     MAX_OPEN_POSITIONS: int = 20           # SAFETY CEILING (bug guard) — not the primary limiter
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance

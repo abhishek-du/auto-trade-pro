@@ -109,6 +109,13 @@ class PaperTrade(Base):
     # Entry snapshot — populated when the trade opens
     product:            Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     strategy_name:      Mapped[str | None]   = mapped_column(String(40),  nullable=True)
+    # High-level strategy SOURCE label for attribution (added 2026-07-24 for the
+    # parallel Pre-Event Expectation Gap strategy). NULL for every pre-existing
+    # row and for the News Strategy (interpreted as "AI"); the new strategy sets
+    # "AI Predict". Deliberately NOT renaming any existing value — this is a new,
+    # additive, nullable column so the two pipelines stay independently
+    # attributable without touching News Strategy behavior.
+    source:             Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     regime_at_entry:    Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     entry_reason:       Mapped[str | None]   = mapped_column(String(40),  nullable=True)
     confidence_bucket:  Mapped[str | None]   = mapped_column(String(8),   nullable=True)
@@ -278,6 +285,7 @@ class NewsItem(Base):
     # JSONB so the @> containment operator can use the ix_news_tickers_gin
     # GIN index. Migrated from JSON in commit "post-ticker-expansion cleanup".
     tickers_affected: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    news_metadata:    Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     published_at:     Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     crawled_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     # Populated for source="NSE-Announcements" rows only (category e.g.
@@ -1177,6 +1185,9 @@ class AgentTrade(Base):
     brokerage:     Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
     is_paper:      Mapped[bool]         = mapped_column(Boolean,     nullable=False, default=True)
     analytics_json:Mapped[dict]         = mapped_column(JSON,        nullable=False, default=dict)
+    # High-level strategy SOURCE label (see PaperTrade.source). NULL = legacy /
+    # "AI"; "AI Predict" for the parallel Pre-Event Expectation Gap strategy.
+    source:        Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     created_at:    Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     def __repr__(self) -> str:
@@ -1736,6 +1747,36 @@ class PreMarketNewsQueue(Base):
     status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, PROCESSED
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class ReentryWatch(Base):
+    """A symbol the T1-reanalysis feature exited (reversal risk after hitting
+    Target 1) but judged worth re-entering IF price breaks back above/below a
+    named level. Checked every india_trade_loop tick (see tasks/india_tasks.py)
+    against live price; on breakout, a fresh full re-analysis re-authorizes a
+    brand-new TradeIntent against the SAME canonical event (event_id/
+    evidence_ids below) -- NO EVENT -> NO TRADE still applies to the re-entry,
+    this is what satisfies it without needing a new news trigger.
+
+    Added 2026-07-22 alongside engine/agent/t1_reanalysis.py.
+    """
+    __tablename__ = "reentry_watches"
+
+    id:               Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol:           Mapped[str]            = mapped_column(String(50), nullable=False, index=True)
+    direction:        Mapped[str]            = mapped_column(String(10), nullable=False)  # BUY | SELL
+    watch_level:      Mapped[float]          = mapped_column(Float, nullable=False)
+    event_id:         Mapped[int | None]     = mapped_column(ForeignKey("causal_events.id"), nullable=True)
+    evidence_ids:     Mapped[list | None]    = mapped_column(JSONB, nullable=True)
+    reason:           Mapped[str]            = mapped_column(Text, nullable=False, default="")
+    status:           Mapped[str]            = mapped_column(String(20), nullable=False, default="WATCHING")  # WATCHING | TRIGGERED | EXPIRED | CANCELLED
+    original_confidence: Mapped[float]       = mapped_column(Float, nullable=False, default=0.0)
+    created_at:       Mapped[datetime]       = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    expires_at:       Mapped[datetime]       = mapped_column(DateTime, nullable=False)
+    resolved_at:      Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<ReentryWatch {self.symbol} {self.direction} level={self.watch_level} status={self.status}>"
+
 
 class CausalEvent(Base):
     """Event Intelligence Layer: Maps news to broad macro/sector/stock impacts via Knowledge Graph."""

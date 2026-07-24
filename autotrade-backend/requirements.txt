@@ -201,5 +201,10 @@ wrapt==2.2.1
 yfinance==1.4.1
 zope.interface==8.5
 
-# OpenAI SDK — Mantle/Bedrock OpenAI-compatible endpoint (primary LLM)
+# OpenAI SDK — no longer the active LLM path (kept only in case any script
+# still imports it directly); primary LLM is now boto3 Bedrock Runtime below.
 openai>=1.40
+
+# boto3 — AWS Bedrock Runtime (Converse API), primary LLM provider as of
+# 2026-07-24 (Amazon Nova Pro, amazon.nova-pro-v1:0). See utils/llm.py.
+boto3>=1.43

@@ -80,6 +80,7 @@ def _bull_features(
     ema20: float = 580.0,
     ema50: float = 560.0,
     ema200: float = 520.0,
+    ema100: float | None = 500.0,
     rsi: float = 62.0,
     adx: float = 28.0,
     st_dir: int = 1,
@@ -99,6 +100,13 @@ def _bull_features(
     f.ema20         = ema20
     f.ema50         = ema50
     f.ema200        = ema200
+    # 2026-07-23: explicit, real value (not left to MagicMock
+    # auto-attribute-creation) -- PullbackTrendLong's Phase 6 "weekly trend
+    # proxy" gate does `getattr(f, "ema100", None)` then `f.close < ema100`;
+    # a MagicMock() with ema100 unset auto-vivifies a child MagicMock rather
+    # than raising, which then fails that comparison with a TypeError
+    # instead of behaving like the real "feature not computed" case (None).
+    f.ema100        = ema100
     f.rsi14         = rsi
     f.macd_hist     = 0.5
     f.atr14         = atr
@@ -728,7 +736,11 @@ class TestHubSignalStrategy:
         self.strat = HubSignalStrategy()
         self.df    = _make_df(100)
 
-    def _hub_feat(self, score=65, signal="BUY", regime="BULL_TRENDING", adx=22):
+    def _hub_feat(self, score=65, signal="BUY", regime="BULL_TRENDING", adx=28):
+        # 2026-07-23: default bumped 22 -> 28. Phase 7 tightening (see
+        # engine/agent/strategies/hub_signal.py) raised the ADX gate to
+        # `adx14 <= 25: return None` -- 22 no longer clears it, which is why
+        # this fixture's own default value predates that change.
         f = _bull_features()
         f.hub_composite_score = score
         f.hub_signal          = signal
@@ -758,10 +770,13 @@ class TestHubSignalStrategy:
         f = self._hub_feat(regime="UNKNOWN", adx=13)
         assert self.strat.evaluate("TEST.NS", self.df, f, 0, "WATCHLIST") is None
 
-    def test_sell_signal_returns_candidate(self):
+    def test_sell_signal_returns_none(self):
+        # Phase 7 tightening: HubSignalStrategy is BUY-only now -- SELL
+        # requires a separate short-side review elsewhere in the codebase,
+        # this strategy never originates a SELL candidate any more.
         f = self._hub_feat(score=-70, signal="SELL", regime="RANGE")
         result = self.strat.evaluate("TEST.NS", self.df, f, 0, "WATCHLIST")
-        assert result is not None and result.side == "SELL"
+        assert result is None
 
     def test_high_score_high_confidence(self):
         c_low  = self.strat.evaluate("TEST.NS", self.df, self._hub_feat(score=15), 0, "WATCHLIST")
@@ -769,11 +784,12 @@ class TestHubSignalStrategy:
         if c_low and c_high:
             assert c_high.confidence > c_low.confidence
 
-    def test_stop_2atr_below_entry_for_buy(self):
+    def test_stop_1atr_below_entry_for_buy(self):
+        # Phase 7 tightening: stop tightened 2xATR -> 1xATR (same 2:1 R:R).
         f = self._hub_feat()
         result = self.strat.evaluate("TEST.NS", self.df, f, 0, "WATCHLIST")
         if result:
-            expected_stop = round(result.entry - 2 * f.atr14, 2)
+            expected_stop = round(result.entry - 1 * f.atr14, 2)
             assert result.stop == pytest.approx(expected_stop, abs=0.01)
 
     def test_rr_exactly_2(self):
@@ -1580,52 +1596,54 @@ class TestMISSquareoff:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestNiftyTrendGate:
-    @pytest.mark.asyncio
-    async def test_fails_open_when_insufficient_data(self):
-        from engine.agent.agent_loop import _check_nifty_trend
-        session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [100.0] * 30  # < 50 bars
-        session.execute = AsyncMock(return_value=mock_result)
-        result = await _check_nifty_trend(session)
-        assert result is True  # fail open
+    """2026-07-23: rewritten -- the previous version tested
+    engine.agent.agent_loop::_check_nifty_trend(), a single-EMA50 gate that
+    no longer exists (replaced 2026-06-26 by the 5-state composite regime
+    engine, engine.agent.market_regime.get_market_regime()). Its fail-open
+    behavior was also deliberately reversed in the replacement: the current
+    engine fails CLOSED (blocks new entries) on both insufficient history
+    and any internal error ("P2.12 fix" comment in market_regime.py), the
+    opposite of the old gate's fail-open design -- a real, documented safety
+    change, not drift. These tests cover the new function's equivalent
+    (and now opposite-polarity) safety behavior."""
 
     @pytest.mark.asyncio
-    async def test_fails_open_on_exception(self):
-        from engine.agent.agent_loop import _check_nifty_trend
+    async def test_fails_closed_when_insufficient_history(self):
+        from engine.agent.market_regime import get_market_regime, SIDEWAYS
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [100.0] * 30  # < 60 bars required
+        session.execute = AsyncMock(return_value=mock_result)
+        result = await get_market_regime(session)
+        assert result.can_buy is False
+        assert result.state == SIDEWAYS
+
+    @pytest.mark.asyncio
+    async def test_fails_closed_on_exception(self):
+        from engine.agent.market_regime import get_market_regime, SIDEWAYS
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=Exception("DB error"))
-        result = await _check_nifty_trend(session)
-        assert result is True  # fail open
+        result = await get_market_regime(session)
+        assert result.can_buy is False
+        assert result.state == SIDEWAYS
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_below_ema50(self):
-        from engine.agent.agent_loop import _check_nifty_trend
-        # DB returns DESC order (most-recent first). Declining nifty: most recent = 50, oldest = 109.
-        # After reversed() in the function: [50, 51, ..., 109] as oldest→newest BUT we want
-        # declining, so DESC from DB means latest=50, rest higher.
-        # DB gives: [50, 51, 52, ..., 109] — DESC means index 0 is the latest (most recent)
-        # reversed → oldest=109 first, newest=50 last → declining series
-        prices_desc = list(range(50, 110))  # [50, 51, ..., 109] as DESC output (latest=50 at front)
+    async def test_sufficient_rising_history_allows_buy(self):
+        from engine.agent.market_regime import get_market_regime
         session = AsyncMock()
         mock_result = MagicMock()
+        # DB returns DESC (most-recent first); a clearly rising series.
+        prices_desc = [float(x) for x in range(320, 100, -1)]  # 220 bars, latest=320
         mock_result.scalars.return_value.all.return_value = prices_desc
         session.execute = AsyncMock(return_value=mock_result)
-        result = await _check_nifty_trend(session)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_returns_true_when_above_ema50(self):
-        from engine.agent.agent_loop import _check_nifty_trend
-        # DB returns DESC: latest=109 at front, oldest=50 at back
-        # reversed() → oldest first, newest last → rising series; latest > EMA50
-        prices_desc = list(range(109, 49, -1))  # [109, 108, ..., 50] — latest=109 at front
-        session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = prices_desc
-        session.execute = AsyncMock(return_value=mock_result)
-        result = await _check_nifty_trend(session)
-        assert result is True
+        with patch("crawler.live_prices.PRICE_CACHE", {}), \
+             patch("crawler.market_breadth.get_breadth_cache", return_value={}), \
+             patch("utils.llm.call_llm_chat", AsyncMock(side_effect=RuntimeError("no live LLM in tests"))):
+            result = await get_market_regime(session, breadth_pct=70.0)
+        # LLM adjustment fails open to the arithmetic classification (caught
+        # internally, logged, arithmetic `result` unchanged) -- a strong,
+        # sustained uptrend with high breadth should classify bullish.
+        assert result.can_buy is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1850,38 +1868,77 @@ class TestEdgeCases:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestBackfillTask:
+    """2026-07-23: rewritten from scratch -- the previous version tested a
+    since-replaced implementation (mocked crawler.price_feed.fetch_candles
+    and a module-level tasks.india_tasks.celery_session attribute, neither
+    of which the current function uses). _backfill_hub_1d_candles() was
+    substantially rewritten (its own docstring: "Expanded scope... Uses the
+    Kite historical API, not yfinance") to pull the full NSE EQ universe
+    from kite_instruments via crawler.zerodha_historical.get_kite_candles_for_range,
+    with celery_session imported locally from tasks._db. This test now
+    mocks the actual current dependency chain."""
+
     @pytest.mark.asyncio
-    async def test_concurrent_batch_saves_all(self):
-        """_backfill_hub_1d_candles should call fetch_candles for every symbol."""
-        symbols = [f"SYM{i}.NS" for i in range(25)]
+    async def test_fetches_only_stale_symbols_and_saves_all(self):
+        kite_syms_result = MagicMock()
+        kite_syms_result.scalars.return_value.all.return_value = ["SYM1", "SYM2", "SYM3"]
+        fresh_result = MagicMock()
+        fresh_result.scalars.return_value.all.return_value = ["SYM1.NS"]  # SYM1 already fresh
+        query_results = [kite_syms_result, fresh_result]
+
+        def _make_session_cm():
+            session = AsyncMock()
+
+            async def _execute(*a, **kw):
+                return query_results.pop(0) if query_results else MagicMock(
+                    scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+                )
+            session.execute = _execute
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=session)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        mock_kite = MagicMock()
+        mock_kite.access_token = "tok"
 
         fetch_calls = []
 
-        async def mock_fetch(sym, timeframe):
+        async def mock_get_candles(sym, from_date, to_date, interval="1d"):
             fetch_calls.append(sym)
             return [{"symbol": sym, "timeframe": "1d", "open": 100, "high": 105,
-                     "low": 98, "close": 102, "volume": 50000,
-                     "timestamp": datetime.utcnow()}]
+                     "low": 98, "close": 102, "volume": 50000}]
 
         async def mock_save(candles, sess):
             return len(candles)
 
-        # fetch_candles is imported locally inside _backfill_hub_1d_candles;
-        # patch the module where it lives (crawler.price_feed)
-        with patch("crawler.price_feed.fetch_candles", side_effect=mock_fetch), \
+        with patch("crawler.zerodha_kite_lib.get_kite", return_value=mock_kite), \
+             patch("crawler.zerodha_instruments.INSTRUMENT_CACHE", {"SYM1.NS": 1}), \
+             patch("tasks._db.celery_session", side_effect=_make_session_cm), \
+             patch("engine.hub_universe.get_hub_universe", AsyncMock(return_value=["SYM3.NS", "SYM4.NS"])), \
+             patch("crawler.zerodha_historical.get_kite_candles_for_range", side_effect=mock_get_candles), \
              patch("crawler.price_feed.save_candles_to_db", side_effect=mock_save), \
-             patch("tasks.india_tasks.celery_session") as mock_session, \
-             patch("tasks.india_tasks.get_hub_universe", return_value=symbols):
-
-            mock_session.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
-            mock_session.return_value.__aexit__  = AsyncMock(return_value=False)
+             patch("asyncio.sleep", AsyncMock()):
 
             from tasks.india_tasks import _backfill_hub_1d_candles
-            try:
-                result = await _backfill_hub_1d_candles()
-                assert len(fetch_calls) == len(symbols)
-            except Exception:
-                pass  # import may fail without full env — structure test
+            result = await _backfill_hub_1d_candles()
+
+        # SYM1.NS is fresh -- must NOT be refetched. SYM2/3 from kite_instruments
+        # + SYM4 from hub_universe (SYM3 overlaps, deduped) are stale.
+        assert sorted(fetch_calls) == ["SYM2.NS", "SYM3.NS", "SYM4.NS"]
+        assert result["total_symbols"] == 4
+        assert result["stale_backfilled"] == 3
+        assert result["saved"] == 3
+        assert result["failed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_skips_entirely_when_not_authenticated(self):
+        mock_kite = MagicMock()
+        mock_kite.access_token = None
+        with patch("crawler.zerodha_kite_lib.get_kite", return_value=mock_kite):
+            from tasks.india_tasks import _backfill_hub_1d_candles
+            result = await _backfill_hub_1d_candles()
+        assert result == {"skipped": True, "reason": "not_authenticated"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1927,8 +1984,21 @@ class TestRunAgentCycleGates:
             ms.FNO_VOL_ENABLED    = False
             ms.nse_symbols        = []
             ms.telegram_available = False
-            with patch("engine.agent.agent_loop._check_nifty_trend", return_value=True), \
-                 patch("engine.agent.agent_loop.get_morning_regime", return_value="AGGRESSIVE"), \
+            ms.IST_TIMEZONE       = "Asia/Kolkata"
+            # 2026-07-23: _check_nifty_trend (single EMA50 gate) was replaced
+            # 2026-06-26 by the 5-state composite regime engine
+            # (engine.agent.market_regime.get_market_regime, imported into
+            # agent_loop's namespace) -- patch its current equivalent instead.
+            from engine.agent.market_regime import RegimeResult, MODERATE_BULL
+            bullish_regime = RegimeResult(
+                state=MODERATE_BULL, size_mult=1.0, min_conf=74,
+                can_buy=True, can_sell=False, score=50.0, signals={},
+            )
+            # get_morning_regime is imported LOCALLY inside run_agent_cycle()
+            # (from engine.agent.morning_regime), not a module-level name on
+            # agent_loop -- patch the source module, not agent_loop itself.
+            with patch("engine.agent.agent_loop.get_market_regime", return_value=bullish_regime), \
+                 patch("engine.agent.morning_regime.get_morning_regime", return_value="AGGRESSIVE"), \
                  patch("engine.agent.agent_loop._executor") as mock_exec:
                 mock_exec.check_and_close_positions = AsyncMock()
                 result = await run_agent_cycle(session, force=True)

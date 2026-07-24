@@ -102,9 +102,15 @@ async def analyze_announcement_llm(symbol: str, headline: str, pdf_text: str) ->
     
     try:
         resp = await call_llm_chat(messages, max_tokens=300)
-        # cleanup response
-        resp = resp.replace("```json", "").replace("```", "").strip()
-        data = json.loads(resp)
+        # Tolerant extraction (2026-07-24, Nova Pro switch): a strict
+        # json.loads() after only stripping markdown fences raises on any
+        # stray prose Nova adds despite the "ONLY JSON" instruction, falling
+        # back to a default HOLD below and losing the real analysis. See
+        # utils/llm.py::extract_json_from_response.
+        from utils.llm import extract_json_from_response
+        data = extract_json_from_response(resp)
+        if data is None:
+            raise ValueError(f"no JSON object found in LLM response: {(resp or '')[:200]!r}")
         return data
     except Exception as e:
         logger.error(f"[pdf_parser] LLM analysis failed: {e}")

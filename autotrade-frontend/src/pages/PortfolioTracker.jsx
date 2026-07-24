@@ -13,7 +13,7 @@ import SellModal from '../components/portfolio/SellModal'
 import AllocationCharts from '../components/portfolio/AllocationCharts'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
 import { formatINR } from '../utils/indianFormat'
-import { apiFetch, getZerodhaLoginUrl, getZerodhaStatus } from '../api/client'
+import { apiFetch, getZerodhaLoginUrl, getZerodhaStatus, getUpstoxLoginUrl, getUpstoxStatus, getUpstoxMargins, getUpstoxHoldings, autoLoginUpstox, syncUpstoxHoldings } from '../api/client'
 
 /* ── Agent activity strip ──────────────────────────────────────────────────
    Inline panel showing the AI agent's paper-trading state alongside the
@@ -373,6 +373,89 @@ function RealZerodhaAccountPanel() {
   )
 }
 
+/* Real Upstox account — actual broker wallet balance + holdings. */
+function RealUpstoxAccountPanel() {
+  const [margins, setMargins] = useState(null)
+  const [holdings, setHoldings] = useState([])
+  const [status, setStatus] = useState(null)
+
+  useEffect(() => {
+    const load = () => {
+      getUpstoxStatus().then(d => setStatus(d?.data ?? d)).catch(() => {})
+      getUpstoxMargins().then(d => setMargins(d?.equity ?? d)).catch(() => {})
+      getUpstoxHoldings().then(d => setHoldings(Array.isArray(d) ? d : [])).catch(() => {})
+    }
+    load()
+    const id = setInterval(load, 30000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (!status?.authenticated) return null;
+
+  const eq = margins
+  const fmt = (n) => formatINR(n ?? 0)
+  const hValue = holdings.reduce((s, h) => s + ((h.last_price ?? 0) * (h.quantity ?? 0)), 0)
+
+  return (
+    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Briefcase size={16} className="text-purple-400" />
+        <h3 className="text-slate-100 font-semibold text-sm">Real Upstox Account</h3>
+        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 uppercase">Live Broker</span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-white/[0.03] border border-border rounded-lg px-3 py-2">
+          <div className="text-muted text-[10px] uppercase tracking-wider">Wallet Balance</div>
+          <div className="text-slate-100 font-bold tabular-nums">{eq ? fmt(eq.available_margin) : '—'}</div>
+          <div className="text-[9px] text-muted">available margin</div>
+        </div>
+        <div className="bg-white/[0.03] border border-border rounded-lg px-3 py-2">
+          <div className="text-muted text-[10px] uppercase tracking-wider">Used Margin</div>
+          <div className="text-slate-100 font-bold tabular-nums">{eq ? fmt(eq.used_margin) : '—'}</div>
+        </div>
+        <div className="bg-white/[0.03] border border-border rounded-lg px-3 py-2">
+          <div className="text-muted text-[10px] uppercase tracking-wider">Payin Amount</div>
+          <div className="text-slate-100 font-bold tabular-nums">{eq ? fmt(eq.payin_amount) : '—'}</div>
+        </div>
+        <div className="bg-white/[0.03] border border-border rounded-lg px-3 py-2">
+          <div className="text-muted text-[10px] uppercase tracking-wider">Holdings Value</div>
+          <div className="text-slate-100 font-bold tabular-nums">{holdings.length ? fmt(hValue) : '₹0'}</div>
+          <div className="text-[9px] text-muted">{holdings.length} holding{holdings.length === 1 ? '' : 's'}</div>
+        </div>
+      </div>
+
+      {holdings.length > 0 ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead><tr className="text-muted uppercase tracking-wider border-b border-border">
+              {['Symbol', 'Qty', 'Avg Price', 'LTP', 'Value', 'P&L'].map((h) => <th key={h} className="text-left px-2 py-1.5 font-semibold">{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {holdings.map((h, i) => {
+                const val = (h.last_price ?? 0) * (h.quantity ?? 0)
+                const pnl = h.pnl ?? 0
+                return (
+                  <tr key={i} className="border-b border-border/40">
+                    <td className="px-2 py-1.5 text-slate-200">{h.tradingsymbol || h.company_name}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-300">{Number(h.quantity ?? 0)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-400">{fmt(h.average_price)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-400">{fmt(h.last_price)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-slate-100">{fmt(val)}</td>
+                    <td className={`px-2 py-1.5 tabular-nums ${pnl >= 0 ? 'text-profit' : 'text-loss'}`}>{pnl >= 0 ? '+' : ''}{fmt(pnl)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="text-xs text-muted">No real holdings yet — this account has ₹{eq ? Number(eq.available_margin).toLocaleString('en-IN') : '0'} margin.</p>
+      )}
+    </div>
+  )
+}
+
 /* Paper F&O positions — index options & futures the agent holds. */
 function FnOPositionsPanel() {
   const [data, setData] = useState(null)
@@ -528,13 +611,18 @@ export default function PortfolioTracker() {
   const [quickCreating,  setQuickCreating]  = useState(false)
   const [zStatus,        setZStatus]        = useState(null)
   const [zBusy,          setZBusy]          = useState(false)
+  const [uBusy,          setUBusy]          = useState(false)
+  const [uStatus,        setUStatus]        = useState(null)
 
   // ── Zerodha connection: status, sync, and direct-login popup ──────────────
   async function fetchZStatus() {
     try { setZStatus(await getZerodhaStatus()) } catch { setZStatus(null) }
   }
+  async function fetchUStatus() {
+    try { setUStatus(await getUpstoxStatus()) } catch { setUStatus(null) }
+  }
 
-  useEffect(() => { fetchZStatus() }, [])
+  useEffect(() => { fetchZStatus(); fetchUStatus(); }, [])
 
   // Pull live Zerodha holdings into a "Zerodha Demat" portfolio (auto-created
   // by the backend) and surface it on this page.
@@ -553,6 +641,21 @@ export default function PortfolioTracker() {
       toast.error(msg)
     } finally {
       setZBusy(false)
+    }
+  }
+
+  async function syncUpstox() {
+    setUBusy(true)
+    try {
+      const d = await syncUpstoxHoldings()
+      toast.success(`Synced ${d.synced ?? 0} Upstox holdings`)
+      await refreshPortfolios()
+      if (d.portfolio_id) setActiveId(d.portfolio_id)
+      await reload()
+    } catch (err) {
+      toast.error('Upstox sync failed')
+    } finally {
+      setUBusy(false)
     }
   }
 
@@ -585,6 +688,10 @@ export default function PortfolioTracker() {
         await syncZerodha()
       } else if (typeof e.data === 'string' && e.data.startsWith('zerodha_error')) {
         toast.error('Zerodha login failed — try again')
+      } else if (e.data === 'upstox_connected') {
+        await fetchUStatus()
+      } else if (typeof e.data === 'string' && e.data.startsWith('upstox_error')) {
+        toast.error('Upstox login failed — try again')
       }
     }
     window.addEventListener('message', onMsg)
@@ -632,10 +739,10 @@ export default function PortfolioTracker() {
         <div>
           <h1 className="text-slate-100 text-xl font-bold flex items-center gap-2">
             <Briefcase size={18} className="text-cyan" />
-            Zerodha Portfolio
+            {activeId ? portfolios.find(p => p.id === activeId)?.name || 'My Portfolio' : 'My Portfolio'}
           </h1>
           <p className="text-muted text-sm mt-0.5">
-            Stocks + mutual funds + Zerodha-synced holdings · agent paper-trades alongside until you flip
+            Stocks + mutual funds + broker-synced holdings · agent paper-trades alongside until you flip
             <code className="mx-1 px-1 py-0.5 rounded bg-surface/60 border border-border text-[10px]">PAPER_MODE=false</code>
           </p>
         </div>
@@ -668,6 +775,39 @@ export default function PortfolioTracker() {
               Connect / Login Zerodha <ExternalLink size={11} />
             </button>
           )}
+
+          {/* Upstox Connect / Login */}
+          {uStatus?.authenticated ? (
+            <span
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-purple-500/30 bg-purple-500/8 text-purple-400 text-xs font-semibold"
+              title={`Upstox Connected`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+              Upstox Connected
+            </span>
+          ) : (
+            <button
+              disabled={uBusy}
+              onClick={async () => {
+                setUBusy(true)
+                try {
+                  const res = await autoLoginUpstox()
+                  if (res.success) {
+                    toast.success('Upstox auto-login successful!')
+                    await fetchUStatus()
+                  }
+                } catch (err) {
+                  toast.error(err?.response?.data?.detail || 'Upstox Auto-login failed')
+                } finally {
+                  setUBusy(false)
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-purple-500/30 bg-purple-500/8 text-purple-400 text-xs font-semibold hover:bg-purple-500/15 hover:border-purple-500/50 transition-colors disabled:opacity-50"
+              title="Auto-login Upstox to connect live prices + real holdings"
+            >
+              {uBusy ? <RefreshCw size={11} className="animate-spin" /> : <Zap size={11} />} Connect / Login Upstox
+            </button>
+          )}
           {/* Sync button — pull Zerodha holdings into a portfolio. Available as
               soon as you're connected, even before any local portfolio exists. */}
           {zStatus?.connected && (
@@ -677,7 +817,19 @@ export default function PortfolioTracker() {
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 transition-colors disabled:opacity-50"
               title="Pull live Zerodha Demat holdings into this view"
             >
-              <RefreshCw size={13} className={zBusy ? 'animate-spin' : ''} /> Sync Holdings
+              <RefreshCw size={13} className={zBusy ? 'animate-spin' : ''} /> Sync Zerodha
+            </button>
+          )}
+
+          {/* Sync button for Upstox */}
+          {uStatus?.authenticated && (
+            <button
+              onClick={syncUpstox}
+              disabled={uBusy}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-purple-500/30 bg-purple-500/8 text-purple-400 text-xs font-semibold hover:bg-purple-500/15 transition-colors disabled:opacity-50"
+              title="Pull live Upstox Demat holdings into this view"
+            >
+              <RefreshCw size={13} className={uBusy ? 'animate-spin' : ''} /> Sync Upstox
             </button>
           )}
           {activeId && (
@@ -720,9 +872,23 @@ export default function PortfolioTracker() {
               </button>
               <p className="text-muted/60 text-xs">or</p>
             </>
+          ) : uStatus?.authenticated ? (
+            <>
+              <p className="text-muted text-sm">
+                Connected to Upstox. Pull your live Demat holdings, or create a portfolio manually.
+              </p>
+              <button
+                onClick={syncUpstox}
+                disabled={uBusy}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-500 text-white text-sm font-semibold disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={uBusy ? 'animate-spin' : ''} /> Sync Upstox Holdings
+              </button>
+              <p className="text-muted/60 text-xs">or</p>
+            </>
           ) : (
             <p className="text-muted text-sm">
-              Connect Zerodha (top right) to pull your real holdings, or create a portfolio manually.
+              Connect a broker (top right) to pull your real holdings, or create a portfolio manually.
             </p>
           )}
           {quickCreate ? (
@@ -787,6 +953,9 @@ export default function PortfolioTracker() {
 
           {/* Real Zerodha account — wallet balance + mutual funds */}
           <RealZerodhaAccountPanel />
+
+          {/* Real Upstox account — wallet balance + holdings */}
+          <RealUpstoxAccountPanel />
 
           {/* Agent watchlist — add stocks the agent scans & may paper-trade */}
           <AgentWatchlistPanel />

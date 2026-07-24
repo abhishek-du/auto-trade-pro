@@ -12,6 +12,7 @@ the mapping in sync with NSE/Kite's master list.
 from __future__ import annotations
 
 import datetime
+import time as _time
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, delete
@@ -26,20 +27,43 @@ from utils.logger import logger
 
 _IST = ZoneInfo("Asia/Kolkata")
 
-# These are set to False after the first 403 — Zerodha market-data APIs
-# (quotes, LTP, historical) require a paid Kite Connect subscription.
-# Free plan: OAuth, portfolio, orders only.
-_kite_historical_available: bool = True
-_kite_quotes_available:     bool = True
+# 2026-07-23 fix: these used to be permanent booleans, set False forever
+# after the FIRST 403 on the (wrong) assumption that this account is on a
+# free Kite Connect plan without market-data access. Verified live -- this
+# account DOES have paid Kite Connect access (both get_historical_data() and
+# get_quote() succeed against the real API) -- so a 403 here is a transient
+# condition (auth hiccup, a race with the daily token-refresh job, etc.),
+# not a permanent plan limitation. A permanent latch meant one blip silently
+# forced the whole process onto the yfinance fallback for its entire
+# remaining lifetime, with no way to recover short of a restart. Replaced
+# with a short cooldown that expires and retries for real.
+_KITE_MARKET_DATA_COOLDOWN_SEC = 60.0
+_kite_historical_blocked_until: float = 0.0
+_kite_quotes_blocked_until:     float = 0.0
+
+
+def _kite_historical_available() -> bool:
+    return _time.monotonic() >= _kite_historical_blocked_until
+
+
+def _kite_quotes_available() -> bool:
+    return _time.monotonic() >= _kite_quotes_blocked_until
 
 
 def _handle_market_data_403(api_name: str) -> None:
-    """Log a single clear message when Kite returns 403 on a market-data endpoint."""
+    """Log a clear message and start a short cooldown when Kite returns 403
+    on a market-data endpoint -- NOT a permanent disable; see comment above."""
+    global _kite_historical_blocked_until, _kite_quotes_blocked_until
     logger.info(
-        f"[zerodha_market] Kite {api_name} API returned 403 — "
-        "market data requires a paid Kite Connect subscription (₹2000/month). "
-        "Falling back to yfinance for this session."
+        f"[zerodha_market] Kite {api_name} API returned 403 — treating as transient "
+        f"(this account has paid Kite Connect access); backing off "
+        f"{_KITE_MARKET_DATA_COOLDOWN_SEC:.0f}s and falling back to yfinance meanwhile."
     )
+    until = _time.monotonic() + _KITE_MARKET_DATA_COOLDOWN_SEC
+    if api_name == "historical":
+        _kite_historical_blocked_until = until
+    else:
+        _kite_quotes_blocked_until = until
 
 # ── Static token map (last-resort fallback if DB refresh hasn't run yet) ──────
 
@@ -452,10 +476,8 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
     call now overflows immediately — chunking keeps each request well
     under the cap.
     """
-    global _kite_quotes_available
-
     kite = get_kite_client()
-    if not kite.access_token or not _kite_quotes_available:
+    if not kite.access_token or not _kite_quotes_available():
         return {}
 
     # Remember the exact symbol each caller asked with, so the reverse mapping
@@ -474,7 +496,6 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
             raw: dict = await kite.get_ltp(chunk)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
-                _kite_quotes_available = False
                 _handle_market_data_403("LTP/quote")
                 return result
             logger.warning(f"[zerodha_market] LTP chunk {i}+{len(chunk)} failed: {exc}")
@@ -508,10 +529,8 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
 
 async def get_full_quote(symbol: str) -> dict:
     """Full quote for one symbol — includes OHLC, volume, bid/ask, OI."""
-    global _kite_quotes_available
-
     kite = get_kite_client()
-    if not kite.access_token or not _kite_quotes_available:
+    if not kite.access_token or not _kite_quotes_available():
         return {}
 
     instr = _symbol_to_kite(symbol)
@@ -519,7 +538,6 @@ async def get_full_quote(symbol: str) -> dict:
         raw = await kite.get_quote([instr])
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 403:
-            _kite_quotes_available = False
             _handle_market_data_403("quote")
         else:
             logger.warning(f"[zerodha_market] Quote fetch failed for {symbol}: {exc}")
@@ -568,14 +586,12 @@ async def get_kite_historical(
         logger.warning(f"[zerodha_market] No instrument token for {symbol}")
         return []
 
-    global _kite_historical_available
-
     kite = get_kite_client()
     if not kite.access_token:
         return []
 
-    if not _kite_historical_available:
-        return []  # plan doesn't include historical API — use yfinance fallback
+    if not _kite_historical_available():
+        return []  # in a short post-403 cooldown — use yfinance fallback meanwhile
 
     kite_interval = _to_kite_interval(interval)
     # Map interval back to our timeframe string for the candles table
@@ -586,12 +602,7 @@ async def get_kite_historical(
         raw = await kite.get_historical_data(token, from_date, to_date, kite_interval)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 403:
-            _kite_historical_available = False
-            logger.info(
-                "[zerodha_market] Kite historical API returned 403 — "
-                "historical data requires a paid Kite Connect subscription. "
-                "Falling back to yfinance for all historical requests this session."
-            )
+            _handle_market_data_403("historical")
         else:
             logger.warning(f"[zerodha_market] Historical fetch failed for {symbol}: {exc}")
         return []

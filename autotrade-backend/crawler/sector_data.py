@@ -277,9 +277,19 @@ def get_sector_cache() -> dict:
 
 
 async def refresh_sector_data() -> dict:
-    """Refresh SECTOR_CACHE from PRICE_CACHE. Async for Celery compatibility."""
+    """Refresh SECTOR_CACHE from PRICE_CACHE. Async for Celery compatibility.
+
+    compute_sector_from_cache() calls utils.sector_cache.get_sector() per
+    symbol, which makes a SYNCHRONOUS yfinance HTTP call for every symbol not
+    already in the on-disk cache -- potentially hundreds of blocking calls in
+    a row. Run on a worker thread so this can never stall the event loop
+    it's awaited from (2026-07-22: confirmed live this blocked uvicorn's
+    entire process for minutes on every restart, hanging unrelated concurrent
+    requests including /auth/login until it finished).
+    """
+    import asyncio
     global SECTOR_CACHE
-    SECTOR_CACHE = compute_sector_from_cache()
+    SECTOR_CACHE = await asyncio.to_thread(compute_sector_from_cache)
     logger.info(
         f"[sectors] {len(SECTOR_CACHE)} sectors refreshed — "
         f"{_find_sector_leaders(SECTOR_CACHE)}"

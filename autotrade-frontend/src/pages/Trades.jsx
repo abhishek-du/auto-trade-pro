@@ -160,6 +160,118 @@ function buildInlineAnalysis(trade, { entry, stop, t1, rr, slPct, t1Pct, hubScor
   return lines.join('\n');
 }
 
+// ── Confidence Breakdown (2026-07-22) ────────────────────────────────────────
+// Proof-of-work for the confidence number: WHY 80%, WHY 42%, never just the
+// bare figure. Renders differently for a direct LLM tool-use verdict vs a
+// second-order cascade's factor formula -- see TradeIntent.confidence_factors's
+// docstring for the incident (a cascade's confidence found hardcoded to a
+// fake 80%) that made this required, not optional.
+
+function FactorRow({ label, value, sub }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 border-b border-white/[0.04] last:border-0">
+      <span className="text-[11px] text-muted">{label}</span>
+      <div className="text-right">
+        <span className="text-xs font-semibold text-slate-200 tabular-nums">{value}</span>
+        {sub && <span className="block text-[9px] text-muted">{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ConfidenceBreakdown({ cf }) {
+  if (!cf || Object.keys(cf).length === 0) {
+    return (
+      <div className="bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-3">
+        <p className="text-[11px] text-muted">
+          No confidence breakdown recorded for this trade — predates the transparency feature, or a non-event-driven strategy.
+        </p>
+      </div>
+    );
+  }
+
+  const isSecondOrder = cf.kind === 'second_order_formula';
+  const confirmColor = cf.market_confirmation === 'POSITIVE' ? 'text-profit'
+                      : cf.market_confirmation === 'NEGATIVE' ? 'text-loss' : 'text-amber-400';
+
+  return (
+    <div className="bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <BookOpen size={12} className="text-cyan" />
+        <span className="text-[10px] font-bold uppercase tracking-widest text-muted">
+          {isSecondOrder ? 'Second-Order Cascade Formula' : 'LLM Multi-Agent Verdict'}
+        </span>
+      </div>
+
+      {isSecondOrder ? (
+        <>
+          <FactorRow label="Cascaded from" value={cf.cascade_from ?? '—'} />
+          <FactorRow label="Primary event strength" value={cf.event_strength != null ? `${cf.event_strength.toFixed(1)}%` : '—'} />
+          <FactorRow label="Relationship" value={cf.relationship_type ?? '—'} />
+          <FactorRow label="Relationship strength" value={cf.relationship_strength != null ? cf.relationship_strength.toFixed(2) : '—'} sub="0.0 – 1.0" />
+          <FactorRow label="Company exposure" value={cf.company_exposure != null ? cf.company_exposure.toFixed(2) : '—'} sub="0.0 – 1.0" />
+          <FactorRow
+            label="Market confirmation"
+            value={<span className={confirmColor}>{cf.market_confirmation ?? '—'}</span>}
+            sub={cf.market_confirmation_multiplier != null ? `×${cf.market_confirmation_multiplier}` : null}
+          />
+          <div className="pt-2 mt-1 border-t border-white/[0.06]">
+            <p className="text-[9px] text-muted font-mono leading-relaxed">{cf.formula}</p>
+            <p className="text-xs font-bold text-cyan mt-1">
+              = {cf.event_strength?.toFixed(1)} × {cf.relationship_strength?.toFixed(2)} × {cf.company_exposure?.toFixed(2)} × {cf.market_confirmation_multiplier} = <span className="text-sm">{cf.confidence?.toFixed(1)}%</span>
+            </p>
+          </div>
+        </>
+      ) : (
+        <>
+          {cf.bull && <FactorRow label="Bull case" value={<span className="text-profit text-[11px] font-normal">{cf.bull}</span>} />}
+          {cf.bear && <FactorRow label="Bear case" value={<span className="text-loss text-[11px] font-normal">{cf.bear}</span>} />}
+          {cf.key_risk && <FactorRow label="Key risk" value={<span className="text-amber-400 text-[11px] font-normal">{cf.key_risk}</span>} />}
+          {cf.market_confirmation && (
+            <FactorRow label="Market confirmation" value={<span className={confirmColor}>{cf.market_confirmation}</span>} />
+          )}
+          {cf.grounding && (
+            <FactorRow
+              label="Grounding check"
+              value={cf.grounding.grounded === false
+                ? <span className="text-loss">FAILED once, self-corrected</span>
+                : <span className="text-profit">PASSED</span>}
+            />
+          )}
+          {Array.isArray(cf.tools_used) && cf.tools_used.length > 0 && (
+            <div className="py-1.5">
+              <p className="text-[11px] text-muted mb-1.5">Tools consulted before deciding</p>
+              <div className="flex flex-wrap gap-1">
+                {cf.tools_used.map((tool) => (
+                  <span key={tool} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan/10 text-cyan border border-cyan/20">
+                    {tool}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {cf.thesis && (
+            <div className="pt-2 mt-1 border-t border-white/[0.06]">
+              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1">Thesis</p>
+              <p className="text-[11px] text-slate-300 leading-relaxed">{cf.thesis}</p>
+            </div>
+          )}
+          {cf.model_reasoning && (
+            <details className="pt-2 mt-1 border-t border-white/[0.06] group">
+              <summary className="text-[9px] font-semibold uppercase tracking-widest text-muted cursor-pointer hover:text-cyan transition-colors">
+                Full model reasoning (multi-agent debate) — click to expand
+              </summary>
+              <pre className="mt-2 text-[10.5px] text-slate-400 leading-relaxed whitespace-pre-wrap font-['Inter',_sans-serif] bg-[#080e1c] rounded-lg p-3 border border-white/[0.05] max-h-64 overflow-y-auto">
+                {cf.model_reasoning}
+              </pre>
+            </details>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Trade Detail Panel (expanded row) ────────────────────────────────────────
 
 function TradeDetailPanel({ trade }) {
@@ -213,6 +325,15 @@ function TradeDetailPanel({ trade }) {
         <pre className="text-[11.5px] text-slate-300 leading-[1.7] bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-4 whitespace-pre-wrap font-['Inter',_sans-serif] overflow-x-auto">
           {analysisText || 'No analysis recorded for this trade.'}
         </pre>
+      </div>
+
+      {/* Confidence Breakdown — proof for WHY this confidence number */}
+      <div>
+        <div className="flex items-center gap-2 mb-2.5">
+          <Target size={13} className="text-cyan" />
+          <span className="text-[10px] font-bold uppercase tracking-widest text-muted">Why {conf.toFixed(0)}% Confidence</span>
+        </div>
+        <ConfidenceBreakdown cf={trade.confidence_factors} />
       </div>
 
       {/* Trade Level Cards */}

@@ -8,6 +8,7 @@ Pipeline order:
 """
 from __future__ import annotations
 
+import contextvars
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -282,22 +283,155 @@ async def llm_debate_candidate(symbol: str, candidate, decision) -> dict | None:
 
 
 # ── Level-3 agentic tools: the LLM pulls fresh data before deciding ──────────
-async def _tool_fundamentals(symbol: str) -> str:
+
+# Per-debate-session caches (2026-07-23 round-exhaustion fix): `fundamentals`
+# used to be re-fetched from scratch on every call, and two other "distinct"
+# tools (earnings/screener_deep, now removed) silently proxied to this exact
+# function -- confirmed live to burn 2-4 rounds re-asking the identical
+# question. Both set to a fresh {} at the top of llm_tooluse_candidate()
+# before its round loop starts; None outside a debate session (e.g.
+# direct/test calls), in which case caching is simply skipped.
+_fundamentals_cache_var: "contextvars.ContextVar[dict[str, str] | None]" = contextvars.ContextVar(
+    "fundamentals_cache", default=None
+)
+# 2026-07-23 (Upstox-primary fix): `fundamentals` and `company_intelligence`
+# are both mandatory core_tools and, as of this fix, both source their
+# numbers from the same underlying get_company_intelligence() call -- shared
+# so a debate that calls both (every debate) triggers exactly one real
+# Upstox fetch, not two.
+_company_intelligence_cache_var: "contextvars.ContextVar[dict[str, dict] | None]" = contextvars.ContextVar(
+    "company_intelligence_cache", default=None
+)
+
+
+async def _get_company_intelligence_cached(symbol: str) -> dict:
+    from engine.company_intelligence import get_company_intelligence
+
+    cache = _company_intelligence_cache_var.get()
+    if cache is not None and symbol in cache:
+        return cache[symbol]
+    ci = await get_company_intelligence(symbol)
+    if cache is not None:
+        cache[symbol] = ci
+    return ci
+
+
+# 2026-07-23 fix: llm_tooluse_candidate() returns None from four genuinely
+# different situations (empty/unparseable LLM output 3x, a grounding
+# rejection, real round-exhaustion, an unexpected exception) -- but the
+# caller (news_discovery_engine.py::process_ticker) can't tell them apart
+# from `None` alone, so it logs the SAME generic "Agent failed to reach a
+# decision (Timed out/Insufficient info)" message for all four. Live-tested
+# 2026-07-23: 3 of 7 candidates in a single run showed that generic message
+# while the real, specific reason (a grounding rejection catching a
+# hallucinated fact) was sitting right there in the debug log, invisible to
+# anyone reading the trade-rejection reason alone. Mirrors the existing
+# get_last_reasoning() contextvar pattern (utils/llm.py) so callers can read
+# the real reason immediately after the call without changing the return type.
+_last_tooluse_rejection_reason: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "last_tooluse_rejection_reason", default=None
+)
+
+
+def get_last_tooluse_rejection_reason() -> "str | None":
+    """The specific reason llm_tooluse_candidate() most recently returned
+    None for, if any -- read immediately after the call, same pattern as
+    utils.llm.get_last_reasoning()."""
     try:
-        from engine.fundamental_analyzer import fetch_fundamentals_yfinance, fetch_fundamentals_screener, calculate_fundamental_score
-        import asyncio
-        
-        bare = symbol.replace(".NS", "")
-        # Live fetch in parallel (skipping database entirely)
-        yf_task = asyncio.to_thread(fetch_fundamentals_yfinance, symbol)
-        sc_task = fetch_fundamentals_screener(bare)
-        yf_data, sc_data = await asyncio.gather(yf_task, sc_task)
-        
-        merged = {**yf_data, **sc_data}
+        return _last_tooluse_rejection_reason.get()
+    except Exception:
+        return None
+
+
+async def _tool_fundamentals(symbol: str) -> str:
+    cache = _fundamentals_cache_var.get()
+    if cache is not None and symbol in cache:
+        return cache[symbol]
+
+    result = await _fetch_fundamentals_uncached(symbol)
+    if cache is not None:
+        cache[symbol] = result
+    return result
+
+
+async def _fetch_fundamentals_uncached(symbol: str) -> str:
+    """2026-07-23 (Upstox-primary fix): sources PE/ROE/ROCE/D-E/promoter
+    holding from get_company_intelligence() -- Upstox primary, DB-then-live
+    yfinance/screener per-field fallback already correctly implemented there
+    (engine/company_intelligence.py::_merge_ratios) -- rather than
+    maintaining a second, parallel yfinance-primary pipeline here. Only
+    revenue/profit 3-year growth CAGR has no Upstox equivalent (Upstox's
+    income-statement endpoint exposes latest-period figures only, no
+    multi-year series to compute a CAGR from), so that pair of fields is
+    still fetched independently from screener.in, best-effort.
+    """
+    try:
+        from engine.fundamental_analyzer import fetch_fundamentals_screener, calculate_fundamental_score
+
+        bare = symbol.replace(".NS", "").replace(".BO", "")
+
+        ci = await _get_company_intelligence_cached(symbol)
+        valuation = ci.get("valuation") or {}
+        quality = ci.get("quality") or {}
+        ownership = ci.get("ownership") or {}
+        promoter = ownership.get("promoter") or {}
+        sections = (ci.get("metadata") or {}).get("sections") or {}
+
+        merged = {
+            "pe_ratio":         valuation.get("pe"),
+            "roe":              quality.get("roe"),
+            "roce":             quality.get("roce"),
+            "debt_to_equity":   quality.get("debt_to_equity"),
+            "promoter_holding": promoter.get("latest_pct"),
+        }
+
+        notes = []
+        val_fields = sections.get("valuation", {}).get("field_sources", {})
+        qual_fields = sections.get("quality", {}).get("field_sources", {})
+        # Per-field source, not the coarse section-level one -- live-tested
+        # against RELIANCE.NS and caught this exact gap: ROE/ROCE succeeded
+        # from Upstox (tagging the whole "quality" section UPSTOX) while D/E
+        # was genuinely UNAVAILABLE from every source, so the section-level
+        # tag alone would have mislabeled D/E as "sourced from Upstox" when
+        # it has no source at all.
+        pe_source = val_fields.get("pe", "UNAVAILABLE")
+        roe_source = qual_fields.get("roe", "UNAVAILABLE")
+        roce_source = qual_fields.get("roce", "UNAVAILABLE")
+        de_source = qual_fields.get("debt_to_equity", "UNAVAILABLE")
+        if pe_source == "UNAVAILABLE":
+            notes.append("PE unavailable from Upstox, DB, or yfinance/screener this call")
+        if roe_source == "UNAVAILABLE" and roce_source == "UNAVAILABLE" and de_source == "UNAVAILABLE":
+            notes.append("quality ratios (ROE/ROCE/D-E) unavailable from Upstox, DB, or yfinance/screener this call")
+
+        # Growth CAGR: the one field pair with no Upstox path -- independent,
+        # best-effort screener.in fetch. Typed _error markers per the earlier
+        # round-exhaustion fix distinguish "rate-limited" from "genuinely no
+        # data" here too.
+        sc_data = await fetch_fundamentals_screener(bare)
+        sc_err = sc_data.get("_error")
+        if sc_err:
+            reason = sc_data.get("_reason")
+            notes.append(
+                f"screener.in {sc_err}" + (f" ({reason})" if reason else "")
+                + " -- growth figures unavailable this call"
+            )
+        else:
+            merged["revenue_growth_3yr"] = sc_data.get("revenue_growth_3yr")
+            merged["profit_growth_3yr"] = sc_data.get("profit_growth_3yr")
+
         score = calculate_fundamental_score(merged)
-        
-        return (f"fundamentals (LIVE API): PE={merged.get('pe_ratio')} ROE={merged.get('roe')}% ROCE={merged.get('roce')}% D/E={merged.get('debt_to_equity')} "
-                f"rev_growth_3y={merged.get('revenue_growth_3yr')}% profit_growth_3y={merged.get('profit_growth_3yr')}% promoter={merged.get('promoter_holding')}% score={score}")
+        note_str = (
+            f" | NOTE: {'; '.join(notes)} (retrying this tool will not help this session)"
+            if notes else ""
+        )
+
+        return (
+            f"fundamentals (Upstox-primary): PE={merged.get('pe_ratio')}[{pe_source}] "
+            f"ROE={merged.get('roe')}%[{roe_source}] ROCE={merged.get('roce')}%[{roce_source}] "
+            f"D/E={merged.get('debt_to_equity')}[{de_source}] "
+            f"rev_growth_3y={merged.get('revenue_growth_3yr')}% profit_growth_3y={merged.get('profit_growth_3yr')}% "
+            f"promoter={merged.get('promoter_holding')}% score={score}{note_str}"
+        )
     except Exception as exc:
         return f"fundamentals: error ({exc})"
 
@@ -457,14 +591,6 @@ async def _tool_macro_environment(symbol: str) -> str:
     except Exception as exc:
         return f"macro_environment: error ({exc})"
 
-async def _tool_earnings_report(symbol: str) -> str:
-    try:
-        # Reusing the live API fundamental fetcher to guarantee fresh data
-        fund_data = await _tool_fundamentals(symbol)
-        return fund_data.replace("fundamentals", "earnings_report")
-    except Exception as exc:
-        return f"earnings_report: error ({exc})"
-
 async def _tool_predict_next_candle(symbol: str) -> str:
     # Uses short-term momentum to give a rough mathematical probability for the next candle
     try:
@@ -477,9 +603,6 @@ async def _tool_predict_next_candle(symbol: str) -> str:
         return f"predict_next_candle: Current Momentum = {chg}%. Probability of NEXT CANDLE being GREEN is ~{prob_bull:.1f}%. Probability of RED is ~{100-prob_bull:.1f}%."
     except Exception as exc:
         return f"predict_next_candle: error ({exc})"
-
-async def _tool_screener_deep(symbol: str) -> str:
-    return await _tool_fundamentals(symbol)
 
 async def _tool_expert_research(symbol: str) -> str:
     # Fetches recent news labeled as 'Brokerage' or research reports
@@ -548,10 +671,15 @@ async def _tool_company_intelligence(symbol: str) -> str:
     says Y" itself, recreating the reconciliation problem the aggregator
     exists to resolve upstream). Always reports completeness/failed_sections
     so the model can tell "no cash-flow data exists for this company" apart
-    from "the enrichment layer happened to be down right now"."""
+    from "the enrichment layer happened to be down right now".
+
+    2026-07-23: reads from the same per-debate-session cache `fundamentals`
+    populates (both tools source from get_company_intelligence() now that
+    `fundamentals` is Upstox-primary too) -- a debate calling both core tools
+    triggers exactly one real Upstox fetch, not two.
+    """
     try:
-        from engine.company_intelligence import get_company_intelligence
-        ci = await get_company_intelligence(symbol)
+        ci = await _get_company_intelligence_cached(symbol)
         meta = ci["metadata"]
         lines = [f"company_intelligence (status={meta['status']}, completeness={meta['completeness']})"]
 
@@ -621,9 +749,7 @@ _LLM_TOOLS = {
     "intraday_candles":     _tool_intraday_candles,
     "sector":               _tool_sector_analysis,
     "macro":                _tool_macro_environment,
-    "earnings":             _tool_earnings_report,
     "predict_candle":       _tool_predict_next_candle,
-    "screener_deep":        _tool_screener_deep,
     "expert_research":      _tool_expert_research,
     "company_intelligence": _tool_company_intelligence,
 }
@@ -675,8 +801,6 @@ class EvidenceCapability(str, Enum):
 # this table instead of naming tools directly.
 _TOOL_CAPABILITIES: dict[str, tuple[EvidenceCapability, ...]] = {
     "fundamentals":         (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
-    "earnings":             (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
-    "screener_deep":        (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION),
     "company_intelligence": (EvidenceCapability.FINANCIAL_PERFORMANCE, EvidenceCapability.VALUATION,
                               EvidenceCapability.SHAREHOLDING, EvidenceCapability.CORPORATE_ACTION,
                               EvidenceCapability.COMPANY_PROFILE, EvidenceCapability.SECTOR),
@@ -918,6 +1042,103 @@ def _deterministic_numeric_consistency_check(claim_text: str, evidence_pool: str
     return violations
 
 
+_CLAIM_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
+
+
+def _filter_claims_present_in_context(claims: list[str], candidate_context: str) -> list[str]:
+    """Drop any LLM fact-checker-flagged claim whose key numbers/facts
+    already appear in candidate_context (the canonical-event title/summary,
+    hub scores, etc. -- explicitly marked GIVEN, never-unsupported in the
+    fact-checker's own prompt above).
+
+    Added 2026-07-24 after confirming live (SBILIFE.NS) that the LLM layer
+    sometimes flags a claim as "unsupported" even when it's a verbatim
+    restatement of the given canonical-event headline -- e.g. "22% YoY
+    profit increase" flagged as fabricated despite candidate_context's own
+    title literally reading "Net profit rises 22% YoY to Rs 725 crore".
+    Re-running the identical candidate immediately after reproduced BOTH
+    outcomes (flagged once, clean the next run) -- non-deterministic
+    instruction-following, not a real hallucination catch.
+
+    This is a deterministic SAFETY NET on top of the LLM's own judgment,
+    not a replacement for it -- _deterministic_provenance_check/
+    _entity_overlap_check/_numeric_consistency_check above are unaffected
+    and remain the primary defense (per this module's own docstring, the
+    LLM layer was always "defense-in-depth, NOT the primary defense").
+
+    Numbers are the most reliable signal: a claim citing "22%" is almost
+    certainly about the same fact if candidate_context also contains "22%"
+    somewhere. Claims with no numbers fall back to a high-bar keyword-
+    overlap check. Known limitation: a coincidentally-matching number for
+    an unrelated metric could let a genuinely fabricated claim through --
+    accepted as a smaller risk than the confirmed false-positive rate,
+    since layers 1-3 still independently catch fabricated event types,
+    capability mismatches, and distorted figures regardless of this filter.
+    """
+    ctx_lower = candidate_context.lower()
+    ctx_numbers = set(_CLAIM_NUMBER_RE.findall(ctx_lower))
+    kept = []
+    for claim in claims:
+        claim_lower = claim.lower()
+        claim_numbers = set(_CLAIM_NUMBER_RE.findall(claim_lower))
+        if claim_numbers and claim_numbers.issubset(ctx_numbers):
+            continue  # every number in this claim is already a given fact
+        if not claim_numbers:
+            words = [w.strip(".,;:()'\"") for w in claim_lower.split() if len(w) > 4]
+            if words and sum(1 for w in words if w in ctx_lower) / len(words) >= 0.7:
+                continue
+        kept.append(claim)
+    return kept
+
+
+# Phrases that mark a sentence as a CONCLUSION drawn from already-given
+# data ("bearish earnings justify a short position") rather than a new
+# factual assertion. The fact-checker's own prompt already says "general
+# reasoning, opinion, or synthesis... is fine" -- this is a deterministic
+# backstop for when it flags one anyway.
+_SYNTHESIS_MARKER_TERMS = (
+    "justif", "support a", "supports a", "suggest", "indicat", "warrant",
+    "favor", "favour", "argue", "makes the case", "make the case",
+    "aligns with", "align with", "consistent with", "in line with",
+    "backs a", "backs the", "points to a", "points towards",
+)
+
+
+def _filter_opinion_synthesis_claims(claims: list[str]) -> list[str]:
+    """Drop LLM-flagged claims that are pure reasoning/synthesis rather than
+    a new factual assertion needing grounding.
+
+    Added 2026-07-24 after confirming live (ROUTE.NS) that the LLM fact-
+    checker layer sometimes flags conclusory sentences -- "Bearish earnings
+    justify short position.", "Current downtrend supports a short (SELL)
+    trade." -- as unsupported claims, even though its own prompt explicitly
+    exempts "general reasoning, opinion, or synthesis" and neither sentence
+    names a new fact.
+
+    Deliberately conservative to avoid opening a hole for a fabricated fact
+    dressed in opinion language ("insider buying justifies a bullish
+    position" citing fake insider buying): a claim is ONLY treated as pure
+    synthesis, and dropped, when ALL of these hold --
+      1. it contains no number (a real claimed figure could still be
+         fabricated even inside reasoning-shaped prose), AND
+      2. it names none of _EVENT_CLAIM_TERMS's tracked vocabulary (a
+         claimed partnership/acquisition/order-win etc. must still pass
+         _deterministic_entity_overlap_check regardless of phrasing), AND
+      3. it contains a clear synthesis-marker phrase.
+    A claim failing any of these stays subject to full verification.
+    """
+    kept = []
+    for claim in claims:
+        cl = claim.lower()
+        has_number = bool(_CLAIM_NUMBER_RE.search(cl))
+        has_event_term = any(term in cl for term in _EVENT_CLAIM_TERMS)
+        has_synthesis_marker = any(marker in cl for marker in _SYNTHESIS_MARKER_TERMS)
+        if not has_number and not has_event_term and has_synthesis_marker:
+            continue
+        kept.append(claim)
+    return kept
+
+
 async def _check_grounding(
     symbol: str, verdict_step: dict, tool_outputs: list[str], used_tools: list[str], candidate_context: str = "",
 ) -> dict:
@@ -1004,6 +1225,8 @@ async def _check_grounding(
         )
         parsed = _parse_first_json(resp) or {}
         llm_claims = [c for c in (parsed.get("unsupported_claims") or []) if c]
+        llm_claims = _filter_claims_present_in_context(llm_claims, candidate_context)
+        llm_claims = _filter_opinion_synthesis_claims(llm_claims)
     except Exception as exc:
         check_failed = True
         logger.debug(f"[agent/grounding_check] {symbol} LLM layer failed (fail-open on this layer only): {exc}")
@@ -1036,7 +1259,7 @@ async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None
     canonical event already exists to be reasoned over.
     """
     try:
-        from utils.llm import call_llm_chat
+        from utils.llm import call_llm_chat, get_last_reasoning
 
         has_canonical_event = getattr(candidate, "evidence", None) is not None
         available_tools = {k: v for k, v in _LLM_TOOLS.items()
@@ -1098,26 +1321,37 @@ You must follow this cycle until you have enough evidence to decide:
 ## Output Format
 
 ### During investigation (THINK + ACT):
+Respond with ONLY the JSON object below — no text before or after it.
 ```json
 {{
-  "thought": "<your reasoning about what you know and what you need next>",
+  "thought": "<your reasoning about what you know and what you need next, one or two sentences>",
   "action": "tool",
   "tool": "<tool_name>"
 }}
 ```
 
 ### When ready to decide (ONLY after using all tools):
-You MUST simulate a multi-agent debate inside the `thought` field before taking the final call.
+First, write your multi-agent debate as plain text — NOT inside JSON, so you don't need to
+escape quotes or line breaks. Start this section with the exact line `DEBATE:`.
+
+DEBATE:
+SWING_AGENT: <argues if it's a good swing trade using tool proofs>
+INTRADAY_AGENT: <argues if it's a good intraday trade using tool proofs>
+FINAL_JUDGE: <weighs both sides and states the final call and why>
+
+Then, on its own line after the debate, output ONLY the JSON object below — no text after it.
+Keep every field SHORT: the full reasoning already lives in the DEBATE section above, this JSON
+is just the structured verdict.
 ```json
 {{
-  "thought": "SWING_AGENT: <argues if it's a good swing trade using tool proofs> | INTRADAY_AGENT: <argues if it's a good intraday trade using tool proofs> | FINAL_JUDGE: <takes all discussions/proofs and makes the final call>",
+  "thought": "<one-sentence summary of the FINAL_JUDGE's call>",
   "action": "decide",
   "verdict": "TAKE" or "SKIP",
   "confidence": <integer 0-100>,
   "bull": "<strongest bullish argument, max 20 words>",
   "bear": "<strongest bearish argument, max 20 words>",
   "key_risk": "<single biggest risk, max 12 words>",
-  "thesis": "<if a CANONICAL_EVENT was given: state how it justifies this trade, in your own words, WITHOUT contradicting its category/materiality/direction. If no canonical event was given, your general investment thesis.>",
+  "thesis": "<if a CANONICAL_EVENT was given: state how it justifies this trade, in your own words, WITHOUT contradicting its category/materiality/direction. If no canonical event was given, your general investment thesis. Max 30 words.>",
   "market_confirmation": "POSITIVE" or "NEGATIVE" or "NEUTRAL"
 }}
 ```
@@ -1141,10 +1375,10 @@ You MUST simulate a multi-agent debate inside the `thought` field before taking 
   - Swing: Extended runner (overbought), no catalyst, negative earnings surprise, bad sector momentum, or **if recent daily price history/chart data is completely unavailable to verify the trend**.
 
 ## Critical Rules (Must Follow)
-1. **Never** output more than one JSON per response.
+1. **Never** output more than one JSON object per response.
 2. **Never** call a tool without a `thought` explaining *why* you need it.
 3. **Never** decide without sufficient investigation. You MUST use at least {len(core_tools)} core tools ({", ".join(core_tools)}) before you are allowed to output a verdict.
-4. **Always** include your reasoning in `thought`.
+4. **When deciding**, put your full reasoning in the plain-text DEBATE section, not inside the JSON — the JSON's `thought` field is only a one-sentence summary.
 5. **Embrace Intraday Shorts:** Do not hesitate to approve SELL side (shorting) setups if momentum is bleeding.
 
 Now, based on the user's context below, follow your workflow and produce your final JSON output.
@@ -1156,7 +1390,11 @@ Now, based on the user's context below, follow your workflow and produce your fi
         ]
         used: list[str] = []
         tool_outputs: list[str] = []
+        tool_results: dict[str, str] = {}
         grounding_retries = 0
+        _fundamentals_cache_var.set({})
+        _company_intelligence_cache_var.set({})
+        _last_tooluse_rejection_reason.set(None)  # clear per-call so a stale reason never leaks
         for _ in range(15):  # max 15 LLM rounds (≤14 tool calls + a decide)
             # gpt-oss/Mantle occasionally returns empty content (reasoning
             # consumed the whole token budget) or a transport-level error
@@ -1171,7 +1409,14 @@ Now, based on the user's context below, follow your workflow and produce your fi
             # re-trigger a whole new evaluation.
             step = None
             for attempt in range(3):
-                resp = await call_llm_chat(messages, max_tokens=32768, temperature=0.2)
+                # gpt-oss-120b's real Bedrock ceiling is 16,384 output tokens
+                # (confirmed 2026-07-24 against AWS's model card) -- this used
+                # to request 32768, ~2x what the model can ever actually get,
+                # which _mantle_budget() now clamps anyway but was misleading
+                # to read here. See utils/config.py::MANTLE_MAX_OUTPUT_TOKENS.
+                resp = await call_llm_chat(
+                    messages, max_tokens=settings.MANTLE_MAX_OUTPUT_TOKENS, temperature=0.2,
+                )
                 step = _parse_first_json(resp)
                 if step:
                     break
@@ -1187,15 +1432,32 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     f"[agent/llm_tooluse] {symbol}: giving up after 3 consecutive "
                     "empty/unparseable LLM responses"
                 )
+                _last_tooluse_rejection_reason.set(
+                    "LLM returned 3 consecutive empty/unparseable responses"
+                )
                 return None
             if step.get("action") == "tool":
                 tool = step.get("tool")
                 messages.append({"role": "assistant", "content": resp})
                 if tool in available_tools:
-                    result = await available_tools[tool](symbol)
-                    used.append(tool)
-                    tool_outputs.append(f"[{tool}] {result}")
-                    messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
+                    if tool in tool_results:
+                        # 2026-07-23 fix: confirmed live cases (e.g.
+                        # company_intelligence called twice, 8 rounds apart)
+                        # where the model re-requests a tool already used this
+                        # session, burning a full round on identical data.
+                        # Feed back the same result instead of re-executing.
+                        result = tool_results[tool]
+                        messages.append({"role": "user", "content": (
+                            f"TOOL[{tool}] → You already called `{tool}` this session — "
+                            f"repeating it returns the same data, shown again below. Use a "
+                            f"different tool or decide.\n{result}"
+                        )})
+                    else:
+                        result = await available_tools[tool](symbol)
+                        tool_results[tool] = result
+                        used.append(tool)
+                        tool_outputs.append(f"[{tool}] {result}")
+                        messages.append({"role": "user", "content": f"TOOL[{tool}] → {result}\nContinue or decide."})
                 elif tool in _NEWS_AUTHORITY_TOOLS:
                     messages.append({"role": "user", "content": (
                         f"TOOL[{tool}] → BLOCKED: not available for this candidate — a canonical "
@@ -1207,6 +1469,27 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     messages.append({"role": "user", "content": f"TOOL[{tool}] → unknown tool. Available tools: {list(available_tools)}"})
                 continue
             if step.get("action") == "decide" or "verdict" in step:
+                # Capture the decide call's OWN reasoning channel now, before
+                # _check_grounding() (below) potentially makes its own LLM
+                # call and overwrites the get_last_reasoning() contextvar --
+                # otherwise a trade's persisted "model_reasoning" could
+                # silently be the grounding checker's reasoning, not the
+                # actual trading decision's.
+                #
+                # Nova Pro (2026-07-24 provider switch) has no separate
+                # reasoning channel, so get_last_reasoning() is always None
+                # for it -- fall back to the plain-text DEBATE section the
+                # prompt now asks for ahead of the decide JSON (see the
+                # sys_prompt's "Output Format" section), so the audit trail
+                # (confidence_factors["model_reasoning"] downstream) doesn't
+                # go silently empty just because the provider changed.
+                decide_reasoning = get_last_reasoning()
+                if not decide_reasoning and resp:
+                    json_start = resp.find("{")
+                    prose = resp[:json_start].strip() if json_start > 0 else ""
+                    if prose:
+                        decide_reasoning = prose
+
                 # Force the agent to actually call every CORE tool by name. The
                 # previous check (len(set(used)) < 5) only counted how many
                 # DISTINCT tools were used — any 5 satisfied it, so a model
@@ -1233,6 +1516,10 @@ Now, based on the user's context below, follow your workflow and produce your fi
                             f"[agent/llm_tooluse] {symbol} rejected — ungrounded claims "
                             f"persisted after retry: {grounding['unsupported_claims']}"
                         )
+                        claims_preview = "; ".join(str(c) for c in grounding["unsupported_claims"][:2])
+                        _last_tooluse_rejection_reason.set(
+                            f"Ungrounded claims persisted after retry: {claims_preview}"
+                        )
                         return None
                     grounding_retries += 1
                     messages.append({"role": "assistant", "content": resp})
@@ -1246,10 +1533,13 @@ Now, based on the user's context below, follow your workflow and produce your fi
 
                 step["tools_used"] = used
                 step["grounding"] = grounding
+                step["model_reasoning"] = decide_reasoning
                 return step
+        _last_tooluse_rejection_reason.set("Exhausted all rounds without reaching a decision (round-exhaustion)")
         return None  # ran out of rounds without deciding
     except Exception as exc:
         logger.debug(f"[agent/llm_tooluse] {symbol} tool-use failed: {exc}")
+        _last_tooluse_rejection_reason.set(f"Unexpected error during tool-use: {exc}")
         return None
 
 

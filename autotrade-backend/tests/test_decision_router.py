@@ -31,6 +31,7 @@ from engine.decision_router import (
     StrategyFamily,
     TradeIntent,
     TradeMode,
+    _intent_to_signal,
     authorize_trade_intent,
 )
 
@@ -413,3 +414,55 @@ class TestEquityRiskGateAndApproval:
         assert result.approved is True
         assert result.reason == "approved"
         assert result.signal is not None
+
+
+class TestIntentToSignalTraceability:
+    """Regression guard for the 2026-07-22 bug: TradeIntent computed
+    target_2/atr (via _compute_news_trade_levels) but never threaded them
+    through to TradingSignal, so open_paper_trade()'s `target_2 = signal.
+    target_2 or target_1` fallback silently collapsed every News-Only
+    trade's final target to target_1 -- the position's hard take-profit
+    coincided with T1, so "ride the second half to T2" never actually
+    happened. Also covers event_id/evidence_ids, needed for the T1-
+    reanalysis re-entry feature to trace a re-entry back to its origin event."""
+
+    def test_target_2_and_atr_carried_through(self):
+        intent = make_intent(target_2=130.0, atr=2.5)
+        signal = _intent_to_signal(intent)
+        assert signal.target_2 == 130.0
+        assert signal.atr == 2.5
+
+    def test_default_target_2_and_atr_are_zero_not_missing(self):
+        intent = make_intent()
+        signal = _intent_to_signal(intent)
+        assert signal.target_2 == 0.0
+        assert signal.atr == 0.0
+
+    def test_event_id_and_evidence_ids_carried_through(self):
+        intent = make_intent(event_id=2848, evidence_ids=["2848"])
+        signal = _intent_to_signal(intent)
+        assert signal.event_id == 2848
+        assert signal.evidence_ids == ["2848"]
+
+    def test_none_event_id_stays_none(self):
+        intent = make_intent(event_id=None, evidence_ids=[])
+        signal = _intent_to_signal(intent)
+        assert signal.event_id is None
+        assert signal.evidence_ids == []
+
+    def test_confidence_factors_carried_through(self):
+        # 2026-07-22, second incident: a SECOND_ORDER cascade's confidence was
+        # found hardcoded to a fake 80% with zero record of why -- this field
+        # is what lets the UI show the real breakdown instead of a bare number.
+        factors = {"kind": "second_order_formula", "confidence": 42.0, "relationship_strength": 0.7}
+        intent = make_intent(confidence_factors=factors)
+        signal = _intent_to_signal(intent)
+        assert signal.confidence_factors == factors
+        # must be a copy, not the same dict instance, so a caller mutating one
+        # side later can't silently corrupt the other
+        assert signal.confidence_factors is not factors
+
+    def test_default_confidence_factors_is_empty_not_missing(self):
+        intent = make_intent()
+        signal = _intent_to_signal(intent)
+        assert signal.confidence_factors == {}

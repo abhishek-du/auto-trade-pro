@@ -58,6 +58,7 @@ def test_api_item_out_sets_high_impact_flag():
         id=1, headline="Sensex, Nifty tumble over 2% as Middle East tensions spook markets",
         source="Reuters", url=None, sentiment="negative", score=-0.86,
         tickers_affected=None, published_at=None, crawled_at=dt.datetime.utcnow(),
+        category=None, company=None,
     )
     out = _item_out(item)
     assert out.high_impact is True
@@ -66,5 +67,6 @@ def test_api_item_out_sets_high_impact_flag():
         id=2, headline="Penny stock rallies 8% for second straight session",
         source="Mint", url=None, sentiment="positive", score=0.86,
         tickers_affected=None, published_at=None, crawled_at=dt.datetime.utcnow(),
+        category=None, company=None,
     )
     assert _item_out(routine).high_impact is False

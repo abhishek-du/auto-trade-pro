@@ -119,6 +119,12 @@ async def init_db() -> None:
         "ALTER TABLE paper_trades   ALTER COLUMN symbol TYPE VARCHAR(50)",
         "ALTER TABLE open_positions ALTER COLUMN symbol TYPE VARCHAR(50)",
         "ALTER TABLE simulation_logs ALTER COLUMN symbol TYPE VARCHAR(50)",
+        # Strategy source label (2026-07-24) — parallel Pre-Event Expectation
+        # Gap strategy attribution. Nullable; existing rows stay NULL ("AI"),
+        # the new strategy writes "AI Predict". Additive, backward-compatible.
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS source VARCHAR(20)",
+        "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS source VARCHAR(20)",
+        "CREATE INDEX IF NOT EXISTS ix_pt_source ON paper_trades (source)",
         # Trade attribution columns (0003_trade_attribution) — entry snapshot
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(40)",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS regime_at_entry VARCHAR(20)",
@@ -140,6 +146,7 @@ async def init_db() -> None:
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mae_pct FLOAT",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS mae_r FLOAT",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS max_open_profit FLOAT",
+        "ALTER TABLE news_items ADD COLUMN IF NOT EXISTS news_metadata JSONB",
         # Indexes for attribution filters
         "CREATE INDEX IF NOT EXISTS ix_pt_strategy_name  ON paper_trades (strategy_name)",
         "CREATE INDEX IF NOT EXISTS ix_pt_regime_entry   ON paper_trades (regime_at_entry)",

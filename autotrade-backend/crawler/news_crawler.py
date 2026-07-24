@@ -29,6 +29,7 @@ from crawler.macro_crawler import fetch_rbi_press_releases, fetch_pib_releases, 
 from crawler.exchange_crawler import fetch_bulk_deals, fetch_block_deals
 from crawler.media_crawler import fetch_financial_media
 from crawler.event_pipeline import process_latest_events
+from engine.event_classifier import classify_event
 
 # Ensure NLTK vader_lexicon is available. Used as fallback by SentimentAnalyser.
 
@@ -408,6 +409,78 @@ async def fetch_nse_corporate_announcements(limit: int = 50) -> list[dict]:
         })
 
     logger.info(f"[news] NSE corporate-announcements: {len(results)}/{len(data or [])} high-impact")
+    return results
+
+
+async def fetch_nse_announcements_for_symbol(symbol: str, date_str: str) -> list[dict]:
+    """Symbol-scoped, date-scoped NSE corporate-announcements query.
+
+    fetch_nse_corporate_announcements() above queries NSE's *unfiltered*
+    market-wide feed, which NSE hard-caps at exactly 20 items regardless of
+    our own `limit` parameter -- confirmed across 2,892 consecutive poll
+    cycles in the 2026-07-22 forensic audit
+    (docs/NEWS_INGESTION_LATENCY_FORENSIC_AUDIT.md). Re-added 2026-07-23 as
+    the on-demand catalyst-discovery step for engine/anomaly_detector.py's
+    INVESTIGATE-tier candidates only -- unlike the earlier (reverted)
+    always-on poller, this is called for a handful of anomaly-flagged
+    symbols per cycle at most, not continuously for a fixed watchlist.
+
+    This function queries NSE's *symbol-scoped* endpoint instead
+    (`&symbol=X&from_date=Y&to_date=Y`), which returns that company's
+    complete announcement history for the date, unaffected by the
+    market-wide ceiling -- verified live against NSE's own API.
+
+    date_str must be NSE's own format, "DD-MM-YYYY".
+    Returns the same dict shape as fetch_nse_corporate_announcements(), so
+    callers can treat results from either function identically.
+    """
+    from crawler.fii_dii_crawler import BROWSER_HEADERS
+
+    bare = symbol.replace(".NS", "").replace(".BO", "").strip().upper()
+    if not bare:
+        return []
+
+    url = (
+        "https://www.nseindia.com/api/corporate-announcements"
+        f"?index=equities&symbol={bare}&from_date={date_str}&to_date={date_str}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            await client.get("https://www.nseindia.com", headers=BROWSER_HEADERS)
+            await asyncio.sleep(1.0)
+            r = await client.get(url, headers={
+                **BROWSER_HEADERS,
+                "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+            })
+            if r.status_code != 200:
+                logger.debug(f"[news] NSE symbol-scoped fetch for {bare} returned {r.status_code}")
+                return []
+            data = r.json()
+    except Exception as exc:
+        logger.warning(f"[news] NSE symbol-scoped fetch failed for {bare}: {exc}")
+        return []
+
+    results: list[dict] = []
+    for item in (data or []):
+        cat_symbol = (item.get("symbol") or "").strip()
+        category = (item.get("desc") or "").strip()
+        if not cat_symbol or not category:
+            continue
+        if not any(kw in category.lower() for kw in _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES):
+            continue
+        company = item.get("sm_name", "") or cat_symbol
+        summary = (item.get("attchmntText") or "").strip()
+        results.append({
+            "seq_id":       str(item.get("seq_id") or ""),
+            "symbol":       f"{cat_symbol}.NS",
+            "company":      company,
+            "category":     category,
+            "summary":      summary,
+            "headline":     f"{company}: {category} — {summary}"[:300] if summary else f"{company}: {category}",
+            "pdf_url":      item.get("attchmntFile", ""),
+            "published_at": _parse_nse_announcement_dt(item.get("an_dt")),
+            "source":       "NSE-Announcements",
+        })
     return results
 
 
@@ -1250,6 +1323,13 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             if item.get("tickers_affected")
             else extract_tickers_from_headline(item["headline"])
         )
+        
+        metadata_dict = None
+        if abs(sent["score"]) > 0.6:
+            classification = await classify_event(item["headline"], item.get("summary", ""))
+            if classification:
+                metadata_dict = classification.model_dump()
+            
         row = NewsItem(
             headline=item["headline"],
             source=item["source"],
@@ -1257,6 +1337,7 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             sentiment=sent["sentiment"],
             score=sent["score"],
             tickers_affected=tickers or None,
+            news_metadata=metadata_dict,
             published_at=item.get("published_at"),
         )
         session.add(row)

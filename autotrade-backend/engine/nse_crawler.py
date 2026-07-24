@@ -235,6 +235,71 @@ def _parse_index_membership(data: dict) -> list[str]:
     return [i.get("indexName", "") for i in indices if i.get("indexName")]
 
 
+# ── Board-meeting batch fetch (pre-event catalyst sourcing) ────────────────────
+
+# NSE board-meeting dates come back as "DD-Mon-YYYY" (date only, no time) --
+# distinct from the corporate-announcements feed's "DD-Mon-YYYY HH:MM:SS"
+# format parsed by crawler/news_crawler.py::_parse_nse_announcement_dt. This
+# needs live verification against a real NSE response before being trusted;
+# callers should fall back gracefully when parsing returns None.
+# Generic scheduled-event-discovery helper (no strategy-specific caller yet).
+def _parse_board_meeting_date(raw: str | None) -> "datetime.date | None":
+    if not raw:
+        return None
+    from datetime import datetime as _dt
+    for fmt in ("%d-%b-%Y", "%d-%b-%Y %H:%M:%S"):
+        try:
+            return _dt.strptime(raw.strip(), fmt).date()
+        except (ValueError, AttributeError):
+            continue
+    return None
+
+
+async def fetch_board_meetings_for_symbols(
+    symbols: list[str], pace_seconds: float = 0.6,
+) -> dict[str, list[dict]]:
+    """Batch board-meeting fetch across many symbols, reusing ONE NSE session
+    (warm-up cookies fetched once) instead of one warm-up per symbol -- the
+    per-symbol pattern used by fetch_nse_deep()/fetch_nse_announcements_for_symbol()
+    in crawler/news_crawler.py is fine for a handful of anomaly-flagged
+    symbols but too slow/heavy for a ~150-200 symbol universe sweep.
+
+    Each returned item: {"symbol", "meeting_date": date|None, "raw_date": str,
+    "purpose": str}. Never raises -- a per-symbol failure just yields an
+    empty list for that symbol; a total session failure yields {} for
+    everything.
+    """
+    out: dict[str, list[dict]] = {}
+    try:
+        client = await _get_nse_session()
+    except Exception as exc:
+        logger.warning(f"[nse_crawler] board-meeting batch: session init failed: {exc}")
+        return out
+
+    try:
+        for sym in symbols:
+            bare = sym.replace(".NS", "").replace(".BO", "").upper()
+            raw = await _api_get(client, f"/api/corp-info?symbol={bare}&corpType=boardMeeting&market=equities")
+            items = (raw or {}).get("data") or (raw or {}).get("boardMeetings") or []
+            parsed = []
+            for item in items[:5]:
+                raw_date = item.get("meetingDate", "") or item.get("bm_date", "")
+                parsed.append({
+                    "symbol":       sym,
+                    "meeting_date": _parse_board_meeting_date(raw_date),
+                    "raw_date":     raw_date,
+                    "purpose":      item.get("purpose", "") or item.get("bm_purpose", ""),
+                })
+            out[sym] = parsed
+            await asyncio.sleep(pace_seconds)
+    except Exception as exc:
+        logger.warning(f"[nse_crawler] board-meeting batch failed partway: {exc}")
+    finally:
+        await client.aclose()
+
+    return out
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 async def fetch_nse_deep(symbol_bare: str) -> dict:

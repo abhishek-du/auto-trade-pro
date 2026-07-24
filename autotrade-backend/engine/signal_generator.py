@@ -76,6 +76,27 @@ class TradingSignal:
     # validate_signal() skips the S&R gate when either field is 0.
     sr_support:         float            = 0.0
     sr_resistance:      float            = 0.0
+    # News-Only traceability (2026-07-22, T1-reanalysis/re-entry feature):
+    # the canonical CausalEvent.id and evidence_ids this signal traces back
+    # to, when it came from a TradeIntent (see decision_router._intent_to_
+    # signal()). Persisted into PaperTrade.indicator_snapshot["trade_mgmt"]
+    # by open_paper_trade() so a later T1-reversal-exit's re-entry watch can
+    # re-authorize a fresh TradeIntent against the SAME canonical event
+    # instead of needing a brand-new news trigger (NO EVENT -> NO TRADE
+    # still applies to the re-entry; this is what lets it be satisfied).
+    # None/empty for non-event-driven signals (technical/F&O) -- unaffected.
+    event_id:           int | None       = None
+    evidence_ids:       list[str]        = field(default_factory=list)
+    # Confidence transparency (2026-07-22): the full breakdown behind
+    # `confidence` -- LLM bull/bear/key_risk/thesis/tools_used/grounding for a
+    # DIRECT verdict, or the event_strength/relationship_strength/
+    # company_exposure/market_confirmation factors for a SECOND_ORDER cascade.
+    # Persisted into PaperTrade.indicator_snapshot["confidence_factors"] by
+    # open_paper_trade() so the UI can show WHY this number, not just the
+    # number -- see TradeIntent.confidence_factors's docstring for the
+    # incident that made this non-optional (a cascade trade's confidence was
+    # found hardcoded to a fake 80%, invisible until the raw code was read).
+    confidence_factors: dict             = field(default_factory=dict)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

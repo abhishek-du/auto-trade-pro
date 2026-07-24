@@ -263,6 +263,82 @@ async def sync_zerodha_holdings(db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, detail=result["error"])
     return result
 
+@router.post("/sync-upstox")
+async def sync_upstox_holdings(db: AsyncSession = Depends(get_db)):
+    """Mirror live Upstox Demat holdings into a TrackerPortfolio named 'Upstox Demat'."""
+    from crawler.upstox_data import get_holdings
+    try:
+        raw = await get_holdings()
+    except Exception as exc:
+        raise HTTPException(500, detail=str(exc))
+    
+    if not isinstance(raw, list):
+        raise HTTPException(500, detail="Failed to fetch Upstox holdings")
+
+    import uuid
+    from db.models import TrackerPortfolio, TrackerHolding
+    import datetime
+    
+    res = await db.execute(
+        select(TrackerPortfolio).where(TrackerPortfolio.name == "Upstox Demat")
+    )
+    portfolio = res.scalar_one_or_none()
+    if portfolio is None:
+        portfolio = TrackerPortfolio(
+            id=str(uuid.uuid4()),
+            name="Upstox Demat",
+            description="Auto-synced from Upstox",
+        )
+        db.add(portfolio)
+        await db.flush()
+
+    today = datetime.datetime.utcnow().date()
+    synced = 0
+
+    for h in raw:
+        sym_bare = str(h.get("tradingsymbol", h.get("company_name", ""))).strip()
+        if not sym_bare:
+            continue
+        
+        sym_nse = sym_bare if "." in sym_bare else f"{sym_bare}.NS"
+        qty     = float(h.get("quantity", 0) or 0)
+        avg_prc = float(h.get("average_price", 0) or 0)
+        
+        if qty <= 0 or avg_prc <= 0:
+            continue
+
+        res = await db.execute(
+            select(TrackerHolding).where(
+                TrackerHolding.portfolio_id == portfolio.id,
+                TrackerHolding.symbol == sym_nse,
+            )
+        )
+        holding = res.scalar_one_or_none()
+        if holding is None:
+            holding = TrackerHolding(
+                portfolio_id=portfolio.id,
+                symbol=sym_nse,
+                company_name=sym_bare,
+                sector="Upstox Demat",
+                quantity=qty,
+                avg_buy_price=avg_prc,
+                first_buy_date=today,
+                notes="source:upstox",
+            )
+            db.add(holding)
+        else:
+            holding.quantity      = qty
+            holding.avg_buy_price = avg_prc
+            holding.notes         = "source:upstox"
+        synced += 1
+
+    await db.commit()
+    return {
+        "synced": synced,
+        "portfolio_id": portfolio.id,
+        "portfolio_name": "Upstox Demat",
+    }
+
 
 # ── Stock search ──────────────────────────────────────────────────────────────
 
