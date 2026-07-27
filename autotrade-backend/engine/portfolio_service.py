@@ -583,10 +583,28 @@ def _proper_case_name(raw: str) -> str:
     return " ".join(out)
 
 
+
+# Known common-name/ticker mismatches where NEITHER substring nor token
+# matching can work: the popular short name isn't a substring of the
+# official listed name, and the real NSE tradingsymbol is unrelated to the
+# short name too (e.g. "HPCL" -> tradingsymbol "HINDPETRO", official name
+# "HINDUSTAN PETROLEUM CORP" -- "HPCL" appears in neither). Root-caused
+# 2026-07-27: HPCL (a large-cap, frequently-in-the-news company) was being
+# dropped as "no NSE instrument match" every time despite being genuinely
+# resolvable, because this is a pure alias, not a fuzzy-matching problem —
+# no amount of token/substring tolerance derives "HINDPETRO" from "HPCL".
+# Deliberately small and explicit (not a general acronym-deriver) — add an
+# entry here only after confirming a real live drop, the way HPCL was found.
+_KNOWN_TICKER_ALIASES: dict[str, str] = {
+    "HPCL": "HINDPETRO",
+}
+
+
 async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
     """Search NSE+BSE stocks.
 
     Priority:
+      0. Known alias map (exact, hardcoded common-name -> tradingsymbol)
       1. kite_instruments table (full universe — if populated)
       2. candles table (our actual crawl data — always available)
     """
@@ -598,6 +616,22 @@ async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
         return []
 
     q_upper   = q.upper()
+
+    _alias = _KNOWN_TICKER_ALIASES.get(q_upper)
+    if _alias:
+        row = (await session.execute(
+            select(KiteInstrument).where(
+                KiteInstrument.tradingsymbol == _alias,
+                KiteInstrument.instrument_type == "EQ",
+            ).order_by(case((KiteInstrument.segment == "NSE", 1), else_=2)).limit(1)
+        )).scalars().first()
+        if row:
+            suffix = ".NS" if row.segment == "NSE" else ".BO"
+            return [{
+                "name": _proper_case_name(row.name) or row.tradingsymbol,
+                "symbol": f"{row.tradingsymbol}{suffix}", "ticker": row.tradingsymbol,
+                "exchange": row.segment, "sector": NSE_SECTOR_MAP.get(f"{row.tradingsymbol}.NS", "Other"),
+            }]
     q_pattern = f"%{q_upper}%"
     q_prefix  = f"{q_upper}%"
 
