@@ -4,7 +4,7 @@ import {
   Database, BrainCircuit, ListFilter, Bot, ShoppingCart,
   Bell, Clock, CheckCircle2, XCircle, AlertCircle,
   RefreshCw, ChevronRight, Wifi, WifiOff, Newspaper,
-  Gauge, ShieldCheck, FileSearch,
+  Gauge, ShieldCheck, FileSearch, Sparkles, Ban, CalendarClock,
 } from 'lucide-react'
 import { apiFetch, getIndiaMarketStatus } from '../api/client'
 
@@ -240,11 +240,14 @@ function SmallNode({ Icon, title, subtitle, accent = 'cyan', timing, badge }) {
 }
 
 // ── decision-path card (Path A / B / C) ────────────────────────────────────────
-function PathCard({ letter, title, Icon, accent, active, timing, points }) {
+function PathCard({ letter, title, Icon, accent, active, timing, points, inactiveLabel = 'DECISION-ONLY — NOT WIRED' }) {
   const cfg = {
     emerald: { border: 'border-emerald-500/30', bg: 'rgba(16,185,129,0.04)', icon: 'text-emerald-400', badge: 'bg-emerald-500/15 text-emerald-400' },
     blue:    { border: 'border-blue-500/30',    bg: 'rgba(59,130,246,0.04)', icon: 'text-blue-400',    badge: 'bg-blue-500/15 text-blue-400' },
     amber:   { border: 'border-amber-500/30',   bg: 'rgba(245,158,11,0.04)', icon: 'text-amber-400',   badge: 'bg-amber-500/15 text-amber-400' },
+    purple:  { border: 'border-purple-500/30',  bg: 'rgba(168,85,247,0.04)', icon: 'text-purple-400',  badge: 'bg-purple-500/15 text-purple-400' },
+    sky:     { border: 'border-sky-500/30',     bg: 'rgba(14,165,233,0.04)', icon: 'text-sky-400',     badge: 'bg-sky-500/15 text-sky-400' },
+    slate:   { border: 'border-slate-600/50',   bg: 'rgba(148,163,184,0.03)', icon: 'text-slate-400',  badge: 'bg-slate-500/15 text-slate-400' },
   }[accent]
   return (
     <div className={`flex-1 min-w-0 rounded-2xl border ${cfg.border} p-4`} style={{ background: cfg.bg }}>
@@ -256,7 +259,7 @@ function PathCard({ letter, title, Icon, accent, active, timing, points }) {
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
         <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap ${active ? cfg.badge : 'bg-slate-500/15 text-slate-400'}`}>
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${active ? `${cfg.icon.replace('text-', 'bg-')} animate-pulse` : 'bg-slate-500'}`} />
-          {active ? 'WIRED TO EXECUTION' : 'DECISION-ONLY — NOT WIRED'}
+          {active ? 'WIRED TO EXECUTION' : inactiveLabel}
         </span>
         <span className="flex items-center gap-1 text-[10px] text-muted"><Clock size={9} className="shrink-0" /> {timing}</span>
       </div>
@@ -564,7 +567,7 @@ export default function PipelineFlow() {
         <Node
           Icon={ListFilter}
           title="Master Intelligence Scores"
-          subtitle="Live DB table — not a separately rebuilt shortlist. Both decision paths below query it directly."
+          subtitle="Live DB table — not a separately rebuilt shortlist. Paths A/B read it directly (context only — hard-blocked from executing)."
           timing="latest scoring cycle"
           accent="amber"
           wide
@@ -579,39 +582,77 @@ export default function PipelineFlow() {
 
       <BranchArrow active={isOpen} />
 
-      {/* ── STEP 6: three semi-independent decision paths ────────────────────── */}
+      {/* ── STEP 6: five semi-independent decision paths ─────────────────────── */}
       <p className="text-[11px] text-muted uppercase tracking-widest text-center mb-1">
-        Three semi-independent engines can each place an order — not one linear funnel
+        Five semi-independent engines evaluate candidates — only three may place an order
       </p>
-      <div className="flex flex-col sm:flex-row gap-3">
+      <div className="rounded-xl border border-rose-500/25 bg-rose-500/5 px-4 py-2.5 mb-1 flex items-start gap-2">
+        <Ban size={14} className="text-rose-400 shrink-0 mt-0.5" />
+        <p className="text-[11px] text-rose-200/90 leading-snug">
+          <strong className="text-rose-300">News-Only architecture hard-block (2026-07-21):</strong> TECHNICAL-family
+          trade origination (Paths A &amp; B below) is blocked in <code className="bg-slate-800 px-1 rounded">engine/decision_router.py::authorize_trade_intent()</code> —
+          the single gate every trade-creation call site funnels through. Hub scoring itself is <em>not</em> deleted —
+          it keeps feeding timing/sizing/risk context to the News-strategy candidates (Path C) — it just can no longer
+          independently originate and execute a trade of its own.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-3">
         <PathCard
-          letter="A" title="Master Intelligence Cycle" Icon={BrainCircuit} accent="emerald" active
+          letter="A" title="Master Intelligence Cycle" Icon={BrainCircuit} accent="slate" active={false}
+          inactiveLabel="HARD-BLOCKED — NEWS-ONLY PIVOT"
           timing="every 15 min, inline with scoring"
           points={[
-            'Same cycle that scores the universe also closes SL/TP hits, evaluates its own top ~10 candidates, and executes — no handoff to a separate loop.',
-            'DecisionEngine.fuse() → LLM reasoning gate → RiskManagerAgent.can_take_trade() → AgentExecutionManager.execute()',
-            'Daily new-entry cap (AGENT_MAX_NEW_ENTRIES_DAY). Logged as PATH: A_inline.',
+            'Same cycle that scores the universe also closes SL/TP hits and evaluates its own top ~10 candidates — but StrategyFamily.TECHNICAL is hard-blocked at authorize_trade_intent() and can never reach EXECUTED_PAPER/EXECUTED_LIVE.',
+            'Its scoring output (MasterIntelligenceScore) still feeds context to the News/Pre-Event/Direct-News candidates below — the block is on independent origination, not on the scoring logic itself.',
           ]}
         />
         <PathCard
-          letter="B" title="India Trade Loop" Icon={Bot} accent="blue" active
+          letter="B" title="India Trade Loop" Icon={Bot} accent="slate" active={false}
+          inactiveLabel="HARD-BLOCKED — NEWS-ONLY PIVOT"
           timing="every 60s, 09:15–16:00 IST"
           points={[
-            'Queries MasterIntelligenceScore directly (last 45 min) — the same table Path A scores, read independently.',
-            'Runs its own validate_signal / calculate_position_size and its own LLM reasoning-gate call before opening a paper trade.',
-            'Logged as PATH: B_live_loop — instrumented side-by-side with Path A for comparison, not dead code.',
+            'Queries MasterIntelligenceScore directly (last 45 min) — same table Path A scores, read independently.',
+            'Also StrategyFamily.TECHNICAL — same hard-block. Still runs (validate_signal, position sizing, LLM reasoning) for instrumentation/comparison; its own TradeIntent never gets past authorize_trade_intent().',
           ]}
         />
         <PathCard
-          letter="C" title="V4 Event-Driven Discovery Engine" Icon={Newspaper} accent="amber" active={true}
-          timing="24/7, running as a systemd --user service"
+          letter="C" title="News Strategy (Event-Driven)" Icon={Newspaper} accent="amber" active
+          timing="24/7, systemd --user service"
           points={[
-            'Clustering & Deduplication: difflib merges multiple articles (e.g., ET, Mint) into a single Master Event to prevent score inflation.',
-            'LLM Categorization: Extracts subcategories, impact horizon, decay half-life, bullish/bearish flags, and mapped entities.',
-            'Surprise Engine: Scores the catalyst strength (1-100) vs expectations. Only top clustered candidates proceed to filtering.',
-            'Execution: On TAKE, routes through validate_signal() using technicals strictly as a timing filter before paper trading.',
+            'Clustering & dedup (difflib) merges multiple articles into one canonical CausalEvent; classify_event() extracts category/impact/confidence — retries on a circuit-breaker window AND on malformed JSON (2026-07-27) so a transient LLM blip never silently drops a material catalyst.',
+            'llm_tooluse_candidate() — ReAct tool-use debate (price action, market depth, fundamentals, options, sector, macro, company intel) → SWING/INTRADAY agent debate → verdict.',
+            'Grounding check: hallucinated claims are caught; with a real canonical event backing the thesis, a persistent-but-peripheral grounding failure soft-fails (confidence haircut) instead of hard-rejecting a genuinely-sourced trade (2026-07-27).',
+            'StrategyFamily.EVENT_DRIVEN — "NO EVENT → NO TRADE" enforced at the gate; on TAKE, routes through validate_signal() before paper execution.',
           ]}
         />
+        <PathCard
+          letter="D" title="Pre-Event Expectation Gap" Icon={CalendarClock} accent="purple" active
+          timing="every 15 min, 24/7 scan · entries only before 15:20 IST"
+          points={[
+            'Independent of the News pipeline — scans scheduled corporate events (earnings, board meetings) 1-15 days out, nowcasts the likely surprise from sector-specific adapters + point-in-time financials (anti-lookahead enforced).',
+            'StrategyFamily.PRE_EVENT — its own 3-flag gate (PRE_EVENT_GAP_ENABLED/PAPER_TRADING/LIVE_TRADING). Trades tagged source="AI Predict" — distinct badge on the Trades page.',
+          ]}
+        />
+        <PathCard
+          letter="E" title="Direct News" Icon={Zap} accent="sky" active
+          timing="fires alongside Path C, on the same classified event"
+          points={[
+            'Added 2026-07-27 after a live-validated observation: event-intelligence-tagged BULLISH/BEARISH stocks were moving in the classified direction regardless of impact tier, while Path C\'s technical-confirmation requirement was skipping many correct-direction candidates.',
+            'Trades DIRECTLY off classify_event()\'s materiality + confidence — no LLM debate, no grounding gate. Requires HIGH/MEDIUM materiality + confidence ≥65%. Sized conservatively (0.5% risk vs the normal 1-2% band).',
+            'StrategyFamily.DIRECT_NEWS — own 3-flag gate, source="Direct News". Runs in parallel to Path C on the same event; the duplicate-open-position guard prevents a double entry.',
+          ]}
+        />
+      </div>
+      <div className="rounded-xl border border-cyan/20 bg-cyan/5 px-4 py-2.5 flex items-start gap-2">
+        <ShieldCheck size={14} className="text-cyan shrink-0 mt-0.5" />
+        <p className="text-[11px] text-cyan-100/90 leading-snug">
+          <strong className="text-cyan">Market-hours gate (2026-07-27):</strong> every EQUITY TradeIntent, from every
+          strategy family, now requires <code className="bg-slate-800 px-1 rounded">is_nse_market_open()</code> (real
+          09:15–15:30 IST) inside <code className="bg-slate-800 px-1 rounded">authorize_trade_intent()</code> — added
+          after a live incident where a wider "market hours + 30min" window (meant for position-management, not new
+          entries) let a trade open 21 minutes after the real close. Position exits/stop-losses are unaffected — they
+          close directly via close_paper_trade() and never construct a TradeIntent.
+        </p>
       </div>
 
       <MergeArrow active={isOpen} />
@@ -620,8 +661,8 @@ export default function PipelineFlow() {
       <div className="flex justify-center">
         <Node
           Icon={ShieldCheck}
-          title="Shared Reasoning Gate, Risk Check &amp; Capital Sizing"
-          subtitle="Both Path A and Path B route through the same LLM, risk manager, and sizing formula"
+          title="Shared Execution Gate, Risk Check &amp; Capital Sizing"
+          subtitle="Paths C/D/E (News, Pre-Event, Direct News) all route through the same authorize_trade_intent(), risk manager, and sizing formula"
           timing="per candidate"
           accent="cyan"
           wide
@@ -634,17 +675,17 @@ export default function PipelineFlow() {
         >
           <div className="mt-3 pt-3 border-t border-border text-xs text-muted space-y-1.5">
             <p className="flex items-center gap-1.5"><BrainCircuit size={11} className="text-purple-400 shrink-0" />
-              LLM reasoning gate — sole provider is <span className="text-slate-300 font-medium">Mantle / AWS Bedrock gpt-oss-120b</span>.
-              No Ollama, no Groq fallback (legacy fallback params are accepted but ignored — every call goes to gpt-oss now).
+              LLM reasoning — sole provider is <span className="text-slate-300 font-medium">nvidia.nemotron-super-3-120b via AWS Bedrock Converse</span> (switched from gpt-oss-120b / Nova Pro 2026-07-27; Redis-backed shared rate limiter across all processes).
+              No Ollama, no Groq fallback.
             </p>
             <p className="flex items-center gap-1.5"><FileSearch size={11} className="text-cyan shrink-0" />
-              Every reasoning call is persisted to <span className="text-slate-300 font-medium">LLMReasoningLog</span> / <span className="text-slate-300 font-medium">reasoning_verdicts</span> — full trace visible on the <span className="text-slate-300 font-medium">Agent Log</span> page.
+              Every reasoning call is persisted to <span className="text-slate-300 font-medium">LLMReasoningLog</span> / <span className="text-slate-300 font-medium">AgentDecision</span> — full trace visible on the <span className="text-slate-300 font-medium">Agent Log</span> and <span className="text-slate-300 font-medium">Decision Journal</span> pages (every processed stock, taken or skipped, with reasoning + grounding proof).
             </p>
             <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
-              Capital sizing (<code className="text-cyan bg-slate-800 px-1 rounded">capital_utilization_size</code>): position weight scales 2%→5% of equity with conviction, damped by VIX (×1.0 at VIX 22 → ×0.5 at VIX 30).
+              Capital sizing (<code className="text-cyan bg-slate-800 px-1 rounded">capital_utilization_size</code>): position weight scales 2%→5% of equity with conviction, damped by VIX (×1.0 at VIX 22 → ×0.5 at VIX 30). Direct News sizes far more conservatively (0.5% risk, own DIRECT_NEWS_RISK_PCT).
             </p>
             <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
-              Hard caps: 5% of equity per position, 20% minimum cash buffer (≤80% of equity ever deployed), and the trade is still capped so a stop-out never loses more than 1% of equity.
+              Hard caps: 5% of equity per position, 20% minimum cash buffer (≤80% of equity ever deployed), and a timeframe-agnostic MIN_STOP_DISTANCE_PCT floor (2026-07-27) — any tier's stop must clear ≥1.5% of entry or the next tier is tried, so a mis-scaled ATR (e.g. from 1-minute candles) can never produce a whipsaw-guaranteed stop.
             </p>
             <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
               Wallet balance is DB-configurable (RuntimeConfig.paper_trading_balance) — ₹20L is the current default, not a hardcoded constant.
@@ -697,8 +738,9 @@ export default function PipelineFlow() {
           <div>
             <p className="text-sm font-semibold text-amber-300">Telegram Alert</p>
             <p className="text-xs text-muted mt-0.5">
-              Fires on: every BUY order (Path A or B), every breakout/momentum discovery injection, and F&amp;O position open/close —
-              symbol, price, qty, score, and the LLM's reasoning summary.
+              Fires on: every executed BUY/SELL from Paths C/D/E (News, Pre-Event, Direct News), every breakout/momentum
+              discovery injection, and F&amp;O position open/close — symbol, price, qty, score, and the LLM's reasoning
+              summary. Paper-mode test runs never leak here — sends are suppressed under PYTEST_CURRENT_TEST.
             </p>
           </div>
         </div>
@@ -713,12 +755,14 @@ export default function PipelineFlow() {
           {[
             { time: 'continuous', event: 'Price scan every 30s · live-price backstop refresh every 15s', color: 'text-cyan', dot: 'bg-cyan' },
             { time: 'every 5m', event: 'Narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
-            { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring + Path A inline execution (fires ~45s after each :14/:29/:44/:59 bar close)', color: 'text-purple-400', dot: 'bg-purple-400' },
+            { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring (Path A) — scoring only, hard-blocked from executing', color: 'text-slate-400', dot: 'bg-slate-500' },
+            { time: 'every 15m', event: 'Pre-Event Expectation Gap scan (Path D) — scans, entries only before 15:20 IST', color: 'text-purple-400', dot: 'bg-purple-400' },
             { time: 'every 30m', event: 'Momentum discovery scan — runs 24/7, not market-hours gated', color: 'text-slate-300', dot: 'bg-slate-400' },
-            { time: '24/7', event: 'News-First Discovery Engine RSS poll — running as a service, TAKE verdicts now route through the standard risk gate into a paper trade', color: 'text-amber-400', dot: 'bg-amber-400' },
-            { time: 'every 60s', event: 'India Trade Loop (Path B), 09:15–16:00 IST', color: 'text-blue-400', dot: 'bg-blue-400' },
+            { time: '24/7', event: 'News Strategy + Direct News (Paths C/E) — RSS/NSE poll as a service; TAKE verdicts route through authorize_trade_intent() (market-hours gate + risk check) into a paper trade', color: 'text-amber-400', dot: 'bg-amber-400' },
+            { time: 'every 60s', event: 'India Trade Loop (Path B) — scoring/instrumentation only, hard-blocked from executing', color: 'text-slate-400', dot: 'bg-slate-500' },
             { time: '9:00 AM', event: 'hub_universe rebuild (crontab 03:30 UTC)', color: 'text-cyan', dot: 'bg-cyan' },
             { time: '3:25 PM', event: 'Agent EOD reconcile (crontab 09:55 UTC)', color: 'text-slate-300', dot: 'bg-slate-400' },
+            { time: '3:30 PM', event: 'Market-hours gate closes — no new EQUITY TradeIntent from any path after this (exits/SL unaffected)', color: 'text-rose-300', dot: 'bg-rose-400' },
             { time: '3:45 PM', event: 'F&O expiry sweep, weekdays (crontab 10:15 UTC)', color: 'text-amber-300', dot: 'bg-amber-400' },
           ].map((row, i) => (
             <div key={i} className="flex items-start gap-3">
