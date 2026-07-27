@@ -154,6 +154,25 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
     if not company_name or company_name.upper() == "NONE":
         return None
 
+    # Repetition/garbage guard (2026-07-27): live-observed nemotron looping on
+    # this exact call — "Aye Finance" (a real, resolvable NSE company, AYE.NS)
+    # came back as "AyeAyeAyeAye...Aye Finance" with the same short token
+    # repeated ~80+ times. Feeding that straight into instrument search wastes
+    # a query and logs a misleading "no NSE instrument match" (looks like a
+    # RESOLUTION failure) when the real problem is a malformed EXTRACTION that
+    # never should have reached search at all. A genuine company name is never
+    # this long or this repetitive.
+    _words = company_name.split()
+    if len(company_name) > 80 or (
+        len(_words) >= 6 and len(set(_words)) <= 2
+    ):
+        logger.info(
+            f"[news_engine] ticker extraction produced malformed/repetitive "
+            f"output ({len(company_name)} chars) — treating as extraction "
+            f"failure, not a resolution failure: '{company_name[:60]}...'"
+        )
+        return None
+
     query = _strip_corporate_suffixes(company_name)
     if not query:
         return None
@@ -1169,7 +1188,22 @@ async def process_ticker(ticker, side, headline, summary):
             # rejection reason alone. get_last_tooluse_rejection_reason()
             # surfaces the real one.
             if result:
-                reason = result.get('key_risk', 'Did not meet criteria')
+                # 2026-07-27 fix: key_risk is the LLM's OWN choice of field to
+                # fill in, and it's frequently left out even when the model
+                # gave real reasoning elsewhere (thesis/bear/bull) -- falling
+                # straight to the generic "Did not meet criteria" string
+                # (live-observed: MADHUCON.NS 27-Jul 16:05, key_risk absent
+                # but thesis/bear were populated) threw away exactly the
+                # detail a human reads the skip reason FOR. Prefer whichever
+                # of these is actually populated, in the order a reader would
+                # find most decision-relevant.
+                reason = (
+                    result.get('key_risk')
+                    or result.get('thesis')
+                    or result.get('bear')
+                    or result.get('bull')
+                    or 'Did not meet criteria'
+                )
             else:
                 from engine.agent.decision_engine import get_last_tooluse_rejection_reason
                 reason = get_last_tooluse_rejection_reason() or "Agent failed to reach a decision (reason unavailable)"
