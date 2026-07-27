@@ -7,7 +7,7 @@ from typing import Optional
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
@@ -726,8 +726,6 @@ async def agent_decisions(
         q = q.where(AgentDecision.symbol.ilike(f"%{symbol}%"))
     if min_confidence is not None:
         q = q.where(AgentDecision.confidence >= min_confidence)
-    q = q.order_by(desc(AgentDecision.ts)).limit(min(limit, 1000)).offset(max(offset, 0))
-    rows = (await db.execute(q)).scalars().all()
 
     def _row(r):
         cf   = r.confidence_factors or {}
@@ -748,15 +746,42 @@ async def agent_decisions(
             "grounding": gr, "model_reasoning": cf.get("model_reasoning"),
         }
 
-    items = [_row(r) for r in rows]
-    if source:
-        items = [x for x in items if (x["source"] or "").upper() == source.upper()]
-    if grounded is not None:
-        items = [x for x in items if (x["grounding"] or {}).get("grounded") is grounded]
+    # 2026-07-27 fix: `source`/`grounded` aren't real DB columns -- source is
+    # derived from a JSON blob (confidence_factors) and grounded is nested
+    # inside it, so they're filtered in Python below rather than in SQL. This
+    # USED to fetch only `limit` rows (ordered by ts) and filter/count on that
+    # already-truncated page, so on a day with more decisions than `limit`,
+    # both the returned results AND the BUY/SELL/SKIP count tiles could
+    # silently miss real matches or under-count -- looking "complete" while
+    # quietly not being. Two paths now:
+    #   - no source/grounded filter: counts come from a real SQL aggregate
+    #     (unaffected by `limit`), and only `limit` rows are ever fetched.
+    #   - source/grounded filter active: fetch a much wider batch (2000, well
+    #     above any realistic single day's volume so far) so the Python-side
+    #     filter has the full matching set to work with, THEN paginate.
+    if source or grounded is not None:
+        wide_q = q.order_by(desc(AgentDecision.ts)).limit(2000)
+        rows = (await db.execute(wide_q)).scalars().all()
+        items = [_row(r) for r in rows]
+        if source:
+            items = [x for x in items if (x["source"] or "").upper() == source.upper()]
+        if grounded is not None:
+            items = [x for x in items if (x["grounding"] or {}).get("grounded") is grounded]
+        counts = {"BUY": 0, "SELL": 0, "SKIP": 0}
+        for x in items:
+            counts[x["action"]] = counts.get(x["action"], 0) + 1
+        items = items[max(offset, 0):max(offset, 0) + min(limit, 1000)]
+    else:
+        count_rows = (await db.execute(
+            q.with_only_columns(AgentDecision.action, func.count()).group_by(AgentDecision.action)
+        )).all()
+        counts = {"BUY": 0, "SELL": 0, "SKIP": 0}
+        for act, c in count_rows:
+            counts[act] = c
+        page_q = q.order_by(desc(AgentDecision.ts)).limit(min(limit, 1000)).offset(max(offset, 0))
+        rows = (await db.execute(page_q)).scalars().all()
+        items = [_row(r) for r in rows]
 
-    counts = {"BUY": 0, "SELL": 0, "SKIP": 0}
-    for x in items:
-        counts[x["action"]] = counts.get(x["action"], 0) + 1
     return {"count": len(items), "counts": counts, "decisions": items}
 
 
