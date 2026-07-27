@@ -31,6 +31,14 @@ _REGIME_EMOJI: dict[str, str] = {
 # ── Core sender ───────────────────────────────────────────────────────────────
 
 async def _post(text: str) -> None:
+    # Hard guard: never send a live Telegram message from inside a test run.
+    # pytest sets PYTEST_CURRENT_TEST for every test, so this fires even for
+    # tests that forget to stub the notifier. Fixture data like the "TESTCO
+    # ₹100 flat entry/SL/target, Qty 0" trade must never reach the real chat.
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("DISABLE_TELEGRAM"):
+        logger.debug("[telegram] suppressed (test / DISABLE_TELEGRAM env)")
+        return
     token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
     chat_id = getattr(settings, "TELEGRAM_CHAT_ID",   "")
     if not token or not chat_id:

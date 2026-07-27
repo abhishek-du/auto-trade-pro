@@ -71,6 +71,10 @@ class TradingSignal:
     risk_reward_ratio:  float            = 0.0
     regime:             str              = ""
     hub_subscores:      dict             = field(default_factory=dict)  # 7-factor breakdown + indicator detail
+    # Strong-news regime override (2026-07-27): set True when a genuinely strong
+    # NEWS catalyst is allowed to bypass the market-regime / technical-pullback
+    # entry gates in the India trade loop. Capital/risk + LLM gates still apply.
+    news_override:      bool             = False
     # Varsity checklist item 2: nearest S&R levels backing the stop-loss.
     # Populated when IndicatorSignals are available (hub path).  0.0 = unknown;
     # validate_signal() skips the S&R gate when either field is 0.
@@ -97,6 +101,10 @@ class TradingSignal:
     # incident that made this non-optional (a cascade trade's confidence was
     # found hardcoded to a fake 80%, invisible until the raw code was read).
     confidence_factors: dict             = field(default_factory=dict)
+    # Explicit trade attribution: strategy identifier and trade origin source
+    # (e.g., source="AI Predict" for PRE_EVENT_EXPECTATION_GAP).
+    strategy:           str | None       = None
+    source:             str | None       = None
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

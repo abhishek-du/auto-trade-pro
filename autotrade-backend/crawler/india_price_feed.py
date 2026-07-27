@@ -310,6 +310,126 @@ def fetch_india_vix() -> float:
     return 15.0
 
 
+# ── 4b. Kite-first live data (indices, VIX, regime daily candles) ────────────
+# yfinance is aggressively rate-limited during market hours (HTTP 429), which
+# froze the index feed and the regime's daily-candle input, blocking every new
+# long on a stale WEAK_BEAR read. Zerodha (Kite) has a paid, reliable feed for
+# exactly these symbols, so we now source the decision-critical data from Kite
+# and keep yfinance only as a fallback when Kite is unavailable (no token /
+# post-403 cooldown). Bulk equity candles still use yfinance for now.
+
+# Daily candles that MUST stay fresh — the 5-state market-regime engine reads
+# NIFTYBEES.NS 1d, and the indices back dashboards + shock guard.
+_REGIME_DAILY_SYMBOLS: tuple[str, ...] = ("NIFTYBEES.NS", "^NSEI", "^NSEBANK", "^BSESN")
+
+
+async def fetch_indices_kite_first() -> dict:
+    """Live NIFTY50 / SENSEX / BANKNIFTY snapshots from Kite, yfinance fallback.
+
+    Same return shape as fetch_nifty_indices() so callers are unchanged.
+    """
+    try:
+        from crawler.zerodha_market import get_live_prices, get_full_quote
+        # our-symbol → human name (matches NIFTY_INDEX_SYMBOLS values)
+        wanted = {"^NSEI": "NIFTY50", "^BSESN": "SENSEX", "^NSEBANK": "BANKNIFTY"}
+        px = await get_live_prices(list(wanted.keys()))
+        out: dict = {}
+        for sym, name in wanted.items():
+            row = px.get(sym)
+            if not row or not row.get("last_price"):
+                continue
+            price = float(row["last_price"])
+            prev = 0.0
+            try:                                   # prev close for change% (dashboard only)
+                q = await get_full_quote(sym)
+                prev = float((q or {}).get("ohlc", {}).get("close") or 0.0)
+            except Exception:
+                prev = 0.0
+            change = price - prev if prev else 0.0
+            out[name] = {
+                "price":      round(price, 2),
+                "change":     round(change, 2),
+                "change_pct": round((change / prev * 100.0) if prev else 0.0, 4),
+                "high_52w":   0.0,
+                "low_52w":    0.0,
+            }
+        if len(out) == len(wanted):
+            logger.info(f"Indices ✓ Kite  " + "  ".join(f"{k}={v['price']:,.1f}" for k, v in out.items()))
+            return out
+        logger.warning(f"[india_price_feed] Kite indices incomplete ({len(out)}/3) — yfinance fallback")
+    except Exception as exc:
+        logger.warning(f"[india_price_feed] Kite indices failed ({exc}) — yfinance fallback")
+    return await asyncio.get_event_loop().run_in_executor(None, fetch_nifty_indices)
+
+
+async def fetch_vix_kite_first() -> float:
+    """India VIX from Kite, yfinance fallback (never raises)."""
+    try:
+        from crawler.zerodha_market import get_full_quote
+        q = await get_full_quote("^INDIAVIX")
+        val = float((q or {}).get("last_price") or 0.0)
+        if val > 0:
+            logger.info(f"India VIX: {val:.2f}  (source: Kite)")
+            return val
+    except Exception as exc:
+        logger.warning(f"[india_price_feed] Kite VIX failed ({exc}) — yfinance fallback")
+    return await asyncio.get_event_loop().run_in_executor(None, fetch_india_vix)
+
+
+async def sync_regime_daily_candles_kite(session: AsyncSession) -> int:
+    """Refresh recent DAILY candles for the regime + index symbols via Kite.
+
+    Keeps NIFTYBEES.NS 1d current so the market-regime engine never decides on
+    stale data. Idempotent (save_candles_to_db upserts). Returns rows saved.
+    """
+    try:
+        from crawler.zerodha_market import get_kite_historical, hydrate_tokens_from_db
+    except Exception:
+        return 0
+    try:
+        await hydrate_tokens_from_db(session)        # ensure NIFTYBEES/index tokens are loaded
+    except Exception:
+        pass
+    from sqlalchemy import and_ as _and, delete as _delete
+    from db.models import Candle as _Candle
+
+    today = datetime.date.today()
+    frm = (today - datetime.timedelta(days=15)).isoformat()
+    to = today.isoformat()
+    window_start = datetime.datetime(today.year, today.month, today.day) - datetime.timedelta(days=15)
+    saved_total = 0
+    for sym in _REGIME_DAILY_SYMBOLS:
+        try:
+            candles = await get_kite_historical(sym, frm, to, "1d", session)
+            # get_kite_historical applies an intraday IST→UTC shift that pushes a
+            # midnight-IST *daily* bar back one calendar day. Undo it so each 1d
+            # bar keeps its true IST trading date — otherwise the regime series
+            # gets off-by-one bars.
+            for c in candles:
+                ts = c["timestamp"]
+                ist_date = (ts + datetime.timedelta(hours=5, minutes=30)).date()
+                c["timestamp"] = datetime.datetime(ist_date.year, ist_date.month, ist_date.day)
+            if not candles:
+                continue
+            # Kite is authoritative for these regime symbols: clear any existing
+            # 1d rows in the window first (removes stale/off-by-one yfinance dupes),
+            # then insert the clean Kite bars → exactly one bar per trading day.
+            await session.execute(
+                _delete(_Candle).where(_and(
+                    _Candle.symbol == sym,
+                    _Candle.timeframe == "1d",
+                    _Candle.timestamp >= window_start,
+                ))
+            )
+            await session.commit()
+            saved_total += await save_candles_to_db(candles, session)
+        except Exception as exc:
+            logger.warning(f"[india_price_feed] regime daily sync failed {sym}: {exc}")
+    if saved_total:
+        logger.info(f"[india_price_feed] regime daily candles refreshed via Kite — {saved_total} rows")
+    return saved_total
+
+
 # ── 5. Single mutual fund NAV ─────────────────────────────────────────────────
 
 def _get_mf_tool():
@@ -695,11 +815,15 @@ async def run_india_price_crawl(
     await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
     total_symbols = len(counted)
 
-    # Step 2 — fetch index snapshots (non-DB, informational / dashboard use)
-    indices = fetch_nifty_indices()
+    # Step 1b — refresh the regime's daily candles via Kite (fresh, not
+    # yfinance-throttled) so buy/sell gating never runs on stale index data.
+    await sync_regime_daily_candles_kite(session)
 
-    # Step 3 — fetch India VIX
-    vix = fetch_india_vix()
+    # Step 2 — fetch index snapshots (Kite-first, yfinance fallback)
+    indices = await fetch_indices_kite_first()
+
+    # Step 3 — fetch India VIX (Kite-first, yfinance fallback)
+    vix = await fetch_vix_kite_first()
 
     # Step 4 — persist new candles to DB (chunked upsert, 3 000 rows per statement)
     total_candles_saved = await save_candles_to_db(all_candles, session)

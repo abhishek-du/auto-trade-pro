@@ -69,6 +69,14 @@ class PreEventExpectationGapEngine:
 
         nowcast = await run_nowcast(symbol, event, as_of, session)
         expectation = await compute_expectation(nowcast, symbol, snapshot)
+
+        # "Final confidence must not exceed the weakest material input": the
+        # anchor is a material input, so cap the nowcast confidence by the
+        # anchor's confidence ceiling (a historical-baseline anchor is weaker
+        # than genuine consensus, so it pulls confidence down accordingly).
+        if expectation.confidence_ceiling is not None and nowcast.status == NowcastStatus.OK:
+            nowcast.confidence = min(nowcast.confidence, expectation.confidence_ceiling)
+
         price_discount = await analyze_price_discount(snapshot)
         relative_strength = await compute_relative_strength(snapshot)
         regime_score = await _regime_score(snapshot)

@@ -152,6 +152,12 @@ async def get_paper_trades(
             "closed_at":        r.closed_at.isoformat() if r.closed_at else None,
             "exit_reason":      None,
             "source":           "paper",
+            # Strategy attribution (2026-07-27): distinct from the "source" key
+            # above (which means paper-vs-live execution mode) — this is which
+            # strategy originated the trade, e.g. "AI Predict" for the
+            # Pre-Event Expectation Gap strategy. None for ordinary News/Hub
+            # trades (PaperTrade.source is nullable and only set for PRE_EVENT).
+            "strategy_source":  getattr(r, "source", None),
             # ── F&O fields so the UI can show strike / type / expiry / premium ──
             "instrument_type":  getattr(r, "instrument_type", "EQUITY"),
             "underlying_symbol": getattr(r, "underlying_symbol", None),

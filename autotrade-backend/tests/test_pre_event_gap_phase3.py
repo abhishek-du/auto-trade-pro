@@ -77,29 +77,63 @@ def _snap():
     return build_snapshot("MARUTI.NS", datetime(2026, 10, 1), AsyncMock())
 
 
+def _baseline_patch(value, known_at):
+    from engine.pre_event_expectation_gap.financials import HistoricalBaseline
+    return patch("engine.pre_event_expectation_gap.expectation.get_historical_baseline_3y_cagr",
+                 AsyncMock(return_value=HistoricalBaseline(value=value, known_at=known_at)))
+
+
 class TestExpectation:
     @pytest.mark.asyncio
-    async def test_gap_vs_historical_baseline(self):
-        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, baseline_profit_growth=0.20)
-        exp = await compute_expectation(nc, "MARUTI.NS", _snap())
+    async def test_annual_gap_vs_historical_baseline(self):
+        # implied is annual (YoY) → compared directly to the annual 3y CAGR
+        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, implied_is_annual=True)
+        with _baseline_patch(0.20, datetime(2026, 9, 1)):   # known_at < as_of(2026-10-01)
+            exp = await compute_expectation(nc, "MARUTI.NS", _snap())
         assert exp.gap_available is True
-        assert exp.anchor_used == "historical_baseline"
+        assert exp.anchor_type == "HISTORICAL_BASELINE_3Y_CAGR"
+        assert exp.is_market_expectation is False           # NEVER a market expectation
+        assert exp.gap_type == "ANNUAL_TREND_VS_HISTORICAL_BASELINE_3Y_CAGR"
         assert exp.expectation_gap == pytest.approx(0.20)
+        assert exp.confidence_ceiling == 0.40
 
     @pytest.mark.asyncio
-    async def test_consensus_preferred_when_available(self):
-        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, baseline_profit_growth=0.20)
-        with patch("engine.pre_event_expectation_gap.expectation._fetch_consensus",
-                   AsyncMock(return_value=0.25)):
+    async def test_baseline_rejected_when_not_point_in_time(self):
+        # known_at AFTER as_of → cannot prove it was known then → NOT usable
+        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, implied_is_annual=True)
+        with _baseline_patch(0.20, datetime(2026, 11, 1)):   # known_at > as_of(2026-10-01)
             exp = await compute_expectation(nc, "MARUTI.NS", _snap())
-        assert exp.anchor_used == "consensus"
+        assert exp.gap_available is False
+        assert exp.anchor_type is None
+
+    @pytest.mark.asyncio
+    async def test_quarterly_trend_quarterlizes_the_annual_baseline(self):
+        # implied is coarse QoQ → the annual baseline is quarterlized before comparison
+        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.05, implied_is_annual=False)
+        with _baseline_patch(0.20, datetime(2026, 9, 1)):
+            exp = await compute_expectation(nc, "MARUTI.NS", _snap())
+        q = (1.20) ** 0.25 - 1.0
+        assert exp.gap_type == "QUARTERLY_TREND_VS_QUARTERLIZED_HISTORICAL_BASELINE_3Y_CAGR"
+        assert exp.expectation_gap == pytest.approx(round(0.05 - round(q, 4), 4))
+
+    @pytest.mark.asyncio
+    async def test_consensus_preferred_and_is_market_expectation(self):
+        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, implied_is_annual=True)
+        with patch("engine.pre_event_expectation_gap.expectation._fetch_consensus",
+                   AsyncMock(return_value=(0.25, datetime(2026, 9, 1)))), \
+             _baseline_patch(0.20, datetime(2026, 9, 1)):
+            exp = await compute_expectation(nc, "MARUTI.NS", _snap())
+        assert exp.anchor_type == "CONSENSUS"
+        assert exp.is_market_expectation is True
         assert exp.consensus_pat_growth == 0.25
         assert exp.expectation_gap == pytest.approx(0.15)
+        assert exp.confidence_ceiling == 0.85               # higher than baseline's 0.40
 
     @pytest.mark.asyncio
     async def test_no_anchor_means_gap_unavailable_not_fabricated(self):
-        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, baseline_profit_growth=None)
-        exp = await compute_expectation(nc, "MARUTI.NS", _snap())
+        nc = NowcastResult(status=NowcastStatus.OK, implied_profit_growth=0.40, implied_is_annual=True)
+        with _baseline_patch(None, None):
+            exp = await compute_expectation(nc, "MARUTI.NS", _snap())
         assert exp.gap_available is False
         assert exp.expectation_gap is None
 
@@ -113,9 +147,9 @@ class TestExpectation:
     @pytest.mark.asyncio
     async def test_consensus_and_guidance_hooks_return_none_by_default(self):
         # Phase 3 has no provider — the hooks must not fabricate a value.
-        from engine.pre_event_expectation_gap.expectation import _fetch_consensus, _fetch_company_guidance
+        from engine.pre_event_expectation_gap.expectation import _fetch_consensus, _fetch_guidance
         assert await _fetch_consensus("MARUTI.NS", _snap()) is None
-        assert await _fetch_company_guidance("MARUTI.NS", _snap()) is None
+        assert await _fetch_guidance("MARUTI.NS", _snap()) is None
 
 
 # ── Price discount ───────────────────────────────────────────────────────────

@@ -63,6 +63,7 @@ export const SECTIONS = [
       { to: '/pipeline',       label: 'Pipeline Flow',    Icon: GitBranch },
       { to: '/agent-log',      label: 'Agent Log',        Icon: ClipboardList },
       { to: '/news',           label: 'News',             Icon: Newspaper },
+      { to: '/news-decisions', label: 'Decision Journal', Icon: BookOpenText },
       { to: '/earnings',       label: 'Earnings AI',      Icon: FileText, badge: 'earningsBadge' },
       { to: '/market-breadth', label: 'Market Breadth',   Icon: Activity, badge: 'breadth' },
       { to: '/calendar',       label: 'Calendar',         Icon: CalendarDays, badge: 'calendar' },

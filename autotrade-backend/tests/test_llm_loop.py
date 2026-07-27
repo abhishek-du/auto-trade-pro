@@ -182,7 +182,27 @@ class TestGroundingRetry:
         assert result["verdict"] == "TAKE"
 
     @pytest.mark.asyncio
-    async def test_second_ungrounded_verdict_rejects_outright(self):
+    async def test_second_ungrounded_verdict_rejects_outright_when_soft_fail_disabled(self):
+        # With the soft-fail behavior turned off, a persistent ungrounded verdict
+        # still fails closed (hard reject) even when a canonical event is present.
+        from utils.config import settings as _settings
+        responses = (
+            [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS]
+            + [decide_step(), decide_step()]  # both ungrounded
+        )
+        grounding_mock = AsyncMock(return_value={"grounded": False, "unsupported_claims": ["fabricated catalyst"]})
+        p1, p2, p3, _ = _patch_common(responses)
+        with p1, p2, p3, patch("engine.agent.decision_engine._check_grounding", grounding_mock), \
+             patch.object(_settings, "NEWS_GROUNDING_SOFT_FAIL", False):
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_second_ungrounded_verdict_soft_fails_when_canonical_event_present(self):
+        # 2026-07-27: with a canonical event backing the candidate, a persistent
+        # grounding failure flags only PERIPHERAL claims — the core catalyst is
+        # the grounded event — so the trade proceeds with the flagged claims
+        # stripped and a confidence haircut, instead of hard-rejecting.
         responses = (
             [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS]
             + [decide_step(), decide_step()]  # both ungrounded
@@ -191,7 +211,8 @@ class TestGroundingRetry:
         p1, p2, p3, _ = _patch_common(responses)
         with p1, p2, p3, patch("engine.agent.decision_engine._check_grounding", grounding_mock):
             result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
-        assert result is None
+        assert result is not None
+        assert result["grounding"].get("soft_failed") is True
 
 
 class TestEmptyResponseRetry:
@@ -357,8 +378,12 @@ class TestRejectionReasonSurfacing:
         grounding_mock = AsyncMock(return_value={
             "grounded": False, "unsupported_claims": ["fabricated ₹800cr figure"],
         })
+        from utils.config import settings as _settings
         p1, p2, p3, _ = _patch_common(responses)
-        with p1, p2, p3, patch("engine.agent.decision_engine._check_grounding", grounding_mock):
+        # Soft-fail disabled → the hard-reject path, which surfaces a specific
+        # grounding reason (the soft-fail path would instead proceed with a haircut).
+        with p1, p2, p3, patch("engine.agent.decision_engine._check_grounding", grounding_mock), \
+             patch.object(_settings, "NEWS_GROUNDING_SOFT_FAIL", False):
             result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
         assert result is None
         reason = get_last_tooluse_rejection_reason()
@@ -406,3 +431,33 @@ class TestRejectionReasonSurfacing:
             result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
         assert result is not None
         assert get_last_tooluse_rejection_reason() is None
+
+
+class TestRoundExhaustionRecovery:
+    """2026-07-27: nemotron is chattier in the ReAct loop and often kept calling
+    tools without committing to a decide within the round budget, getting dropped
+    as 'round-exhaustion'. A final tool-free call now demands a decision so the
+    model's own TAKE/SKIP judgment is captured instead of an infra rejection."""
+
+    @pytest.mark.asyncio
+    async def test_final_tool_free_round_recovers_near_exhaustion(self):
+        # Never decides in-loop (all 20 rounds are tool calls) → the final
+        # tool-free round returns a clean decision instead of None.
+        responses = [tool_step("fundamentals") for _ in range(20)] + [decide_step("TAKE")]
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert result["verdict"] == "TAKE"
+
+    @pytest.mark.asyncio
+    async def test_decision_key_synonym_is_accepted_as_verdict(self):
+        # Some models emit {"decision": "SKIP"} instead of {"verdict": ...};
+        # it must be normalized and accepted, not looped as unrecognized.
+        alt_decide = '{"action": "decide", "decision": "SKIP", "confidence": 40, "bull": "x", "bear": "y", "thesis": "z"}'
+        responses = [tool_step(t) for t in _ALL_EVENT_CORE_TOOLS] + [alt_decide]
+        p1, p2, p3, p4 = _patch_common(responses)
+        with p1, p2, p3, p4:
+            result = await llm_tooluse_candidate("TESTCO.NS", make_candidate(has_event=True), make_decision())
+        assert result is not None
+        assert result.get("verdict") == "SKIP"

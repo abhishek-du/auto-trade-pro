@@ -31,6 +31,20 @@ def _today_start() -> datetime:
 
 # ── Dynamic trade-level computation ───────────────────────────────────────────
 
+# Minimum acceptable distance between entry and stop-loss, as a fraction of
+# entry price. Root-caused 2026-07-27 (AUBANK.NS): when indicators were
+# computed off 1-MINUTE candles instead of daily ones, ATR came out ~0.1% of
+# price instead of a normal 1.5-3% daily ATR, producing a 2x-ATR stop only
+# 0.21% from entry — clipped by ordinary tick/spread noise regardless of
+# whether the trade thesis played out (the stock kept climbing AFTER the
+# stop-out). This floor is deliberately timeframe-agnostic and applies to
+# EVERY tier (dynamic/ATR/static) and every caller (news, hub, pre-event,
+# intraday) as a backstop — a tier's stop is only accepted if it clears this
+# floor; otherwise the next tier is tried, and the static % fallback (which
+# is always >= this floor) is the final guarantee.
+MIN_STOP_DISTANCE_PCT: float = 0.015   # 1.5% minimum SL distance from entry
+
+
 def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
     """Resolve stop-loss + two targets + ATR for a trade, in priority order.
 
@@ -69,7 +83,11 @@ def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
             sl, t1, t2 = setup.get("stop_loss"), setup.get("target_1"), setup.get("target_2")
             valid = all(v is not None and not (isinstance(v, float) and math.isnan(v)) and v > 0
                         for v in (sl, t1, t2))
-            # Sanity: stop on the correct side, targets beyond entry in trade direction
+            # Sanity: stop on the correct side, targets beyond entry in trade
+            # direction, AND far enough away to survive ordinary noise (see
+            # MIN_STOP_DISTANCE_PCT docstring above).
+            if valid and abs(entry - sl) / entry < MIN_STOP_DISTANCE_PCT:
+                valid = False
             if valid:
                 # Carry S&R levels so validate_signal() can apply Varsity's 4% gate.
                 _sup = setup.get("support", 0.0) or 0.0
@@ -86,7 +104,11 @@ def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
             pass  # fall through to ATR
 
     # ── 2. ATR-based ─────────────────────────────────────────────────────────
-    if atr > 0 and entry > 0:
+    # 2x/4x ATR distance, but only if ATR itself implies a stop that clears
+    # MIN_STOP_DISTANCE_PCT -- a tiny ATR (e.g. computed off 1-minute candles
+    # by a caller upstream) must not silently produce a whipsaw-prone stop;
+    # fall through to the static % tier instead.
+    if atr > 0 and entry > 0 and (2 * atr) / entry >= MIN_STOP_DISTANCE_PCT:
         if is_buy:
             sl, t1, t2 = entry - 2 * atr, entry + 2 * atr, entry + 4 * atr
         else:

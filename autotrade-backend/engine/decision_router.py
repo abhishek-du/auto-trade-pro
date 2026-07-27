@@ -361,6 +361,8 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
         target_2=intent.target_2, atr=intent.atr,
         event_id=intent.event_id, evidence_ids=list(intent.evidence_ids or []),
         confidence_factors=dict(intent.confidence_factors or {}),
+        strategy=intent.strategy,
+        source=intent.extra.get("source") or ("AI Predict" if intent.strategy == "PRE_EVENT_EXPECTATION_GAP" else None),
     )
 
 
@@ -530,6 +532,29 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
         )
         await _log_intent_audit(intent, mode, result, session)
         return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+    if intent.strategy_family == StrategyFamily.PRE_EVENT:
+        if not settings.PRE_EVENT_GAP_ENABLED:
+            reason = "Pre-Event Expectation Gap strategy disabled (PRE_EVENT_GAP_ENABLED=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_DISABLED, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (pre-event master switch) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+        if mode == TradeMode.PAPER and not settings.PRE_EVENT_GAP_PAPER_TRADING:
+            reason = "Pre-Event Expectation Gap paper trading disabled (PRE_EVENT_GAP_PAPER_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (pre-event paper gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+        if mode == TradeMode.LIVE and not settings.PRE_EVENT_GAP_LIVE_TRADING:
+            reason = "Pre-Event Expectation Gap live trading disabled (PRE_EVENT_GAP_LIVE_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (pre-event live gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     _event_ok, _event_reason = await _verify_canonical_event(intent, session)
     if not _event_ok:

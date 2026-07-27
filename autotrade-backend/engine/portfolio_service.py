@@ -637,6 +637,76 @@ async def search_stocks_async(query: str, session: AsyncSession) -> list[dict]:
         )
         rows = (await session.execute(stmt)).scalars().all()
 
+        # ── Token-based fallback (2026-07-27 coverage fix) ────────────────────
+        # The contiguous "%query%" match above silently fails on punctuation and
+        # conjunction differences between the extracted company name and the
+        # exchange's official name — "Dr Lal PathLabs" vs "DR. LAL PATHLABS",
+        # "CG Power & Industrial Solutions" vs "CG POWER AND INDUSTRIAL
+        # SOLUTIONS", "Motilal Oswal Financial Services" vs "MOTILAL OSWAL
+        # FINANCIAL SERVICES" — all real NSE names that were being dropped
+        # ("no NSE instrument match → skip"). Retry requiring every significant
+        # word of the query to appear anywhere in the name, order- and
+        # punctuation-independent, so these resolve instead of being lost.
+        if not rows:
+            import re as _re
+            _GENERIC = {"AND", "THE", "OF", "LIMITED", "LTD", "CO", "COMPANY", "PVT", "PRIVATE"}
+            _norm = _re.sub(r"[^A-Z0-9 ]", " ", q_upper.replace("&", " AND "))
+            _toks = [t for t in _norm.split() if len(t) >= 3 and t not in _GENERIC]
+
+            def _tok_query(required):
+                # Rank by how many of ALL the query tokens the name contains
+                # (best overlap first), then NSE over BSE, then tightest name.
+                _overlap = reduce(
+                    lambda a, b: a + b,
+                    [case((func.upper(KiteInstrument.name).like(f"%{t}%"), 1), else_=0) for t in _toks],
+                )
+                return (
+                    select(KiteInstrument)
+                    .where(
+                        KiteInstrument.instrument_type == "EQ",
+                        KiteInstrument.segment.in_(["NSE", "BSE"]),
+                        KiteInstrument.name != "",
+                        ~KiteInstrument.name.like(r"%\%%"),
+                        ~KiteInstrument.tradingsymbol.like("%-SG"),
+                        ~KiteInstrument.tradingsymbol.like("%-SK"),
+                        ~KiteInstrument.tradingsymbol.like("%-TB"),
+                        # Exclude ETFs / index funds — they share brand tokens
+                        # ("Motilal Oswal Nifty ... ETF") and would otherwise
+                        # out-rank the actual operating company on a loose match.
+                        ~func.upper(KiteInstrument.name).like("%ETF%"),
+                        ~func.upper(KiteInstrument.name).like("%NIFTY%"),
+                        ~func.upper(KiteInstrument.name).like("%SENSEX%"),
+                        ~func.upper(KiteInstrument.name).like("%INDEX FUND%"),
+                        ~func.upper(KiteInstrument.name).like("%BEES%"),
+                        *[func.upper(KiteInstrument.name).like(f"%{t}%") for t in required],
+                    )
+                    .order_by(
+                        # Prefer a tradeable NSE listing first (the news pipeline
+                        # keys off .NS symbols), then best token overlap, then the
+                        # tightest name.
+                        case((KiteInstrument.segment == "NSE", 1), else_=2),
+                        _overlap.desc(),
+                        func.length(KiteInstrument.name),
+                        KiteInstrument.tradingsymbol,
+                    )
+                    .limit(20)
+                )
+
+            if _toks:
+                from functools import reduce
+                # Tier 1: every token present (precise). Tier 2: the first two
+                # brand tokens present (handles abbreviated official names like
+                # "FINANCIAL SERVICES" -> "FIN SERV", "SOLUTIONS" -> "SOL"),
+                # ranked by total-token overlap so the right entity still wins.
+                rows = (await session.execute(_tok_query(_toks))).scalars().all()
+                if not rows and len(_toks) >= 2:
+                    rows = (await session.execute(_tok_query(_toks[:2]))).scalars().all()
+                if rows:
+                    logger.info(
+                        f"[search_stocks] token-fallback resolved '{query}' -> "
+                        f"{rows[0].tradingsymbol} (contiguous match had failed)"
+                    )
+
         seen: set[str] = set()
         results = []
         for r in rows:

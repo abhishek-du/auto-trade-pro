@@ -211,20 +211,40 @@ async def _compute_news_trade_levels(ticker: str, side: str, entry_price: float)
 
     try:
         async with AsyncSessionLocal() as session:
-            candles_1m = await get_latest_candles(ticker, "1m", 60, session)
+            # DAILY candles are the primary source for SL/TP structure — this
+            # trade is meant to be HELD for hours-to-days on a news catalyst,
+            # not scalped, so ATR/support/resistance must reflect the stock's
+            # real day-to-day range. Root-caused 2026-07-27: this used to try
+            # 1-MINUTE candles first, so on a day with ~60 min of 1m history
+            # ATR came out as ~0.1% of price (e.g. ATR=1.06 on a ₹1057 stock)
+            # instead of a normal 1.5-3% daily ATR. A 2×ATR stop off that tiny
+            # number sits a fraction of a percent from entry — guaranteed to
+            # be clipped by ordinary tick/spread noise regardless of whether
+            # the news thesis plays out, producing a loss even when the stock
+            # later moves in the predicted direction (AUBANK.NS 2026-07-27:
+            # entry ₹1057.16, stop ₹1054.89 — only 0.21% away — stopped out
+            # for -₹451 while the stock kept climbing after).
+            candles_1d = await get_latest_candles(ticker, "1d", 60, session)
             df = None
-            if len(candles_1m) >= 20:
+            if len(candles_1d) >= 20:
                 df = pd.DataFrame([{
                     "open": c.open, "high": c.high, "low": c.low,
                     "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
-                } for c in candles_1m])
+                } for c in candles_1d])
             if df is None or df.empty:
-                candles_1d = await get_latest_candles(ticker, "1d", 60, session)
-                if len(candles_1d) >= 20:
+                # 1-minute fallback only when daily history is unavailable —
+                # still better than the static % fallback, but see the
+                # MIN_STOP_DISTANCE_PCT floor in compute_trade_levels() below,
+                # which now refuses to use ANY tier's stop if it comes out
+                # unreasonably tight (the real, general-purpose fix — this
+                # ordering change fixes the common case, the floor is the
+                # backstop for whatever produces a tight stop next).
+                candles_1m = await get_latest_candles(ticker, "1m", 60, session)
+                if len(candles_1m) >= 20:
                     df = pd.DataFrame([{
                         "open": c.open, "high": c.high, "low": c.low,
                         "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
-                    } for c in candles_1d])
+                    } for c in candles_1m])
             if df is not None and not df.empty:
                 last_close = float(df.iloc[-1]["close"])
                 sig_ind = compute_indicators(df)
@@ -943,6 +963,75 @@ async def _log_evidence_gate_audit(ticker, side, evidence, verdict, consistency)
         logger.debug(f"[news_engine] evidence-gate audit log failed: {exc}")
 
 
+async def _persist_news_decision(
+    ticker, action, *, side, result, reason, headline, summary, event_id, entry_price=None,
+):
+    """Persist a news-pipeline decision (BUY / SELL / SKIP) to the agent_decisions
+    table so the UI 'News Decision Journal' can show every processed stock — taken
+    or skipped — with the FULL reasoning and the evidence/proof behind it.
+
+    Best-effort and fully isolated: a failure here never affects the trade path.
+    """
+    try:
+        from db.models import AgentDecision
+        r = result or {}
+        conf = 0
+        try:
+            conf = int(float(r.get("confidence") or 0))
+        except (TypeError, ValueError):
+            conf = 0
+        grounding = r.get("grounding") or {}
+
+        # Price at decision time — useful "proof" context in the journal.
+        entry_px = entry_price
+        if entry_px is None:
+            try:
+                from crawler.zerodha_market import get_live_prices
+                _ns = ticker if ticker.endswith((".NS", ".BO")) else f"{ticker}.NS"
+                q = await get_live_prices([_ns])
+                qd = q.get(_ns) or q.get(ticker) or {}
+                entry_px = float(qd.get("price") or qd.get("last_price") or 0) or None
+            except Exception:
+                entry_px = None
+
+        factors = {
+            "source": "NEWS",
+            "news": {
+                "headline": headline,
+                "summary": (summary or "")[:1200],
+                "event_id": event_id,
+                "side": side,
+            },
+            "verdict": r.get("verdict"),
+            "bull": r.get("bull"),
+            "bear": r.get("bear"),
+            "key_risk": r.get("key_risk"),
+            "thesis": r.get("thesis"),
+            "market_confirmation": r.get("market_confirmation"),
+            "tools_used": r.get("tools_used") or [],
+            "grounding": {
+                "grounded": grounding.get("grounded"),
+                "soft_failed": grounding.get("soft_failed"),
+                "unsupported_claims": (grounding.get("unsupported_claims") or [])[:8],
+            },
+            "model_reasoning": (r.get("model_reasoning") or "")[:4000],
+        }
+        reasons = [x for x in (r.get("bull"), r.get("bear"), r.get("thesis")) if x] or [reason]
+
+        async with AsyncSessionLocal() as session:
+            session.add(AgentDecision(
+                symbol=ticker, action=action, confidence=conf,
+                strategy="NEWS", regime="",
+                entry=entry_px, stop=None, target=None,
+                reasons=reasons,
+                skip_reason=(str(reason)[:200] if action == "SKIP" else None),
+                confidence_factors=factors, is_paper=True,
+            ))
+            await session.commit()
+    except Exception as exc:
+        logger.debug(f"[news_engine] persist decision failed for {ticker}: {exc}")
+
+
 async def process_ticker(ticker, side, headline, summary):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
@@ -980,12 +1069,22 @@ async def process_ticker(ticker, side, headline, summary):
                     f"[news_engine] ⛔ EVIDENCE INCONSISTENCY for {ticker}: {consistency.reason}"
                 )
                 await _log_evidence_gate_audit(ticker, side, cand.evidence, result, consistency)
+                await _persist_news_decision(
+                    ticker, "SKIP", side=side, result=result,
+                    reason=f"Evidence inconsistency: {consistency.reason}",
+                    headline=headline, summary=summary, event_id=event_id,
+                )
                 return False
 
             try:
                 success = await _execute_news_trade(
                     ticker, side, headline, result,
                     event_id=event_id, evidence=cand.evidence, evidence_ids=[str(event_id)],
+                )
+                await _persist_news_decision(
+                    ticker, side if success else "SKIP", side=side, result=result,
+                    reason=("TAKE — executed" if success else "TAKE verdict but execution gate blocked"),
+                    headline=headline, summary=summary, event_id=event_id,
                 )
                 if success:
                     # Trigger 2nd-order graph trades
@@ -1065,6 +1164,10 @@ async def process_ticker(ticker, side, headline, summary):
                 from engine.agent.decision_engine import get_last_tooluse_rejection_reason
                 reason = get_last_tooluse_rejection_reason() or "Agent failed to reach a decision (reason unavailable)"
             logger.info(f"❌ Agent Rejected Trade for {ticker}. Reason: {reason}")
+            await _persist_news_decision(
+                ticker, "SKIP", side=side, result=result, reason=reason,
+                headline=headline, summary=summary, event_id=event_id,
+            )
             return False
     except Exception as exc:
         logger.error(f"Error executing trade for {ticker}: {exc}")
@@ -1132,10 +1235,20 @@ async def run_news_discovery_loop():
                 _processed_headlines.add(headline)
                 
                 action_words = [
-                    'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal', 
-                    'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger', 
-                    'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend', 
-                    'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade'
+                    'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal',
+                    'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger',
+                    'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend',
+                    'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade',
+                    # 2026-07-27 coverage widening — real catalysts that lacked a
+                    # matching word were silently dropped before ever reaching the
+                    # event classifier (LAURUSLABS/ORIENTTECH/LODHA-class misses):
+                    'order', 'wins', ' win', 'won ', 'bags', 'bag ', 'secures', 'secured',
+                    'contract', 'result', 'record', 'beat', 'beats', 'rises', 'rise ',
+                    'doubles', 'triples', 'rally', 'rallies', 'gains', 'gain ', 'awarded',
+                    'award', 'approval', 'approved', 'launch', 'expansion', 'guidance',
+                    'q1', 'q2', 'q3', 'q4', 'earnings', 'revenue', 'pat ', 'ebitda',
+                    'buyback', 'demerger', 'raises', 'cuts', 'hikes', 'slumps', 'tumbles',
+                    'falls', 'drops', 'sinks', 'high', 'multibagger', 'block deal',
                 ]
                 if not any(w in headline.lower() for w in action_words):
                     continue

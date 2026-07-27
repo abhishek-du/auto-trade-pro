@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-07-26T23:36:11.349598",
+  "total_predictions": 572,
+  "stage_pass_counts": {
+    "total": 572,
+    "valid_event_timestamp": 572,
+    "candles_available": 572,
+    "sector_resolved": 572,
+    "adapter_available": 572,
+    "nowcast_available": 572,
+    "expectation_anchor_available": 0,
+    "price_discount_available": 0,
+    "relative_strength_available": 0,
+    "reached_decision": 0
+  },
+  "exclusion_reason_distribution": {
+    "no_expectation_anchor": 572
+  },
+  "sector_distribution": {
+    "FMCG": 204,
+    "AUTO": 108,
+    "METALS": 104,
+    "IT": 80,
+    "PHARMA": 76
+  },
+  "decision_distribution": {},
+  "long_count": 0,
+  "wait_count": 0,
+  "no_trade_count": 0,
+  "data_exclusion_rate": 1.0,
+  "diagnosis": "MIXED: 572/572 produced a nowcast, 0/572 reached a decision \u2014 both coverage and gate factors contribute.",
+  "version": "v0.2"
+}
