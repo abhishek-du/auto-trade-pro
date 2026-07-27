@@ -52,6 +52,7 @@ class RoutingOutcome(str, Enum):
     BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
     BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
     BLOCKED_TECHNICAL_ORIGIN     = "BLOCKED_TECHNICAL_ORIGIN"      # News-Only hard-block: TECHNICAL may not originate trades (2026-07-21)
+    BLOCKED_MARKET_CLOSED        = "BLOCKED_MARKET_CLOSED"         # NSE not open for trading (2026-07-27)
     WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
 
@@ -108,6 +109,19 @@ class StrategyFamily(str, Enum):
     # branch is required; adding this member is sufficient (verified: nothing
     # switches exhaustively on StrategyFamily).
     PRE_EVENT    = "PRE_EVENT"
+    # DIRECT_NEWS (added 2026-07-27): trades directly off the already-
+    # classified event materiality/sentiment direction (real canonical
+    # CausalEvent, same classify_event() output the News/EVENT_DRIVEN strategy
+    # consumes) -- WITHOUT running the LLM-debate that produces a bull/bear
+    # thesis. Deliberately NOT EVENT_DRIVEN: _verify_canonical_event's
+    # thesis-vs-canonical consistency check (validate_evidence_consistency)
+    # needs an LLM-generated thesis to check for contradiction, which this
+    # strategy never produces -- there is nothing to verify. The strategy
+    # module itself (engine/direct_news_strategy.py) still enforces its own
+    # "NO EVENT -> NO TRADE" by refusing to build an intent without a
+    # resolvable event_id, so the invariant holds without this family-
+    # specific router check.
+    DIRECT_NEWS  = "DIRECT_NEWS"
 
 
 @dataclass
@@ -362,7 +376,10 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
         event_id=intent.event_id, evidence_ids=list(intent.evidence_ids or []),
         confidence_factors=dict(intent.confidence_factors or {}),
         strategy=intent.strategy,
-        source=intent.extra.get("source") or ("AI Predict" if intent.strategy == "PRE_EVENT_EXPECTATION_GAP" else None),
+        source=intent.extra.get("source") or (
+            "AI Predict" if intent.strategy == "PRE_EVENT_EXPECTATION_GAP" else
+            "Direct News" if intent.strategy == "DIRECT_NEWS" else None
+        ),
     )
 
 
@@ -493,6 +510,34 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     """
     mode = await resolve_mode(session)
 
+    # ── Market-hours gate (2026-07-27) ──────────────────────────────────────────
+    # New positions may ONLY open while NSE is actually open for trading
+    # (09:15-15:30 IST, weekdays, non-holidays) — checked here, in the one
+    # place every trade-creation call site already funnels through, so no
+    # individual caller can open a position outside real market hours by
+    # forgetting its own check (or, as happened live on 2026-07-27, by using
+    # a WIDER window meant for a different purpose: news_discovery_engine.py's
+    # market_open flag came from tasks.india_tasks._is_india_trading_window(),
+    # which deliberately extends to 16:00 IST — "market hours plus 30 minutes
+    # after close" — for position-management/reconciliation tasks, not for
+    # deciding whether a NEW trade may open; SHAKTIPUMP.BO opened live at
+    # 15:51 IST, 21 minutes after NSE's real 15:30 close, because of exactly
+    # that mismatch). Uses crawler.india_price_feed.is_nse_market_open() — the
+    # strict, real-hours definition (settings.NSE_OPEN/CLOSE_HOUR/MINUTE) —
+    # not the extended window. Does NOT affect position exits/stop-losses:
+    # confirmed by reading tasks/india_tasks.py::_fast_sl_check() and the
+    # slower exit path — both close positions directly via close_paper_trade()
+    # on OpenPosition rows and never construct a TradeIntent, so exits remain
+    # unaffected and can still run any time.
+    from crawler.india_price_feed import is_nse_market_open
+    if intent.instrument_type == "EQUITY" and not is_nse_market_open():
+        reason = "NSE is not open for trading (new positions only open 09:15-15:30 IST, weekdays)"
+        result = RoutingResult(outcome=RoutingOutcome.BLOCKED_MARKET_CLOSED, mode=mode, reason=reason,
+                                metadata={"strategy": intent.strategy})
+        logger.warning(f"[execution_gate] BLOCKED (market closed) {intent.symbol} strategy={intent.strategy}")
+        await _log_intent_audit(intent, mode, result, session)
+        return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
     # ── News-Only architecture hard-block (2026-07-21) ─────────────────────────
     # User-directed strategic pivot: "Make the system pure News-Only. Hard-block
     # all independent TECHNICAL strategy trade origination... The final
@@ -553,6 +598,29 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
             result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
                                     metadata={"strategy": intent.strategy})
             logger.warning(f"[execution_gate] BLOCKED (pre-event live gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+    if intent.strategy_family == StrategyFamily.DIRECT_NEWS:
+        if not settings.DIRECT_NEWS_ENABLED:
+            reason = "Direct News strategy disabled (DIRECT_NEWS_ENABLED=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_DISABLED, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (direct-news master switch) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+        if mode == TradeMode.PAPER and not settings.DIRECT_NEWS_PAPER_TRADING:
+            reason = "Direct News paper trading disabled (DIRECT_NEWS_PAPER_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (direct-news paper gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+        if mode == TradeMode.LIVE and not settings.DIRECT_NEWS_LIVE_TRADING:
+            reason = "Direct News live trading disabled (DIRECT_NEWS_LIVE_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (direct-news live gate) {intent.symbol} strategy={intent.strategy}")
             await _log_intent_audit(intent, mode, result, session)
             return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
