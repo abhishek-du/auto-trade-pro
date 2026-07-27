@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert, Landmark, FileText, HeartHandshake, FileCheck2, Paperclip, Activity, ArrowRight, BrainCircuit, Rss, Gauge } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Newspaper, ExternalLink, Clock, TrendingUp, TrendingDown, Minus, Wifi, WifiOff, Flame, Radio, Zap, RefreshCw, AlertTriangle, ShieldAlert, Landmark, FileText, HeartHandshake, FileCheck2, Paperclip, Activity, ArrowRight, BrainCircuit, Rss, Gauge, BookOpenText } from 'lucide-react';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getNews, getNewsAlerts, getCorporateAnnouncements, getSSEAnnouncements, getCausalEvents, apiFetch } from '../api/client';
 import { useLivePrices } from '../contexts/LivePricesContext';
@@ -688,6 +689,7 @@ const SENTIMENT_FILTERS = ['All', 'Bullish', 'Bearish', 'Neutral'];
 const MAX_ARTICLES = 200;
 
 export default function News() {
+  const navigate = useNavigate();
   const [articles,  setArticles]  = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [filter,    setFilter]    = useState('All');
@@ -772,6 +774,17 @@ export default function News() {
             <Icon size={13} /> {label}
           </button>
         ))}
+        <div className="w-px self-stretch bg-border mx-0.5" />
+        {/* Decision Journal is a full separate page (every processed stock's
+            buy/sell/skip + LLM reasoning + grounding proof), not in-page tab
+            state — clicking navigates there instead of switching activeTab. */}
+        <button
+          onClick={() => navigate('/news-decisions')}
+          className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors text-muted hover:text-slate-300"
+          title="Every processed stock — buy/sell/skip — with full LLM reasoning and grounding proof"
+        >
+          <BookOpenText size={13} /> Decision Journal <ArrowRight size={11} className="opacity-60" />
+        </button>
       </div>
 
       {/* ── Feed tab ── */}
