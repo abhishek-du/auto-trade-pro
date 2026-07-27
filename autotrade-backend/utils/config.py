@@ -336,6 +336,31 @@ class Settings(BaseSettings):
     PRE_EVENT_GAP_PAPER_TRADING:  bool  = True    # allow paper (virtual) execution
     PRE_EVENT_GAP_LIVE_TRADING:   bool  = True    # allow live capital (keep OFF until validated)
 
+    # ── Direct News strategy (2026-07-27, user-validated observation) ────────
+    # Trades DIRECTLY off the already-classified event materiality/sentiment
+    # direction (the same classify_event() output the News strategy's LLM
+    # debate consumes) -- skips the LLM-debate/grounding/technical-confirmation
+    # gate entirely. Rationale: live-checked that stocks tagged BULLISH by the
+    # event-intelligence system were moving up (and BEARISH ones down)
+    # regardless of impact tier, while the News strategy's demand for
+    # volume/momentum confirmation was skipping many of those correct-
+    # direction candidates. Fully isolated from the News strategy (separate
+    # StrategyFamily, separate source tag "Direct News", separate 3-flag
+    # gate) -- both may fire on the same event; the duplicate-open-position
+    # guard in risk_manager prevents a double entry. Sized deliberately small
+    # (DIRECT_NEWS_RISK_PCT) since this is a newer, simpler strategy running
+    # without the debate's confirmation layer.
+    DIRECT_NEWS_ENABLED:          bool  = True
+    DIRECT_NEWS_PAPER_TRADING:    bool  = True
+    DIRECT_NEWS_LIVE_TRADING:     bool  = True
+    # Only HIGH/MEDIUM materiality events qualify -- LOW-materiality headlines
+    # (routine filings, minor announcements) are excluded even if sentiment
+    # score is strong, since the classifier itself flags them as unlikely to
+    # move the stock materially.
+    DIRECT_NEWS_MIN_MATERIALITY: tuple = ("HIGH", "MEDIUM")
+    DIRECT_NEWS_MIN_CONFIDENCE:  float = 0.65   # classify_event's own 0-1 confidence
+    DIRECT_NEWS_RISK_PCT:        float = 0.5    # % of balance risked per trade (well below the normal 1-2% band)
+
     # Exit policy — validated OOS in Phase 2 backtest
     # partial_fixed: book 50% at T1, hold remaining to fixed T2 target (no trailing)
     # current:       book 50% at T1, trail remaining to T2 with 1×ATR trailing stop

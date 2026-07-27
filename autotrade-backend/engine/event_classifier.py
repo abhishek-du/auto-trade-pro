@@ -7,19 +7,34 @@ from utils.logger import logger
 from utils.llm import call_llm_chat
 
 class EventClassification(BaseModel):
+    # Required — the fields _build_evidence()/DecisionEvidence.from_classification()
+    # actually need to build a usable CausalEvent/trade decision. If the model
+    # can't reliably produce even these, the classification genuinely isn't
+    # usable and SHOULD fail (return None) — that's a correct "no event, no
+    # trade", not a bug.
     category: str = Field(description="Category of news (e.g. ORDER_WIN, EARNINGS_BEAT, REGULATORY_APPROVAL, MACRO_EVENT, RUMOR, MANAGEMENT_INTERVIEW)")
-    subcategories: list[str] = Field(description="List of subcategories (e.g. ['GOVERNMENT', 'INFRASTRUCTURE'])")
     impact: str = Field(description="Impact level: HIGH, MEDIUM, LOW")
     confidence: float = Field(description="Confidence in this classification from 0.0 to 1.0")
     bullish: bool = Field(description="True if bullish, False if bearish")
-    time_horizon: str = Field(description="Expected time horizon (e.g. '2_5_DAYS', 'WEEKS')")
-    expected_half_life_hours: int = Field(description="Exponential decay half-life in hours")
-    entities: dict = Field(description="Affected entities: {'companies': [], 'sectors': [], 'countries': []}")
-    reasoning: str = Field(description="Reasoning behind the classification")
-    surprise_score: int = Field(description="Impact score from 1 to 100 representing market surprise")
-    is_new_information: bool = Field(description="Is this genuinely new information or circulating old news?")
-    market_priced_in: float = Field(description="Estimated % of how much the market has already priced this in (0.0 to 1.0)")
-    source_reliability: float = Field(description="Reliability of the source (0.0 to 1.0) e.g., NSE=1.0, Rumor=0.3")
+    entities: dict = Field(default_factory=dict, description="Affected entities: {'companies': [], 'sectors': [], 'countries': []}")
+
+    # Optional (2026-07-27 forensic) — these are informational/bookkeeping only
+    # (never read by _build_evidence's DecisionEvidence, and the CausalEvent
+    # row degrades gracefully with a neutral default for each). Live-observed:
+    # nemotron occasionally omits one of these under an elaborate 13-field
+    # schema (e.g. "1 validation error for EventClassification" for a missing
+    # `source_reliability` or `is_new_information`), which used to hard-fail
+    # the ENTIRE classification — "no event, no trade" — even though the
+    # decision-critical fields above were present and perfectly usable. A
+    # missing optional field must not discard a genuine, usable catalyst.
+    subcategories: list[str] = Field(default_factory=list, description="List of subcategories (e.g. ['GOVERNMENT', 'INFRASTRUCTURE'])")
+    time_horizon: str = Field(default="UNKNOWN", description="Expected time horizon (e.g. '2_5_DAYS', 'WEEKS')")
+    expected_half_life_hours: int = Field(default=48, description="Exponential decay half-life in hours")
+    reasoning: str = Field(default="", description="Reasoning behind the classification")
+    surprise_score: int = Field(default=50, description="Impact score from 1 to 100 representing market surprise")
+    is_new_information: bool = Field(default=True, description="Is this genuinely new information or circulating old news?")
+    market_priced_in: float = Field(default=0.0, description="Estimated % of how much the market has already priced this in (0.0 to 1.0)")
+    source_reliability: float = Field(default=0.7, description="Reliability of the source (0.0 to 1.0) e.g., NSE=1.0, Rumor=0.3")
 
 async def classify_event(headline: str, summary: str | None = None) -> EventClassification | None:
     """
@@ -71,52 +86,67 @@ Output exactly valid JSON matching the following structure and nothing else. No 
     ]
 
     try:
-        # Retry across a transient circuit-breaker window — a dropped event here
-        # means "no canonical event → no trade" for a possibly-material catalyst,
-        # which was the #1 coverage gap (500+ classifications/day lost to breaker
-        # blips). Only wait+retry when the breaker is actually OPEN; a plain None
-        # for any other reason is given up on immediately (and, with mocked LLMs
-        # in tests, the breaker is never open, so behavior there is unchanged).
         from utils.llm import mantle_breaker_remaining as _breaker_remaining
         import asyncio as _asyncio
-        response_text = None
+        import re as _re
+
         for _attempt in range(4):
+            # ── 1. Get a response, retrying across a transient circuit-breaker
+            # window — a dropped event here means "no canonical event → no
+            # trade" for a possibly-material catalyst, which was the #1
+            # coverage gap (500+ classifications/day lost to breaker blips).
+            # Only wait+retry when the breaker is actually OPEN; a plain None
+            # for any other reason is given up on immediately (and, with
+            # mocked LLMs in tests, the breaker is never open, so behavior
+            # there is unchanged).
             response_text = await call_llm_chat(messages, max_tokens=2500, temperature=0.1)
-            if response_text:
-                break
-            remaining = _breaker_remaining()
-            if remaining <= 0 or _attempt == 3:
-                break
-            wait = min(remaining + 0.5, 20.0)
-            logger.info(
-                f"[event_classifier] LLM breaker open — retry {_attempt + 1}/4 for "
-                f"'{headline[:50]}' in {wait:.1f}s (so a material event isn't dropped)"
-            )
-            await _asyncio.sleep(wait)
-        if not response_text:
-            # Root-caused 2026-07-23: this used to be completely silent, which
-            # is why a Bedrock circuit-breaker cascade (utils/llm.py) killing
-            # 45-50 candidates in a row looked identical to routine
-            # classification misses in the logs -- see
-            # docs/NEWS_INGESTION_LATENCY_FORENSIC_AUDIT.md-adjacent
-            # investigation. call_llm_chat() returns falsy for two reasons:
-            # the circuit breaker is open (blocking ALL calls, not just this
-            # one -- see utils.llm's own block-window log), or a genuine
-            # empty-content response survived both of call_mantle_chat's
-            # internal retries. Either way, this is worth a trace.
-            logger.warning(f"[event_classifier] classify_event: no response for '{headline[:60]}' (LLM call failed or circuit breaker open)")
-            return None
+            if not response_text:
+                # Root-caused 2026-07-23: this used to be completely silent,
+                # which is why a Bedrock circuit-breaker cascade (utils/llm.py)
+                # killing 45-50 candidates in a row looked identical to
+                # routine classification misses in the logs. call_llm_chat()
+                # returns falsy for two reasons: the circuit breaker is open
+                # (blocking ALL calls, not just this one), or a genuine
+                # empty-content response survived both of call_mantle_chat's
+                # internal retries.
+                remaining = _breaker_remaining()
+                if remaining <= 0 or _attempt == 3:
+                    logger.warning(f"[event_classifier] classify_event: no response for '{headline[:60]}' (LLM call failed or circuit breaker open)")
+                    return None
+                wait = min(remaining + 0.5, 20.0)
+                logger.info(
+                    f"[event_classifier] LLM breaker open — retry {_attempt + 1}/4 for "
+                    f"'{headline[:50]}' in {wait:.1f}s (so a material event isn't dropped)"
+                )
+                await _asyncio.sleep(wait)
+                continue
 
-        import re
-        # Find json block if wrapped in markdown
-        match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
-        if match:
-            cleaned = match.group(1)
-        else:
-            cleaned = response_text.replace("```json", "").replace("```", "").strip()
-
-        data = json.loads(cleaned)
-        return EventClassification(**data)
+            # ── 2. Parse + validate — retry on malformed JSON too (2026-07-27
+            # forensic): nemotron occasionally produces JSON with a genuine
+            # syntax slip (a missing comma, a stray control character embedded
+            # raw in a string value) rather than an empty response, which used
+            # to hard-fail classify_event with no retry at all -- a second
+            # attempt at temperature=0.1 usually comes back clean.
+            match = _re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, _re.DOTALL)
+            cleaned = match.group(1) if match else response_text.replace("```json", "").replace("```", "").strip()
+            try:
+                # strict=False tolerates literal control characters (raw
+                # newlines/tabs) inside string values instead of requiring
+                # them escaped as \n/\t -- the json module's default (strict
+                # =True) rejects those outright, which was one of the
+                # observed live failure modes ("Invalid control character").
+                data = json.loads(cleaned, strict=False)
+                return EventClassification(**data)
+            except Exception as parse_exc:
+                if _attempt < 3:
+                    logger.info(
+                        f"[event_classifier] malformed JSON for '{headline[:50]}' "
+                        f"(attempt {_attempt + 1}/4): {parse_exc} — retrying"
+                    )
+                    continue
+                logger.error(f"[event_classifier] Failed to classify '{headline}' after retries: {parse_exc}")
+                return None
+        return None
     except Exception as e:
         logger.error(f"[event_classifier] Failed to classify '{headline}': {e}")
         return None

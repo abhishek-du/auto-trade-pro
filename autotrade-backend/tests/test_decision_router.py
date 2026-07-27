@@ -466,3 +466,69 @@ class TestIntentToSignalTraceability:
         intent = make_intent()
         signal = _intent_to_signal(intent)
         assert signal.confidence_factors == {}
+
+
+# ── Market-hours gate (2026-07-27) ───────────────────────────────────────────
+# SHAKTIPUMP.BO opened live at 15:51 IST, 21 minutes after NSE's real 15:30
+# close, because news_discovery_engine.py's market_open flag came from a
+# DIFFERENT function (tasks.india_tasks._is_india_trading_window(), which
+# deliberately extends to 16:00 IST for position-management purposes) than
+# the strict real-hours check this gate now enforces. This is the single
+# most important regression guard for that incident: every TradeIntent, from
+# every strategy family, must funnel through this check regardless of what
+# any individual caller's own (possibly wrong) market-hours logic decided.
+# tests/conftest.py's `_market_always_open` autouse fixture patches
+# is_nse_market_open() to True for every OTHER test in the suite (so they
+# aren't flaky by time-of-day) — these tests explicitly override it back to
+# verify the gate itself.
+
+class TestMarketHoursGate:
+    @pytest.mark.asyncio
+    async def test_blocks_new_equity_position_when_market_closed(self):
+        intent = make_intent(strategy_family=StrategyFamily.EVENT_DRIVEN)
+        canonical = make_canonical_event(bullish=["TESTCO"])
+        with _patch_resolve_mode(), \
+             patch("crawler.india_price_feed.is_nse_market_open", return_value=False):
+            result = await authorize_trade_intent(intent, make_session(canonical))
+        assert result.approved is False
+        assert result.outcome == RoutingOutcome.BLOCKED_MARKET_CLOSED
+
+    @pytest.mark.asyncio
+    async def test_applies_regardless_of_strategy_family(self):
+        # PRE_EVENT and DIRECT_NEWS are both exempt from the EVENT_DRIVEN-
+        # specific canonical-event consistency check, but neither is exempt
+        # from this one -- the whole point is no strategy can bypass it. Both
+        # families' own 3-flag gates default True already, so no extra
+        # patching is needed for those; the market-hours check runs first
+        # regardless and short-circuits before either gate is even reached.
+        for family in (StrategyFamily.PRE_EVENT, StrategyFamily.DIRECT_NEWS):
+            intent = make_intent(strategy_family=family, event_id=None, evidence_ids=[])
+            with _patch_resolve_mode(), \
+                 patch("crawler.india_price_feed.is_nse_market_open", return_value=False):
+                result = await authorize_trade_intent(intent, make_session())
+            assert result.outcome == RoutingOutcome.BLOCKED_MARKET_CLOSED, f"family={family}"
+
+    @pytest.mark.asyncio
+    async def test_does_not_block_when_market_open(self):
+        # Positive control: with the gate patched open (matching the autouse
+        # fixture's default) and everything else valid, the intent reaches
+        # past this check (approved, or blocked for an unrelated reason —
+        # never BLOCKED_MARKET_CLOSED).
+        intent = make_intent(strategy_family=StrategyFamily.EVENT_DRIVEN)
+        canonical = make_canonical_event(bullish=["TESTCO"])
+        wallet_patch, risk_patch = _patch_equity_approval()
+        with _patch_resolve_mode(), wallet_patch, risk_patch, \
+             patch("crawler.india_price_feed.is_nse_market_open", return_value=True):
+            result = await authorize_trade_intent(intent, make_session(canonical))
+        assert result.outcome != RoutingOutcome.BLOCKED_MARKET_CLOSED
+
+    @pytest.mark.asyncio
+    async def test_does_not_apply_to_non_equity_instrument_types(self):
+        # F&O / other instrument types have their own hours logic elsewhere;
+        # this gate only checks EQUITY intents.
+        intent = make_intent(strategy_family=StrategyFamily.FNO, instrument_type="FUTURE",
+                              event_id=None, evidence_ids=[])
+        with _patch_resolve_mode(), \
+             patch("crawler.india_price_feed.is_nse_market_open", return_value=False):
+            result = await authorize_trade_intent(intent, make_session())
+        assert result.outcome != RoutingOutcome.BLOCKED_MARKET_CLOSED

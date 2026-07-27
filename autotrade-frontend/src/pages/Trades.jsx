@@ -383,13 +383,21 @@ function TradeDetailPanel({ trade }) {
           </div>
         )}
 
-        {/* AI Predict attribution — Pre-Event Expectation Gap trades have no
+        {/* AI Predict / Direct News attribution — these strategies have no
             pattern_name, so this is their only Strategy-row indicator here. */}
         {trade.strategy_source === 'AI Predict' && (
           <div>
             <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
             <span className="inline-flex items-center gap-1 text-xs font-mono font-bold text-amber-300 bg-amber-500/10 border border-amber-500/25 px-2 py-0.5 rounded">
               <Sparkles size={11} /> AI Predict — Pre-Event Gap
+            </span>
+          </div>
+        )}
+        {trade.strategy_source === 'Direct News' && (
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
+            <span className="inline-flex items-center gap-1 text-xs font-mono font-bold text-sky-300 bg-sky-500/10 border border-sky-500/25 px-2 py-0.5 rounded">
+              <Zap size={11} /> Direct News — sentiment-direct
             </span>
           </div>
         )}
@@ -976,10 +984,11 @@ export default function Trades() {
                         </div>
                       </td>
 
-                      {/* Source badge — agent is the sole trader; "AI Predict" gets a
-                          distinct badge for trades originated by the Pre-Event
-                          Expectation Gap strategy (t.strategy_source), separate from
-                          the generic News/Hub-originated "AI" trades. */}
+                      {/* Source badge — agent is the sole trader; "AI Predict" and
+                          "Direct News" get distinct badges for trades originated by
+                          the Pre-Event Expectation Gap and Direct News strategies
+                          respectively (t.strategy_source), separate from the generic
+                          News/Hub-originated "AI" trades. */}
                       <td className="px-4 py-3">
                         {t.strategy_source === 'AI Predict' ? (
                           <span
@@ -987,6 +996,13 @@ export default function Trades() {
                             className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
                           >
                             <Sparkles size={9} /> AI Predict
+                          </span>
+                        ) : t.strategy_source === 'Direct News' ? (
+                          <span
+                            title="Opened by the Direct News strategy — trades directly off classified sentiment/materiality, no LLM debate (source: Direct News)"
+                            className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30"
+                          >
+                            <Zap size={9} /> Direct News
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">

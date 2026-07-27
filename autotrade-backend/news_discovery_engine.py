@@ -11,7 +11,7 @@ from crawler.news_crawler import (
 )
 from engine.agent.decision_engine import llm_tooluse_candidate
 from utils.llm import call_llm_chat
-from tasks.india_tasks import _is_india_trading_window
+from crawler.india_price_feed import is_nse_market_open
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("news_engine")
@@ -1046,6 +1046,16 @@ async def process_ticker(ticker, side, headline, summary):
         logger.info(f"[news_engine] {ticker}: no canonical event — skipping (no LLM call)")
         return False
 
+    # Direct News strategy (2026-07-27) — fires on the SAME classified evidence,
+    # completely independent of the LLM debate below. Never blocks on it, never
+    # blocked by it; any failure here is swallowed internally and can't affect
+    # the News strategy's own decision that follows.
+    try:
+        from engine.direct_news_strategy import maybe_direct_trade
+        await maybe_direct_trade(ticker, side, event_id, cand.evidence, headline)
+    except Exception as _dn_exc:
+        logger.debug(f"[news_engine] direct_news hook failed for {ticker}: {_dn_exc}")
+
     try:
         result = await llm_tooluse_candidate(ticker, cand, dec)
 
@@ -1178,8 +1188,22 @@ async def run_news_discovery_loop():
     
     while True:
         try:
-            market_open = _is_india_trading_window()
-            
+            # Root-caused 2026-07-27: this used to read
+            # tasks.india_tasks._is_india_trading_window(), which deliberately
+            # extends to 16:00 IST ("market hours plus 30 minutes after
+            # close") for a DIFFERENT purpose (letting position-management/
+            # reconciliation tasks keep running a bit past the real close) --
+            # but that same extended flag was ALSO gating whether a candidate
+            # gets processed live (potentially opening a NEW trade) vs queued
+            # for tomorrow, so live news between 15:30-16:00 IST could open a
+            # position after NSE's real close (confirmed: SHAKTIPUMP.BO
+            # opened live at 15:51 IST). is_nse_market_open() is the strict,
+            # real-hours definition (09:15-15:30 IST) — the correct check for
+            # "may a new trade open right now." The central execution gate
+            # (engine.decision_router.authorize_trade_intent) also enforces
+            # this independently now, as a backstop for any other caller.
+            market_open = is_nse_market_open()
+
             # 0. If Market is Open, Process DB Queue First
             if market_open:
                 async with AsyncSessionLocal() as session:
