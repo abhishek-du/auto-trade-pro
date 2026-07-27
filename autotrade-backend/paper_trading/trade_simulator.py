@@ -289,6 +289,7 @@ async def open_paper_trade(
         opened_at=now,
         # Attribution
         strategy_name=(_strategy[:40] if _strategy else None),
+        source=(getattr(signal, "source", None) or ("AI Predict" if _strategy == "PRE_EVENT_EXPECTATION_GAP" else None)),
         regime_at_entry=(_regime_entr[:20] if _regime_entr else None),
         entry_reason=_entry_rsn,
         confidence_bucket=_conf_bucket,

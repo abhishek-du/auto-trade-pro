@@ -98,6 +98,18 @@ _mantle_consecutive_failures: int = 0
 _mantle_block_logged: bool = False
 
 
+def mantle_breaker_remaining() -> float:
+    """Seconds until the LLM circuit breaker clears (0.0 if it is not open).
+
+    Lets high-value callers (e.g. engine.event_classifier.classify_event, whose
+    None return means a material event is dropped entirely — "no event, no
+    trade") wait out a transient Bedrock blip and retry, instead of permanently
+    losing the event. Added 2026-07-27 after a forensic showed ~500 event
+    classifications/day being dropped purely because a breaker window happened
+    to be open when they were attempted."""
+    return max(0.0, _mantle_blocked_until - _time.monotonic())
+
+
 @lru_cache(maxsize=1)
 def _nova_client():
     """Cached boto3 bedrock-runtime client (or None).

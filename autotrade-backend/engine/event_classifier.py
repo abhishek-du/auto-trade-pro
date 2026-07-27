@@ -71,7 +71,28 @@ Output exactly valid JSON matching the following structure and nothing else. No 
     ]
 
     try:
-        response_text = await call_llm_chat(messages, max_tokens=2500, temperature=0.1)
+        # Retry across a transient circuit-breaker window — a dropped event here
+        # means "no canonical event → no trade" for a possibly-material catalyst,
+        # which was the #1 coverage gap (500+ classifications/day lost to breaker
+        # blips). Only wait+retry when the breaker is actually OPEN; a plain None
+        # for any other reason is given up on immediately (and, with mocked LLMs
+        # in tests, the breaker is never open, so behavior there is unchanged).
+        from utils.llm import mantle_breaker_remaining as _breaker_remaining
+        import asyncio as _asyncio
+        response_text = None
+        for _attempt in range(4):
+            response_text = await call_llm_chat(messages, max_tokens=2500, temperature=0.1)
+            if response_text:
+                break
+            remaining = _breaker_remaining()
+            if remaining <= 0 or _attempt == 3:
+                break
+            wait = min(remaining + 0.5, 20.0)
+            logger.info(
+                f"[event_classifier] LLM breaker open — retry {_attempt + 1}/4 for "
+                f"'{headline[:50]}' in {wait:.1f}s (so a material event isn't dropped)"
+            )
+            await _asyncio.sleep(wait)
         if not response_text:
             # Root-caused 2026-07-23: this used to be completely silent, which
             # is why a Bedrock circuit-breaker cascade (utils/llm.py) killing

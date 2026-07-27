@@ -1395,7 +1395,18 @@ Now, based on the user's context below, follow your workflow and produce your fi
         _fundamentals_cache_var.set({})
         _company_intelligence_cache_var.set({})
         _last_tooluse_rejection_reason.set(None)  # clear per-call so a stale reason never leaks
-        for _ in range(15):  # max 15 LLM rounds (≤14 tool calls + a decide)
+        _max_rounds = 20
+        for _round_i in range(_max_rounds):  # LLM rounds (tool calls + a decide)
+            # Force convergence near the round limit: in the final rounds stop
+            # accepting further tool calls and require the model to commit to a
+            # decide verdict. Without this, a model that keeps calling tools (or
+            # can't satisfy the call-every-core-tool requirement in the exact
+            # expected form) burns all 15 rounds and is rejected as
+            # "round-exhaustion" — the dominant failure mode after the
+            # 2026-07-27 switch to nemotron, which is chattier in the ReAct loop
+            # than the previous provider. The core-tool requirement is also
+            # relaxed here so a near-exhaustion decide is accepted, not re-looped.
+            _force_decide = _round_i >= 12
             # gpt-oss/Mantle occasionally returns empty content (reasoning
             # consumed the whole token budget) or a transport-level error
             # (500/timeout) on a single round — confirmed live on the
@@ -1436,6 +1447,38 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     "LLM returned 3 consecutive empty/unparseable responses"
                 )
                 return None
+
+            # Normalize a common nemotron malformation: it frequently puts the
+            # TOOL NAME directly in "action" (e.g. {"action": "price_action",
+            # "tool": "price_action"}) instead of the literal {"action": "tool",
+            # "tool": "price_action"} the prompt asks for. Verified live
+            # (2026-07-27 forensic): this single mismatch made EVERY round fail
+            # the `action == "tool"` check below, so it fell through to the
+            # "neither tool nor decision" nudge every time, the model repeated
+            # the same malformed shape, burned the full round budget, and was
+            # decided blind (zero tools ever called) by the final-round
+            # fallback — this was ~96% (73/76) of today's decisions before this
+            # fix, not genuine "no data available" rejections.
+            _act = step.get("action")
+            if _act and _act not in ("tool", "decide", "final", "answer", "conclude") \
+                    and (_act in available_tools or _act in _NEWS_AUTHORITY_TOOLS):
+                # nemotron usually sets BOTH action and tool to the same tool
+                # name (not just action) -- tool may already be identical or
+                # even absent; either way, action must become the literal
+                # "tool" sentinel the dispatch below checks for.
+                if not step.get("tool"):
+                    step["tool"] = _act
+                step["action"] = "tool"
+            if step.get("action") == "tool" and _force_decide:
+                # Round budget almost gone — refuse more tools, demand a decision.
+                messages.append({"role": "assistant", "content": resp})
+                messages.append({"role": "user", "content": (
+                    "ROUND LIMIT REACHED: no more tool calls are available. Based on the "
+                    "canonical event and the tool outputs you already gathered, output your "
+                    "final decide verdict JSON NOW (with action:\"decide\", verdict, confidence, "
+                    "bull, bear, thesis). Do not request any tool."
+                )})
+                continue
             if step.get("action") == "tool":
                 tool = step.get("tool")
                 messages.append({"role": "assistant", "content": resp})
@@ -1468,7 +1511,10 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 else:
                     messages.append({"role": "user", "content": f"TOOL[{tool}] → unknown tool. Available tools: {list(available_tools)}"})
                 continue
-            if step.get("action") == "decide" or "verdict" in step:
+            if (step.get("action") in ("decide", "final", "answer", "conclude")
+                    or "verdict" in step or "decision" in step):
+                if "verdict" not in step and step.get("decision"):
+                    step["verdict"] = step.get("decision")
                 # Capture the decide call's OWN reasoning channel now, before
                 # _check_grounding() (below) potentially makes its own LLM
                 # call and overwrites the get_last_reasoning() contextvar --
@@ -1498,7 +1544,7 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 # claiming those specific tools were required. This checks
                 # identity, not count.
                 missing_core = [t for t in core_tools if t not in used]
-                if missing_core:
+                if missing_core and not _force_decide:
                     messages.append({"role": "assistant", "content": resp})
                     messages.append({"role": "user", "content": f"You have not met the minimum tool requirement. You must still call: {', '.join(missing_core)}. Continue investigating."})
                     continue
@@ -1512,6 +1558,42 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 grounding = await _check_grounding(symbol, step, tool_outputs, used, ctx0)
                 if not grounding["grounded"]:
                     if grounding_retries >= 1:
+                        # Second failure. If a canonical news event backs this
+                        # candidate (EVENT_DRIVEN path), the trade's core thesis is
+                        # that grounded event — the flagged claims are peripheral
+                        # LLM confirmations (price action / market depth / secondary
+                        # metrics), never the catalyst itself (which lives in the
+                        # given candidate_context and is therefore never flagged).
+                        # Rather than kill a valid strong-news trade over peripheral
+                        # fabrications, strip those claims, take a confidence
+                        # haircut, and proceed. The canonical-event verification +
+                        # materiality floor at the execution gate still vet it.
+                        # With NO canonical event the whole thesis is the model's
+                        # own claims → stay fail-closed (hard reject).
+                        _has_event = bool(getattr(candidate, "evidence", None))
+                        if _has_event and getattr(settings, "NEWS_GROUNDING_SOFT_FAIL", True):
+                            _bad = grounding.get("unsupported_claims") or []
+                            logger.info(
+                                f"[agent/llm_tooluse] {symbol} grounding SOFT-FAIL — canonical "
+                                f"event present; stripping {len(_bad)} peripheral ungrounded "
+                                f"claim(s) and proceeding with confidence haircut: {_bad}"
+                            )
+                            for _k in ("bull", "bear", "thesis", "thought"):
+                                _v = step.get(_k)
+                                if isinstance(_v, str) and _v:
+                                    for _c in _bad:
+                                        _v = _v.replace(str(_c), "")
+                                    step[_k] = _v.strip()
+                            try:
+                                _hc = float(getattr(settings, "NEWS_GROUNDING_SOFT_FAIL_PENALTY", 15.0))
+                                if step.get("confidence") is not None:
+                                    step["confidence"] = max(0.0, float(step["confidence"]) - _hc)
+                            except Exception:
+                                pass
+                            step["tools_used"] = used
+                            step["grounding"] = {**grounding, "soft_failed": True}
+                            step["model_reasoning"] = decide_reasoning
+                            return step
                         logger.info(
                             f"[agent/llm_tooluse] {symbol} rejected — ungrounded claims "
                             f"persisted after retry: {grounding['unsupported_claims']}"
@@ -1535,6 +1617,71 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 step["grounding"] = grounding
                 step["model_reasoning"] = decide_reasoning
                 return step
+
+            # Step was neither a tool call nor a recognized decision — nudge the
+            # model instead of silently repeating a non-actionable step and
+            # burning the round budget (a dominant round-exhaustion cause with
+            # the chattier nemotron provider).
+            messages.append({"role": "assistant", "content": resp})
+            messages.append({"role": "user", "content": (
+                "Your last response was neither a tool call nor a decision. Reply with ONLY "
+                "one JSON object — either {\"action\":\"tool\",\"tool\":\"<name>\"} to "
+                "investigate further, or {\"action\":\"decide\",\"verdict\":\"TAKE\"|\"SKIP\","
+                "\"confidence\":<int>,\"bull\":\"...\",\"bear\":\"...\",\"thesis\":\"...\"} to conclude."
+            )})
+
+        # Rounds exhausted without a decide. Last-ditch: one final tool-free call
+        # demanding the verdict JSON, so a chatty model that kept investigating
+        # still yields a clean TAKE/SKIP decision (its own judgment) instead of
+        # being dropped as an infra "round-exhaustion" (which looked like "no
+        # trades" but was really "no decision reached"). Same grounding + soft-
+        # fail discipline as the in-loop decide path.
+        try:
+            messages.append({"role": "user", "content": (
+                "FINAL — no more tool calls are permitted. Based on the canonical event and "
+                "the tool outputs already gathered, output ONLY your decision JSON now: "
+                "{\"action\":\"decide\",\"verdict\":\"TAKE\"|\"SKIP\",\"confidence\":<int>,"
+                "\"bull\":\"...\",\"bear\":\"...\",\"thesis\":\"...\"}."
+            )})
+            resp = await call_llm_chat(messages, max_tokens=settings.MANTLE_MAX_OUTPUT_TOKENS, temperature=0.1)
+            fstep = _parse_first_json(resp)
+            if fstep and ("verdict" in fstep or "decision" in fstep
+                          or fstep.get("action") in ("decide", "final", "answer", "conclude")):
+                if "verdict" not in fstep and fstep.get("decision"):
+                    fstep["verdict"] = fstep.get("decision")
+                grounding = await _check_grounding(symbol, fstep, tool_outputs, used, ctx0)
+                if not grounding["grounded"]:
+                    _has_event = bool(getattr(candidate, "evidence", None))
+                    if not (_has_event and getattr(settings, "NEWS_GROUNDING_SOFT_FAIL", True)):
+                        _last_tooluse_rejection_reason.set(
+                            f"Final forced decision ungrounded: {grounding['unsupported_claims'][:2]}"
+                        )
+                        return None
+                    _bad = grounding.get("unsupported_claims") or []
+                    for _k in ("bull", "bear", "thesis", "thought"):
+                        _v = fstep.get(_k)
+                        if isinstance(_v, str) and _v:
+                            for _c in _bad:
+                                _v = _v.replace(str(_c), "")
+                            fstep[_k] = _v.strip()
+                    try:
+                        _hc = float(getattr(settings, "NEWS_GROUNDING_SOFT_FAIL_PENALTY", 15.0))
+                        if fstep.get("confidence") is not None:
+                            fstep["confidence"] = max(0.0, float(fstep["confidence"]) - _hc)
+                    except Exception:
+                        pass
+                    fstep["grounding"] = {**grounding, "soft_failed": True}
+                else:
+                    fstep["grounding"] = grounding
+                fstep["tools_used"] = used
+                fstep["model_reasoning"] = get_last_reasoning()
+                logger.info(
+                    f"[agent/llm_tooluse] {symbol} decided via final tool-free round "
+                    f"(was near round-exhaustion)"
+                )
+                return fstep
+        except Exception as _fexc:
+            logger.debug(f"[agent/llm_tooluse] {symbol} final forced-decision failed: {_fexc}")
         _last_tooluse_rejection_reason.set("Exhausted all rounds without reaching a decision (round-exhaustion)")
         return None  # ran out of rounds without deciding
     except Exception as exc:

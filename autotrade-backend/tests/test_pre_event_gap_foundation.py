@@ -98,20 +98,24 @@ class TestDecisionStates:
         assert PreEventDecision.NO_TRADE.value == "NO_TRADE"
 
 
-# ── 3. Config flags (all default OFF — fail-closed) ─────────────────────────
+# ── 3. Config flags ─────────────────────────────────────────────────────────
+# Turned ON by user decision 2026-07-27 ("turn on all the flags by default
+# true"). Note: the engine is NOT wired into any execution path yet, so even
+# with all three True no trade is created — the flags are inert until the
+# execution-wiring phase lands. These tests assert the requested default.
 
 class TestConfigFlags:
-    def test_master_flag_default_off(self):
+    def test_master_flag_default_on(self):
         from utils.config import Settings
-        assert Settings.model_fields["PRE_EVENT_GAP_ENABLED"].default is False
+        assert Settings.model_fields["PRE_EVENT_GAP_ENABLED"].default is True
 
-    def test_paper_flag_default_off(self):
+    def test_paper_flag_default_on(self):
         from utils.config import Settings
-        assert Settings.model_fields["PRE_EVENT_GAP_PAPER_TRADING"].default is False
+        assert Settings.model_fields["PRE_EVENT_GAP_PAPER_TRADING"].default is True
 
-    def test_live_flag_default_off(self):
+    def test_live_flag_default_on(self):
         from utils.config import Settings
-        assert Settings.model_fields["PRE_EVENT_GAP_LIVE_TRADING"].default is False
+        assert Settings.model_fields["PRE_EVENT_GAP_LIVE_TRADING"].default is True
 
     def test_flags_are_bools_at_runtime(self):
         for name in ("PRE_EVENT_GAP_ENABLED", "PRE_EVENT_GAP_PAPER_TRADING", "PRE_EVENT_GAP_LIVE_TRADING"):

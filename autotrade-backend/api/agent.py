@@ -690,3 +690,88 @@ async def resume_trading(
     await RuntimeConfig.set(db, "trading_halted", False)
     await db.commit()
     return {"status": "success", "message": "Trading resumed."}
+
+
+# ── GET /decisions ────────────────────────────────────────────────────────────
+# News / agent Decision Journal: every stock the pipeline processed — BUY, SELL,
+# or SKIP — with the full reasoning and the evidence/proof behind it. Powers the
+# frontend "Decision Journal" page (date + action + source + symbol filters).
+
+@router.get("/journal", summary="Decision journal: every processed stock (BUY/SELL/SKIP) with reasoning + proof")
+async def agent_decisions(
+    date_from: Optional[str] = None,   # YYYY-MM-DD inclusive
+    date_to:   Optional[str] = None,   # YYYY-MM-DD inclusive
+    action:    Optional[str] = None,   # BUY | SELL | SKIP
+    strategy:  Optional[str] = None,   # NEWS | HUB_SIGNAL | ...
+    source:    Optional[str] = None,   # NEWS | HUB (from confidence_factors.source)
+    symbol:    Optional[str] = None,   # substring match
+    grounded:  Optional[bool] = None,  # True/False → grounding pass/fail
+    min_confidence: Optional[int] = None,
+    limit:     int = 300,
+    offset:    int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import datetime as _dt, timedelta as _td
+
+    q = select(AgentDecision)
+    if date_from:
+        q = q.where(AgentDecision.ts >= _dt.fromisoformat(date_from))
+    if date_to:
+        q = q.where(AgentDecision.ts < _dt.fromisoformat(date_to) + _td(days=1))
+    if action:
+        q = q.where(AgentDecision.action == action.upper())
+    if strategy:
+        q = q.where(AgentDecision.strategy == strategy)
+    if symbol:
+        q = q.where(AgentDecision.symbol.ilike(f"%{symbol}%"))
+    if min_confidence is not None:
+        q = q.where(AgentDecision.confidence >= min_confidence)
+    q = q.order_by(desc(AgentDecision.ts)).limit(min(limit, 1000)).offset(max(offset, 0))
+    rows = (await db.execute(q)).scalars().all()
+
+    def _row(r):
+        cf   = r.confidence_factors or {}
+        news = cf.get("news") or {}
+        gr   = cf.get("grounding") or {}
+        return {
+            "id": r.id, "ts": r.ts.isoformat(), "symbol": r.symbol, "action": r.action,
+            "confidence": r.confidence, "strategy": r.strategy, "regime": r.regime,
+            "entry": r.entry, "stop": r.stop, "target": r.target,
+            "skip_reason": r.skip_reason, "reasons": r.reasons or [],
+            "source": (cf.get("source") or ("NEWS" if r.strategy == "NEWS" else r.strategy or "OTHER")),
+            "headline": news.get("headline"), "summary": news.get("summary"),
+            "event_id": news.get("event_id"), "news_side": news.get("side"),
+            "verdict": cf.get("verdict"), "bull": cf.get("bull"), "bear": cf.get("bear"),
+            "key_risk": cf.get("key_risk"), "thesis": cf.get("thesis"),
+            "market_confirmation": cf.get("market_confirmation"),
+            "tools_used": cf.get("tools_used") or [],
+            "grounding": gr, "model_reasoning": cf.get("model_reasoning"),
+        }
+
+    items = [_row(r) for r in rows]
+    if source:
+        items = [x for x in items if (x["source"] or "").upper() == source.upper()]
+    if grounded is not None:
+        items = [x for x in items if (x["grounding"] or {}).get("grounded") is grounded]
+
+    counts = {"BUY": 0, "SELL": 0, "SKIP": 0}
+    for x in items:
+        counts[x["action"]] = counts.get(x["action"], 0) + 1
+    return {"count": len(items), "counts": counts, "decisions": items}
+
+
+@router.get("/journal/facets", summary="Distinct filter values (strategies, sources, dates) for the journal UI")
+async def agent_decision_facets(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import func as _f, cast, Date
+    strategies = (await db.execute(
+        select(AgentDecision.strategy, _f.count()).group_by(AgentDecision.strategy)
+    )).all()
+    dates = (await db.execute(
+        select(cast(AgentDecision.ts, Date).label("d"), _f.count())
+        .group_by("d").order_by(desc("d")).limit(60)
+    )).all()
+    return {
+        "strategies": [{"value": s or "OTHER", "count": c} for s, c in strategies],
+        "dates": [{"date": str(d), "count": c} for d, c in dates],
+        "actions": ["BUY", "SELL", "SKIP"],
+    }

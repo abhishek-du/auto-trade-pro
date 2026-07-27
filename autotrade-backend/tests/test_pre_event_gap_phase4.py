@@ -177,6 +177,14 @@ def _income_strong():
     ]}
 
 
+def _patch_baseline(value=0.20, known_at=datetime(2026, 9, 1)):
+    # A valid, point-in-time (known_at < as_of) historical-baseline anchor so
+    # the engine can reach a decision. Patched in expectation.py's namespace.
+    from engine.pre_event_expectation_gap.financials import HistoricalBaseline
+    return patch("engine.pre_event_expectation_gap.expectation.get_historical_baseline_3y_cagr",
+                 AsyncMock(return_value=HistoricalBaseline(value=value, known_at=known_at)))
+
+
 class TestEngine:
     @pytest.mark.asyncio
     async def test_predict_calm_price_is_long(self):
@@ -188,7 +196,8 @@ class TestEngine:
 
         eng = PreEventExpectationGapEngine()
         with patch("crawler.price_feed.get_latest_candles", side_effect=fake), \
-             patch("crawler.upstox_data.get_income_statement", AsyncMock(return_value=_income_strong())):
+             patch("crawler.upstox_data.get_income_statement", AsyncMock(return_value=_income_strong())), \
+             _patch_baseline():
             p = await eng.predict("MARUTI.NS", _event(), datetime(2026, 10, 1), AsyncMock())
         assert p.decision == PreEventDecision.LONG
         assert p.source == "AI Predict"
@@ -204,7 +213,8 @@ class TestEngine:
 
         eng = PreEventExpectationGapEngine()
         with patch("crawler.price_feed.get_latest_candles", side_effect=fake), \
-             patch("crawler.upstox_data.get_income_statement", AsyncMock(return_value=_income_strong())):
+             patch("crawler.upstox_data.get_income_statement", AsyncMock(return_value=_income_strong())), \
+             _patch_baseline():
             p = await eng.predict("MARUTI.NS", _event(), datetime(2026, 10, 1), AsyncMock())
         assert p.decision == PreEventDecision.WAIT
 

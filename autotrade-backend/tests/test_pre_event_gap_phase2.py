@@ -23,9 +23,11 @@ from engine.pre_event_expectation_gap.sector_adapters import (
     run_nowcast, get_adapter, registered_sectors, resolve_strategy_sector,
 )
 from engine.pre_event_expectation_gap.sector_adapters import base as adapters_base
-from engine.pre_event_expectation_gap.sector_adapters.auto import (
-    AutoNowcastAdapter, _period_end_date, _available_series, _direction,
+from engine.pre_event_expectation_gap.sector_adapters.auto import AutoNowcastAdapter
+from engine.pre_event_expectation_gap.financials import (
+    period_end_date as _period_end_date, available_series as _available_series,
 )
+from engine.pre_event_expectation_gap.sector_adapters.common import direction_of as _direction
 
 
 def _q(period, value):

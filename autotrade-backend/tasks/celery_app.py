@@ -208,6 +208,14 @@ celery_app.conf.beat_schedule = {
         "options":  {"countdown": 30},
     },
 
+    # Every 15 min during NSE hours: scan scheduled corporate events (1-15 days out)
+    # for pre-event expectation gap setups. Parallel & independent of News Strategy.
+    "pre-event-gap-scan-every-15min": {
+        "task":     "tasks.india_pre_event_gap_scan",
+        "schedule": 900,
+        "options":  {"countdown": 45},
+    },
+
     # Every 5 s during NSE hours: stop-loss / take-profit check on live PRICE_CACHE.
     # Pure exit-only path — reads WebSocket LTP, no scoring, no new entries.
     "fast-sl-check-every-5s": {

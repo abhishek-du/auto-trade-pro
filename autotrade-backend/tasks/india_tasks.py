@@ -764,9 +764,23 @@ async def _india_trade_loop():
         signals: list = []
         for c in candidates:
             conf = min(100.0, abs(c["score"]))
-            if conf < conf_threshold:
+            # Strong-news override: a strongly-positive Hub news sub-score lets a
+            # BUY survive even when the bear-dragged master score is below the
+            # actionable threshold (it will bypass the regime gates downstream).
+            _news_sub = float((c.get("hub_subscores") or {}).get("news", 0) or 0)
+            _news_override = bool(
+                getattr(settings, "NEWS_REGIME_OVERRIDE_ENABLED", False)
+                and _news_sub >= getattr(settings, "NEWS_OVERRIDE_MIN_NEWS_SCORE", 75.0)
+            )
+            if conf < conf_threshold and not _news_override:
                 continue
-            action = "BUY" if "BUY" in c["signal"] else "SELL"
+            if _news_override:
+                action = "BUY"
+                # Effective confidence scales with news strength so the candidate
+                # ranks into the level pool instead of being crowded out.
+                conf = max(conf, min(100.0, 50.0 + _news_sub * 0.5))
+            else:
+                action = "BUY" if "BUY" in c["signal"] else "SELL"
             # Shorts need higher conviction — only short on strong Hub signals
             if action == "SELL" and conf < 50:
                 continue
@@ -867,6 +881,7 @@ async def _india_trade_loop():
                 regime=c["hub_subscores"].get("regime", "") if c.get("hub_subscores") else "",
                 timeframe="1d",
                 hub_subscores=c.get("hub_subscores", {}),
+                news_override=_news_override,
             ))
 
         actionable = [s for s in signals if s.action in ("BUY", "SELL")]
@@ -1101,9 +1116,18 @@ async def _india_trade_loop():
         # Step 6: work down the ranked pool, opening until the risk budget / cash
         # buffer (inside validate_signal) or the per-cycle cap stops us.
         opened = 0
+        news_opened = 0
+        _news_cap = (
+            int(getattr(settings, "NEWS_OVERRIDE_MAX_PER_CYCLE", 2))
+            if getattr(settings, "NEWS_REGIME_OVERRIDE_ENABLED", False) else 0
+        )
         for signal in level_pool:
-            if opened >= max_new:
-                break
+            _override = bool(getattr(signal, "news_override", False)) and signal.action == "BUY"
+            # Normal budget/halt cap reached (max_new can be 0 under a
+            # portfolio-brain halt). A strong-news override may still open, up to
+            # its own small per-cycle cap; everything else is done for this cycle.
+            if opened >= max_new and not (_override and news_opened < _news_cap):
+                continue
 
             # ── Phase 9 Quality Gate — mirrors the exact filters proven in backtest ──
             # All 4 checks must pass for a BUY to proceed. SELLs get their own
@@ -1111,8 +1135,15 @@ async def _india_trade_loop():
             # per-cycle above but previously never consulted for shorts, which let
             # the short book fire regardless of the broader market's direction.
             if signal.action == "BUY":
+                if _override:
+                    logger.info(
+                        f"[news-override] {signal.symbol} — strong news "
+                        f"(news_score={float((getattr(signal,'hub_subscores',{}) or {}).get('news',0)):+.0f}) "
+                        f"bypassing regime/technical entry gates "
+                        f"[{news_opened + 1}/{_news_cap} this cycle]"
+                    )
                 # Gate 1: EMA200 absolute bear-market gate
-                if not _p9ctx["nifty_ema200_ok"]:
+                if not _p9ctx["nifty_ema200_ok"] and not _override:
                     logger.info(
                         f"[phase9] BLOCK {signal.symbol} — Nifty below EMA200 "
                         f"(structural bear market)"
@@ -1124,7 +1155,7 @@ async def _india_trade_loop():
                     continue
 
                 # Gate 2: 5-state regime engine — only STRONG_BULL / MODERATE_BULL
-                if not _p9ctx["regime_allows_buy"]:
+                if not _p9ctx["regime_allows_buy"] and not _override:
                     _rstate = _p9ctx.get("regime_state", "?")
                     logger.info(
                         f"[phase9] BLOCK {signal.symbol} — regime={_rstate} "
@@ -1139,7 +1170,7 @@ async def _india_trade_loop():
                 # Gate 3: Relative Strength filter — stock must not lag Nifty by >3%
                 _stock_roc20 = getattr(signal, "phase9_roc20", 0.0)
                 _nifty_roc20 = _p9ctx["nifty_roc20"]
-                if _stock_roc20 < _nifty_roc20 - 3.0:
+                if _stock_roc20 < _nifty_roc20 - 3.0 and not _override:
                     logger.info(
                         f"[phase9] BLOCK {signal.symbol} — RS filter: "
                         f"stock_roc20={_stock_roc20:+.2f}% < nifty_roc20={_nifty_roc20:+.2f}% - 3%"
@@ -1154,7 +1185,7 @@ async def _india_trade_loop():
                     continue
 
                 # Gate 4: EMA20 slope — must be rising (today > 5 bars ago)
-                if not getattr(signal, "phase9_ema20_slope_ok", True):
+                if not getattr(signal, "phase9_ema20_slope_ok", True) and not _override:
                     logger.info(
                         f"[phase9] BLOCK {signal.symbol} — EMA20 slope flat/declining "
                         f"(pullback may be reversal)"
@@ -1169,7 +1200,7 @@ async def _india_trade_loop():
                 # bounced above EMA20 with vol spike, RSI 50-70, ADX>20, EMA stack
                 # (20>50, 50>=200×1.01), shallow touch (prev low within 3%), quiet
                 # prev bar, ADX not collapsing. Mirrors PullbackTrendLong.evaluate().
-                if not getattr(signal, "phase9_pullback_ok", False):
+                if not getattr(signal, "phase9_pullback_ok", False) and not _override:
                     logger.info(
                         f"[phase9] BLOCK {signal.symbol} — pullback pattern not confirmed "
                         f"(needs EMA20 touch + bounce + vol spike + RSI/ADX/EMA stack)"
@@ -4034,3 +4065,159 @@ async def _india_weekend_reflection():
                 json.dump(existing_rules, f, indent=4)
     except Exception as exc:
         logger.error(f"[weekend_reflection] Error: {exc}")
+
+
+# ── Pre-Event Expectation Gap Strategy Task (Phase 6) ────────────────────────
+# Dedicated live production wiring for the parallel Pre-Event Expectation Gap
+# strategy. Operates independently of the News Strategy without interference or
+# shared state. Evaluates scheduled corporate events and routes actionable
+# candidates through the central execution gate with source="AI Predict" attribution.
+
+async def _compute_pre_event_trade_levels(symbol: str, action: str, entry_price: float, session) -> dict:
+    import pandas as pd
+    from crawler.price_feed import get_latest_candles
+    from engine.indicators import compute_indicators
+    from engine.risk_manager import compute_trade_levels
+
+    sig_ind = None
+    try:
+        candles_1d = await get_latest_candles(symbol, "1d", 60, session)
+        if len(candles_1d) >= 20:
+            df = pd.DataFrame([{
+                "open": c.open, "high": c.high, "low": c.low,
+                "close": c.close, "volume": c.volume, "timestamp": c.timestamp,
+            } for c in candles_1d])
+            sig_ind = compute_indicators(df)
+    except Exception as exc:
+        logger.debug(f"[pre_event_gap] {symbol}: candle fetch for SL/TP levels failed: {exc}")
+
+    lv = compute_trade_levels(action, entry_price, sig=sig_ind)
+    return {
+        "stop_loss": round(lv["stop_loss"], 2),
+        "take_profit": round(lv["target_1"], 2),
+        "target_2": round(lv.get("target_2", lv["target_1"]), 2),
+        "atr": lv.get("atr", 0.0),
+    }
+
+
+async def _pre_event_gap_scan_loop(min_days_until: int = 1, max_days_until: int = 15):
+    from utils.config import settings
+    if not settings.PRE_EVENT_GAP_ENABLED:
+        return
+
+    is_window = _is_india_trading_window()
+    now_ist = datetime.datetime.now(_IST)
+    is_entry_window = is_window and (now_ist.time() < datetime.time(15, 20))
+
+    if is_window:
+        try:
+            from crawler.live_snapshot import fetch_live_snapshot
+            await fetch_live_snapshot()
+        except Exception as exc:
+            logger.warning(f"[pre_event_gap] live snapshot fetch failed: {exc}")
+
+    from tasks._db import celery_session
+    from engine.pre_event_expectation_gap import scan as _pre_event_scan, PreEventDecision, STRATEGY_ID, TRADE_SOURCE
+    from engine.decision_router import (
+        TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome,
+    )
+    from crawler.market_snapshot import get_market_snapshot
+
+    async with celery_session() as session:
+        logger.info(f"[pre_event_gap] starting event scan (window={min_days_until}..{max_days_until}d)")
+        predictions = await _pre_event_scan(session, min_days_until=min_days_until, max_days_until=max_days_until)
+        logger.info(f"[pre_event_gap] evaluated {len(predictions)} scheduled events")
+
+        if not is_entry_window:
+            logger.info("[pre_event_gap] outside market entry window — scan recorded, no trade execution attempted")
+            return
+
+        opened = 0
+        for pred in predictions:
+            if pred.decision not in (PreEventDecision.LONG, PreEventDecision.SHORT):
+                continue
+
+            action = "BUY" if pred.decision == PreEventDecision.LONG else "SELL"
+            product = "MIS" if action == "SELL" else "CNC"
+
+            snap = await get_market_snapshot(pred.symbol)
+            entry_price = snap.ltp if snap else None
+            if not entry_price or entry_price <= 0:
+                logger.warning(f"[pre_event_gap] {pred.symbol}: no live quote available — skipping trade execution")
+                continue
+
+            levels = await _compute_pre_event_trade_levels(pred.symbol, action, entry_price, session)
+
+            extra_meta = {
+                "source": TRADE_SOURCE,
+                "reasoning_points": [
+                    f"Event: {pred.event.event_type.value} on {pred.event.event_date.isoformat()}",
+                    f"Nowcast profit: {pred.nowcast.profit_direction.value} (conf: {pred.nowcast.confidence:.2f})",
+                    f"Price discount status: {pred.price_discount.status.value}",
+                    pred.decision_reason,
+                ],
+                "audit_record": pred.to_audit_dict(),
+            }
+
+            intent = TradeIntent(
+                strategy=STRATEGY_ID,
+                symbol=pred.symbol,
+                action=action,
+                instrument_type="EQUITY",
+                entry_price=entry_price,
+                stop_loss=levels["stop_loss"],
+                take_profit=levels["take_profit"],
+                confidence=pred.pre_event_score,
+                confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.PRE_EVENT,
+                event_directness=EventDirectness.NOT_APPLICABLE,
+                evidence_ids=[],
+                event_id=None,
+                product=product,
+                extra=extra_meta,
+                target_2=levels["target_2"],
+                atr=levels["atr"],
+                confidence_factors={"score_breakdown": pred.score_breakdown, "source": TRADE_SOURCE},
+            )
+
+            result = await execute_trade_intent(intent, session)
+            if result.outcome in (RoutingOutcome.EXECUTED_PAPER, RoutingOutcome.EXECUTED_LIVE):
+                opened += 1
+                logger.warning(f"✅ PRE-EVENT TRADE OPENED: {pred.symbol} {action} @ ₹{entry_price} ({result.outcome.value} via {TRADE_SOURCE})")
+            else:
+                logger.info(f"[pre_event_gap] trade not executed for {pred.symbol}: {result.outcome.value} — {result.reason}")
+
+        if opened > 0:
+            logger.info(f"[pre_event_gap] scan cycle opened {opened} trade(s)")
+
+
+@celery_app.task(
+    name="tasks.india_pre_event_gap_scan",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=60,
+    time_limit=600,
+    soft_time_limit=540,
+)
+def run_pre_event_gap_scan(self, min_days_until: int = 1, max_days_until: int = 15):
+    """Phase 6: Live production wiring for Pre-Event Expectation Gap strategy.
+
+    Runs completely in parallel to and isolated from the News Strategy.
+    Scans upcoming scheduled corporate events in the specified window, generates
+    auditable PreEventPredictions, and routes actionable (LONG) predictions through
+    the central execution gate with source='AI Predict' attribution.
+    """
+    from utils.config import settings
+    if not settings.PRE_EVENT_GAP_ENABLED:
+        logger.debug("[pre_event_gap] task skipped — PRE_EVENT_GAP_ENABLED is False")
+        return
+
+    try:
+        _run_async(_pre_event_gap_scan_loop(min_days_until, max_days_until))
+    except Exception as exc:
+        logger.error(f"[pre_event_gap] scan loop failed: {exc}", exc_info=True)
+        try:
+            self.retry(exc=exc)
+        except Exception:
+            pass
+

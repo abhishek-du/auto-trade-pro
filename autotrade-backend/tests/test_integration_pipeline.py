@@ -190,7 +190,10 @@ class TestRejectedViaThesisCanonicalDrift:
 
 class TestRejectedViaLLMGroundingLoop:
     @pytest.mark.asyncio
-    async def test_persistently_ungrounded_verdict_never_reaches_execution(self):
+    async def test_persistently_ungrounded_verdict_hard_rejects_when_soft_fail_disabled(self):
+        # With NEWS_GROUNDING_SOFT_FAIL off, a persistently ungrounded verdict
+        # still fails closed end-to-end, even with a canonical event present.
+        from utils.config import settings as _settings
         canonical = _make_canonical_event(bullish=["TESTCO"])
         find_ctx, _ = _mock_session_ctx()
 
@@ -203,11 +206,37 @@ class TestRejectedViaLLMGroundingLoop:
              patch("engine.agent.decision_engine._candidate_context", AsyncMock(return_value="CONTEXT")), \
              patch("engine.agent.decision_engine._check_grounding",
                    AsyncMock(return_value={"grounded": False, "unsupported_claims": ["fabricated catalyst"]})), \
+             patch.object(_settings, "NEWS_GROUNDING_SOFT_FAIL", False), \
              patch("news_discovery_engine._execute_news_trade", AsyncMock()) as mock_execute:
             result = await process_ticker("TESTCO.NS", "BUY", "headline", "summary")
 
         assert result is False
         mock_execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_persistently_ungrounded_verdict_soft_fails_and_proceeds_with_canonical_event(self):
+        # 2026-07-27: a canonical event backs the thesis, so a persistent
+        # grounding failure (peripheral claims only) soft-fails and the trade
+        # proceeds to execution with a confidence haircut, instead of being
+        # dropped outright — this is what let real strong-news trades
+        # (LT/AUBANK/etc.) through instead of being killed by grounding noise.
+        canonical = _make_canonical_event(bullish=["TESTCO"])
+        find_ctx, _ = _mock_session_ctx()
+
+        llm_responses = [tool_step(t) for t in _CORE_TOOLS_WITH_EVENT] + [decide_step(), decide_step()]
+
+        with patch("news_discovery_engine._find_canonical_event", AsyncMock(return_value=(canonical, "matched headline"))), \
+             patch("news_discovery_engine.AsyncSessionLocal", find_ctx), \
+             patch("utils.llm.call_llm_chat", AsyncMock(side_effect=llm_responses)), \
+             patch("engine.agent.decision_engine._LLM_TOOLS", _make_stub_tools()), \
+             patch("engine.agent.decision_engine._candidate_context", AsyncMock(return_value="CONTEXT")), \
+             patch("engine.agent.decision_engine._check_grounding",
+                   AsyncMock(return_value={"grounded": False, "unsupported_claims": ["fabricated catalyst"]})), \
+             patch("news_discovery_engine._execute_news_trade", AsyncMock(return_value=True)) as mock_execute:
+            result = await process_ticker("TESTCO.NS", "BUY", "headline", "summary")
+
+        assert result is True
+        mock_execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_skip_verdict_never_reaches_execution(self):

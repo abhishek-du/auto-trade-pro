@@ -3,7 +3,7 @@ import {
   Search, ChevronLeft, ChevronRight, ChevronDown,
   TrendingUp, TrendingDown, IndianRupee, Activity,
   Wallet, BarChart2, ArrowUpRight, ArrowDownRight,
-  Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen, Bot,
+  Zap, Target, ShieldAlert, Clock, Brain, Clock3, BookOpen, Bot, Sparkles,
 } from 'lucide-react';
 import { useTrades } from '../hooks/useTrades';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -379,6 +379,17 @@ function TradeDetailPanel({ trade }) {
             <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
             <span className="text-xs font-mono font-bold text-cyan bg-cyan/10 border border-cyan/25 px-2 py-0.5 rounded">
               {trade.pattern_name.replace(/_/g, ' ')}
+            </span>
+          </div>
+        )}
+
+        {/* AI Predict attribution — Pre-Event Expectation Gap trades have no
+            pattern_name, so this is their only Strategy-row indicator here. */}
+        {trade.strategy_source === 'AI Predict' && (
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-widest text-muted mb-1.5">Strategy</p>
+            <span className="inline-flex items-center gap-1 text-xs font-mono font-bold text-amber-300 bg-amber-500/10 border border-amber-500/25 px-2 py-0.5 rounded">
+              <Sparkles size={11} /> AI Predict — Pre-Event Gap
             </span>
           </div>
         )}
@@ -965,11 +976,23 @@ export default function Trades() {
                         </div>
                       </td>
 
-                      {/* Source badge — agent is the sole trader */}
+                      {/* Source badge — agent is the sole trader; "AI Predict" gets a
+                          distinct badge for trades originated by the Pre-Event
+                          Expectation Gap strategy (t.strategy_source), separate from
+                          the generic News/Hub-originated "AI" trades. */}
                       <td className="px-4 py-3">
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
-                          <Bot size={9} /> AI
-                        </span>
+                        {t.strategy_source === 'AI Predict' ? (
+                          <span
+                            title="Opened by the Pre-Event Expectation Gap strategy (source: AI Predict)"
+                            className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                          >
+                            <Sparkles size={9} /> AI Predict
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                            <Bot size={9} /> AI
+                          </span>
+                        )}
                       </td>
 
                       {/* Direction */}

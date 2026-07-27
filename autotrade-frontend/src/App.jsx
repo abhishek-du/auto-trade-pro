@@ -55,6 +55,7 @@ import Dashboard        from './pages/Dashboard';
 import Trades           from './pages/Trades';
 import Analytics        from './pages/Analytics';
 import News             from './pages/News';
+import NewsDecisions    from './pages/NewsDecisions';
 import Simulation       from './pages/Simulation';
 import Settings         from './pages/Settings';
 import Documentation    from './pages/Documentation';
@@ -140,6 +141,7 @@ function AppShell() {
               <Route path="/trades"        element={<Trades />}            />
               <Route path="/analytics"     element={<Analytics />}         />
               <Route path="/news"          element={<News />}              />
+              <Route path="/news-decisions" element={<NewsDecisions />}     />
               <Route path="/simulation"    element={<Simulation />}        />
               <Route path="/settings"      element={<Settings />}          />
               <Route path="/documentation" element={<Documentation />}     />

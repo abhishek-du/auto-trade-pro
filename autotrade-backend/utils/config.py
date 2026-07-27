@@ -135,36 +135,35 @@ class Settings(BaseSettings):
     # calls per single candidate, so this ceiling was the dominant cause of
     # "3 consecutive empty/unparseable responses" rejections under normal
     # production load, not just this session's own testing burst.
-    MANTLE_MODEL:    str  = "us.amazon.nova-pro-v1:0"
+    MANTLE_MODEL:    str  = "nvidia.nemotron-super-3-120b"
     MANTLE_REGION:   str  = "us-east-1"
     MANTLE_PROJECT:  str  = "default"
     MANTLE_ENABLED:  bool = True
     # Floor every request here so a caller can't accidentally request a
     # budget too small to get a useful answer back.
     MANTLE_MIN_TOKENS: int = 512
-    # Nova Pro's real ceiling on THIS account/endpoint, confirmed live
-    # 2026-07-24 via the API's own ValidationException (not the ~5K figure
-    # AWS's model card page shows, and not the 300K context-window figure --
-    # context window and max OUTPUT tokens are different limits): requesting
-    # 16384 was rejected with "maximum tokens you requested exceeds the model
-    # limit of 10000"; 10000 itself was accepted. Unlike gpt-oss-120b, Nova
-    # Pro is not a chain-of-thought reasoning model with a separate reasoning
-    # channel sharing this budget -- so the previous "reasoning consumed the
-    # budget, empty content" failure mode this constant was originally added
-    # to guard against (see utils/llm.py) should not apply to Nova at all;
-    # the ceiling is still enforced so no caller can request more than the
-    # account is actually allowed.
-    MANTLE_MAX_OUTPUT_TOKENS: int = 10000
-    # Added 2026-07-24: the account's Nova Pro RPM quota can't be increased
-    # (user decision), so instead of periodically hammering AWS's hard 25 RPM
-    # cross-region ceiling and eating ThrottlingException failures, every
-    # process sharing this AWS account (news-engine service, Celery workers,
-    # uvicorn API) coordinates through a Redis-backed shared rate limiter
+    # Switched 2026-07-27 to nvidia.nemotron-super-3-120b (Bedrock Converse,
+    # bare model id -- no us./cross-region prefix needed, authenticates with
+    # the same AWS_BEARER_TOKEN_BEDROCK key). Verified live: maxTokens up to
+    # 64000 accepted with no ValidationException (far above Nova Pro's hard
+    # 10000 ceiling). Although Nemotron Super is a reasoning-capable model,
+    # live probes showed it does NOT leak reasoning into the text block and
+    # follows "reply with ONLY JSON" precisely (single text content block,
+    # clean JSON) -- so the gpt-oss "reasoning consumed the budget -> empty
+    # content" failure mode is not observed here. The generous ceiling below
+    # still gives ample headroom for any internal reasoning + the answer so a
+    # long ReAct turn can never be truncated mid-output.
+    MANTLE_MAX_OUTPUT_TOKENS: int = 16000
+    # Updated 2026-07-27 for nemotron-super-3-120b: this model's quota is
+    # RPM 100 / TPM 100M (far higher than Nova Pro's 25 RPM). Every process
+    # sharing this AWS account (news-engine service, Celery workers, uvicorn
+    # API) still coordinates through the Redis-backed shared rate limiter
     # (see utils/llm.py::_acquire_llm_rate_slot) that proactively caps
-    # combined LLM request volume at this number per 60s window. Set below
-    # the real 25 RPM ceiling for safety margin (Redis coordination isn't
-    # perfectly precise, and other ad hoc scripts/tests also share the quota).
-    MANTLE_MAX_RPM: int = 20
+    # combined LLM request volume at this number per 60s window. Set to 90 --
+    # a 10% safety margin below the real 100 RPM ceiling (Redis coordination
+    # isn't perfectly precise, and other ad hoc scripts/tests also share the
+    # quota). TPM is effectively a non-constraint at this volume.
+    MANTLE_MAX_RPM: int = 90
     # Ollama: local inference — no rate limits, runs on localhost
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL:    str = "qwen2.5:3b"
@@ -305,9 +304,37 @@ class Settings(BaseSettings):
     # these being True is what guarantees the News Strategy is completely
     # unaffected while this is built out phase by phase. Flip PRE_EVENT_GAP_ENABLED
     # on first to observe predictions with no execution.
-    PRE_EVENT_GAP_ENABLED:        bool  = False   # master: run the analysis engine
-    PRE_EVENT_GAP_PAPER_TRADING:  bool  = False   # allow paper (virtual) execution
-    PRE_EVENT_GAP_LIVE_TRADING:   bool  = False   # allow live capital (keep OFF until validated)
+    # ── Strong-news regime override (2026-07-27, user request) ───────────────
+    # In a legitimate WEAK/BEAR regime the Phase-9 gates block ALL new longs, so
+    # even a stock with a strong bullish news catalyst (Q1 beat, big order win)
+    # never trades. When enabled, a BUY whose Hub news sub-score is strongly
+    # positive (>= MIN_NEWS_SCORE, scale -100..100) is allowed to bypass the
+    # regime + technical-pullback entry gates and the portfolio-brain halt.
+    # It does NOT bypass capital/risk sizing (validate_signal), the drawdown
+    # circuit-breaker, or the LLM reasoning gate — those still vet every trade.
+    # Capped per cycle so a noisy news burst can't open the whole book.
+    NEWS_REGIME_OVERRIDE_ENABLED: bool  = True
+    NEWS_OVERRIDE_MIN_NEWS_SCORE: float = 75.0   # Hub news sub-score threshold (-100..100)
+    NEWS_OVERRIDE_MAX_PER_CYCLE:  int   = 2
+
+    # ── Grounding soft-fail for canonical-event (news) trades (2026-07-27) ───
+    # When a candidate is backed by a real canonical CausalEvent (the News-Only
+    # EVENT_DRIVEN path), a grounding-check failure flags only PERIPHERAL LLM
+    # claims (price action, market depth, secondary metrics) — the core news
+    # catalyst lives in the given event context and is never what gets flagged.
+    # Hard-rejecting the whole trade over peripheral fabrications was killing
+    # valid strong-news trades (LT, AUBANK, RATNAVEER …). With this on, the
+    # flagged claims are stripped from the verdict, a confidence haircut is
+    # applied, and the trade proceeds — the canonical-event verification +
+    # materiality floor at the execution gate still vet it. Set False to restore
+    # the old always-hard-reject behavior. Only affects candidates that HAVE a
+    # canonical event; pure technical/model-thesis candidates stay fail-closed.
+    NEWS_GROUNDING_SOFT_FAIL:        bool  = True
+    NEWS_GROUNDING_SOFT_FAIL_PENALTY: float = 15.0   # confidence points to deduct
+
+    PRE_EVENT_GAP_ENABLED:        bool  = True    # master: run the analysis engine
+    PRE_EVENT_GAP_PAPER_TRADING:  bool  = True    # allow paper (virtual) execution
+    PRE_EVENT_GAP_LIVE_TRADING:   bool  = True    # allow live capital (keep OFF until validated)
 
     # Exit policy — validated OOS in Phase 2 backtest
     # partial_fixed: book 50% at T1, hold remaining to fixed T2 target (no trailing)
