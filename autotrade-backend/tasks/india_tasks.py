@@ -3798,7 +3798,7 @@ async def _backfill_hub_1d_candles():
         n = await refresh_instrument_cache()
         logger.info(f"[backfill_hub_1d] INSTRUMENT_CACHE was empty — refreshed {n} symbols")
 
-    # Fetch ALL NSE EQ symbols from kite_instruments.
+    # Fetch ALL NSE + BSE EQ symbols from kite_instruments.
     #
     # Zerodha's instrument master tags government bonds/T-bills/state loans
     # (GOI TBILL, GOI LOAN, GOI STRIPS, SDL — State Development Loans) with
@@ -3813,18 +3813,28 @@ async def _backfill_hub_1d_candles():
     # the tradeable universe was still frozen on a June-30 candle days later.
     # Their `name` field reliably identifies them (e.g. "GOI TBILL 182D-...",
     # "SDL MZ 7.23% 2038") — no real NSE company name starts with GOI/SDL.
+    #
+    # BSE included as of 2026-07-28: this query, refresh_instrument_cache()
+    # (NSE-only before), get_token() (didn't strip ".BO"), and
+    # get_kite_candles_for_range()'s save path (forced ".NS" onto every
+    # symbol) formed a 4-layer, mutually-reinforcing gap where NO BSE symbol
+    # could ever get a candle -- confirmed live via ASIIL.BO/MOLDTKPAC.NS,
+    # two Direct News trades taken with literally zero price history on
+    # either side (chart-blind entries). All four layers fixed together;
+    # this is the query-level piece.
     async with celery_session() as session:
         rows = (await session.execute(_text("""
-            SELECT tradingsymbol
+            SELECT tradingsymbol, segment
             FROM kite_instruments
-            WHERE segment = 'NSE' AND instrument_type = 'EQ'
+            WHERE segment IN ('NSE', 'BSE') AND instrument_type = 'EQ'
               AND name != '' AND instrument_token > 0
               AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
             ORDER BY tradingsymbol
-        """))).scalars().all()
-        all_symbols = [f"{sym}.NS" for sym in rows]
+        """))).all()
+        _suffix = {"NSE": ".NS", "BSE": ".BO"}
+        all_symbols = [f"{sym}{_suffix[segment]}" for sym, segment in rows]
 
-        # Also include hub_universe symbols (covers BSE + any extras)
+        # Also include hub_universe symbols (extras not yet in kite_instruments)
         from engine.hub_universe import get_hub_universe
         hub_syms = await get_hub_universe(session)
 
@@ -3893,9 +3903,20 @@ async def _backfill_hub_1d_candles():
     }
 
 
-@celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=2700, soft_time_limit=2400)
+@celery_app.task(name="tasks.backfill_hub_1d_candles", time_limit=3900, soft_time_limit=3600)
 def backfill_hub_1d_candles_task():
-    """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols."""
+    """Daily 3:10 AM: backfill 1d candles for all Hub universe symbols.
+
+    Time budget bumped 2026-07-28 (was 2400s/2700s soft/hard) when BSE was
+    added alongside NSE -- universe grew from ~3,900 to ~10,200 symbols
+    (measured: 3,872 NSE + 6,325 BSE post bond-exclude). At the existing
+    0.35s/symbol pacing that's ~3,570s worst-case for a cold, fully-stale
+    run; steady-state runs are far faster since the stale-skip only re-fetches
+    symbols without a fresh candle. A run that still hits the time limit on a
+    cold start is not a regression -- next day's run picks up wherever this
+    one left off (idempotent, stale-skip based) and converges within a few
+    days rather than requiring one run to cover the whole expanded universe.
+    """
     logger.info("[backfill_hub_1d] starting daily 1d candle backfill for Hub universe")
     return _run_async(_backfill_hub_1d_candles())
 

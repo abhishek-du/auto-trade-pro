@@ -41,6 +41,85 @@ from utils.logger import logger
 STRATEGY_ID = "DIRECT_NEWS"
 TRADE_SOURCE = "Direct News"
 
+# Same threshold _find_canonical_event() (news_discovery_engine.py) uses for
+# headline-similarity clustering -- kept consistent rather than inventing a
+# second number.
+_STALE_NEWS_SIMILARITY_THRESHOLD = 0.5
+# How far back to look for a prior same-story sighting. Deliberately wider
+# than _find_canonical_event()'s 6h dedup window (see _is_stale_repeat_news()
+# docstring for why that window can't be reused here) -- 3 calendar days
+# comfortably covers "results announced Friday, recap headline Monday"
+# without also matching genuinely unrelated news from weeks ago.
+_STALE_NEWS_LOOKBACK_DAYS = 3
+
+
+async def _is_stale_repeat_news(ticker: str, headline: str, session) -> tuple[bool, str]:
+    """Is this headline reporting something this ticker was ALREADY processed
+    for on an earlier IST calendar day, or is it genuinely first-seen today?
+
+    Added 2026-07-28 after live data proved both of Direct News's first two
+    closed trades (ASIIL.BO, MOLDTKPAC.NS) were entered on a same-story recap
+    headline one full calendar day after the real event (results/price
+    reaction) had already happened and the market had already moved -- both
+    stopped out. Root cause traced precisely: news_discovery_engine.py's
+    _find_canonical_event() -- the existing dedup -- only searches a 6-HOUR
+    window and only CausalEvent rows linked to a real NewsItem via news_id;
+    this module's own classify_event() calls create CausalEvent rows with
+    news_id=None (see _build_evidence()'s docstring), so they're invisible to
+    that dedup both as a search target AND as a future match candidate. A
+    same underlying fact re-worded by a different source/aggregator the next
+    day sails straight through as "fresh."
+
+    This is a separate, purpose-built check: search AgentDecision (populated
+    for every candidate this ticker has ever been evaluated for, regardless
+    of outcome) for a highly similar headline already seen for this SAME
+    ticker on a STRICTLY EARLIER IST calendar day. If found, this is a
+    repeat/recap, not real news -- reject.
+
+    Fail-open on any DB error (never block a genuinely fresh trade because
+    this specific staleness check couldn't run) -- but fail-open here means
+    "not stale," which is a deliberate asymmetry: a false negative here just
+    means the deterministic price/volume confirmation gate (also present)
+    still has to independently agree before anything trades.
+    """
+    try:
+        import difflib
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from sqlalchemy import text as _t
+
+        _IST = ZoneInfo("Asia/Kolkata")
+        today_ist = datetime.now(_IST).date()
+        cutoff_utc = datetime.utcnow() - timedelta(days=_STALE_NEWS_LOOKBACK_DAYS)
+
+        rows = (await session.execute(_t("""
+            SELECT created_at, confidence_factors->'news'->>'headline' AS headline
+            FROM agent_decisions
+            WHERE symbol = :sym AND created_at >= :cutoff
+            ORDER BY created_at DESC
+            LIMIT 50
+        """), {"sym": ticker, "cutoff": cutoff_utc})).all()
+
+        for created_at, prior_headline in rows:
+            if not prior_headline or created_at is None:
+                continue
+            prior_date_ist = (created_at.replace(tzinfo=ZoneInfo("UTC"))
+                               .astimezone(_IST).date())
+            if prior_date_ist >= today_ist:
+                continue  # same day (or clock skew) -- not what we're guarding against
+            similarity = difflib.SequenceMatcher(
+                None, headline.lower(), prior_headline.lower()
+            ).ratio()
+            if similarity > _STALE_NEWS_SIMILARITY_THRESHOLD:
+                return True, (
+                    f"same story already seen on {prior_date_ist} "
+                    f"(similarity {similarity:.2f}): {prior_headline[:100]!r}"
+                )
+        return False, ""
+    except Exception as exc:
+        logger.debug(f"[direct_news] {ticker}: staleness check errored, failing open: {exc}")
+        return False, ""
+
 
 async def _size_direct_news_position(entry_price: float, stop_loss: float, session) -> dict | None:
     """Deliberately conservative, fixed risk fraction (DIRECT_NEWS_RISK_PCT) —
@@ -125,6 +204,16 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
             execute_trade_intent, RoutingOutcome,
         )
         from db.database import AsyncSessionLocal
+
+        # "Only trade genuinely today's news" (2026-07-28) -- checked before
+        # the network snapshot call so a stale repeat never spends that call.
+        # See _is_stale_repeat_news() docstring for the exact incident (ASIIL.BO,
+        # MOLDTKPAC.NS) this closes and why the existing dedup didn't catch it.
+        async with AsyncSessionLocal() as _stale_check_session:
+            is_stale, stale_reason = await _is_stale_repeat_news(ticker, headline, _stale_check_session)
+        if is_stale:
+            logger.info(f"[direct_news] {ticker}: STALE — {stale_reason} — skipping")
+            return False
 
         snap = await get_market_snapshot(ticker)
         entry_price = snap.ltp if snap else None

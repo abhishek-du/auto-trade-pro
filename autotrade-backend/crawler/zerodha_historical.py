@@ -75,7 +75,15 @@ async def get_kite_candles_for_range(
     # Normalise into Candle DB row format
     tf_reverse = {v: k for k, v in INTERVAL_MAP.items()}
     tf = tf_reverse.get(kite_interval, interval)
-    sym_save = symbol if symbol.endswith(".NS") or symbol.startswith("^") else f"{symbol}.NS"
+    # Preserve the caller's exchange suffix (.BO must NOT become .NS -- was
+    # silently corrupting every BSE candle save into a wrong ".BO.NS" symbol
+    # before this fix, 2026-07-28). Only a genuinely bare/unsuffixed symbol
+    # defaults to .NS, matching this function's pre-existing NSE-default
+    # behaviour for callers that never pass a suffix at all.
+    if symbol.endswith(".NS") or symbol.endswith(".BO") or symbol.startswith("^"):
+        sym_save = symbol
+    else:
+        sym_save = f"{symbol}.NS"
 
     candles: list[dict] = []
     for c in raw:
