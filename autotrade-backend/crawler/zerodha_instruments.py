@@ -79,6 +79,15 @@ HARDCODED_TOKENS: dict[str, int] = {
 
 # Live cache — populated by refresh_instrument_cache()
 INSTRUMENT_CACHE: dict[str, dict] = {}
+# Separate BSE cache, keyed the same way (bare tradingsymbol) -- kept apart
+# from INSTRUMENT_CACHE rather than merged into it because many companies are
+# dual-listed with the SAME bare tradingsymbol on both exchanges but
+# DIFFERENT instrument_tokens (e.g. RELIANCE on NSE vs BSE); a single shared
+# dict keyed by bare symbol would have one exchange silently clobber the
+# other depending on refresh order. get_token() picks which cache to search
+# based on the caller's .NS/.BO suffix (added 2026-07-28 -- see the
+# ASIIL.BO/MOLDTKPAC.NS candle-coverage investigation this closes).
+INSTRUMENT_CACHE_BSE: dict[str, dict] = {}
 
 
 # ── Token lookup ─────────────────────────────────────────────────────────────
@@ -86,13 +95,23 @@ INSTRUMENT_CACHE: dict[str, dict] = {}
 def get_token(symbol: str) -> int | None:
     """Resolve a symbol to its instrument_token.
 
-    Accepts "RELIANCE", "RELIANCE.NS", or full "NSE:RELIANCE" forms.
+    Accepts "RELIANCE", "RELIANCE.NS", "RELIANCE.BO", or full "NSE:RELIANCE"
+    forms. A ".BO" suffix routes to INSTRUMENT_CACHE_BSE (a separate cache,
+    not merged into INSTRUMENT_CACHE -- see its definition for why); every
+    other form (bare, ".NS", "NSE:...") routes to the NSE cache as before.
     """
     sym = symbol.strip().upper()
-    if sym.endswith(".NS"):
+    is_bse = sym.endswith(".BO")
+    if sym.endswith(".NS") or is_bse:
         sym = sym[:-3]
     if ":" in sym:
         sym = sym.split(":", 1)[1]
+
+    if is_bse:
+        if sym in INSTRUMENT_CACHE_BSE:
+            return INSTRUMENT_CACHE_BSE[sym].get("instrument_token")
+        return None
+
     # Try live cache first
     if sym in INSTRUMENT_CACHE:
         return INSTRUMENT_CACHE[sym].get("instrument_token")
@@ -144,25 +163,14 @@ def symbol_to_kite(symbol: str) -> str:
 
 # ── Refresh from Kite ────────────────────────────────────────────────────────
 
-async def refresh_instrument_cache() -> int:
-    """Download the full NSE instrument list from Kite into INSTRUMENT_CACHE.
-
-    Falls back silently if Kite is not connected or the call fails.
-    """
-    try:
-        from crawler.zerodha_kite_lib import get_instruments
-        rows = await asyncio.to_thread(get_instruments, "NSE")
-    except Exception as exc:
-        logger.warning(f"[zerodha_instruments] Refresh failed, keeping hardcoded: {exc}")
-        return 0
-
+def _load_instruments_into(cache: dict[str, dict], rows: list[dict]) -> int:
     count = 0
     for r in rows:
         try:
             sym = str(r.get("tradingsymbol", "")).strip().upper()
             if not sym:
                 continue
-            INSTRUMENT_CACHE[sym] = {
+            cache[sym] = {
                 "instrument_token": int(r.get("instrument_token") or 0),
                 "exchange_token":   int(r.get("exchange_token") or 0),
                 "name":             str(r.get("name") or ""),
@@ -175,6 +183,40 @@ async def refresh_instrument_cache() -> int:
             count += 1
         except (TypeError, ValueError):
             continue
-
-    logger.info(f"[zerodha_instruments] Cache refreshed — {count} NSE instruments")
     return count
+
+
+async def refresh_instrument_cache() -> int:
+    """Download the full NSE + BSE instrument lists from Kite into
+    INSTRUMENT_CACHE / INSTRUMENT_CACHE_BSE respectively.
+
+    Falls back silently if Kite is not connected or a call fails -- NSE and
+    BSE are refreshed independently so a BSE-side failure never blocks NSE
+    (the dominant, higher-traffic path) from refreshing.
+
+    Returns the NSE count only, for backward compat with existing callers
+    that log/branch on this return value -- check INSTRUMENT_CACHE_BSE
+    directly for the BSE count if needed.
+    """
+    from crawler.zerodha_kite_lib import get_instruments
+
+    try:
+        nse_rows = await asyncio.to_thread(get_instruments, "NSE")
+    except Exception as exc:
+        logger.warning(f"[zerodha_instruments] NSE refresh failed, keeping hardcoded: {exc}")
+        nse_rows = []
+
+    nse_count = _load_instruments_into(INSTRUMENT_CACHE, nse_rows) if nse_rows else 0
+
+    try:
+        bse_rows = await asyncio.to_thread(get_instruments, "BSE")
+    except Exception as exc:
+        logger.warning(f"[zerodha_instruments] BSE refresh failed: {exc}")
+        bse_rows = []
+
+    bse_count = _load_instruments_into(INSTRUMENT_CACHE_BSE, bse_rows) if bse_rows else 0
+
+    logger.info(
+        f"[zerodha_instruments] Cache refreshed — {nse_count} NSE + {bse_count} BSE instruments"
+    )
+    return nse_count

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from engine.direct_news_strategy import maybe_direct_trade
+from engine.direct_news_strategy import maybe_direct_trade, _is_stale_repeat_news
 
 
 def _evidence(materiality="HIGH", confidence=0.85, direction="BULLISH"):
@@ -27,7 +27,9 @@ def _base_mocks():
     """Everything up to the confirmation gate succeeds by default, so each
     test only needs to override the one thing it's testing."""
     snap = SimpleNamespace(ltp=100.0, change_pct=1.0, buy_depth=[], sell_depth=[])
-    with patch("crawler.market_snapshot.get_market_snapshot", AsyncMock(return_value=snap)):
+    with patch("crawler.market_snapshot.get_market_snapshot", AsyncMock(return_value=snap)), \
+         patch("engine.direct_news_strategy._is_stale_repeat_news",
+               AsyncMock(return_value=(False, ""))):
         yield snap
 
 
@@ -69,3 +71,96 @@ class TestConfirmationGate:
             opened = await maybe_direct_trade("FOO.NS", "BUY", 123, _evidence(), "FOO rises on results")
         assert opened is False
         mock_wallet.assert_not_called()
+
+
+def _row(created_at, headline):
+    return (created_at, headline)
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, *a, **kw):
+        return _FakeResult(self._rows)
+
+
+class TestStaleRepeatNewsUnit:
+    """2026-07-28: _is_stale_repeat_news() -- the exact mechanism that closes
+    the ASIIL.BO/MOLDTKPAC.NS incident (same underlying fact re-classified as
+    'fresh' a full calendar day after the real event, because the existing
+    dedup only searches a 6h window over news_id-linked rows this module's
+    own classify_event() calls never produce)."""
+
+    @pytest.mark.asyncio
+    async def test_no_prior_decisions_is_not_stale(self):
+        session = _FakeSession([])
+        is_stale, reason = await _is_stale_repeat_news("FOO.NS", "FOO rises 10%", session)
+        assert is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_similar_headline_from_yesterday_is_stale(self):
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1, hours=6)
+        session = _FakeSession([_row(yesterday, "Mold-Tek Packaging Limited: Outcome of Board Meeting")])
+        is_stale, reason = await _is_stale_repeat_news(
+            "MOLDTKPAC.NS",
+            "Mold-Tek Packaging Limited: Outcome of Board Meeting — results approved",
+            session,
+        )
+        assert is_stale is True
+        assert "already seen" in reason
+
+    @pytest.mark.asyncio
+    async def test_dissimilar_headline_from_yesterday_is_not_stale(self):
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1, hours=6)
+        session = _FakeSession([_row(yesterday, "Totally unrelated company wins a contract")])
+        is_stale, _ = await _is_stale_repeat_news("FOO.NS", "FOO rises 10% on Q1 results", session)
+        assert is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_similar_headline_from_today_is_not_stale(self):
+        """Same-day re-mentions (e.g. multiple RSS feeds syndicating the same
+        story within one day) are NOT what this guards against -- only a
+        story that's already a day (or more) old."""
+        from datetime import datetime, timedelta
+        earlier_today = datetime.utcnow() - timedelta(minutes=30)
+        session = _FakeSession([_row(earlier_today, "FOO rises 10% on Q1 results")])
+        is_stale, _ = await _is_stale_repeat_news("FOO.NS", "FOO rises 10% on Q1 results", session)
+        assert is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_db_error_fails_open_not_stale(self):
+        class _BrokenSession:
+            async def execute(self, *a, **kw):
+                raise RuntimeError("db down")
+        is_stale, _ = await _is_stale_repeat_news("FOO.NS", "FOO rises 10%", _BrokenSession())
+        assert is_stale is False
+
+    @pytest.mark.asyncio
+    async def test_null_headline_row_is_skipped_not_crashed(self):
+        from datetime import datetime, timedelta
+        yesterday = datetime.utcnow() - timedelta(days=1)
+        session = _FakeSession([_row(yesterday, None)])
+        is_stale, _ = await _is_stale_repeat_news("FOO.NS", "FOO rises 10%", session)
+        assert is_stale is False
+
+
+class TestStaleRepeatNewsWiring:
+    @pytest.mark.asyncio
+    async def test_stale_repeat_is_not_traded(self):
+        with patch("engine.direct_news_strategy._is_stale_repeat_news",
+                   AsyncMock(return_value=(True, "same story already seen on 2026-07-27"))), \
+             patch("crawler.market_snapshot.get_market_snapshot") as mock_snap:
+            opened = await maybe_direct_trade("FOO.NS", "BUY", 123, _evidence(), "FOO rises on results")
+        assert opened is False
+        mock_snap.assert_not_called()  # short-circuits before the network call too

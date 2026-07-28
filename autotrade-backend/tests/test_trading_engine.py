@@ -1881,7 +1881,9 @@ class TestBackfillTask:
     @pytest.mark.asyncio
     async def test_fetches_only_stale_symbols_and_saves_all(self):
         kite_syms_result = MagicMock()
-        kite_syms_result.scalars.return_value.all.return_value = ["SYM1", "SYM2", "SYM3"]
+        # (tradingsymbol, segment) tuples -- query now selects both columns
+        # (2026-07-28, BSE inclusion) so the .NS/.BO suffix can be chosen per row.
+        kite_syms_result.all.return_value = [("SYM1", "NSE"), ("SYM2", "NSE"), ("SYM3", "NSE")]
         fresh_result = MagicMock()
         fresh_result.scalars.return_value.all.return_value = ["SYM1.NS"]  # SYM1 already fresh
         query_results = [kite_syms_result, fresh_result]
@@ -1939,6 +1941,56 @@ class TestBackfillTask:
             from tasks.india_tasks import _backfill_hub_1d_candles
             result = await _backfill_hub_1d_candles()
         assert result == {"skipped": True, "reason": "not_authenticated"}
+
+    @pytest.mark.asyncio
+    async def test_bse_rows_get_bo_suffix_not_ns(self):
+        """2026-07-28 regression guard: a BSE-segment kite_instruments row must
+        become SYMBOL.BO, never SYMBOL.NS -- the whole point of the fix that
+        closed the ASIIL.BO/MOLDTKPAC.NS zero-candle-coverage gap."""
+        kite_syms_result = MagicMock()
+        kite_syms_result.all.return_value = [("NSESYM", "NSE"), ("BSESYM", "BSE")]
+        fresh_result = MagicMock()
+        fresh_result.scalars.return_value.all.return_value = []  # nothing fresh
+        query_results = [kite_syms_result, fresh_result]
+
+        def _make_session_cm():
+            session = AsyncMock()
+
+            async def _execute(*a, **kw):
+                return query_results.pop(0) if query_results else MagicMock(
+                    scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+                )
+            session.execute = _execute
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=session)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            return cm
+
+        mock_kite = MagicMock()
+        mock_kite.access_token = "tok"
+
+        fetch_calls = []
+
+        async def mock_get_candles(sym, from_date, to_date, interval="1d"):
+            fetch_calls.append(sym)
+            return [{"symbol": sym, "timeframe": "1d", "open": 100, "high": 105,
+                     "low": 98, "close": 102, "volume": 50000}]
+
+        async def mock_save(candles, sess):
+            return len(candles)
+
+        with patch("crawler.zerodha_kite_lib.get_kite", return_value=mock_kite), \
+             patch("crawler.zerodha_instruments.INSTRUMENT_CACHE", {}), \
+             patch("tasks._db.celery_session", side_effect=_make_session_cm), \
+             patch("engine.hub_universe.get_hub_universe", AsyncMock(return_value=[])), \
+             patch("crawler.zerodha_historical.get_kite_candles_for_range", side_effect=mock_get_candles), \
+             patch("crawler.price_feed.save_candles_to_db", side_effect=mock_save), \
+             patch("asyncio.sleep", AsyncMock()):
+
+            from tasks.india_tasks import _backfill_hub_1d_candles
+            await _backfill_hub_1d_candles()
+
+        assert sorted(fetch_calls) == ["BSESYM.BO", "NSESYM.NS"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
