@@ -6,7 +6,7 @@ tests flaky/time-of-day-dependent or accidentally hit live external services.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -28,4 +28,32 @@ def _market_always_open():
     `with`/decorator scope and reverts to this fixture's True on exit.
     """
     with patch("crawler.india_price_feed.is_nse_market_open", return_value=True):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _entry_confirmation_passes_by_default():
+    """engine.agent.decision_engine._apply_confirmation_veto() and
+    engine.direct_news_strategy.maybe_direct_trade() both gate a TAKE/entry on
+    engine.entry_confirmation.check_price_volume_confirmation() (added
+    2026-07-28, after live data showed every stopped-out trade that week
+    shared near-zero MFE — no real price/volume follow-through at entry).
+    That check needs a live MarketSnapshot with real change_pct/depth data,
+    which tests don't have — patch it to pass by default so pre-existing
+    TAKE-path tests stay deterministic and unrelated to this gate. A test that
+    specifically wants to verify the confirmation veto itself can still nest
+    its own patch of this same target inside the test body.
+    """
+    # Also short-circuit the underlying snapshot fetch -- otherwise the real
+    # get_market_snapshot() (ws/rest/yfinance fallback chain) still runs and
+    # burns several seconds per call attempting live network calls that will
+    # never succeed in a test sandbox, even though its result is discarded by
+    # the check-function patch above.
+    with patch(
+        "engine.entry_confirmation.check_price_volume_confirmation",
+        return_value=(True, "test default: confirmed"),
+    ), patch(
+        "crawler.market_snapshot.get_market_snapshot",
+        AsyncMock(return_value=None),
+    ):
         yield

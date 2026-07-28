@@ -1238,6 +1238,33 @@ async def _check_grounding(
     return result
 
 
+async def _apply_confirmation_veto(symbol: str, side: str, step: dict) -> dict:
+    """Hard backstop (2026-07-28) behind the LLM's own TAKE verdict: does the
+    market show genuine price/volume follow-through, or is this still just an
+    unconfirmed headline? get_relevant_lessons() already puts a "verify price/
+    volume before entry" reminder in this model's own prompt on every single
+    call (see _candidate_context) -- live data showed that soft context alone
+    doesn't reliably change the verdict. This is the deterministic version:
+    a TAKE with no real confirmation gets downgraded to SKIP here, not left to
+    the model's own judgment a second time. No-op for a SKIP verdict.
+    """
+    if str(step.get("verdict") or "").upper() != "TAKE":
+        return step
+    try:
+        from crawler.market_snapshot import get_market_snapshot
+        from engine.entry_confirmation import check_price_volume_confirmation
+        snap = await get_market_snapshot(symbol)
+        confirmed, reason = check_price_volume_confirmation(snap, side)
+    except Exception as exc:
+        logger.debug(f"[agent/llm_tooluse] {symbol} confirmation check errored, failing closed: {exc}")
+        confirmed, reason = False, f"confirmation check errored: {exc}"
+    if not confirmed:
+        logger.info(f"[agent/llm_tooluse] {symbol} TAKE vetoed — {reason}")
+        step["verdict"] = "SKIP"
+        step["key_risk"] = reason
+    return step
+
+
 async def llm_tooluse_candidate(symbol: str, candidate, decision) -> dict | None:
     """Level-3 agentic reasoning: give the LLM tools (news / options / fundamentals
     / price_action / market_depth) and let it INVESTIGATE before deciding.
@@ -1593,7 +1620,7 @@ Now, based on the user's context below, follow your workflow and produce your fi
                             step["tools_used"] = used
                             step["grounding"] = {**grounding, "soft_failed": True}
                             step["model_reasoning"] = decide_reasoning
-                            return step
+                            return await _apply_confirmation_veto(symbol, decision.action, step)
                         logger.info(
                             f"[agent/llm_tooluse] {symbol} rejected — ungrounded claims "
                             f"persisted after retry: {grounding['unsupported_claims']}"
@@ -1616,7 +1643,7 @@ Now, based on the user's context below, follow your workflow and produce your fi
                 step["tools_used"] = used
                 step["grounding"] = grounding
                 step["model_reasoning"] = decide_reasoning
-                return step
+                return await _apply_confirmation_veto(symbol, decision.action, step)
 
             # Step was neither a tool call nor a recognized decision — nudge the
             # model instead of silently repeating a non-actionable step and
@@ -1679,7 +1706,7 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     f"[agent/llm_tooluse] {symbol} decided via final tool-free round "
                     f"(was near round-exhaustion)"
                 )
-                return fstep
+                return await _apply_confirmation_veto(symbol, decision.action, fstep)
         except Exception as _fexc:
             logger.debug(f"[agent/llm_tooluse] {symbol} final forced-decision failed: {_fexc}")
         _last_tooluse_rejection_reason.set("Exhausted all rounds without reaching a decision (round-exhaustion)")

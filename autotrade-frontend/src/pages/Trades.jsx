@@ -753,7 +753,16 @@ export default function Trades() {
   const safePage   = Math.min(page, totalPages);
   const pageRows   = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  const closed     = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'CLOSED');
+  // Any exited trade counts as "closed" for stats purposes -- CLOSED (target/
+  // reversal exit) AND STOPPED (stop-loss exit) are both terminal states, only
+  // OPEN isn't. Matching just 'CLOSED' silently dropped every stop-loss exit
+  // (almost always a loss) from win-rate/best/worst, inflating the shown win
+  // rate (44.4% vs the real 15.4% on 2026-07-28's data, where 7 of 13 exited
+  // trades were STOPPED and excluded). NOTE: this fix was silently reverted
+  // once already (file overwritten externally between edits) -- if this
+  // comment is ever missing again while the bug is back, check what's
+  // rewriting this file outside normal edits.
+  const closed     = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() !== 'OPEN');
   // For open trades, use live unrealised P&L from position map (or trade record)
   const openTrades = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
   const openPnls   = openTrades.map((t) => {
