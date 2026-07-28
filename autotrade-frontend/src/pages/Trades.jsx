@@ -322,7 +322,14 @@ function TradeDetailPanel({ trade }) {
           </div>
         </div>
 
-        <pre className="text-[11.5px] text-slate-300 leading-[1.7] bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-4 whitespace-pre-wrap font-['Inter',_sans-serif] overflow-x-auto">
+        {/* whitespace-pre-wrap already wraps long lines to the container width --
+            the old overflow-x-auto fought that (a horizontally-scrollable pre
+            whose content also wraps can end up scrolled off its own left edge,
+            clipping the start of the text, e.g. "Tamilnad Mercantile Bank..."
+            rendering as "...nad Mercantile Bank..."). break-words instead
+            handles the one case overflow-x-auto was actually needed for -- a
+            single unbroken long token -- by breaking it, not scrolling past it. */}
+        <pre className="text-[11.5px] text-slate-300 leading-[1.7] bg-[#0c1525] border border-white/[0.07] rounded-xl px-4 py-4 whitespace-pre-wrap break-words font-['Inter',_sans-serif]">
           {analysisText || 'No analysis recorded for this trade.'}
         </pre>
       </div>
@@ -340,16 +347,16 @@ function TradeDetailPanel({ trade }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
         <div className="bg-[#0c1525] border border-white/[0.07] rounded-lg p-3 space-y-0.5">
           <p className="text-[9px] text-muted font-semibold uppercase tracking-wider">Entry</p>
-          <p className="text-sm font-bold text-slate-100 tabular-nums">₹{fmt(entry)}</p>
+          <p className="text-sm font-bold text-slate-100 tabular-nums">{fmt(entry)}</p>
         </div>
         <div className="bg-rose-500/5 border border-rose-500/20 rounded-lg p-3 space-y-0.5">
           <p className="text-[9px] text-rose-400/80 font-semibold uppercase tracking-wider">Stop Loss</p>
-          <p className="text-sm font-bold text-rose-400 tabular-nums">₹{fmt(stop)}</p>
+          <p className="text-sm font-bold text-rose-400 tabular-nums">{fmt(stop)}</p>
           <p className="text-[9px] text-rose-400/50">−{slPct.toFixed(1)}% risk</p>
         </div>
         <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-3 space-y-0.5">
           <p className="text-[9px] text-emerald-400/80 font-semibold uppercase tracking-wider">Target</p>
-          <p className="text-sm font-bold text-emerald-400 tabular-nums">₹{fmt(t1)}</p>
+          <p className="text-sm font-bold text-emerald-400 tabular-nums">{fmt(t1)}</p>
           <p className="text-[9px] text-emerald-400/50">+{t1Pct.toFixed(1)}% gain</p>
         </div>
         <div className={`border rounded-lg p-3 space-y-0.5 ${rrColor}`}>
@@ -503,15 +510,20 @@ function InvestmentSummary({ wallet, agentStatus, trades, positions = [] }) {
   return (
     <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
       {cards.map(({ label, value, sub, icon: Icon, color, bg }) => (
-        <div key={label} className="glass-panel rounded-xl p-5 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300 group">
+        // min-w-0 is required for the child `truncate` below to actually ellipsize --
+        // grid items default to min-width:auto, which lets the <p> overflow the cell
+        // (clipping mid-character with no "…") instead of shrinking to it. Confirmed
+        // via user QA at ~1300-1440px widths, e.g. "Net P&L -₹4,647.75 on ₹20…" cut
+        // off with no ellipsis.
+        <div key={label} className="glass-panel rounded-xl p-5 min-w-0 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.4)] transition-all duration-300 group">
           <div className="flex items-center justify-between mb-3">
             <span className="text-muted text-xs font-medium">{label}</span>
-            <span className={`w-8 h-8 rounded-lg ${bg} flex items-center justify-center`}>
+            <span className={`w-8 h-8 rounded-lg ${bg} flex items-center justify-center shrink-0`}>
               <Icon size={15} className={color} />
             </span>
           </div>
           <p className={`text-xl font-bold ${color} tabular-nums`}>{value}</p>
-          <p className="text-muted text-xs mt-1 truncate">{sub}</p>
+          <p className="text-muted text-xs mt-1 truncate" title={sub}>{sub}</p>
         </div>
       ))}
     </div>
@@ -634,7 +646,7 @@ function OpenPositionsSection({ positions, livePrices = {} }) {
                 <div>
                   <p className="text-muted text-[10px]">Qty / Invested</p>
                   <p className="text-slate-200 tabular-nums font-semibold">{fmtQty(pos.size_units)} shares</p>
-                  <p className="text-muted text-[9px] mt-0.5">{fmt(pos.size_usd)} @ ₹{fmt(pos.entry_price)}/sh</p>
+                  <p className="text-muted text-[9px] mt-0.5">{fmt(pos.size_usd)} @ {fmt(pos.entry_price)}/sh</p>
                 </div>
                 <ArrowUpRight size={14} className="text-muted" />
                 <div className="text-right">
@@ -823,7 +835,11 @@ export default function Trades() {
             <p className={`font-bold text-xl ${winRate >= 50 ? 'text-profit' : 'text-loss'}`}>
               {winRate.toFixed(1)}%
             </p>
-            <p className="text-muted text-[10px]">{wins.length}W / {closed.length - wins.length}L</p>
+            {/* Must match winRate's own counts (totalWins/totalTrades), not just
+                closed trades -- winRate already folds in currently-profitable
+                open positions as "wins", so a closed-only subtitle here would
+                silently disagree with the headline percentage above it. */}
+            <p className="text-muted text-[10px]">{totalWins}W / {totalTrades - totalWins}L <span className="opacity-60">(incl. open)</span></p>
           </div>
         </div>
         <div className="glass-panel rounded-xl p-5 flex items-center gap-4 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
@@ -880,9 +896,10 @@ export default function Trades() {
       </div>
 
       {/* ── Trade table ── */}
-      <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300">
+      <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300 relative">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
+
             <thead>
               <tr className="border-b border-border">
                 {[
@@ -911,21 +928,38 @@ export default function Trades() {
                   const pos        = isOpen ? (positionBySymbol[tradeSym] ?? null) : null;
                   const isExpanded = expandedId === (t.id ?? i);
 
-                  /* P&L: open → live pos (paper) OR candle-based (agent), closed → recorded pnl */
-                  const pnl      = isOpen ? (t.unrealised_pnl ?? pos?.unrealised_pnl ?? 0) : (t.pnl ?? 0);
-                  const pnlPct   = isOpen ? (t.unrealised_pct ?? pos?.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
+                  /* P&L: open → live pos (paper) OR candle-based (agent), closed → recorded pnl.
+                     Prefer `pos` FIRST (not `t`) for every open-trade field here -- current_price,
+                     unrealised_pnl and unrealised_pct are all computed together, consistently, from
+                     the SAME live tick in OpenPositionsSection. Preferring `t.*` per-field (the old
+                     order) could pick a stale t.current_price alongside a fresh pos.unrealised_pnl
+                     whenever only one of those fields happened to be null in the REST snapshot --
+                     confirmed live on TMB.BO: table showed a stale price while the P&L/Current Value
+                     columns were already computed from the correct, newer one. */
+                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0) : (t.pnl ?? 0);
+                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
                   const invested = t.size_usd ?? 0;
-                  const curPrice = isOpen ? (t.current_price ?? pos?.current_price ?? null) : (t.exit_price ?? null);
+                  const curPrice = isOpen ? (pos?.current_price ?? t.current_price ?? null) : (t.exit_price ?? null);
                   const tradeIsBuy = (t.direction ?? t.side ?? '').toUpperCase() === 'BUY';
                   /* BUY: invested + pnl = qty×cur  SELL: invested − pnl = qty×cur */
                   const curVal   = invested + (tradeIsBuy ? pnl : -pnl);
                   const isGain   = pnl >= 0;
 
+                  const toggleExpanded = () => setExpandedId(isExpanded ? null : (t.id ?? i));
+                  const rowSymbol = t.symbol ?? t.ticker ?? 'trade';
+
                   return (
                     <Fragment key={t.id ?? i}>
                     <tr
-                      onClick={() => setExpandedId(isExpanded ? null : (t.id ?? i))}
-                      className={`border-b cursor-pointer hover:bg-surface/50 transition-colors ${
+                      onClick={toggleExpanded}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpanded(); }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      aria-expanded={isExpanded}
+                      aria-label={`${rowSymbol} trade details, ${isExpanded ? 'expanded' : 'collapsed'}`}
+                      className={`border-b cursor-pointer hover:bg-surface/50 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 focus-visible:bg-surface/50 ${
                         isExpanded ? 'border-border/20 bg-surface/30' : 'border-border/50'
                       } ${isOpen ? 'bg-profit/[0.03]' : ''}`}
                     >
@@ -1116,6 +1150,13 @@ export default function Trades() {
             </tbody>
           </table>
         </div>
+
+        {/* Scroll hint — mobile only, where the table has hidden columns (P&L,
+            P&L%, Status) reachable by horizontal scroll but no visual affordance
+            told users that. Desktop shows every column, so no hint needed there. */}
+        {filtered.length > 0 && (
+          <div className="md:hidden pointer-events-none absolute top-10 bottom-0 right-0 w-8 bg-gradient-to-l from-[#0a1120] to-transparent" />
+        )}
 
         {/* Pagination */}
         {totalPages > 1 && (
