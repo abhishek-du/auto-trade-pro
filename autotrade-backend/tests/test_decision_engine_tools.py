@@ -477,3 +477,47 @@ class TestCheckGroundingOpinionSynthesisFalsePositive:
             )
         assert result["grounded"] is True
         assert result["unsupported_claims"] == []
+
+
+class TestConfirmationVeto:
+    """Regression tests for _apply_confirmation_veto() (2026-07-28) -- the
+    deterministic backstop that downgrades a TAKE verdict to SKIP when
+    engine.entry_confirmation reports no real price/volume follow-through,
+    regardless of how confident the LLM's own text sounds."""
+
+    @pytest.mark.asyncio
+    async def test_skip_verdict_is_untouched_no_confirmation_check_run(self):
+        step = {"verdict": "SKIP", "key_risk": "some reason"}
+        with patch("engine.entry_confirmation.check_price_volume_confirmation") as mock_check:
+            result = await de._apply_confirmation_veto("FOO.NS", "BUY", step)
+        mock_check.assert_not_called()
+        assert result["verdict"] == "SKIP"
+        assert result["key_risk"] == "some reason"
+
+    @pytest.mark.asyncio
+    async def test_take_with_confirmation_stays_take(self):
+        step = {"verdict": "TAKE", "confidence": 80, "bull": "strong catalyst"}
+        with patch("crawler.market_snapshot.get_market_snapshot", AsyncMock(return_value=object())), \
+             patch("engine.entry_confirmation.check_price_volume_confirmation",
+                   return_value=(True, "confirmed: 1.2% day move")):
+            result = await de._apply_confirmation_veto("FOO.NS", "BUY", step)
+        assert result["verdict"] == "TAKE"
+
+    @pytest.mark.asyncio
+    async def test_take_without_confirmation_is_downgraded_to_skip(self):
+        step = {"verdict": "TAKE", "confidence": 85, "bull": "strong catalyst"}
+        with patch("crawler.market_snapshot.get_market_snapshot", AsyncMock(return_value=object())), \
+             patch("engine.entry_confirmation.check_price_volume_confirmation",
+                   return_value=(False, "price only +0.10% on the day — not enough follow-through")):
+            result = await de._apply_confirmation_veto("FOO.NS", "BUY", step)
+        assert result["verdict"] == "SKIP"
+        assert "follow-through" in result["key_risk"]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_fetch_error_fails_closed_to_skip(self):
+        step = {"verdict": "TAKE", "confidence": 90}
+        with patch("crawler.market_snapshot.get_market_snapshot",
+                   AsyncMock(side_effect=RuntimeError("network down"))):
+            result = await de._apply_confirmation_veto("FOO.NS", "BUY", step)
+        assert result["verdict"] == "SKIP"
+        assert "errored" in result["key_risk"]

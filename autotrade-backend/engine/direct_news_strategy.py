@@ -132,6 +132,16 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
             logger.debug(f"[direct_news] {ticker}: no live price available — skipping")
             return False
 
+        # Deterministic backstop (2026-07-28) -- this strategy has NO LLM/
+        # debate step (see module docstring), so it's the only strategy with
+        # zero confirmation of any kind before this gate existed. See
+        # engine.entry_confirmation for the incident this closes.
+        from engine.entry_confirmation import check_price_volume_confirmation
+        confirmed, confirm_reason = check_price_volume_confirmation(snap, side)
+        if not confirmed:
+            logger.info(f"[direct_news] {ticker}: NOT CONFIRMED — {confirm_reason} — skipping")
+            return False
+
         levels = await _compute_news_trade_levels(ticker, side, entry_price)
         stop_loss, take_profit = levels["stop_loss"], levels["target_1"]
 
