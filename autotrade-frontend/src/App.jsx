@@ -134,7 +134,13 @@ function AppShell() {
         <Sidebar />
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <Navbar onSearchOpen={openSearch} />
-          <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 pb-24 md:pb-28 relative w-full">
+          {/* Bottom padding must clear FloatingChatButton's full fixed footprint
+              (mobile: bottom-20 + h-14 = 136px; desktop: bottom-6 + h-16 = 88px,
+              plus its glow/pulse-ring visual bleed) -- pb-24/pb-28 left a ~40px
+              band on mobile where the FAB could sit directly over the last
+              row's content (e.g. Trades page position-card P&L/TP figures).
+              Confirmed via user QA across desktop/tablet/mobile widths. */}
+          <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-6 pb-36 md:pb-32 relative w-full">
             <ErrorBoundary>
             <Routes>
               <Route path="/"              element={<Dashboard />}         />
