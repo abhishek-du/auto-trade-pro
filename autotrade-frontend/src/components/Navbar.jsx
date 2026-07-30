@@ -274,11 +274,15 @@ export default function Navbar({ onSearchOpen }) {
 
   return (
     <header className="shrink-0 border-b border-white/5 bg-black/40 backdrop-blur-md relative z-40">
-      {/* Disclaimer */}
+      {/* Disclaimer -- the full sentence wraps to 2 lines and eats ~15% of a
+          390px-wide viewport's height on mobile (no width constraint / no
+          responsive shortening existed here before). Mobile shows a compact
+          "PAPER MODE" label instead; the full sentence is desktop-only. */}
       <div className="flex items-center justify-center gap-2 px-4 py-1.5 border-b border-warn/15 bg-amber-500/5">
         <AlertTriangle size={11} className="text-warn/70 shrink-0" />
-        <span className="text-warn/70 text-[11px] font-semibold tracking-wider uppercase">
-          Paper Trading Only — Simulated Money — No Real Trades
+        <span className="text-warn/70 text-[11px] font-semibold tracking-wider uppercase whitespace-nowrap">
+          <span className="md:hidden">Paper Mode — No Real Trades</span>
+          <span className="hidden md:inline">Paper Trading Only — Simulated Money — No Real Trades</span>
         </span>
         <AlertTriangle size={11} className="text-warn/70 shrink-0" />
       </div>
@@ -302,6 +306,13 @@ export default function Navbar({ onSearchOpen }) {
           </button>
         )}
 
+        {/* Right side: one muted "market status" cluster (expiry/RBI countdown,
+            NSE+EDT clocks, live clock) followed by the prominent balance/P&L
+            (the number that actually matters), then sign-out. Previously each
+            item sat between its own equal-weight divider with no visual
+            distinction between secondary status info and the core number --
+            2026-07-28 audit: "six unrelated data points at the same visual
+            weight with no grouping." */}
         <div className="flex items-center gap-2 md:gap-4 lg:gap-5 shrink-0">
           {/* Mobile search icon */}
           {onSearchOpen && (
@@ -311,16 +322,21 @@ export default function Navbar({ onSearchOpen }) {
           )}
           {/* Token warning — always visible when expired, hidden on xs when near-expiry only */}
           <ZerodhaTokenBanner />
-          {/* Expiry countdown — desktop only */}
-          <div className="hidden xl:block"><ExpiryCountdown /></div>
-          {/* Market status dots — large screens */}
-          <div className="hidden lg:flex"><MarketStatusDots /></div>
+
+          {/* Secondary status cluster — grouped, muted, no internal dividers.
+              All members now share the same lg: breakpoint (LiveClock was
+              previously visible from md:, one breakpoint earlier than the
+              rest of this cluster -- inconsistent show/hide made the
+              grouping less obvious). */}
+          <div className="hidden lg:flex items-center gap-3 opacity-75">
+            <div className="hidden xl:block"><ExpiryCountdown /></div>
+            <MarketStatusDots />
+            <LiveClock />
+          </div>
+
           <div className="hidden lg:block w-px h-8 bg-border" />
           {/* Balance — always visible (core info), compact on mobile */}
           <BalanceTicker portfolio={portfolio} />
-          {/* Live clock — tablet and up */}
-          <div className="hidden md:block w-px h-8 bg-border" />
-          <div className="hidden md:block"><LiveClock /></div>
           {/* Logout */}
           <div className="hidden md:block w-px h-8 bg-border" />
           <button

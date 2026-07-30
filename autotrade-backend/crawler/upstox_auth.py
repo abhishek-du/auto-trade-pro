@@ -148,6 +148,9 @@ async def refresh_upstox_token_with_retry(retries: int = 3) -> bool:
     return False
 
 
+_MIN_SECONDS_SINCE_ENV_WRITE = 90  # see cross-process cascade note below
+
+
 async def ensure_upstox_token_fresh() -> bool:
     """Request-time freshness guard — call this instead of trusting
     settings.upstox_authenticated before any Upstox API call.
@@ -158,6 +161,30 @@ async def ensure_upstox_token_fresh() -> bool:
       attempts ONE auto-refresh, serialized behind a lock so concurrent
       callers (e.g. several LLM tool calls in the same cycle) don't each try
       to refresh independently.
+
+    Cross-process cascade fix (2026-07-29): `_state` above is per-OS-process,
+    but this codebase runs the token check from FOUR separate celery worker
+    child processes (prefork pool) plus uvicorn plus celery beat -- each with
+    its own independent copy, unaware of what the others are doing. Confirmed
+    live via celery_worker.log: 7 full re-logins in 5 hours on one day, 13 in
+    under 5 hours on another, two of them 3 SECONDS apart from two different
+    ForkPoolWorkers. Root cause: Upstox invalidates the previous access token
+    the instant a new one is issued (single-active-session), so whenever ANY
+    one process refreshes, every OTHER process's in-memory token silently
+    goes stale -- and each of THEM independently notices within their own
+    10-min cache window and triggers its own full TOTP login, which
+    invalidates whichever token the others are now holding, repeating all day
+    instead of once each morning. Each of these looks like a fresh
+    account login to Upstox, which is almost certainly why the user is
+    getting an OTP challenge repeatedly instead of once.
+
+    Fix: before doing a REAL login, first reload the token from .env (a
+    sibling process may have refreshed moments ago and this process just
+    doesn't know yet) and re-verify that. Only fall through to an actual
+    TOTP login if the reloaded token is ALSO invalid. This turns the common
+    staggered-refresh case (the pattern actually observed in the logs) into
+    "pick up the token someone else already fetched" instead of "each
+    process fetches its own and kicks the others out."
     """
     if not settings.UPSTOX_ACCESS_TOKEN and not (settings.UPSTOX_API_KEY and settings.UPSTOX_API_SECRET):
         return False   # nothing to verify and no way to obtain a token
@@ -171,12 +198,48 @@ async def ensure_upstox_token_fresh() -> bool:
         _state["last_verified_ok"] = True
         return True
 
+    # Our in-memory token failed -- before assuming it's genuinely expired,
+    # check whether a sibling process already wrote a fresher one to .env.
+    _reload_token_from_env()
+    if await verify_upstox_token():
+        _state["last_verified_ts"] = time.time()
+        _state["last_verified_ok"] = True
+        logger.debug("[upstox] picked up a fresher token from .env written by another process -- no login needed")
+        return True
+
     async with _refresh_lock:
-        # Re-check inside the lock: another caller may have refreshed already
-        # while this one was waiting.
+        # Re-check inside the lock: another caller (in THIS process) may have
+        # refreshed already while this one was waiting.
         now2 = time.time()
         if _state["last_verified_ok"] and (now2 - _state["last_verified_ts"]) < _VERIFY_CACHE_SEC:
             return True
+
+        # Re-check .env once more: a SIBLING process may have refreshed while
+        # we were waiting for the lock (the lock only serializes within this
+        # one process, not across the fork pool).
+        _reload_token_from_env()
+        if await verify_upstox_token():
+            _state["last_verified_ts"] = time.time()
+            _state["last_verified_ok"] = True
+            return True
+
+        # Last line of defense against the near-simultaneous race (two
+        # processes hit staleness within the same second): if .env was
+        # written very recently, a sibling is almost certainly mid-refresh
+        # right now -- wait briefly and re-check rather than piling on a
+        # second concurrent login attempt.
+        try:
+            age = time.time() - os.path.getmtime(env_path)
+            if age < _MIN_SECONDS_SINCE_ENV_WRITE:
+                await asyncio.sleep(min(10, _MIN_SECONDS_SINCE_ENV_WRITE - age))
+                _reload_token_from_env()
+                if await verify_upstox_token():
+                    _state["last_verified_ts"] = time.time()
+                    _state["last_verified_ok"] = True
+                    return True
+        except OSError:
+            pass
+
         ok = await refresh_upstox_token_with_retry(retries=2)
         _state["last_verified_ts"] = time.time()
         _state["last_verified_ok"] = ok

@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
     if settings.ZERODHA_ENABLED and settings.ZERODHA_ACCESS_TOKEN:
         try:
             from crawler.zerodha_ticker import start_kite_ticker
-            await _asyncio.to_thread(start_kite_ticker)
+            _asyncio.create_task(_asyncio.to_thread(start_kite_ticker))
             logger.info("Kite WebSocket ticker started on app startup")
         except Exception as exc:
             logger.warning(f"Kite ticker startup failed: {exc}")

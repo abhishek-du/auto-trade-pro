@@ -8,7 +8,9 @@ def fetch():
     soup = BeautifulSoup(r.text, 'html.parser')
     messages = soup.find_all('div', class_='tgme_widget_message')
     
-    dates = ['2026-07-20', '2026-07-19', '2026-07-18']
+    from datetime import date, timedelta
+    today = date.today()
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(3)]
     
     for msg in messages:
         t_div = msg.find('div', class_='tgme_widget_message_text')

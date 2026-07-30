@@ -106,10 +106,10 @@ async def _fetch_live_fallback(symbol: str) -> dict:
     already uses — reused, not reimplemented."""
     try:
         import asyncio
-        from engine.fundamental_analyzer import fetch_fundamentals_yfinance, fetch_fundamentals_screener
+        from engine.fundamental_analyzer import fetch_fundamentals_upstox, fetch_fundamentals_screener
         bare = symbol.replace(".NS", "").replace(".BO", "")
         yf_data, sc_data = await asyncio.gather(
-            asyncio.to_thread(fetch_fundamentals_yfinance, symbol),
+            fetch_fundamentals_upstox(symbol),
             fetch_fundamentals_screener(bare),
         )
         return {**(yf_data or {}), **(sc_data or {})}

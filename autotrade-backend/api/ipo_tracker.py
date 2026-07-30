@@ -188,6 +188,6 @@ async def ipo_stats():
         "by_type":    by_type,
         "open_ipos":  open_ipos[:10],
         "upcoming":   upcoming[:10],
-        "source":     "ipoalerts" if settings.ipoalerts_available else "nse_fallback",
-        "api_key_configured": settings.ipoalerts_available,
+        "source":     "upstox",
+        "api_key_configured": True,
     }

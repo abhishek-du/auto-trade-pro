@@ -1576,6 +1576,11 @@ Now, based on the user's context below, follow your workflow and produce your fi
                     messages.append({"role": "user", "content": f"You have not met the minimum tool requirement. You must still call: {', '.join(missing_core)}. Continue investigating."})
                     continue
 
+                if not step.get("verdict") or not step.get("thesis"):
+                    messages.append({"role": "assistant", "content": resp})
+                    messages.append({"role": "user", "content": "MALFORMED DECISION: Your JSON is missing the 'verdict' and/or 'thesis' keys. You must output the full decision format: {\"action\":\"decide\",\"verdict\":\"TAKE\"|\"SKIP\",\"confidence\":<int>,\"bull\":\"...\",\"bear\":\"...\",\"thesis\":\"...\"}. Please rewrite your decision."})
+                    continue
+
                 # Hallucination-vs-tool-output grounding check: does bull/bear/
                 # thesis/thought cite a specific fact never returned by any tool
                 # this session? Give the model ONE chance to self-correct; a
@@ -1676,6 +1681,11 @@ Now, based on the user's context below, follow your workflow and produce your fi
                           or fstep.get("action") in ("decide", "final", "answer", "conclude")):
                 if "verdict" not in fstep and fstep.get("decision"):
                     fstep["verdict"] = fstep.get("decision")
+                
+                if not fstep.get("verdict") or not fstep.get("thesis"):
+                    _last_tooluse_rejection_reason.set("Final forced decision was malformed (missing verdict or thesis)")
+                    return None
+
                 grounding = await _check_grounding(symbol, fstep, tool_outputs, used, ctx0)
                 if not grounding["grounded"]:
                     _has_event = bool(getattr(candidate, "evidence", None))
@@ -1717,6 +1727,70 @@ Now, based on the user's context below, follow your workflow and produce your fi
         return None
 
 
+
+async def llm_devils_advocate_candidate(symbol: str, candidate, decision) -> dict | None:
+    """Multi-Agent Debate (Devil's Advocate System):
+    1. Eagle Eye (Bull) creates thesis.
+    2. Risk Manager (Bear) criticizes it.
+    3. Eagle Eye defends it.
+    4. Judge decides if the defense holds up.
+    """
+    try:
+        from utils.llm import call_llm_chat
+
+        context = await _candidate_context(symbol, candidate, decision)
+
+        # 1. Thesis
+        bull_sys = "You are the Eagle Eye AI. Based on the data, create a strong Bullish thesis for taking this trade. Keep it under 60 words."
+        thesis = await call_llm_chat(
+            [{"role": "system", "content": bull_sys}, {"role": "user", "content": context}],
+            max_tokens=150, temperature=0.3
+        )
+        if not thesis: return None
+
+        # 2. Criticism
+        bear_sys = "You are the Risk Manager AI. Read the Eagle Eye's thesis. Find the biggest flaws, technical resistances, or sector weaknesses. Play Devil's Advocate. Keep it under 60 words."
+        criticism = await call_llm_chat(
+            [{"role": "system", "content": bear_sys},
+             {"role": "user", "content": f"Context:\\n{context}\\n\\nEagle Eye Thesis:\\n{thesis}"}],
+            max_tokens=150, temperature=0.3
+        )
+        if not criticism: return None
+
+        # 3. Defense
+        defend_sys = "You are the Eagle Eye AI. The Risk Manager has criticized your thesis. Defend your trade. If the risk is too high, admit it. Keep it under 60 words."
+        defense = await call_llm_chat(
+            [{"role": "system", "content": defend_sys},
+             {"role": "user", "content": f"Context:\\n{context}\\n\\nThesis:\\n{thesis}\\n\\nCriticism:\\n{criticism}"}],
+            max_tokens=150, temperature=0.3
+        )
+        if not defense: return None
+
+        # 4. Judge
+        judge_sys = (
+            "You are the Final Judge. Review the Thesis, Criticism, and Defense. "
+            "If Eagle Eye defended well and the edge is strong, verdict is TAKE. "
+            "If the Risk Manager's flaws are fatal, verdict is SKIP. "
+            'Respond with ONLY JSON: '
+            '{"verdict":"TAKE"|"SKIP","confidence":<0-100>,"bull":"<=20 words",'
+            '"bear":"<=20 words","key_risk":"<=15 words","judge":"<=25 words rationale"}'
+        )
+        judge_user = f"{context}\\n\\nThesis: {thesis}\\nCriticism: {criticism}\\nDefense: {defense}"
+        
+        resp = await call_llm_chat(
+            [{"role": "system", "content": judge_sys}, {"role": "user", "content": judge_user}],
+            max_tokens=250, temperature=0.2
+        )
+        data = _parse_first_json(resp)
+        if not data: return None
+        
+        data["_panel"] = {"thesis": thesis, "criticism": criticism, "defense": defense}
+        return data
+    except Exception as exc:
+        from utils.logger import logger
+        logger.debug(f"[devils_advocate] Failed for {symbol}: {exc}")
+        return None
+
 async def apply_reasoning_gate(symbol: str, candidate, decision):
     """Level-1 reasoning gate (opt-in via AGENT_LLM_REASONING_ENABLED).
 
@@ -1730,8 +1804,10 @@ async def apply_reasoning_gate(symbol: str, candidate, decision):
     if not getattr(settings, "AGENT_LLM_REASONING_ENABLED", False):
         return decision, None
 
-    # Dispatch by level: tool-use (L3) > debate (L2) > single-pass reasoning (L1).
-    if getattr(settings, "AGENT_LLM_TOOLUSE_ENABLED", False):
+    # Dispatch by level: devils_advocate > tool-use (L3) > debate (L2) > single-pass reasoning (L1).
+    if getattr(settings, "AGENT_LLM_DEVILS_ADVOCATE_ENABLED", True): # Enabled by default now!
+        mode, data = "devils_advocate", await llm_devils_advocate_candidate(symbol, candidate, decision)
+    elif getattr(settings, "AGENT_LLM_TOOLUSE_ENABLED", False):
         mode, data = "tooluse", await llm_tooluse_candidate(symbol, candidate, decision)
     elif getattr(settings, "AGENT_LLM_DEBATE_ENABLED", False):
         mode, data = "debate", await llm_debate_candidate(symbol, candidate, decision)

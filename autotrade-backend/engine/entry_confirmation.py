@@ -27,7 +27,7 @@ from __future__ import annotations
 # stock is considered "flat on the news" -- exactly the failure mode observed
 # live (e.g. MOLDTKPAC.NS stopped out 4 minutes after entry; ASIIL.BO's MFE
 # was the news move itself, not genuine follow-through).
-MIN_DAY_CHANGE_PCT = 0.5
+MIN_DAY_CHANGE_PCT = 1.5
 
 # Order-book skew tolerance: the side opposing the trade direction is allowed
 # to be somewhat larger (real books are noisy) but not dominant.
@@ -86,3 +86,45 @@ def check_price_volume_confirmation(snap, side: str) -> tuple[bool, str]:
             )
 
     return True, f"confirmed: {change:+.2f}% day move, order book supports {side}"
+
+
+# Day-range instability threshold, as a fraction of the day's low --
+# (high - low) / low. v0.1 baseline, tunable (same status as the scoring
+# weights in engine/pre_event_expectation_gap/scoring.py). AASTHA.NS's
+# entry-day range was ~23% (high 105.79, low 81.9) on a stock that had been
+# trading a flat ~102-104 range the prior sessions -- entered near the day's
+# low mid-collapse, then gapped through its stop overnight. Normal small/
+# mid-cap ranges, even on active-news days, are typically 1-8%; 12% gives
+# comfortable room above that while still catching AASTHA-shaped whipsaws.
+MAX_DAY_RANGE_PCT = 0.12
+
+
+def check_day_range_stability(snap) -> tuple[bool, str]:
+    """Supplementary filter (2026-07-29): reject entries into a stock whose
+    own session has already been unusually wide/unstable, independent of
+    which direction it's currently pointing.
+
+    Added after AASTHA.NS (-11.27%, DIRECT_NEWS's worst trade): its entry
+    passed check_price_volume_confirmation() (a real bullish move existed at
+    entry) but the day's price action was itself a ~23% whipsaw -- the kind
+    of session that's statistically more likely to keep gapping around than
+    settle, which is exactly what happened overnight. This is a
+    supplementary check, not a replacement for check_price_volume_confirmation:
+    it fails OPEN (returns confirmed=True) when OHLC data isn't available,
+    since the primary fail-closed gate is already covered by that other
+    check -- this one only adds an extra reason to say no, never the only
+    reason to say yes.
+    """
+    ohlc = getattr(snap, "ohlc", None) or {}
+    high = ohlc.get("high")
+    low = ohlc.get("low")
+    if not high or not low or low <= 0:
+        return True, "no day-range data available — skipping stability check"
+
+    day_range_pct = (high - low) / low
+    if day_range_pct > MAX_DAY_RANGE_PCT:
+        return False, (
+            f"day range too wide ({day_range_pct * 100:.1f}%, high={high:.2f} "
+            f"low={low:.2f}) — elevated whipsaw/gap risk"
+        )
+    return True, f"day range stable ({day_range_pct * 100:.1f}%)"

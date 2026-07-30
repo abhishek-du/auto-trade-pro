@@ -225,11 +225,43 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
         # debate step (see module docstring), so it's the only strategy with
         # zero confirmation of any kind before this gate existed. See
         # engine.entry_confirmation for the incident this closes.
-        from engine.entry_confirmation import check_price_volume_confirmation
+        from engine.entry_confirmation import (
+            check_price_volume_confirmation, check_day_range_stability,
+        )
         confirmed, confirm_reason = check_price_volume_confirmation(snap, side)
         if not confirmed:
             logger.info(f"[direct_news] {ticker}: NOT CONFIRMED — {confirm_reason} — skipping")
             return False
+
+        # Supplementary whipsaw filter (2026-07-29) -- see
+        # check_day_range_stability()'s docstring for the AASTHA.NS incident
+        # this closes (real move at entry, but an unusually wide/unstable
+        # session that went on to gap through its overnight stop).
+        stable, stability_reason = check_day_range_stability(snap)
+        if not stable:
+            logger.info(f"[direct_news] {ticker}: UNSTABLE — {stability_reason} — skipping")
+            return False
+
+        # Technical Trend & Volume Confirmation (Added 2026-07-30)
+        from crawler.zerodha_historical import fetch_historical_data
+        hist_df = await fetch_historical_data(ticker, "day", limit=60)
+        if hist_df is not None and not hist_df.empty and len(hist_df) > 20:
+            close_price = hist_df["close"].iloc[-1]
+            ema_20 = hist_df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+            
+            if side == "BUY" and close_price < ema_20:
+                logger.info(f"[direct_news] {ticker}: TECHNICAL REJECT — Price (₹{close_price:.2f}) below 20 EMA (₹{ema_20:.2f}), downtrend despite bullish news")
+                return False
+            if side == "SELL" and close_price > ema_20:
+                logger.info(f"[direct_news] {ticker}: TECHNICAL REJECT — Price (₹{close_price:.2f}) above 20 EMA (₹{ema_20:.2f}), uptrend despite bearish news")
+                return False
+                
+            if "volume" in hist_df.columns:
+                avg_vol = hist_df["volume"].rolling(window=20).mean().iloc[-2]
+                today_vol = getattr(snap, "volume", None) or hist_df["volume"].iloc[-1]
+                if avg_vol > 0 and today_vol < (avg_vol * 0.5):
+                    logger.info(f"[direct_news] {ticker}: VOLUME REJECT — Today's volume is below 50% of 20-day average, lacking follow-through")
+                    return False
 
         levels = await _compute_news_trade_levels(ticker, side, entry_price)
         stop_loss, take_profit = levels["stop_loss"], levels["target_1"]
@@ -256,8 +288,10 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
                     "reasoning_points": [
                         f"Direct sentiment/event signal: {headline}",
                         f"materiality={materiality}  classification_confidence={confidence_pct}%",
-                        "No LLM debate or technical-confirmation gate — traded directly off "
-                        "the classified news direction (isolated strategy; see module docstring).",
+                        "No LLM debate step (isolated strategy; see module docstring) -- "
+                        f"passed deterministic gates instead: {confirm_reason}; {stability_reason}. "
+                        "Also re-checked periodically post-entry until Target 1 "
+                        "(see trade_simulator's CONFIRMATION_LOST exit).",
                     ],
                 },
                 target_2=levels["target_2"], atr=levels["atr"],

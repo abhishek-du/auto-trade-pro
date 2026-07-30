@@ -11,6 +11,7 @@ import httpx
 
 from utils.config import settings
 from utils.logger import logger
+from crawler.upstox_data import get_ipos as upstox_get_ipos, get_ipo_details as upstox_get_ipo_details
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -37,90 +38,50 @@ IPO_CACHE: dict[str, Any] = {
     "last_refresh": 0.0,
 }
 
-# ── ipoalerts.in API helpers ───────────────────────────────────────────────────
-
-def _api_headers() -> dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if settings.ipoalerts_available:
-        h["x-api-key"] = settings.IPOALERTS_API_KEY
-    return h
+# (ipoalerts.in helpers removed)
 
 
-async def fetch_ipos_by_status(status: str) -> list[dict]:
-    """
-    Fetch all IPOs from ipoalerts.in for a given status.
+async def fetch_ipos_from_upstox() -> list[dict]:
+    """Fetch live IPO data from Upstox API."""
+    results = []
+    for status in ("open", "upcoming", "closed", "listed"):
+        try:
+            items = await upstox_get_ipos(status=status, records=30)
+            for item in items:
+                # Map Upstox keys to expected format for enrich_ipo_data
+                item["company_name"] = item.get("name")
+                item["open_date"] = item.get("bidding_start_date")
+                item["close_date"] = item.get("bidding_end_date")
+                item["issue_size_cr"] = item.get("issue_size")
+                if item.get("minimum_price") and item.get("maximum_price"):
+                    item["price_band"] = f"{item.get('minimum_price')}-{item.get('maximum_price')}"
+                item["type"] = "SME" if item.get("issue_type") == "sme" else "EQ"
+                item["status"] = status
+                results.append(item)
+        except Exception as exc:
+            logger.warning(f"Upstox IPO fetch failed for {status}: {exc}")
+    return results
 
-    Free-plan constraints:
-      - limit=1 per request (hard cap)
-      - only status=open is supported; others return 400
-    So we paginate sequentially with a short delay to stay under the rate limit.
-    """
-    if not settings.ipoalerts_available:
-        return []
-    url    = f"{settings.IPOALERTS_BASE_URL}/ipos"
-    params: dict[str, Any] = {"status": status, "limit": 1, "page": 1}
-    if settings.IPOALERTS_INCLUDE_GMP:
-        params["includeGmp"] = "true"
-
-    all_items: list[dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # First page — also tells us totalPages
-            resp = await client.get(url, headers=_api_headers(), params=params)
-            if resp.status_code == 400:
-                # Free plan doesn't support this status — skip silently
-                logger.debug("ipoalerts: status=%s not supported on free plan", status)
-                return []
-            resp.raise_for_status()
-            raw        = resp.json()
-            items      = raw.get("ipos") or raw.get("data") or (raw if isinstance(raw, list) else [])
-            all_items.extend(items)
-
-            total_pages = raw.get("meta", {}).get("totalPages", 1) if isinstance(raw, dict) else 1
-
-            # Paginate remaining pages — stop on 429 (free plan bursts ~6 req/window)
-            for page in range(2, total_pages + 1):
-                await asyncio.sleep(1.0)
-                params["page"] = page
-                try:
-                    r = await client.get(url, headers=_api_headers(), params=params)
-                    if r.status_code == 429:
-                        logger.info(
-                            "ipoalerts: rate limit hit at page %d/%d — free plan cap reached, "
-                            "got %d/%d IPOs. Cache will be refreshed next cycle.",
-                            page, total_pages, len(all_items), raw.get("meta", {}).get("count", "?"),
-                        )
-                        break
-                    if r.is_success:
-                        page_items = r.json().get("ipos") or r.json().get("data") or []
-                        all_items.extend(page_items)
-                except Exception as exc:
-                    logger.debug("ipoalerts page %d failed: %s", page, exc)
-
-    except Exception as exc:
-        logger.warning("fetch_ipos_by_status(%s) failed: %s", status, exc)
-
-    logger.info("ipoalerts: fetched %d IPOs for status=%s", len(all_items), status)
-    return all_items
+# (ipoalerts.in helpers removed)
 
 
 async def fetch_single_ipo(identifier: str) -> dict | None:
-    """Fetch a single IPO by id or slug from ipoalerts.in."""
-    if not settings.ipoalerts_available:
-        return None
-    url = f"{settings.IPOALERTS_BASE_URL}/ipos/{identifier}"
+    """Fetch a single IPO by id or slug from Upstox API."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=_api_headers())
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            raw = resp.json()
-            if isinstance(raw, dict) and "data" in raw:
-                return raw["data"]
-            return raw if isinstance(raw, dict) else None
+        raw = await upstox_get_ipo_details(identifier)
+        if raw:
+            # Map Upstox keys to expected format for enrich_ipo_data
+            raw["company_name"] = raw.get("name")
+            raw["open_date"] = raw.get("bidding_start_date")
+            raw["close_date"] = raw.get("bidding_end_date")
+            raw["issue_size_cr"] = raw.get("issue_size")
+            if raw.get("minimum_price") and raw.get("maximum_price"):
+                raw["price_band"] = f"{raw.get('minimum_price')}-{raw.get('maximum_price')}"
+            raw["type"] = "SME" if raw.get("issue_type") == "sme" else "EQ"
+            return raw
+        return None
     except Exception as exc:
-        logger.warning("fetch_single_ipo(%s) failed: %s", identifier, exc)
+        logger.warning("fetch_single_ipo(%s) from Upstox failed: %s", identifier, exc)
         return None
 
 
@@ -167,31 +128,12 @@ async def fetch_ipos_from_nse() -> list[dict]:
 async def refresh_ipo_cache() -> None:
     """Fetch all IPOs and rebuild cache.
 
-    Free-plan ipoalerts.in only supports status=open (sequential pagination).
-    All other statuses (upcoming, listed, announced) are attempted but silently
-    return empty on the free plan — NSE is tried as a supplementary source for those.
+    Now uses Upstox API as the primary source, falling back to NSE if needed.
     """
-    merged: list[dict] = []
-    if settings.ipoalerts_available:
-        # open: paginated sequentially (free plan: limit=1 per request)
-        open_ipos = await fetch_ipos_by_status("open")
-        merged.extend(open_ipos)
-
-        # upcoming / listed / announced — free plan returns 400, logged at DEBUG level
-        for status in ("upcoming", "listed", "announced"):
-            items = await fetch_ipos_by_status(status)
-            merged.extend(items)
-
-        # Supplement with NSE fallback for any statuses ipoalerts couldn't serve
-        statuses_from_api = {i.get("status", "").lower() for i in merged}
-        if not {"upcoming", "listed"}.issubset(statuses_from_api):
-            nse_items = await fetch_ipos_from_nse()
-            # Only add NSE items whose status isn't already covered
-            for item in nse_items:
-                if item.get("status", "").lower() not in statuses_from_api:
-                    merged.append(item)
-    else:
-        # No API key — NSE public API only
+    merged: list[dict] = await fetch_ipos_from_upstox()
+    
+    if not merged:
+        # No Upstox data — fallback to NSE public API
         merged = await fetch_ipos_from_nse()
 
     # Deduplicate by id

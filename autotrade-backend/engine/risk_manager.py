@@ -206,27 +206,52 @@ async def validate_signal(
 
     this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
     this_risk = this_pos["risk_amount"]
-
-    # ── Check 1b: Portfolio risk budget ──────────────────────────────────────
-    if equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity:
-        reason = (
-            f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
-            f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
-        )
-        _log_rejection(signal.symbol, reason)
-        return False, reason
-
-    # ── Check 1c: Cash buffer — applies in both paper and live ───────────────
-    # Keeps MIN_CASH_BUFFER fraction of equity as dry powder at all times.
     this_notional = this_pos["usd_value"]
-    if equity > 0 and (deployed_capital + this_notional) > (1 - min_cash_buffer) * equity:
-        reason = (
-            f"Cash buffer: deploying ₹{this_notional:.0f} would breach "
-            f"the {min_cash_buffer*100:.0f}% cash reserve "
-            f"(deployed ₹{deployed_capital:.0f} / equity ₹{equity:.0f})"
+
+    # ── Checks 1b/1c: portfolio risk budget + cash buffer ────────────────────
+    # Both are capital-based, count-independent (Check 1a above is the only
+    # count-based one). If either fails, try ONE thesis-based reallocation
+    # (2026-07-29, user request) before rejecting outright: if some open
+    # position's own strategy no longer endorses it, free it and re-check
+    # once. A position whose thesis still holds is never touched, even if
+    # it's down -- this is a capital-reallocation opportunity, not a general
+    # loss-cutting rule (see engine/portfolio_reallocation.py docstring).
+    _reallocated = False
+    for _attempt in range(2):
+        port_risk_fail   = equity > 0 and (current_open_risk + this_risk) > max_port_risk * equity
+        cash_buffer_fail = equity > 0 and (deployed_capital + this_notional) > (1 - min_cash_buffer) * equity
+        if not port_risk_fail and not cash_buffer_fail:
+            break
+        if _reallocated or _attempt == 1:
+            if port_risk_fail:
+                reason = (
+                    f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
+                    f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
+                )
+            else:
+                reason = (
+                    f"Cash buffer: deploying ₹{this_notional:.0f} would breach "
+                    f"the {min_cash_buffer*100:.0f}% cash reserve "
+                    f"(deployed ₹{deployed_capital:.0f} / equity ₹{equity:.0f})"
+                )
+            _log_rejection(signal.symbol, reason)
+            return False, reason
+        try:
+            from engine.portfolio_reallocation import try_reallocate_for_candidate
+            _reallocated = await try_reallocate_for_candidate(open_positions, session)
+        except Exception as exc:
+            logger.warning(f"[risk_manager] reallocation attempt failed for {signal.symbol}: {exc}")
+            _reallocated = False
+        if not _reallocated:
+            continue  # nothing eligible to free -- next loop iteration re-fails and returns
+        # A position closed -- recompute capital state before re-checking.
+        open_positions    = list((await session.execute(select(OpenPosition))).scalars().all())
+        deployed_capital  = sum(p.size_usd for p in open_positions)
+        unrealised        = sum(getattr(p, "unrealised_pnl", 0.0) or 0.0 for p in open_positions)
+        equity            = wallet_balance + deployed_capital + unrealised
+        current_open_risk = sum(
+            abs(p.entry_price - p.stop_loss) * p.size_units for p in open_positions
         )
-        _log_rejection(signal.symbol, reason)
-        return False, reason
 
     # ── Check 2: Daily loss circuit-breaker (mark-to-market) ──────────────────
     # P2.11 fix: measure the day's loss as realised-closed P&L PLUS the current

@@ -132,10 +132,13 @@ async def fetch_nse_advances_declines() -> dict:
                 if "TOTAL" in idx_name.upper() or "ALL" in idx_name.upper():
                     total_adv, total_dec, total_unc = adv, dec, unc
             if total_adv == 0 and by_index:
-                for v in by_index.values():
-                    total_adv += v["advances"]
-                    total_dec += v["declines"]
-                    total_unc += v["unchanged"]
+                # Avoid double-counting overlapping indices. Use the broadest available.
+                for fallback in ("NIFTY TOTAL MARKET", "NIFTY 500", "NIFTY 50", "NIFTY BANK"):
+                    if fallback in by_index:
+                        total_adv = by_index[fallback]["advances"]
+                        total_dec = by_index[fallback]["declines"]
+                        total_unc = by_index[fallback]["unchanged"]
+                        break
 
         if total_adv == 0 and total_dec == 0:
             return {}

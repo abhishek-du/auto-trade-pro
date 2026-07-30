@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import {
-  createChart, CandlestickSeries, LineSeries, HistogramSeries,
+  createChart, CandlestickSeries, LineSeries, HistogramSeries, TickMarkType,
 } from 'lightweight-charts'
 import { apiFetch } from '../../api/client'
 import {
@@ -84,6 +84,36 @@ function OHLCVLegend({ data, timeframe }) {
   )
 }
 
+// ── Indicator legend overlay (top-left, over the chart canvas) ─────────────────
+// Replaces lightweight-charts' own per-series title labels, which stacked as
+// overlapping colored pills at the right edge (every overlay indicator sits
+// near the same price level as the candles, so their tags collided). One
+// compact line per currently-visible indicator: colored dot + short label +
+// value, matching the top-left-overlay convention used by Bloomberg/
+// TradingView Pro/Coinbase Pro rather than right-edge stacked pills.
+function IndicatorLegend({ indicators, values }) {
+  const rows = IND_CONFIG.filter(c => indicators[c.key])
+  if (rows.length === 0) return null
+  // Mobile: shorter labels + tighter type so the legend doesn't eat a big
+  // chunk of an already-small chart area (2026-07-28 mobile QA finding).
+  const mobileLabel = { 'EMA 20': 'E20', 'EMA 50': 'E50', 'EMA 200': 'E200', 'Supertrend': 'ST', 'BB': 'BB', 'VWAP': 'VWAP' }
+  return (
+    <div className="absolute top-1.5 left-1.5 sm:top-2 sm:left-2 z-[5] flex flex-col gap-0.5 pointer-events-none bg-[#0A1120]/70 backdrop-blur-[2px] rounded-md px-1.5 py-1 sm:px-2 sm:py-1.5">
+      {rows.map(({ key, label, color }) => {
+        const v = values[key]
+        return (
+          <div key={key} className="flex items-center gap-1 sm:gap-1.5 text-[10.5px] sm:text-[12px] leading-tight tabular-nums">
+            <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
+            <span className="text-muted font-medium sm:hidden">{mobileLabel[label] ?? label}</span>
+            <span className="text-muted font-medium hidden sm:inline">{label}</span>
+            <span className="text-slate-300 font-semibold">{v != null ? fmtPrice(v) : '—'}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Signal panel below chart ──────────────────────────────────────────────────
 function SignalPanel({ symbol }) {
   const [data, setData]       = useState(null)
@@ -107,11 +137,17 @@ function SignalPanel({ symbol }) {
 
   if (!sig && !tech) return null
 
+  // 2026-07-28 retheme: the neutral/no-clear-signal case (by far the most
+  // common one -- most candidates are HOLD, not BUY/SELL) used the amber
+  // `warn` semantic color, which visually reads as a warning and clashes
+  // with the dark navy/teal theme used everywhere else on this page. `warn`
+  // is now reserved for genuine warnings; a neutral card matches the rest
+  // of the app's surface language instead.
   const sigCls = sig === 'BUY'
     ? 'bg-profit/10 border-profit/30 text-profit'
     : sig === 'SELL'
     ? 'bg-loss/10 border-loss/30 text-loss'
-    : 'bg-warn/10 border-warn/30 text-warn'
+    : 'bg-card/60 border-border text-slate-300'
 
   const bullets = [
     tech?.rsi        && `RSI ${tech.rsi} — ${tech.rsi_signal?.toLowerCase().replace('_', ' ')}`,
@@ -255,6 +291,13 @@ export default function CandlestickChart({
   const [indicators,     setIndicators]     = useState(
     Object.fromEntries(IND_CONFIG.map(c => [c.key, c.default]))
   )
+  // Legend values (2026-07-28 redesign): latest bar's value per indicator by
+  // default, overridden live on crosshair hover -- powers the top-left
+  // legend overlay that replaced lightweight-charts' own per-series title
+  // labels (which stacked as overlapping pills at the right edge, one per
+  // indicator, since every overlay indicator sits near the same price level).
+  const [indLegend,      setIndLegend]      = useState({})
+  const [hoverLegend,    setHoverLegend]    = useState(null)  // crosshair override, null = show latest
   const [showSignal,     setShowSignal]     = useState(true)
   const [settingsOpen,   setSettingsOpen]   = useState(false)
 
@@ -271,9 +314,12 @@ export default function CandlestickChart({
         fontSize:    11,
         fontFamily:  'Inter, -apple-system, sans-serif',
       },
+      // Near-invisible (2026-07-28): was #0F1E35 solid, close enough in
+      // weight to the BB overlay lines that the two visually merged. Grid
+      // should recede; overlays should be what actually draws the eye.
       grid: {
-        vertLines: { color: '#0F1E35', style: 1 },
-        horzLines: { color: '#0F1E35', style: 1 },
+        vertLines: { color: 'rgba(15,30,53,0.35)', style: 1 },
+        horzLines: { color: 'rgba(15,30,53,0.35)', style: 1 },
       },
       crosshair: {
         vertLine: { width: 1, color: '#334155', style: 1, labelBackgroundColor: '#1E293B' },
@@ -287,10 +333,24 @@ export default function CandlestickChart({
         borderColor: '#0F1E35',
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time) => {
+        // Root cause of the "11:00 repeated across nearly every label" bug
+        // (2026-07-28 user QA): this always formatted as bare hour:minute for
+        // any intraday timeframe, with no date -- so once the visible range
+        // spanned more than one trading day (the normal case once you're
+        // zoomed out even slightly on 1h/15m/5m/1m), every day's identical
+        // intraday hour (e.g. 11:00 AM) produced the exact same label with
+        // nothing to distinguish which day it belonged to. Fixed by using
+        // the tickMarkType the library already computes (Year/Month/
+        // DayOfMonth vs Time) instead of branching on the selected
+        // timeframe -- a day-boundary tick now shows the date even on an
+        // intraday chart, exactly like any real trading terminal.
+        tickMarkFormatter: (time, tickMarkType) => {
           const d = new Date((time + 19800) * 1000)   // shift to IST for display
-          const tf = timeframe
-          if (tf === '1d')
+          if (tickMarkType === TickMarkType.Year)
+            return d.toLocaleDateString('en-IN', { year: 'numeric' })
+          if (tickMarkType === TickMarkType.Month)
+            return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' })
+          if (tickMarkType === TickMarkType.DayOfMonth)
             return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
           return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })
         },
@@ -320,22 +380,36 @@ export default function CandlestickChart({
         priceFormat:  { type: 'volume' },
         color:        '#3B82F6',
       })
-      chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
+      // ~20% of chart height, own scale, with a visible border separating
+      // it from the price pane above (was borderless -- read as a thin
+      // strip sharing the price axis rather than its own sub-panel).
+      chart.priceScale('vol').applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 },
+        borderVisible: true,
+        borderColor: '#1E293B',
+      })
       seriesRefs.current.volume = vol
     }
 
     // EMA lines
+    // (2026-07-28 redesign) title left unset on every overlay series below --
+    // lightweight-charts renders a `title` as a label tag near the series'
+    // current price level, and since every one of these trend-following
+    // overlays sits at a similar price level near the current price, their
+    // tags stacked into overlapping pills at the right edge. Replaced with a
+    // single custom top-left legend overlay (see the JSX render below) driven
+    // by indLegend state instead.
     const ema20 = chart.addSeries(LineSeries, {
       color: '#3B82F6', lineWidth: 1.5,
-      priceLineVisible: false, lastValueVisible: false, title: 'EMA20',
+      priceLineVisible: false, lastValueVisible: false,
     })
     const ema50 = chart.addSeries(LineSeries, {
       color: '#F59E0B', lineWidth: 1.5,
-      priceLineVisible: false, lastValueVisible: false, title: 'EMA50',
+      priceLineVisible: false, lastValueVisible: false,
     })
     const ema200 = chart.addSeries(LineSeries, {
       color: '#8B5CF6', lineWidth: 2,
-      priceLineVisible: false, lastValueVisible: false, title: 'EMA200',
+      priceLineVisible: false, lastValueVisible: false,
     })
     ema200.applyOptions({ visible: false })
     seriesRefs.current.ema20  = ema20
@@ -345,18 +419,22 @@ export default function CandlestickChart({
     // Supertrend line
     const st = chart.addSeries(LineSeries, {
       color: '#10B981', lineWidth: 2,
-      priceLineVisible: false, lastValueVisible: false, title: 'ST',
+      priceLineVisible: false, lastValueVisible: false,
     })
     seriesRefs.current.supertrend = st
 
-    // Bollinger Bands
+    // Bollinger Bands -- lineWidth bumped 1 -> 1.5 and opacity raised (solid
+    // slate instead of the old #64748B-on-near-black, which read at almost
+    // the same visual weight as the gridlines). Gridlines themselves are
+    // now much lower-opacity (see `grid:` below) so overlays read clearly
+    // above them instead of the two visually merging.
     const bbUp = chart.addSeries(LineSeries, {
-      color: '#64748B', lineWidth: 1, lineStyle: 2,
-      priceLineVisible: false, lastValueVisible: false, title: 'BB+',
+      color: '#94A3B8', lineWidth: 1.5, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false,
     })
     const bbLo = chart.addSeries(LineSeries, {
-      color: '#64748B', lineWidth: 1, lineStyle: 2,
-      priceLineVisible: false, lastValueVisible: false, title: 'BB-',
+      color: '#94A3B8', lineWidth: 1.5, lineStyle: 2,
+      priceLineVisible: false, lastValueVisible: false,
     })
     bbUp.applyOptions({ visible: false })
     bbLo.applyOptions({ visible: false })
@@ -366,18 +444,27 @@ export default function CandlestickChart({
     // VWAP
     const vwap = chart.addSeries(LineSeries, {
       color: '#0D9488', lineWidth: 1.5, lineStyle: 2,
-      priceLineVisible: false, lastValueVisible: false, title: 'VWAP',
+      priceLineVisible: false, lastValueVisible: false,
     })
     seriesRefs.current.vwap = vwap
 
-    // Crosshair → legend
+    // Crosshair → legend (OHLCV strip + indicator legend overlay)
     chart.subscribeCrosshairMove(param => {
-      if (!param.time) { setOhlcv(null); return }
+      if (!param.time) { setOhlcv(null); setHoverLegend(null); return }
       const c = param.seriesData?.get(candle)
       if (c) {
         const v = param.seriesData?.get(seriesRefs.current.volume)
         setOhlcv({ ...c, volume: v?.value })
       }
+      const s = seriesRefs.current
+      setHoverLegend({
+        ema20:      param.seriesData?.get(s.ema20)?.value,
+        ema50:      param.seriesData?.get(s.ema50)?.value,
+        ema200:     param.seriesData?.get(s.ema200)?.value,
+        supertrend: param.seriesData?.get(s.supertrend)?.value,
+        bb:         param.seriesData?.get(s.bbUp)?.value,
+        vwap:       param.seriesData?.get(s.vwap)?.value,
+      })
     })
 
     // Resize observer — must track both width AND height. lightweight-charts
@@ -461,24 +548,32 @@ export default function CandlestickChart({
       const ind = await apiFetch(`/api/v1/india/candles/${encodeURIComponent(symbol)}/indicators?timeframe=${tf}&limit=500`)
       const s   = seriesRefs.current
 
-      if (ind.ema20?.length)  s.ema20?.setData(ind.ema20)
-      if (ind.ema50?.length)  s.ema50?.setData(ind.ema50)
-      if (ind.ema200?.length) s.ema200?.setData(ind.ema200)
+      const legend = {}
+
+      if (ind.ema20?.length)  { s.ema20?.setData(ind.ema20);   legend.ema20  = ind.ema20.at(-1)?.value }
+      if (ind.ema50?.length)  { s.ema50?.setData(ind.ema50);   legend.ema50  = ind.ema50.at(-1)?.value }
+      if (ind.ema200?.length) { s.ema200?.setData(ind.ema200); legend.ema200 = ind.ema200.at(-1)?.value }
 
       if (ind.supertrend?.length) {
         s.supertrend?.setData(ind.supertrend.map(d => ({ time: d.time, value: d.value })))
-        const lastDir = ind.supertrend[ind.supertrend.length - 1]?.direction
+        const lastBar = ind.supertrend.at(-1)
+        const lastDir = lastBar?.direction
         s.supertrend?.applyOptions({ color: lastDir === 'up' ? '#10B981' : '#EF4444' })
+        legend.supertrend = lastBar?.value
       }
 
       if (ind.bollinger) {
         s.bbUp?.setData(ind.bollinger.upper)
         s.bbLo?.setData(ind.bollinger.lower)
+        legend.bb = ind.bollinger.upper?.at(-1)?.value
       }
 
       if (ind.vwap?.length && tf !== '1d') {
         s.vwap?.setData(ind.vwap)
+        legend.vwap = ind.vwap.at(-1)?.value
       }
+
+      setIndLegend(legend)
     } catch { /* indicators are optional */ }
   }, [symbol])
 
@@ -641,6 +736,13 @@ export default function CandlestickChart({
       </div>
 
       {/* ── Row 2: Timeframe + indicator toggles ─────────────────────────── */}
+      {/* One consistent button grammar for both groups (2026-07-28 audit:
+          "mixes filled buttons, outlined pills, and plain text at
+          inconsistent sizes"): same padding/radius/border/font-size on both.
+          Timeframe stays a solid-fill segmented control (single-select);
+          indicators stay colored-border chips (multi-select) -- that
+          semantic difference is real and worth keeping, but both now draw
+          from the same size/shape system instead of two different ones. */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 gap-4 flex-wrap">
         {/* Timeframe pills */}
         <div className="flex items-center gap-1">
@@ -649,10 +751,10 @@ export default function CandlestickChart({
               key={tf}
               onClick={() => setTimeframe(tf)}
               className={[
-                'px-2.5 py-1 rounded text-[11px] font-bold transition-all',
+                'px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-all',
                 tf === timeframe
-                  ? 'bg-accent text-white shadow'
-                  : 'text-muted hover:text-slate-300 hover:bg-white/5',
+                  ? 'bg-accent text-white border-accent shadow-sm'
+                  : 'text-muted border-border/40 hover:text-slate-300 hover:border-border hover:bg-white/5',
               ].join(' ')}
             >
               {TF_LABEL[tf]}
@@ -670,12 +772,12 @@ export default function CandlestickChart({
                 <button
                   key={key}
                   onClick={() => setIndicators(prev => ({ ...prev, [key]: !prev[key] }))}
-                  style={{ borderColor: on ? color : 'transparent' }}
+                  style={{ borderColor: on ? color : undefined }}
                   className={[
-                    'px-2 py-0.5 rounded text-[10px] font-semibold border transition-all',
+                    'px-2.5 py-1 rounded-md text-[11px] font-semibold border transition-all',
                     on
                       ? 'text-slate-200 bg-white/5'
-                      : 'text-muted bg-transparent border-border/30',
+                      : 'text-muted bg-transparent border-border/40 hover:border-border',
                   ].join(' ')}
                 >
                   {label}
@@ -708,6 +810,9 @@ export default function CandlestickChart({
           className="w-full h-full"
           style={{ opacity: loading ? 0 : 1, transition: 'opacity 0.2s' }}
         />
+        {!loading && !error && (
+          <IndicatorLegend indicators={indicators} values={hoverLegend ?? indLegend} />
+        )}
       </div>
 
       {/* ── Signal panel ──────────────────────────────────────────────────── */}
