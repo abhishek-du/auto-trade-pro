@@ -220,22 +220,67 @@ def _fetch_nse_chain_sync(normalized: str, equity: bool, expiry_date: datetime.d
 
 async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False, expiry_date: datetime.date | None = None) -> dict:
     """Fetch the live NSE option chain for an index or single stock.
-
-    Uses curl_cffi (Chrome TLS impersonation) + the current v3 API. The blocking
-    fetch runs in a thread executor so the async caller isn't blocked.
-
-    `expiry_date` (optional): fetch this specific expiry's chain instead of the
-    nearest one (falls back to nearest if it isn't in NSE's listed expiries).
-    Needed because a position can be opened on a later expiry than the front
-    week, and that contract still needs live premium updates every cycle.
-
-    Returns dict: symbol, expiry_date, spot_price, options_data, total_call_oi,
-    total_put_oi, all_expiries. Raises ValueError on bot-block / empty / closed-market.
+    
+    Primary: Upstox Option Chain API (faster, no bot blocks).
+    Fallback: curl_cffi NSE scraper (Chrome TLS impersonation).
     """
     normalized = symbol.upper().replace(" ", "").replace("-", "").replace(".NS", "")
     if not equity and normalized not in SUPPORTED_SYMBOLS:
         raise ValueError(f"Unsupported index symbol '{symbol}'. Supported: {SUPPORTED_SYMBOLS}")
 
+    # ── Try Upstox API First ──
+    try:
+        from crawler.upstox_data import get_instrument_key, _headers, _V2
+        import httpx
+        ikey = await get_instrument_key(normalized)
+        if ikey:
+            async with httpx.AsyncClient(timeout=12, verify=False) as c:
+                r = await c.get(f"{_V2}/option/contract", headers=_headers(), params={"instrument_key": ikey})
+                if r.status_code == 200:
+                    data = r.json().get("data", [])
+                    if data:
+                        expiries = sorted(list(set(c["expiry"] for c in data)))
+                        target_expiry_str = expiries[0]
+                        if expiry_date:
+                            dt_str = expiry_date.strftime("%Y-%m-%d")
+                            if dt_str in expiries:
+                                target_expiry_str = dt_str
+                        
+                        r2 = await c.get(f"{_V2}/option/chain", headers=_headers(), params={"instrument_key": ikey, "expiry_date": target_expiry_str})
+                        if r2.status_code == 200:
+                            chain_data = r2.json().get("data", [])
+                            options_data = []
+                            total_call_oi = 0
+                            total_put_oi = 0
+                            spot = 0.0
+                            for item in chain_data:
+                                if not spot and item.get("underlying_spot_price"):
+                                    spot = float(item["underlying_spot_price"])
+                                coi = float((item.get("call_options") or {}).get("market_data", {}).get("oi") or 0.0)
+                                poi = float((item.get("put_options") or {}).get("market_data", {}).get("oi") or 0.0)
+                                total_call_oi += coi
+                                total_put_oi += poi
+                                options_data.append({
+                                    "strike_price": float(item["strike_price"]),
+                                    "call_oi": coi,
+                                    "put_oi": poi,
+                                })
+                            
+                            parsed_expiry = datetime.datetime.strptime(target_expiry_str, "%Y-%m-%d").date()
+                            logger.info(f"Options chain (Upstox) fetched {normalized:<10} expiry={parsed_expiry} spot={spot:,.2f} strikes={len(options_data)}")
+                            return {
+                                "symbol":        normalized,
+                                "expiry_date":   parsed_expiry,
+                                "spot_price":    spot,
+                                "options_data":  options_data,
+                                "total_call_oi": total_call_oi,
+                                "total_put_oi":  total_put_oi,
+                                "all_expiries":  expiries,
+                            }
+    except Exception as e:
+        logger.warning(f"Upstox Option Chain failed for {normalized}: {e} (Falling back to NSE scraper)")
+
+    # ── Fallback to NSE Scraper ──
     global _last_nse_failure
     if _last_nse_failure and (_time.time() - _last_nse_failure) < _NSE_BACKOFF_SECS:
         wait_min = int((_NSE_BACKOFF_SECS - (_time.time() - _last_nse_failure)) / 60) + 1
@@ -248,18 +293,18 @@ async def fetch_options_chain(symbol: str = "NIFTY", *, equity: bool = False, ex
         _last_nse_failure = _time.time()
         raise ValueError(str(exc))
 
-    options_data, spot, total_call_oi, total_put_oi, expiry_date = _parse_chain_payload(payload)
+    options_data, spot, total_call_oi, total_put_oi, parsed_expiry = _parse_chain_payload(payload)
 
     logger.info(
-        f"Options chain fetched  {normalized:<10}  "
-        f"expiry={expiry_date}  spot={spot:,.2f}  "
+        f"Options chain (NSE) fetched    {normalized:<10}  "
+        f"expiry={parsed_expiry}  spot={spot:,.2f}  "
         f"strikes={len(options_data)}  "
         f"call_oi={total_call_oi:,}  put_oi={total_put_oi:,}"
     )
 
     return {
         "symbol":        normalized,
-        "expiry_date":   expiry_date,
+        "expiry_date":   parsed_expiry,
         "spot_price":    spot,
         "options_data":  options_data,
         "total_call_oi": total_call_oi,

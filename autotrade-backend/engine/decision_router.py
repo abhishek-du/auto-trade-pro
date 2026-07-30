@@ -755,6 +755,114 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
         else:
             position_size = {"units": 1, "usd_value": intent.entry_price}
 
+    # ── F&O Smart Profit Engine: Dynamic TP / SL via Option Chain (OI) ──
+    try:
+        from db.models import OptionsChainSnapshot
+        from sqlalchemy import select, desc
+        from utils.logger import logger
+        # Check if symbol has recent option chain data (F&O stocks/indices)
+        fno_snap = await session.execute(
+            select(OptionsChainSnapshot)
+            .where(OptionsChainSnapshot.symbol == intent.symbol.replace(".NS", ""))
+            .order_by(desc(OptionsChainSnapshot.snapshot_at))
+            .limit(1)
+        )
+        snap = fno_snap.scalar_one_or_none()
+        if snap and intent.take_profit and intent.stop_loss:
+            # For BUY: Cap Target at lowest Resistance above entry, raise Stop to highest Support below entry.
+            if intent.action == "BUY":
+                if snap.resistance_levels:
+                    valid_resistances = [r for r in snap.resistance_levels if r > intent.entry_price]
+                    if valid_resistances:
+                        lowest_res = min(valid_resistances)
+                        if intent.take_profit >= lowest_res:
+                            new_tp = lowest_res * 0.998
+                            logger.info(f"[fno_smart] {intent.symbol} BUY Target {intent.take_profit} capped to {new_tp:.2f} due to Call OI Resistance at {lowest_res}")
+                            intent.take_profit = new_tp
+                            if hasattr(auth.signal, 'take_profit'): auth.signal.take_profit = new_tp
+                
+                if snap.support_levels:
+                    valid_supports = [s for s in snap.support_levels if s < intent.entry_price]
+                    if valid_supports:
+                        highest_sup = max(valid_supports)
+                        if intent.stop_loss <= highest_sup:
+                            new_sl = highest_sup * 0.998
+                            logger.info(f"[fno_smart] {intent.symbol} BUY Stop {intent.stop_loss} raised to {new_sl:.2f} to lean on Put OI Support at {highest_sup}")
+                            intent.stop_loss = new_sl
+                            if hasattr(auth.signal, 'stop_loss'): auth.signal.stop_loss = new_sl
+
+            # For SELL: Cap Target at highest Support below entry, lower Stop to lowest Resistance above entry.
+            elif intent.action == "SELL":
+                if snap.support_levels:
+                    valid_supports = [s for s in snap.support_levels if s < intent.entry_price]
+                    if valid_supports:
+                        highest_sup = max(valid_supports)
+                        if intent.take_profit <= highest_sup:
+                            new_tp = highest_sup * 1.002 # 0.2% above support
+                            logger.info(f"[fno_smart] {intent.symbol} SELL Target {intent.take_profit} capped to {new_tp:.2f} due to Put OI Support at {highest_sup}")
+                            intent.take_profit = new_tp
+                            if hasattr(auth.signal, 'take_profit'): auth.signal.take_profit = new_tp
+                
+                if snap.resistance_levels:
+                    valid_resistances = [r for r in snap.resistance_levels if r > intent.entry_price]
+                    if valid_resistances:
+                        lowest_res = min(valid_resistances)
+                        if intent.stop_loss >= lowest_res:
+                            new_sl = lowest_res * 1.002
+                            logger.info(f"[fno_smart] {intent.symbol} SELL Stop {intent.stop_loss} lowered to {new_sl:.2f} to lean on Call OI Resistance at {lowest_res}")
+                            intent.stop_loss = new_sl
+                            if hasattr(auth.signal, 'stop_loss'): auth.signal.stop_loss = new_sl
+
+            # Max Pain Rejection for FNO specific directional trades (especially options on expiry)
+            # If today is expiry day and we are buying an option near Max Pain, reject due to Pin Risk / Premium Decay.
+            if intent.instrument_type in ("CE", "PE") and intent.action == "BUY":
+                if snap.expiry_date == datetime.utcnow().date() and snap.max_pain:
+                    if abs(intent.entry_price - snap.max_pain) / snap.max_pain < 0.01: # Within 1% of Max Pain
+                        msg = f"Rejected: Option buying on Expiry Day near Max Pain ({snap.max_pain}) is extremely risky due to premium decay (Pin Risk)."
+                        logger.warning(f"[fno_smart] {intent.symbol} {msg}")
+                        return RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=auth.mode, reason=msg, metadata={"strategy": intent.strategy})
+
+            # PCR (Put-Call Ratio) Checks for Position Sizing
+            if snap.pcr > 1.2:
+                # Bullish momentum
+                if intent.action == "BUY":
+                    position_size["units"] = int(position_size.get("units", 1) * 1.5) or 1
+                    logger.info(f"[fno_smart] {intent.symbol} High PCR ({snap.pcr:.2f}) -> Bullish momentum. Increased BUY size.")
+                elif intent.action == "SELL":
+                    position_size["units"] = max(1, int(position_size.get("units", 1) * 0.5))
+                    logger.info(f"[fno_smart] {intent.symbol} High PCR ({snap.pcr:.2f}) -> Bullish momentum. Decreased SELL size.")
+            elif snap.pcr > 0.0 and snap.pcr < 0.6:
+                # Bearish fear
+                if intent.action == "BUY":
+                    position_size["units"] = max(1, int(position_size.get("units", 1) * 0.5))
+                    logger.info(f"[fno_smart] {intent.symbol} Low PCR ({snap.pcr:.2f}) -> Bearish fear. Decreased BUY size.")
+                elif intent.action == "SELL":
+                    position_size["units"] = int(position_size.get("units", 1) * 1.5) or 1
+                    logger.info(f"[fno_smart] {intent.symbol} Low PCR ({snap.pcr:.2f}) -> Bearish fear. Increased SELL size.")
+
+        # IV Crush Protection: Check IV Percentile
+        if intent.instrument_type in ("CE", "PE") and intent.action == "BUY":
+            from db.models import IVHistory
+            # Fetch last 252 trading days of IV to calculate Percentile
+            iv_res = await session.execute(
+                select(IVHistory.atm_iv)
+                .where(IVHistory.underlying == intent.symbol.replace(".NS", ""))
+                .order_by(desc(IVHistory.trade_date))
+                .limit(252)
+            )
+            ivs = [row[0] for row in iv_res.fetchall() if row[0] is not None]
+            if ivs:
+                current_iv = ivs[0]
+                ivp = sum(1 for iv in ivs if iv < current_iv) / len(ivs) * 100
+                if ivp > 80:
+                    msg = f"Rejected: IV Percentile is too high ({ivp:.1f}%). Buying naked options is risky due to IV Crush."
+                    logger.warning(f"[fno_smart] {intent.symbol} {msg}")
+                    return RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=auth.mode, reason=msg, metadata={"strategy": intent.strategy})
+                elif ivp < 30:
+                    logger.info(f"[fno_smart] {intent.symbol} IV Percentile is low ({ivp:.1f}%). Safe to buy options.")
+    except Exception as e:
+        logger.warning(f"[fno_smart] Failed to apply Option Chain overrides for {intent.symbol}: {e}")
+
     # ── Macro & Market Breadth Integration (Half-Size on Negative Breadth) ──
     if intent.action == "BUY" and position_size.get("units", 0) > 1:
         from crawler.market_breadth import get_breadth_cache

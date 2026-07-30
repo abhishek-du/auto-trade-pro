@@ -174,7 +174,7 @@ async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
         ck = "isin_csv"
         csv_text = _get_cache(ck)
         if csv_text is None:
-            async with httpx.AsyncClient(timeout=15) as c:
+            async with httpx.AsyncClient(timeout=15, verify=False) as c:
                 r = await c.get("https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz")
                 import gzip
                 csv_text = gzip.decompress(r.content).decode("utf-8")
@@ -257,6 +257,18 @@ async def _resolve_isin_uncached(bare: str) -> str | None:
 
 async def get_instrument_key(symbol: str) -> str | None:
     """Resolve symbol → Upstox instrument_key (e.g. 'NSE_EQ|INE002A01018')."""
+    bare = symbol.upper().replace(".NS", "").replace(" ", "")
+    
+    # ── Handle Indices explicitly for Option Chain ──
+    index_map = {
+        "NIFTY": "NSE_INDEX|Nifty 50",
+        "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+        "FINNIFTY": "NSE_INDEX|Nifty Fin Service",
+        "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+    }
+    if bare in index_map:
+        return index_map[bare]
+
     isin = await get_isin(symbol)
     return f"NSE_EQ|{isin}" if isin else None
 
@@ -331,7 +343,7 @@ async def _fundamentals(endpoint: str, path_id: str, cache_key: str, params: dic
     try:
         from urllib.parse import quote
         encoded_id = quote(path_id, safe="")   # instrument_key contains "|" — must be percent-encoded
-        async with httpx.AsyncClient(timeout=12) as c:
+        async with httpx.AsyncClient(timeout=12, verify=False) as c:
             r = await c.get(f"{_V2}/fundamentals/{encoded_id}/{endpoint}", headers=_headers(), params=params or {})
             if r.status_code == 200:
                 data = r.json().get("data", r.json())
@@ -545,7 +557,7 @@ async def get_historical(
     if not ikey:
         return []
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
+        async with httpx.AsyncClient(timeout=15, verify=False) as c:
             r = await c.get(
                 f"{_V2}/historical-candle/{ikey}/{interval}/{to_date}/{from_date}",
                 headers=_headers(),
@@ -582,7 +594,7 @@ async def get_option_chain(symbol: str, expiry: str | None = None) -> dict:
         params: dict = {"instrument_key": ikey}
         if expiry:
             params["expiry_date"] = expiry
-        async with httpx.AsyncClient(timeout=12) as c:
+        async with httpx.AsyncClient(timeout=12, verify=False) as c:
             r = await c.get(f"{_V2}/option/chain", headers=_headers(), params=params)
             if r.status_code == 200:
                 data = r.json().get("data", {})
@@ -607,7 +619,7 @@ def get_auth_url() -> str:
 
 async def exchange_code_for_token(code: str) -> str:
     """Exchange OAuth code for access token and persist to .env."""
-    async with httpx.AsyncClient(timeout=15) as c:
+    async with httpx.AsyncClient(timeout=15, verify=False) as c:
         r = await c.post(
             "https://api.upstox.com/v2/login/authorization/token",
             data={
