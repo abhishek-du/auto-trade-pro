@@ -10,14 +10,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from engine.entry_confirmation import check_price_volume_confirmation
+from engine.entry_confirmation import check_price_volume_confirmation, check_day_range_stability
 
 
-def _snap(change_pct=None, buy_depth=None, sell_depth=None):
+def _snap(change_pct=None, buy_depth=None, sell_depth=None, ohlc=None):
     return SimpleNamespace(
         change_pct=change_pct,
         buy_depth=buy_depth or [],
         sell_depth=sell_depth or [],
+        ohlc=ohlc or {},
     )
 
 
@@ -109,3 +110,56 @@ class TestOrderBookSkew:
             "BUY",
         )
         assert confirmed is True  # malformed -> treated as 0 quantity, no skew detected
+
+
+class TestDayRangeStability:
+    """check_day_range_stability() -- added 2026-07-29 after AASTHA.NS
+    (-11.27%, DIRECT_NEWS's worst trade): entry passed
+    check_price_volume_confirmation() (a real bullish move existed) but the
+    day's own range was a ~23% whipsaw (high 105.79, low 81.9), and the
+    position gapped through its overnight stop the next morning."""
+
+    def test_aastha_shaped_whipsaw_is_rejected(self):
+        # The actual AASTHA.NS entry-day OHLC that motivated this check.
+        confirmed, reason = check_day_range_stability(
+            _snap(ohlc={"open": 103.9, "high": 105.79, "low": 81.9, "close": 81.9})
+        )
+        assert confirmed is False
+        assert "whipsaw" in reason.lower() or "gap" in reason.lower()
+
+    def test_stable_day_range_confirmed(self):
+        # A normal ~3% range on an active-news day.
+        confirmed, _ = check_day_range_stability(
+            _snap(ohlc={"open": 100.0, "high": 102.5, "low": 99.6, "close": 101.0})
+        )
+        assert confirmed is True
+
+    def test_exact_threshold_boundary_is_confirmed(self):
+        # (high-low)/low == 0.12 exactly -- boundary is inclusive (not > threshold)
+        confirmed, _ = check_day_range_stability(
+            _snap(ohlc={"high": 112.0, "low": 100.0})
+        )
+        assert confirmed is True
+
+    def test_just_past_threshold_is_rejected(self):
+        confirmed, _ = check_day_range_stability(
+            _snap(ohlc={"high": 112.01, "low": 100.0})
+        )
+        assert confirmed is False
+
+    def test_missing_ohlc_fails_open_not_closed(self):
+        # Supplementary filter -- missing data should never be the reason a
+        # trade gets blocked; check_price_volume_confirmation is the
+        # fail-closed gate.
+        confirmed, reason = check_day_range_stability(_snap(ohlc={}))
+        assert confirmed is True
+        assert "no day-range data" in reason.lower()
+
+    def test_zero_low_fails_open_not_divide_by_zero(self):
+        confirmed, _ = check_day_range_stability(_snap(ohlc={"high": 10.0, "low": 0.0}))
+        assert confirmed is True
+
+    def test_none_snapshot_ohlc_attr_fails_open(self):
+        snap = SimpleNamespace()  # no .ohlc attribute at all
+        confirmed, _ = check_day_range_stability(snap)
+        assert confirmed is True

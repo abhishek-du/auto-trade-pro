@@ -1,3 +1,4 @@
+from utils.logger import logger
 # Indian market Celery tasks.
 #
 # Task schedule (all times UTC — Celery runs in UTC):
@@ -17,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from celery.signals import worker_ready
 from tasks.celery_app import celery_app
-from utils.logger import logger
+
 
 _IST = ZoneInfo("Asia/Kolkata")
 
@@ -1559,7 +1560,34 @@ async def _fast_sl_check() -> None:
                     )
                     if not tp_hit:
                         continue
-                    reason = "TAKE_PROFIT"
+                        
+                    # ── Smart Trailing & Post-Entry Management ──
+                    trade_obj = getattr(pos, "trade", None)
+                    if not trade_obj:
+                        from db.models import PaperTrade
+                        trade_obj = await session.get(PaperTrade, pos.trade_id)
+                        
+                    if trade_obj and abs(pos.size_units - trade_obj.size_units) < 1e-4:
+                        try:
+                            from paper_trading.trade_simulator import scale_out_paper_trade
+                            partial_pnl = await scale_out_paper_trade(pos, 0.5, price, "T1_HIT", session)
+                            # Move SL to cost-to-cost
+                            pos.stop_loss = max(pos.stop_loss, pos.entry_price) if is_buy else min(pos.stop_loss, pos.entry_price)
+                            # Let trailing logic in update_positions_with_current_prices handle the rest
+                            pos.take_profit = 0.0  
+                            await session.commit()
+                            
+                            # Alert
+                            
+                            logger.info(f"[fast_sl] {pos.symbol} hit T1. Booked 50% (PnL: ₹{partial_pnl:.2f}). SL moved to entry ₹{pos.entry_price:.2f}.")
+                            
+                        except Exception as exc:
+                            
+                            logger.warning(f"[fast_sl] scale_out failed for {pos.symbol}: {exc}")
+                            await session.rollback()
+                        continue
+                    else:
+                        reason = "TAKE_PROFIT"
                 else:
                     continue
             else:
@@ -2602,10 +2630,31 @@ def refresh_market_breadth_task():
 
 # ── 14. Calendar seed — daily 7 AM IST ───────────────────────────────────────
 
-@celery_app.task(name="tasks.seed_calendar_events")
+@celery_app.task(name="tasks.seed_calendar_events", time_limit=300, soft_time_limit=240)
 def seed_calendar_events_task():
     """Seeds market calendar with F&O expiries, RBI, holidays, IPOs, earnings.
     Runs daily at 7 AM IST = 1:30 AM UTC.
+
+    full_universe=True, tried 2026-07-28/29: scanning every real NSE+BSE
+    symbol (~10,000) via yfinance to cover large names missing from the old
+    ~100-symbol curated watchlist (Varun Beverages, Ambuja Cements, Tata
+    Capital, Cholamandalam Finance). Confirmed working for coverage, but
+    proved fundamentally fragile in practice -- 10-way concurrency got 81%
+    of requests rate-limited outright, and even a tuned sequential/backoff
+    version run overnight hit a sustained yfinance block after ~3h that
+    repeated cooldowns couldn't clear.
+
+    Replaced 2026-07-29 with fetch_nse_board_meetings_calendar(): NSE's own
+    /api/event-calendar returns every listed company's CONFIRMED upcoming
+    board-meeting date (the legal earnings date under SEBI LODR) for
+    "Financial Results" in one bulk call -- no per-symbol looping, no
+    rate-limit exposure, and it's the company's own filing rather than an
+    analyst guess. seed_calendar_events() always calls it internally
+    (unconditional on full_universe), so this task no longer needs
+    full_universe=True to get broad coverage -- back to the fast
+    curated-~100-symbol default, same as the manual "Refresh Data" button.
+    Time budget shrunk accordingly (was 40min soft / 45min hard for the
+    full-universe scan).
     """
     async def _run():
         from engine.calendar_engine import seed_calendar_events
@@ -4016,7 +4065,7 @@ async def _india_weekend_reflection():
     from sqlalchemy import text as _t
     import json
     import os
-    from utils.logger import logger
+    
     from utils.llm import call_llm_chat
 
     logger.info("[weekend_reflection] Starting weekend self-reflection loop...")
@@ -4099,6 +4148,8 @@ async def _compute_pre_event_trade_levels(symbol: str, action: str, entry_price:
     from crawler.price_feed import get_latest_candles
     from engine.indicators import compute_indicators
     from engine.risk_manager import compute_trade_levels
+    from sqlalchemy import select
+    from db.models import OptionsChainSnapshot
 
     sig_ind = None
     try:
@@ -4113,10 +4164,35 @@ async def _compute_pre_event_trade_levels(symbol: str, action: str, entry_price:
         logger.debug(f"[pre_event_gap] {symbol}: candle fetch for SL/TP levels failed: {exc}")
 
     lv = compute_trade_levels(action, entry_price, sig=sig_ind)
+    take_profit = lv["target_1"]
+
+    # ── Options Max-Pain / OI Resistance Adjustment (AI Predict smart sizing) ──
+    if action == "BUY":
+        try:
+            stmt = select(OptionsChainSnapshot).where(
+                OptionsChainSnapshot.symbol == symbol
+            ).order_by(OptionsChainSnapshot.snapshot_at.desc()).limit(1)
+            opt_snap = (await session.execute(stmt)).scalar_one_or_none()
+
+            if opt_snap and opt_snap.resistance_levels:
+                resistances_above = [r for r in opt_snap.resistance_levels if r > entry_price]
+                if resistances_above:
+                    nearest_res = min(resistances_above)
+                    if nearest_res < take_profit:
+                        old_tp = take_profit
+                        # Cap it 0.2% below the option strike to front-run call writers
+                        take_profit = nearest_res * 0.998
+                        logger.info(
+                            f"[pre_event_gap] {symbol}: TP reduced from ₹{old_tp:.2f} to ₹{take_profit:.2f} "
+                            f"due to Call OI resistance at ₹{nearest_res}"
+                        )
+        except Exception as exc:
+            logger.debug(f"[pre_event_gap] {symbol}: Options data adjustment failed: {exc}")
+
     return {
         "stop_loss": round(lv["stop_loss"], 2),
-        "take_profit": round(lv["target_1"], 2),
-        "target_2": round(lv.get("target_2", lv["target_1"]), 2),
+        "take_profit": round(take_profit, 2),
+        "target_2": round(lv.get("target_2", take_profit), 2),
         "atr": lv.get("atr", 0.0),
     }
 

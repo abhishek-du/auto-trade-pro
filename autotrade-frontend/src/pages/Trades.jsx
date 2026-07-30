@@ -748,6 +748,7 @@ export default function Trades() {
   const [search,     setSearch]     = useState('');
   const [direction,  setDirection]  = useState('All');
   const [status,     setStatus]     = useState('All');
+  const [source,     setSource]     = useState('All');
   const [page,       setPage]       = useState(1);
   const [expandedId, setExpandedId] = useState(null);
 
@@ -757,9 +758,10 @@ export default function Trades() {
       if (search    && !sym.includes(search.toUpperCase())) return false;
       if (direction !== 'All' && (t.direction ?? t.side ?? '').toUpperCase() !== direction) return false;
       if (status    !== 'All' && (t.status ?? 'CLOSED').toUpperCase() !== status) return false;
+      if (source    !== 'All' && (t.strategy_source ?? 'Unknown') !== source) return false;
       return true;
     });
-  }, [trades, search, direction, status]);
+  }, [trades, search, direction, status, source]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage   = Math.min(page, totalPages);
@@ -778,9 +780,9 @@ export default function Trades() {
   // For open trades, use live unrealised P&L from position map (or trade record)
   const openTrades = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
   const openPnls   = openTrades.map((t) => {
-    const sym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
-    const pos = positionBySymbol[sym];
-    return pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0;
+    const tradeSym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
+    const pos      = positionBySymbol[tradeSym] ?? null;
+    return pos?.unrealised_pnl ?? t.pnl ?? 0;
   });
   const allPnls    = [
     ...closed.map((t) => t.pnl ?? 0),
@@ -858,45 +860,47 @@ export default function Trades() {
         </div>
       </div>
 
-      {/* ── Filters ── */}
-      <div className="glass-panel rounded-xl p-4 flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-40">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <input
-            type="text"
-            placeholder="Search symbol…"
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            className="w-full bg-surface border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
-          />
-        </div>
-        {[
-          { label: 'Direction', value: direction, set: setDirection, opts: ['All', 'BUY', 'SELL'] },
-          { label: 'Status',    value: status,    set: setStatus,    opts: ['All', 'OPEN', 'CLOSED'] },
-        ].map(({ label, value, set, opts }) => (
-          <div key={label} className="flex items-center gap-2">
-            <span className="text-muted text-xs">{label}:</span>
-            <div className="flex rounded-lg overflow-hidden border border-border">
-              {opts.map((o) => (
-                <button
-                  key={o}
-                  onClick={() => { set(o); setPage(1); }}
-                  className={[
-                    'px-3 py-2 text-xs font-medium transition-colors',
-                    value === o ? 'bg-accent text-white' : 'text-muted hover:text-slate-300 hover:bg-surface',
-                  ].join(' ')}
-                >
-                  {o}
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
-        <span className="text-muted text-xs ml-auto">{filtered.length} trades</span>
-      </div>
-
       {/* ── Trade table ── */}
       <div className="glass-panel rounded-xl overflow-hidden hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] transition-all duration-300 relative">
+        
+        {/* Table Header / Filters */}
+        <div className="p-4 border-b border-border flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-40">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+            <input
+              type="text"
+              placeholder="Search symbol…"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              className="w-full bg-surface border border-border rounded-lg pl-8 pr-3 py-2 text-sm text-slate-200 placeholder:text-muted focus:outline-none focus:border-accent"
+            />
+          </div>
+          {[
+            { label: 'Direction', value: direction, set: setDirection, opts: ['All', 'BUY', 'SELL'] },
+            { label: 'Status',    value: status,    set: setStatus,    opts: ['All', 'OPEN', 'CLOSED', 'STOPPED'] },
+            { label: 'Source',    value: source,    set: setSource,    opts: ['All', 'Direct News', 'AI Predict'] },
+          ].map(({ label, value, set, opts }) => (
+            <div key={label} className="flex items-center gap-2">
+              <span className="text-muted text-xs">{label}:</span>
+              <div className="flex rounded-lg overflow-hidden border border-border">
+                {opts.map((o) => (
+                  <button
+                    key={o}
+                    onClick={() => { set(o); setPage(1); }}
+                    className={[
+                      'px-3 py-2 text-xs font-medium transition-colors',
+                      value === o ? 'bg-accent text-white' : 'text-muted hover:text-slate-300 hover:bg-surface',
+                    ].join(' ')}
+                  >
+                    {o}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <span className="text-muted text-xs ml-auto font-medium">{filtered.length} trades</span>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
 
@@ -936,8 +940,8 @@ export default function Trades() {
                      whenever only one of those fields happened to be null in the REST snapshot --
                      confirmed live on TMB.BO: table showed a stale price while the P&L/Current Value
                      columns were already computed from the correct, newer one. */
-                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? 0) : (t.pnl ?? 0);
-                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
+                  const pnl      = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? t.pnl ?? 0) : (t.pnl ?? 0);
+                  const pnlPct   = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? t.pnl_percent ?? t.pnl_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
                   const invested = t.size_usd ?? 0;
                   const curPrice = isOpen ? (pos?.current_price ?? t.current_price ?? null) : (t.exit_price ?? null);
                   const tradeIsBuy = (t.direction ?? t.side ?? '').toUpperCase() === 'BUY';

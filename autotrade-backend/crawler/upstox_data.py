@@ -408,9 +408,11 @@ async def get_competitors(symbol: str) -> list:
 
 # ── Market Intel (cross-platform — also available on Zerodha via NSE) ─────────
 
-async def get_market_intel(symbol: str) -> dict:
-    """PCR, Max Pain, OI — Upstox provides this in one call."""
-    ck = f"market_intel:{symbol}"
+async def get_market_intel(symbol: str, include_greeks: bool = False) -> dict:
+    """PCR, Max Pain, OI — Upstox provides this in one call.
+    Optionally fetch option greeks using v3 API.
+    """
+    ck = f"market_intel:{symbol}:greeks={include_greeks}"
     if cached := _get_cache(ck):
         return cached
     if not await ensure_upstox_token_fresh():
@@ -420,15 +422,30 @@ async def get_market_intel(symbol: str) -> dict:
         return {}
     try:
         async with httpx.AsyncClient(timeout=10) as c:
+            # First fetch PCR
             r = await c.get(
                 f"{_V2}/market/option-chain/pcr",
                 headers=_headers(),
                 params={"instrument_key": ikey},
             )
+            data = {}
             if r.status_code == 200:
-                data = r.json().get("data", {})
+                data.update(r.json().get("data", {}))
+                
+            if include_greeks:
+                # Fetch Option Greeks using V3 API
+                v3_url = f"{_BASE}/v3/market-quote/options/greeks"
+                rg = await c.get(
+                    v3_url,
+                    headers=_headers(),
+                    params={"instrument_key": ikey},
+                )
+                if rg.status_code == 200:
+                    data["greeks"] = rg.json().get("data", {})
+                    
+            if data:
                 _set_cache(ck, data, "market_intel")
-                return data
+            return data
     except Exception as e:
         logger.debug(f"[upstox/market_intel] {symbol}: {e}")
     return {}
@@ -631,3 +648,59 @@ def _update_env(key: str, value: str) -> None:
             f.write(content)
     except Exception as e:
         logger.warning(f"[upstox] Could not update .env: {e}")
+
+# ── IPO APIs ──────────────────────────────────────────────────────────
+
+async def get_ipos(status: str = "open", issue_type: str = "regular", page_number: int = 1, records: int = 30) -> list:
+    """
+    Fetch a paginated list of IPOs filtered by status and issue type.
+    Allowed status values: 'open', 'closed', 'listed', 'upcoming'.
+    Allowed issue_type values: 'regular', 'sme'.
+    """
+    if not await ensure_upstox_token_fresh():
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{_V2}/ipos",
+                headers=_headers(),
+                params={
+                    "status": status,
+                    "issue_type": issue_type,
+                    "page_number": page_number,
+                    "records": records
+                }
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("data", [])
+            else:
+                logger.warning(f"[upstox] get_ipos failed: {r.status_code} - {r.text}")
+                return []
+    except Exception as exc:
+        logger.error(f"[upstox] Exception in get_ipos: {exc}")
+        return []
+
+async def get_ipo_details(ipo_id: str) -> dict:
+    """
+    Retrieve detailed IPO information including pricing, lot size, timeline, registrar details, 
+    and subscription data for a specific IPO using its slug ID.
+    """
+    if not await ensure_upstox_token_fresh():
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{_V2}/ipo/details",
+                headers=_headers(),
+                params={"id": ipo_id}
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("data", {})
+            else:
+                logger.warning(f"[upstox] get_ipo_details failed: {r.status_code} - {r.text}")
+                return {}
+    except Exception as exc:
+        logger.error(f"[upstox] Exception in get_ipo_details: {exc}")
+        return {}

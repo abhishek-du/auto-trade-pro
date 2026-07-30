@@ -225,7 +225,11 @@ export default function MarketCalendar() {
               onClose={() => setShowEventPanel(false)}
             />
           ) : (
-            <UpcomingEventsWidget events={upcomingEvents} maxItems={10} />
+            <UpcomingEventsWidget
+              events={upcomingEvents}
+              maxItems={10}
+              onViewAll={() => setViewMode('list')}
+            />
           )}
         </div>
       </div>

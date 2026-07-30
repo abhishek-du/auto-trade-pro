@@ -77,8 +77,14 @@ _SECTOR_CACHE_TO_STRATEGY = {
     "FMCG": "FMCG",
     "IT": "IT",
     "METALS": "METALS",
-    # sector_cache also emits: Consumer, Energy, Infra, Telecom, GENERAL — none
-    # of which map cleanly to a Phase-1 supported adapter, so they resolve to None.
+    "CONSUMER": "CONSUMER",
+    "ENERGY": "ENERGY",
+    "INFRA": "INFRA",
+    "TELECOM": "TELECOM",
+    # All 9 sector_cache buckets are now covered (2026-07-29, user request:
+    # "sirf 5 nahi mujhe saare sector chaiye" -- all sectors, not just 5).
+    # GENERAL (the unclassified fallback, 0 symbols in the live cache) is
+    # intentionally left unmapped -- it's not a real sector, just "unknown".
 }
 
 

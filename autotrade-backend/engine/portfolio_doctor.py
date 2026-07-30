@@ -824,7 +824,7 @@ async def run_full_diagnosis(
         calculate_tax_summary,
         find_harvesting_opportunities,
     )
-    from engine.fundamental_analyzer import fetch_fundamentals_yfinance
+    from engine.fundamental_analyzer import fetch_fundamentals_upstox
     from crawler.live_prices import PRICE_CACHE
     from crawler.sector_data import get_sector_cache
 
@@ -864,7 +864,7 @@ async def run_full_diagnosis(
         if not sym:
             continue
         try:
-            data = await loop.run_in_executor(None, fetch_fundamentals_yfinance, sym)
+            data = await fetch_fundamentals_upstox(sym)
             fundamentals[sym] = data
         except Exception:
             fundamentals[sym] = {}

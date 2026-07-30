@@ -60,7 +60,25 @@ def get_price(symbol: str) -> dict | None:
                         "age_seconds": round(age, 2),
                     }
         except Exception:
-            pass  # Fall through to PRICE_CACHE
+            pass  # Fall through to UPSTOX
+
+    # 1.5 Upstox LIVE_TICKS — sub-second from Upstox WebSocket
+    try:
+        from crawler.upstox_websocket import get_live_tick as get_upstox_tick
+        tick = get_upstox_tick(symbol)
+        if tick and tick.get("last_price"):
+            age = float(tick.get("_age_seconds", 0.0))
+            if age <= 30.0:
+                return {
+                    "price":      float(tick["last_price"]),
+                    "change":     float(tick.get("change", 0) or 0),
+                    "change_pct": float(tick.get("change_percent", 0) or 0),
+                    "volume":     float(tick.get("volume_traded", 0) or 0),
+                    "source":     "upstox_websocket",
+                    "age_seconds": round(age, 2),
+                }
+    except Exception:
+        pass  # Fall through to PRICE_CACHE
 
     # 2. PRICE_CACHE (15-sec refresh)
     cached = PRICE_CACHE.get(symbol)

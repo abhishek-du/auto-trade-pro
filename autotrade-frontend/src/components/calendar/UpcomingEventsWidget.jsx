@@ -17,7 +17,7 @@ function DateBadge({ dateStr }) {
   )
 }
 
-export default function UpcomingEventsWidget({ events: propEvents, compact = false, maxItems = 8 }) {
+export default function UpcomingEventsWidget({ events: propEvents, compact = false, maxItems = 8, onViewAll }) {
   const navigate = useNavigate()
   const [fetchedEvents, setFetchedEvents] = useState([])
 
@@ -56,7 +56,7 @@ export default function UpcomingEventsWidget({ events: propEvents, compact = fal
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <p className="text-slate-200 font-semibold text-sm">Upcoming Events</p>
         <button
-          onClick={() => navigate('/calendar')}
+          onClick={() => (onViewAll ? onViewAll() : navigate('/calendar'))}
           className="text-cyan/70 text-xs hover:text-cyan transition-colors"
         >
           View all →

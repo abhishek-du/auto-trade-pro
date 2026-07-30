@@ -17,7 +17,7 @@ function NoIPOsState({ activeTab, hasAnyData, apiKeyConfigured, onRefresh }) {
           <div className="space-y-1">
             <p className="text-slate-200 font-semibold text-sm">IPO data is loading</p>
             <p className="text-muted text-xs max-w-xs">
-              ipoalerts.in free plan fetches ~6 IPOs per request window.
+              Upstox API is providing the data.
               Cache refreshes every 30 minutes — data accumulates across cycles.
             </p>
           </div>
@@ -35,22 +35,14 @@ function NoIPOsState({ activeTab, hasAnyData, apiKeyConfigured, onRefresh }) {
         <div className="space-y-1">
           <p className="text-slate-200 font-semibold text-sm">IPO data needs an API key</p>
           <p className="text-muted text-xs max-w-xs">
-            NSE's API requires browser JS execution (Akamai) — not accessible from a server.
-            ipoalerts.in is the reliable data source.
+            The system uses Upstox API for reliable IPO data.
           </p>
         </div>
         <div className="rounded-xl border border-border px-5 py-3 text-left space-y-2 w-full max-w-sm" style={{ background: '#0a0f1c' }}>
           <p className="text-muted text-[10px] uppercase tracking-widest">Setup (2 steps)</p>
           <p className="text-slate-300 text-xs">
-            1. Get a free API key at{' '}
-            <span className="text-accent font-mono">ipoalerts.in</span>
+            1. Authenticate with Upstox API in settings
           </p>
-          <p className="text-slate-300 text-xs">
-            2. Add to <code className="bg-surface px-1.5 py-0.5 rounded text-amber-400">.env</code>:
-          </p>
-          <code className="block bg-surface rounded px-3 py-2 text-[11px] text-green-400 font-mono select-all">
-            IPOALERTS_API_KEY=your_key_here
-          </code>
           <p className="text-muted/60 text-[10px]">Then restart the backend — data loads automatically.</p>
         </div>
         <button onClick={onRefresh} className="text-xs text-muted hover:text-slate-300 transition-colors flex items-center gap-1">

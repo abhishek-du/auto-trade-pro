@@ -196,11 +196,11 @@ async def build_stock_context(
     # ── Steps 3 & 4: Indicators, patterns, fundamentals in parallel ───────────
     from engine.indicators import compute_indicators
     from engine.candlestick import detect_patterns, get_pattern_summary
-    from engine.fundamental_analyzer import fetch_fundamentals_yfinance
+    from engine.fundamental_analyzer import fetch_fundamentals_upstox
 
     ind_task  = asyncio.to_thread(compute_indicators, df)    if df is not None else asyncio.sleep(0)
     pat_task  = asyncio.to_thread(detect_patterns, df)       if df is not None else asyncio.sleep(0)
-    fund_task = asyncio.to_thread(fetch_fundamentals_yfinance, symbol)
+    fund_task = asyncio.create_task(fetch_fundamentals_upstox(symbol))
 
     ind_raw, pat_raw, fund_raw = await asyncio.gather(
         ind_task, pat_task, fund_task,

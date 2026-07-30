@@ -47,6 +47,45 @@ class Settings(BaseSettings):
         "PIDILITIND", "VOLTAS", "MUTHOOTFIN", "PERSISTENT", "COFORGE",
         "LTTS", "TATAELXSI", "METROPOLIS", "LALPATHLAB", "ASTRAL",
     ]
+    # ── Earnings calendar universe ────────────────────────────────────────────
+    # Deliberately SEPARATE from WATCHLIST_NSE_LARGE_CAP/MID_CAP above (added
+    # 2026-07-28) -- those two feed several other subsystems (candle sync,
+    # info-cache refresh) that specifically need a SMALL list to reliably
+    # finish within their time budget (see the NIFTYBEES comment above).
+    # fetch_earnings_calendar() was reusing that same tiny 32-symbol list,
+    # which meant genuinely large, actively-traded NSE names outside it --
+    # confirmed live: Varun Beverages (VBL), Ambuja Cements, Tata Capital
+    # (TATACAP), Cholamandalam Investment & Finance (CHOLAFIN), all with
+    # real yfinance earnings dates -- never appeared on the calendar at all.
+    # This list is only consumed by the once-daily calendar reseed, which has
+    # all day to finish, so it can safely be much broader than the 32-symbol
+    # list without risking the timeout problems that motivated keeping that
+    # one small.
+    WATCHLIST_EARNINGS_CALENDAR: list[str] = [
+        # Nifty 50 core (banking, IT, energy, auto, FMCG, pharma, materials)
+        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR",
+        "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK", "LT", "AXISBANK",
+        "ASIANPAINT", "MARUTI", "BAJFINANCE", "WIPRO", "HCLTECH",
+        "ULTRACEMCO", "NESTLEIND", "POWERGRID", "SUNPHARMA", "DRREDDY",
+        "TITAN", "M&M", "NTPC", "TECHM", "JSWSTEEL", "INDUSINDBK",
+        "TATAMOTORS", "BAJAJFINSV", "TATASTEEL", "ADANIENT", "ADANIPORTS",
+        "CIPLA", "COALINDIA", "DIVISLAB", "EICHERMOT", "GRASIM",
+        "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "BAJAJ-AUTO", "BPCL",
+        "BRITANNIA", "APOLLOHOSP", "ONGC", "SBILIFE", "SHRIRAMFIN",
+        "TATACONSUM", "TRENT", "UPL",
+        # Widely-held large/mid caps that kept coming up missing from the
+        # calendar -- banking/NBFC, cement, auto, chemicals, consumer.
+        "VBL", "AMBUJACEM", "TATACAP", "CHOLAFIN", "PIDILITIND",
+        "VOLTAS", "MUTHOOTFIN", "PERSISTENT", "COFORGE", "LTTS",
+        "TATAELXSI", "METROPOLIS", "LALPATHLAB", "ASTRAL", "DLF",
+        "GODREJCP", "DABUR", "HAVELLS", "SIEMENS", "PIIND",
+        "ABB", "BOSCHLTD", "COLPAL", "MARICO", "PAGEIND",
+        "BANKBARODA", "PNB", "CANBK", "IDFCFIRSTB", "AUBANK",
+        "ZOMATO", "NAUKRI", "PAYTM", "IRCTC", "INDIGO",
+        "VEDL", "SAIL", "NMDC", "JINDALSTEL", "ACC",
+        "SHREECEM", "AMBER", "POLYCAB", "CUMMINSIND", "SRF",
+        "GLAND", "TORNTPHARM", "LUPIN", "AUROPHARMA", "ALKEM",
+    ]
     # ── BSE / Sensex watchlists ───────────────────────────────────────────────
     WATCHLIST_BSE_LARGE_CAP: list[str] = [
         # Sensex 30 core
@@ -390,6 +429,7 @@ class Settings(BaseSettings):
     # the verdict — instead of the single-pass Level-1 reasoning. ~4 LLM calls per
     # qualified candidate, so keep it for high-conviction names. Default OFF.
     AGENT_LLM_DEBATE_ENABLED:    bool = True
+    AGENT_LLM_DEVILS_ADVOCATE_ENABLED: bool = True
     # Level-3: agentic tool-use. When True, the gate lets the LLM call data tools
     # (news / options / fundamentals / price_action) to investigate a candidate
     # before deciding (a ReAct loop, ≤3 tool calls). Takes priority over debate.
@@ -533,7 +573,14 @@ class Settings(BaseSettings):
     # buying someone else's exit liquidity, not anticipating the catalyst.
     NEWS_MAX_PRE_ENTRY_SPIKE_PCT: float = 2.0
     MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
-    MAX_OPEN_POSITIONS: int = 20           # SAFETY CEILING (bug guard) — not the primary limiter
+    MAX_OPEN_POSITIONS: int = 500          # SAFETY CEILING (bug guard against a runaway loop) —
+                                            # NOT a real capital limiter; MAX_PORTFOLIO_RISK/
+                                            # MIN_CASH_BUFFER below do that job. Raised from 25
+                                            # (2026-07-29, user request) since the count ceiling
+                                            # was the actual thing rejecting new trades, not
+                                            # capital exhaustion — "25/25 positions" rejections
+                                            # were common while portfolio-risk utilization stayed
+                                            # well under its 15% cap.
     MAX_DAILY_LOSS: float = 0.05           # halt trading when day loss hits 5 % of balance
     PAPER_MODE: bool = True
     SCANNER_ENABLED: bool = False  # False = agent runs solo; True = SCAN paper trader also runs
@@ -709,6 +756,10 @@ class Settings(BaseSettings):
     @property
     def nse_mid_symbols(self) -> list[str]:
         return [f"{s}.NS" for s in self.WATCHLIST_NSE_MID_CAP]
+
+    @property
+    def earnings_calendar_symbols(self) -> list[str]:
+        return [f"{s}.NS" for s in self.WATCHLIST_EARNINGS_CALENDAR]
 
     @property
     def bse_symbols(self) -> list[str]:

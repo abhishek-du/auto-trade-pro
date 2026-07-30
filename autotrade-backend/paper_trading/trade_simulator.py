@@ -16,6 +16,7 @@ TradeSimulator.execute_buy / execute_sell / size_from_risk
 """
 
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -39,6 +40,17 @@ _SLIP_MAX = 0.0003
 _SLIP_BPS_MIN = 2
 _SLIP_BPS_MAX = 8
 _MAX_POSITION_PCT = 0.05
+
+# ── DIRECT_NEWS post-entry re-confirmation (2026-07-29) ─────────────────────
+# See update_positions_with_current_prices()'s CONFIRMATION_LOST block below
+# for the CARTRADE.NS incident this closes. Per-process, in-memory -- same
+# tradeoff already accepted for PRICE_CACHE/SECTOR_CACHE elsewhere in this
+# codebase (crawler/live_prices.py, engine/intelligence_hub.py). Keyed by
+# trade_id -> last-checked monotonic time.
+_DIRECT_NEWS_RECHECK_STATE: dict[int, float] = {}
+_DIRECT_NEWS_RECHECK_INTERVAL_SEC = 15 * 60   # don't re-verify more than every 15 min
+_DIRECT_NEWS_RECHECK_WINDOW = timedelta(hours=2)  # only during the early post-entry window
+_DIRECT_NEWS_RECHECK_GRACE_PERIOD = timedelta(minutes=15)  # give stock time to breathe before enforcing rule
 
 
 def estimate_trade_cost(qty: int, price: float, side: str = "BUY") -> float:
@@ -371,6 +383,67 @@ async def open_paper_trade(
     )
     return trade
 
+
+
+async def scale_out_paper_trade(
+    position,
+    scale_pct: float,
+    current_price: float,
+    reason: str,
+    session
+) -> float:
+    """Book a percentage of the open position.
+    
+    1. Reduces position.size_units and size_usd by scale_pct.
+    2. Calculates realised PnL on the closed portion.
+    3. Saves partial_pnl in trade.indicator_snapshot.
+    4. Returns margin + partial PnL to wallet.
+    """
+    trade = position.trade
+    if not trade:
+        # Fallback if lazy-loaded
+        from db.models import PaperTrade
+        trade = await session.get(PaperTrade, position.trade_id)
+        if not trade:
+            return 0.0
+            
+    close_units = position.size_units * scale_pct
+    close_usd = position.size_usd * scale_pct
+    
+    # Calculate P&L for the scaled-out portion
+    if position.direction.value == "BUY":
+        gross_pnl = (current_price - trade.entry_price) * close_units
+        cost = estimate_trade_cost(close_units, trade.entry_price, "BUY") + estimate_trade_cost(close_units, current_price, "SELL")
+    else:
+        gross_pnl = (trade.entry_price - current_price) * close_units
+        cost = estimate_trade_cost(close_units, trade.entry_price, "SELL") + estimate_trade_cost(close_units, current_price, "BUY")
+        
+    partial_pnl = gross_pnl - cost
+    
+    # Update position
+    position.size_units -= close_units
+    position.size_usd -= close_usd
+    
+    # Update snapshot
+    snap = trade.indicator_snapshot or {}
+    tm = snap.get("trade_mgmt", {})
+    tm["partial_pnl"] = tm.get("partial_pnl", 0.0) + partial_pnl
+    snap["trade_mgmt"] = tm
+    # re-assign to trigger SQLAlchemy JSON mutation
+    trade.indicator_snapshot = dict(snap)
+    
+    # Return margin + P&L
+    from paper_trading.wallet import VirtualWallet
+    await VirtualWallet.return_margin(session, close_usd, partial_pnl, trade.symbol)
+    
+    from db.models import SimulationLog
+    session.add(SimulationLog(
+        event_type="TRADE_SCALEOUT",
+        symbol=trade.symbol,
+        message=f"{reason} | Booked {scale_pct*100:.0f}% @ {current_price:.2f} | PnL: {partial_pnl:.2f}",
+        data={"units": close_units, "pnl": partial_pnl, "price": current_price},
+    ))
+    return partial_pnl
 
 async def close_paper_trade(
     position:    OpenPosition,
@@ -871,6 +944,60 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 except Exception as exc:
                     logger.warning(f"update_positions: {pos.symbol} sector-exit close failed: {exc}")
                 continue
+
+        # ── DIRECT_NEWS post-entry re-confirmation exit ─────────────────────────
+        # DIRECT_NEWS has no LLM/technical step (see engine/direct_news_strategy.py
+        # docstring) -- its only entry gates run ONCE, at entry
+        # (engine.entry_confirmation.check_price_volume_confirmation +
+        # check_day_range_stability). CARTRADE.NS (2026-07-29) showed why that's
+        # not enough on its own: news hit ~9:29 IST, price spiked to ₹3066
+        # (genuinely passing the entry gate), then reversed and kept falling to
+        # ₹2800 -- nothing re-checked whether that early move was still holding.
+        # This re-runs the SAME entry-time price/volume check periodically during
+        # the early post-entry window, before Target 1 (the trailing-stop/
+        # T1-reversal logic below only starts protecting AFTER T1 is touched --
+        # this covers the gap before that).
+        if (
+            is_buy
+            and pos.trade
+            and pos.trade.strategy_name == "DIRECT_NEWS"
+            and pos.opened_at
+            and (now - pos.opened_at) <= _DIRECT_NEWS_RECHECK_WINDOW
+            and (now - pos.opened_at) > _DIRECT_NEWS_RECHECK_GRACE_PERIOD
+        ):
+            _last_check = _DIRECT_NEWS_RECHECK_STATE.get(pos.trade_id, 0.0)
+            if (time.monotonic() - _last_check) >= _DIRECT_NEWS_RECHECK_INTERVAL_SEC:
+                _DIRECT_NEWS_RECHECK_STATE[pos.trade_id] = time.monotonic()
+                try:
+                    from crawler.market_snapshot import get_market_snapshot
+                    from engine.entry_confirmation import check_price_volume_confirmation
+                    _snap = await get_market_snapshot(pos.symbol)
+                    _confirmed, _reason = check_price_volume_confirmation(_snap, pos.direction.value)
+                except Exception as exc:
+                    logger.debug(f"update_positions: {pos.symbol} re-confirmation check failed: {exc}")
+                    _confirmed = True   # fail open -- this is a supplementary exit, not the primary SL
+                if not _confirmed:
+                    try:
+                        async with session.begin_nested():
+                            closed_trade = await close_paper_trade(pos, price, "CONFIRMATION_LOST", session)
+                        auto_closed.append({
+                            "trade_id":    closed_trade.id,
+                            "symbol":      closed_trade.symbol,
+                            "reason":      "CONFIRMATION_LOST",
+                            "exit_price":  price,
+                            "pnl":         closed_trade.pnl,
+                            "entry_price": closed_trade.entry_price,
+                            "size_units":  closed_trade.size_units,
+                            "direction":   pos.direction.value,
+                        })
+                        logger.warning(
+                            f"[confirmation_lost] {pos.symbol}: {_reason} — exited @ ₹{price:.2f} "
+                            f"before Target 1 (DIRECT_NEWS re-check)"
+                        )
+                        _DIRECT_NEWS_RECHECK_STATE.pop(pos.trade_id, None)
+                    except Exception as exc:
+                        logger.warning(f"update_positions: {pos.symbol} confirmation-lost close failed: {exc}")
+                    continue
 
         # ── Trailing stop after Target 1 ──────────────────────────────────────
         # Once price touches T1, ratchet the stop to trail the high-water mark by

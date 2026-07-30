@@ -5,6 +5,13 @@ required/available/missing inputs, carry sector-appropriate confidence ceilings
 (commodity/FDA-driven sectors lowest), never fabricate drivers, and the
 historical-baseline anchor is correctly labelled (NOT a market expectation) and
 point-in-time-gated.
+
+2026-07-29: extended from 5 to all 10 sector_cache buckets (user request:
+"sirf 5 nahi mujhe saare sector chaiye" -- all sectors, not just 5). See
+engine/pre_event_expectation_gap/sector_adapters/banking.py's docstring for
+why BANKING is deliberately the most conservative (lowest confidence
+ceiling) of all -- generic revenue/profit trend is a weaker proxy for a
+bank than for other sectors; a real NIM/NPA-trend adapter is future work.
 """
 from __future__ import annotations
 
@@ -12,15 +19,16 @@ from datetime import datetime, date
 
 import pytest
 
-from engine.pre_event_expectation_gap.sector_adapters import registered_sectors, get_adapter
+from engine.pre_event_expectation_gap.sector_adapters import registered_sectors, get_adapter, resolve_strategy_sector
 from engine.pre_event_expectation_gap.sector_adapters.common import FinancialsTrendAdapter
 
 
-ALL_SECTORS = ("FMCG", "IT", "AUTO", "METALS", "PHARMA")
+ALL_SECTORS = ("FMCG", "IT", "AUTO", "METALS", "PHARMA",
+               "BANKING", "CONSUMER", "ENERGY", "INFRA", "TELECOM")
 
 
 class TestAdapterCoverage:
-    def test_all_five_registered(self):
+    def test_all_ten_registered(self):
         for s in ALL_SECTORS:
             assert s in registered_sectors()
             assert get_adapter(s) is not None
@@ -49,11 +57,48 @@ class TestAdapterCoverage:
         assert ceils["METALS"] <= ceils["PHARMA"]
         assert all(0.0 < c <= 0.5 for c in ceils.values())
 
+    def test_banking_is_the_most_conservative_of_all_sectors(self):
+        # Deliberate design decision (2026-07-29, see banking.py docstring):
+        # generic P&L trend is a materially weaker proxy for a bank than for
+        # any other sector here, so BANKING's ceiling must be strictly the
+        # lowest of all -- not just "low like Metals/Energy".
+        ceils = {s: get_adapter(s).confidence_ceiling for s in ALL_SECTORS}
+        banking_ceil = ceils.pop("BANKING")
+        assert all(banking_ceil < c for c in ceils.values())
+
     def test_it_treats_qoq_as_meaningful_auto_does_not(self):
         # Economic rationale: IT is low-seasonality (QoQ meaningful); auto is
         # highly seasonal (QoQ misleading → penalized).
         assert get_adapter("IT").qoq_is_meaningful is True
         assert get_adapter("AUTO").qoq_is_meaningful is False
+
+
+class TestSectorResolution:
+    """resolve_strategy_sector() -- the _SECTOR_CACHE_TO_STRATEGY map in
+    base.py, extended 2026-07-29 to forward Consumer/Energy/Infra/Telecom
+    (previously resolved to None even though Auto/Banking/Pharma/FMCG/IT/
+    Metals already worked -- a symbol could have zero chance of ever being
+    traded by this strategy purely because its sector-cache label didn't
+    forward to a strategy sector key, a DIFFERENT failure mode than "no
+    adapter registered" and not covered by any prior test)."""
+
+    @pytest.mark.parametrize("cached_sector,expected", [
+        ("Consumer", "CONSUMER"),
+        ("Energy", "ENERGY"),
+        ("Infra", "INFRA"),
+        ("Telecom", "TELECOM"),
+    ])
+    def test_newly_mapped_sectors_resolve(self, cached_sector, expected):
+        from unittest.mock import patch
+        with patch("utils.sector_cache._cache", {"FOO": cached_sector}), \
+             patch("engine.india_specific.SECTOR_MAP", {}):
+            assert resolve_strategy_sector("FOO.NS") == expected
+
+    def test_general_still_resolves_to_none(self):
+        from unittest.mock import patch
+        with patch("utils.sector_cache._cache", {"FOO": "GENERAL"}), \
+             patch("engine.india_specific.SECTOR_MAP", {}):
+            assert resolve_strategy_sector("FOO.NS") is None
 
 
 class TestAdapterNowcastHonesty:

@@ -202,16 +202,18 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
     logger.info(f"[zerodha_market] NFO spot prices for OTM filter: {_spots}")
 
     try:
-        rows = await kite.get_instruments("NFO")
+        nfo_rows = await kite.get_instruments("NFO")
+        nse_rows = await kite.get_instruments("NSE")
+        bse_rows = await kite.get_instruments("BSE")
     except Exception as exc:
-        logger.error(f"[zerodha_market] NFO instrument download failed: {exc}", exc_info=True)
+        logger.error(f"[zerodha_market] Instrument download failed: {exc}", exc_info=True)
         return 0
 
     today = _dt.date.today()
 
     # Build sorted expiry lists per underlying+type for the "nearest N" filter
     _expiry_sets: dict[tuple, list] = {}
-    for r in rows:
+    for r in nfo_rows:
         nm    = str(r.get("name") or "")
         itype = str(r.get("instrument_type") or "")
         exp_s = str(r.get("expiry") or "")
@@ -230,12 +232,12 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
         for k, v in _expiry_sets.items()
     }
 
-    # Clear existing NFO rows, insert filtered batch
-    await session.execute(delete(KiteInstrument).where(KiteInstrument.exchange == "NFO"))
+    # Clear existing NFO, NSE, BSE rows, insert filtered batch
+    await session.execute(delete(KiteInstrument).where(KiteInstrument.exchange.in_(["NFO", "NSE", "BSE"])))
 
     now   = datetime.datetime.utcnow()
     batch: list[KiteInstrument] = []
-    for r in rows:
+    for r in nfo_rows:
         nm    = str(r.get("name") or "")
         itype = str(r.get("instrument_type") or "")
         if nm not in _FNO_NAMES:
@@ -281,13 +283,43 @@ async def refresh_instrument_tokens(session: AsyncSession) -> int:
         except (ValueError, TypeError):
             continue
 
+    # Add NSE and BSE Equity instruments
+    for r in (nse_rows + bse_rows):
+        nm    = str(r.get("name") or "")
+        itype = str(r.get("instrument_type") or "")
+        if itype not in ("EQ", ""):
+            continue
+            
+        try:
+            token = int(r.get("instrument_token") or 0)
+            if not token:
+                continue
+            exchange = str(r.get("exchange") or "")
+            batch.append(KiteInstrument(
+                instrument_token = token,
+                exchange_token   = int(r.get("exchange_token") or 0),
+                tradingsymbol    = str(r.get("tradingsymbol") or ""),
+                name             = nm,
+                last_price       = float(r.get("last_price") or 0.0),
+                expiry           = None,
+                strike           = 0.0,
+                tick_size        = float(r.get("tick_size") or 0.05),
+                lot_size         = int(float(r.get("lot_size") or 1)),
+                instrument_type  = "EQ",
+                segment          = str(r.get("segment") or exchange),
+                exchange         = exchange,
+                refreshed_at     = now,
+            ))
+        except (ValueError, TypeError):
+            continue
+
     if batch:
         session.add_all(batch)
         await session.flush()
 
     logger.info(
-        f"[zerodha_market] NFO instruments refreshed: {len(batch)} contracts "
-        f"(from {len(rows):,} raw) — names={sorted(_FNO_NAMES)}"
+        f"[zerodha_market] Instruments refreshed: {len(batch)} contracts "
+        f"(NFO={len(nfo_rows)}, NSE={len(nse_rows)}, BSE={len(bse_rows)})"
     )
     return len(batch)
 

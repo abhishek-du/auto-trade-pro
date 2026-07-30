@@ -31,9 +31,9 @@ class FundamentalProfile:
 class FundamentalsAgent:
 
     async def fetch_profile(self, symbol: str) -> FundamentalProfile:
-        from engine.fundamental_analyzer import fetch_fundamentals_yfinance
+        from engine.fundamental_analyzer import fetch_fundamentals_upstox
         loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, fetch_fundamentals_yfinance, symbol)
+        data = await fetch_fundamentals_upstox(symbol)
         de_raw = data.get("debtToEquity")
         de = de_raw / 100 if de_raw is not None else None
         roe_raw = data.get("returnOnEquity")

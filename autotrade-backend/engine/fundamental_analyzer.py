@@ -163,40 +163,59 @@ def _to_float(text: Any, default: float | None = None) -> float | None:
 
 # ── 1. yfinance fetch (sync) ──────────────────────────────────────────────────
 
-def fetch_fundamentals_yfinance(symbol: str) -> dict:
-    """Fetch fundamental ratios from Yahoo Finance via yfinance.
-
-    Parameters
-    ----------
-    symbol : NSE ticker including suffix, e.g. ``RELIANCE.NS``
-
+async def fetch_fundamentals_upstox(symbol: str) -> dict:
+    """Fetch fundamental ratios from Upstox Fundamentals API.
+    
     Returns
     -------
-    dict with keys: company_name, pe_ratio, pb_ratio, roe, debt_to_equity,
-    current_ratio, revenue_growth_ttm, profit_growth_ttm, dividend_yield,
-    market_cap_cr, promoter_holding, fii_holding.
-
-    NOTE:  yfinance ``debtToEquity`` is stored as a percentage (50 = D/E 0.5).
-           ``returnOnEquity`` is a decimal (0.18 = 18 %).
-           ``heldPercentInsiders`` approximates promoter holding (decimal).
+    dict with keys: company_name, pe_ratio, pb_ratio, roe, roce, 
+    current_ratio, market_cap_cr, promoter_holding, fii_holding.
     """
+    from crawler.upstox_data import get_key_ratios, get_shareholding, get_company_profile
     try:
-        import yfinance as yf
-    except ImportError:
-        logger.error("fetch_fundamentals_yfinance: yfinance not installed")
-        return {"_error": "unavailable", "_reason": "yfinance not installed"}
-
-    try:
-        info: dict = yf.Ticker(symbol).info
+        ratios = await get_key_ratios(symbol)
+        share = await get_shareholding(symbol)
+        prof = await get_company_profile(symbol)
+        
+        data = {}
+        if isinstance(prof, dict):
+            if "company_profile" in prof:
+                data["company_name"] = prof["company_profile"][:100]
+            if "sector_market_cap_inr" in prof:
+                data["market_cap_cr"] = prof["sector_market_cap_inr"].get("value")
+                
+        if isinstance(ratios, list):
+            for r in ratios:
+                name = r.get("name")
+                val_str = str(r.get("company_value", ""))
+                val_str = val_str.replace(",", "").replace("%", "")
+                try:
+                    val = float(val_str)
+                except ValueError:
+                    val = None
+                    
+                if name == "P/E" and val: data["pe_ratio"] = val
+                if name == "P/B" and val: data["pb_ratio"] = val
+                if name == "ROE" and val: data["roe"] = val / 100.0 if val else None
+                if name == "ROCE" and val: data["roce"] = val / 100.0 if val else None
+                if name == "Quick Ratio" and val: data["current_ratio"] = val
+                
+        if isinstance(share, list):
+            for s in share:
+                cat = s.get("category")
+                hist = s.get("history", [])
+                if hist:
+                    val = hist[0].get("value")
+                    try:
+                        val = float(val) / 100.0 if val else None
+                    except ValueError:
+                        val = None
+                    if cat == "promoters" and val: data["promoter_holding"] = val
+                    if cat == "fii" and val: data["fii_holding"] = val
+                    
+        return data
     except Exception as exc:
-        logger.warning(f"fetch_fundamentals_yfinance {symbol}: {exc}")
-        # 2026-07-23 fix: a bare {} on failure was indistinguishable from a
-        # genuine "this stock has no fundamentals" result -- callers
-        # (engine/agent/decision_engine.py::_tool_fundamentals) need to know
-        # whether retrying could ever help (never, if rate-limited) or not.
-        _msg = str(exc).lower()
-        if "429" in _msg or "too many requests" in _msg:
-            return {"_error": "rate_limited"}
+        logger.warning(f"fetch_fundamentals_upstox {symbol}: {exc}")
         return {"_error": "fetch_failed", "_reason": str(exc)[:120]}
 
     def _g(key: str) -> Any:
@@ -540,11 +559,9 @@ async def run_fundamental_update(session: AsyncSession) -> None:
     for idx, symbol in enumerate(symbols, start=1):
         bare = symbol.replace(".NS", "")
 
-        # ── Fetch yfinance (sync → executor) ─────────────────────────────────
+        # ── Fetch Upstox (async) ─────────────────────────────────
         try:
-            yf_data = await loop.run_in_executor(
-                None, fetch_fundamentals_yfinance, symbol
-            )
+            yf_data = await fetch_fundamentals_upstox(symbol)
         except Exception as exc:
             logger.warning(f"[fundamental_update] yfinance {symbol}: {exc}")
             yf_data = {}

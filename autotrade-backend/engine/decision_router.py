@@ -755,6 +755,24 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
         else:
             position_size = {"units": 1, "usd_value": intent.entry_price}
 
+    # ── Macro & Market Breadth Integration (Half-Size on Negative Breadth) ──
+    if intent.action == "BUY" and position_size.get("units", 0) > 1:
+        from crawler.market_breadth import get_breadth_cache
+        from utils.logger import logger
+        breadth = get_breadth_cache()
+        # Ensure we check the NSE breadth
+        nse_breadth = breadth.get("nse", {})
+        mood = nse_breadth.get("market_mood", "NEUTRAL")
+        if mood in ("STRONGLY_BEARISH", "BEARISH"):
+            old_units = position_size["units"]
+            new_units = max(1, old_units // 2)
+            position_size["units"] = new_units
+            position_size["usd_value"] = position_size["usd_value"] / 2
+            logger.info(
+                f"[execution_gate] {intent.symbol}: Market breadth is {mood}. "
+                f"Halving BUY quantity from {old_units} to {new_units} to manage risk."
+            )
+
     result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy)
     await _log_intent_audit(intent, auth.mode, result, session)
     return result
