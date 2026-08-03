@@ -269,6 +269,99 @@ async def sync_full_nse_universe(
     return summary
 
 
+# ── DB sync — FULL BSE universe from kite_instruments (2026-07-31) ───────────
+
+async def sync_full_bse_universe(
+    session: AsyncSession,
+    *,
+    days_back: int = 7,
+    delay_sec: float = 0.5,
+) -> dict:
+    """Incrementally refresh daily candles for EVERY BSE EQ instrument.
+
+    Direct mirror of sync_full_nse_universe() above -- same GOI/SDL-bond
+    exclusion (BSE's instrument master has the same miscategorisation issue),
+    same 0.5s/symbol Kite rate-limit headroom, same batched-insert pattern.
+    Written as this codebase's NSE/BSE convention: separate symbol spaces
+    (.NS vs .BO suffix), so a twin function rather than an exchange parameter
+    on the existing one. Added after JUMBO.BO (a real, tradeable BSE
+    micro-cap DIRECT_NEWS fired on) turned out to have zero candle history --
+    BSE had no full-universe sync of any kind before this.
+    """
+    import datetime as _d
+    from sqlalchemy import text as _text
+
+    rows = (await session.execute(_text("""
+        SELECT tradingsymbol, instrument_token
+        FROM kite_instruments
+        WHERE segment='BSE' AND instrument_type='EQ'
+          AND name != '' AND instrument_token > 0
+          AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
+        ORDER BY tradingsymbol
+    """))).all()
+
+    kite = None
+    try:
+        from crawler.zerodha_kite_lib import get_kite
+        kite = get_kite()
+        kite.profile()  # verify token before the long loop
+    except Exception as exc:
+        logger.warning(f"[sync_full_bse_universe] Zerodha not authenticated: {exc}")
+        return {"symbols": 0, "saved": 0, "error": "not_authenticated"}
+
+    to_date   = _d.date.today()
+    from_date = to_date - _d.timedelta(days=int(days_back * 1.6) + 3)
+
+    total_saved = ok = empty = 0
+    pending: list[dict] = []
+
+    for sym, token in rows:
+        try:
+            raw = await asyncio.to_thread(
+                kite.historical_data,
+                instrument_token=token, from_date=from_date,
+                to_date=to_date, interval="day",
+            )
+        except Exception:
+            raw = []
+        if raw:
+            ok += 1
+            for c in raw:
+                ts = c.get("date")
+                if ts is None:
+                    continue
+                if isinstance(ts, _d.datetime) and ts.tzinfo is not None:
+                    ts = ts.astimezone(_d.timezone.utc).replace(tzinfo=None)
+                pending.append({
+                    "symbol": f"{sym}.BO", "timeframe": "1d",
+                    "open": float(c.get("open", 0.0)), "high": float(c.get("high", 0.0)),
+                    "low": float(c.get("low", 0.0)), "close": float(c.get("close", 0.0)),
+                    "volume": float(c.get("volume", 0) or 0), "timestamp": ts,
+                })
+        else:
+            empty += 1
+
+        if len(pending) >= 5000:
+            try:
+                total_saved += await save_candles_to_db(pending, session)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+            pending = []
+        await asyncio.sleep(delay_sec)
+
+    if pending:
+        try:
+            total_saved += await save_candles_to_db(pending, session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+    summary = {"symbols": len(rows), "fetched_ok": ok, "empty": empty, "saved": total_saved}
+    logger.info(f"[sync_full_bse_universe] → {summary}")
+    return summary
+
+
 # ── Live 1-minute candle sync (runs every 60 s during market hours) ───────────
 
 async def sync_live_1m_candles(

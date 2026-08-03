@@ -3730,6 +3730,65 @@ def refresh_full_nse_candles_task(days_back: int = 7):
     return _run_async(_refresh_full_nse_candles(days_back))
 
 
+# ── Daily full-BSE candle refresh (Zerodha) — 2026-07-31 ─────────────────────
+# Twin of _refresh_full_nse_candles above; BSE had no full-universe sync of
+# any kind before this (see crawler/zerodha_historical.py::sync_full_bse_universe
+# docstring — JUMBO.BO, a real BSE micro-cap DIRECT_NEWS traded on, had zero
+# candle history because of this exact gap). Daily rather than weekly, per
+# explicit choice over the weekly-like-NSE default.
+
+async def _refresh_full_bse_candles(days_back: int = 7):
+    from crawler.zerodha_historical import sync_full_bse_universe
+    from tasks._db import celery_session
+    async with celery_session() as session:
+        return await sync_full_bse_universe(session, days_back=days_back, delay_sec=0.5)
+
+
+@celery_app.task(
+    name="tasks.refresh_full_bse_candles",
+    soft_time_limit=4800,   # ~6,150 syms × 0.5s ≈ 51 min; allow headroom
+    time_limit=5100,
+)
+def refresh_full_bse_candles_task(days_back: int = 7):
+    """Daily: refresh the last ~week of daily candles for EVERY BSE EQ symbol
+    via Zerodha Kite. PAPER TRADING — read-only market data, no orders."""
+    logger.info("[refresh_full_bse_candles] starting daily full-BSE-universe refresh")
+    return _run_async(_refresh_full_bse_candles(days_back))
+
+
+# ── Long-tail intraday candle refresh (Upstox) — 2026-07-31 ──────────────────
+# Everything outside hub_universe (NSE below the turnover cutoff, all of BSE)
+# gets intraday coverage here instead — separate lane, separate broker (Upstox,
+# not Kite), so it can't compete with or slow down the Hub universe's existing
+# live-trading price cadence. See crawler/upstox_historical.py::
+# sync_long_tail_intraday_upstox for the full design writeup.
+
+async def _sync_long_tail_intraday():
+    from crawler.upstox_historical import sync_long_tail_intraday_upstox
+    from tasks._db import celery_session
+    async with celery_session() as session:
+        return await sync_long_tail_intraday_upstox(session)
+
+
+@celery_app.task(
+    name="tasks.sync_long_tail_intraday",
+    # 2026-08-03: was 1800/1900 (sized to the old full-universe-per-call
+    # design). Now processes 1 of 4 time-boxed slices per call (~1,918 syms,
+    # ~8 min) -- see sync_long_tail_intraday_upstox()'s docstring for why.
+    # 900/960 is a safety net for a slow slice, not the expected runtime.
+    soft_time_limit=900,
+    time_limit=960,
+)
+def sync_long_tail_intraday_task():
+    """Every ~30 min during NSE hours: intraday candles, via Upstox, for every
+    NSE+BSE EQ symbol NOT already covered by the Kite-based Hub universe crawl.
+    PAPER TRADING — read-only market data, no orders."""
+    if not _is_india_trading_window():
+        return
+    logger.info("[sync_long_tail_intraday] starting long-tail intraday refresh")
+    return _run_async(_sync_long_tail_intraday())
+
+
 async def _rebuild_hub_universe(top_n: int | None = None, min_turnover_cr: float | None = None):
     from engine.hub_universe import rebuild_hub_universe
     from tasks._db import celery_session
@@ -4233,6 +4292,33 @@ async def _pre_event_gap_scan_loop(min_days_until: int = 1, max_days_until: int 
         for pred in predictions:
             if pred.decision not in (PreEventDecision.LONG, PreEventDecision.SHORT):
                 continue
+
+            # Symbol-specific lockout (2026-07-31) — ported from the 45-min
+            # cooldown + two-strikes lockout in engine/agent/agent_loop.py's
+            # decide(). This scan loop calls execute_trade_intent() directly
+            # every ~15-20min cycle and never went through that gate, which is
+            # what let AVALON/PROTEAN/MINDTECK/RPTECH/PACEDIGITK each get
+            # bought and SECTOR_REVERSAL-stopped 8-10x in a single session on
+            # 2026-07-31 (₹3,375 net loss, 49 trades) — nothing checked
+            # "was this symbol just closed" before re-opening it.
+            from db.models import PaperTrade
+            from sqlalchemy import select
+            today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            closed_today = (await session.execute(
+                select(PaperTrade.closed_at, PaperTrade.pnl).where(
+                    PaperTrade.symbol == pred.symbol,
+                    PaperTrade.closed_at >= today_start,
+                )
+            )).all()
+            if closed_today:
+                last_closed = max(row[0] for row in closed_today if row[0] is not None)
+                if last_closed and (datetime.datetime.utcnow() - last_closed) < datetime.timedelta(minutes=45):
+                    logger.info(f"[pre_event_gap] BLOCKED {pred.symbol} | COOLDOWN_LOCK: mandatory 45 min rest since last close")
+                    continue
+                losses_today = sum(1 for _, pnl in closed_today if pnl is not None and pnl < 0)
+                if losses_today >= 2:
+                    logger.info(f"[pre_event_gap] BLOCKED {pred.symbol} | TWO_STRIKES_LOCK: {losses_today} losses already today")
+                    continue
 
             action = "BUY" if pred.decision == PreEventDecision.LONG else "SELL"
             product = "MIS" if action == "SELL" else "CNC"

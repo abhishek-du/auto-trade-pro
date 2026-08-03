@@ -228,12 +228,17 @@ class Settings(BaseSettings):
     FINNHUB_BASE_URL:      str = "https://finnhub.io/api/v1"
     ALPHA_VANTAGE_BASE_URL: str = "https://www.alphavantage.co"
     BSE_API_BASE_URL:      str = "https://api.bseindia.com"
-    # Comma-separated RSS feed URLs for free news (no key required)
+    # Comma-separated RSS feed URLs for free news (no key required).
+    # moneycontrol.com/rss/latestnews.xml removed 2026-07-31: returns a 403
+    # WAF/block-page (HTML, not the feed) regardless of User-Agent/Referer/
+    # Accept-Language — confirmed via direct curl, not a code-side header bug.
+    # Zero successful fetches from it in the 2026-07-31 session log despite
+    # ~2,676 attempts (a 24/7 poll loop hitting it every cycle) — pure wasted
+    # requests and log noise, not a source that's ever coming back on its own.
     RSS_FEED_URLS: str = (
         "https://www.business-standard.com/rss/markets-106.rss,"
         "https://www.livemint.com/rss/markets,"
-        "https://economictimes.indiatimes.com/markets/rss.cms,"
-        "https://www.moneycontrol.com/rss/latestnews.xml"
+        "https://economictimes.indiatimes.com/markets/rss.cms"
     )
 
     # ── Upstox (data-only: news, fundamentals, corporate actions, shareholding) ──
