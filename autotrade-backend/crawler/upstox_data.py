@@ -117,11 +117,15 @@ def _set_cache(key: str, data: Any, ttl_key: str) -> None:
 _NSE_SEGMENT_SUFFIX_RE = re.compile(r"-(SM|ST|BE|BZ|SG|E1|E2|IL|IT|IQ)$")
 
 
-async def _search_upstox_isin(query: str, expect_symbol: str) -> str | None:
+async def _search_upstox_isin(query: str, expect_symbol: str, expect_segment: str = "NSE_EQ") -> str | None:
     """One /v2/instruments/search call, matched against expect_symbol (which
     may differ from `query` when the caller is retrying with a suffix
     stripped from the query but still needs to confirm the RIGHT instrument
-    came back, not an unrelated fuzzy match)."""
+    came back, not an unrelated fuzzy match).
+
+    expect_segment (2026-07-31): defaults to "NSE_EQ" so every pre-existing
+    call site is unaffected; pass "BSE_EQ" to match a BSE-only listing
+    instead (see _resolve_isin_live's exchange-aware retry below)."""
     if not await ensure_upstox_token_fresh():
         return None
     async with httpx.AsyncClient(timeout=10) as c:
@@ -129,18 +133,34 @@ async def _search_upstox_isin(query: str, expect_symbol: str) -> str | None:
     if r.status_code != 200:
         return None
     for item in r.json().get("data", []):
-        if item.get("trading_symbol") == expect_symbol and item.get("segment") == "NSE_EQ":
+        if item.get("trading_symbol") == expect_symbol and item.get("segment") == expect_segment:
             isin = item.get("isin")
             if isin and len(isin) == 12:
                 return isin
     return None
 
 
-async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
+async def _resolve_isin_live(bare: str, is_bse: bool = False) -> tuple[str, str] | None:
     """Live Upstox-search -> yfinance -> Upstox-CSV resolution, no DB/
     in-memory cache involved. Returns (isin, source) so callers (get_isin's
     fallback, and the background populator) can both use and persist the
-    same logic."""
+    same logic.
+
+    is_bse (2026-07-31, default False -- every pre-existing call site keeps
+    today's NSE-first behaviour unchanged): a company with no NSE listing at
+    all (e.g. JUMBO.BO / JUMBO BAG) can never resolve through an NSE-only
+    search or an ".NS"-suffixed yfinance lookup, regardless of which exchange
+    the caller asked about -- confirmed live 2026-07-31 (get_instrument_key
+    already made exchange-aware, but had nothing to resolve because get_isin
+    stripped the exchange hint before this function ever saw it). Tries both
+    segments on a miss, hint-preferred-order, so a bare/.NS call for a
+    BSE-only company still resolves (and gets cached) on the second attempt.
+    The CSV fallback below stays NSE-only and untouched -- checked live
+    2026-07-31, that endpoint currently 403s for every exchange variant, a
+    separate pre-existing outage not worth building BSE support against.
+    """
+    segments = ("BSE_EQ", "NSE_EQ") if is_bse else ("NSE_EQ", "BSE_EQ")
+
     # 1. Upstox's own instrument search (api.upstox.com) — confirmed live to
     # return the exact real ISIN for INFY ("INE009A01021") when yfinance
     # returned a placeholder. Try the symbol as-is first (matches the common
@@ -148,45 +168,38 @@ async def _resolve_isin_live(bare: str) -> tuple[str, str] | None:
     # retry, since Upstox's trading_symbol field doesn't carry that suffix
     # even though this codebase's own symbol strings do.
     try:
-        isin = await _search_upstox_isin(bare, bare)
-        if not isin:
-            stripped = _NSE_SEGMENT_SUFFIX_RE.sub("", bare)
-            if stripped != bare:
-                isin = await _search_upstox_isin(stripped, stripped)
-        if isin:
-            return isin, "upstox_search"
+        for segment in segments:
+            isin = await _search_upstox_isin(bare, bare, expect_segment=segment)
+            if not isin:
+                stripped = _NSE_SEGMENT_SUFFIX_RE.sub("", bare)
+                if stripped != bare:
+                    isin = await _search_upstox_isin(stripped, stripped, expect_segment=segment)
+            if isin:
+                return isin, "upstox_search"
     except Exception as e:
         logger.debug(f"[upstox] instrument-search ISIN lookup failed for {bare}: {e}")
 
     try:
         import yfinance as yf
-        info = yf.Ticker(f"{bare}.NS").fast_info
-        isin = getattr(info, "isin", None)
-        if not isin:
-            t = yf.Ticker(f"{bare}.NS")
-            isin = t.isin
-        if isin and len(isin) == 12:
-            return isin, "yfinance"
+        suffixes = (".BO", ".NS") if is_bse else (".NS", ".BO")
+        for suffix in suffixes:
+            info = yf.Ticker(f"{bare}{suffix}").fast_info
+            isin = getattr(info, "isin", None)
+            if not isin:
+                t = yf.Ticker(f"{bare}{suffix}")
+                isin = t.isin
+            if isin and len(isin) == 12:
+                return isin, "yfinance"
     except Exception:
         pass
 
-    try:
-        ck = "isin_csv"
-        csv_text = _get_cache(ck)
-        if csv_text is None:
-            async with httpx.AsyncClient(timeout=15, verify=False) as c:
-                r = await c.get("https://assets.upstox.com/market-quote/instruments/exchange/NSE.csv.gz")
-                import gzip
-                csv_text = gzip.decompress(r.content).decode("utf-8")
-                _set_cache(ck, csv_text, "isin_map")
-        for line in csv_text.splitlines()[1:]:
-            parts = line.split(",")
-            if len(parts) >= 5 and parts[3].strip().upper() == bare:
-                isin = parts[1].strip()
-                if isin and len(isin) == 12:
-                    return isin, "upstox_csv"
-    except Exception as e:
-        logger.debug(f"[upstox] ISIN CSV lookup failed for {bare}: {e}")
+    # CSV fallback (assets.upstox.com/.../NSE.csv.gz) removed 2026-08-03 --
+    # confirmed dead for every exchange variant on 2026-07-31 (403, an HTML
+    # block page, not the file -- "Not a gzipped file (b'<!'" in the logs).
+    # It was pure wasted latency on every failed lookup, tried after search
+    # and yfinance had already failed, on a URL that has never once
+    # succeeded since that check. Removing it doesn't change any lookup that
+    # was ever going to succeed -- only speeds up the failure path.
 
     return None
 
@@ -209,6 +222,7 @@ async def get_isin(symbol: str) -> str | None:
     Concurrent callers for the same not-yet-cached symbol now await the same
     in-flight resolution instead of each starting their own.
     """
+    is_bse = symbol.upper().endswith(".BO")
     bare = symbol.upper().replace(".NS", "").replace(".BO", "")
     if bare in _ISIN_CACHE:
         return _ISIN_CACHE[bare]
@@ -220,7 +234,7 @@ async def get_isin(symbol: str) -> str | None:
     fut: "asyncio.Future[str | None]" = asyncio.get_running_loop().create_future()
     _ISIN_INFLIGHT[bare] = fut
     try:
-        result = await _resolve_isin_uncached(bare)
+        result = await _resolve_isin_uncached(bare, is_bse=is_bse)
         fut.set_result(result)
         return result
     except Exception as exc:
@@ -230,7 +244,7 @@ async def get_isin(symbol: str) -> str | None:
         _ISIN_INFLIGHT.pop(bare, None)
 
 
-async def _resolve_isin_uncached(bare: str) -> str | None:
+async def _resolve_isin_uncached(bare: str, is_bse: bool = False) -> str | None:
     """The real DB-then-live resolution, called at most once concurrently per
     symbol -- see get_isin()'s single-flight wrapper above."""
     try:
@@ -247,7 +261,7 @@ async def _resolve_isin_uncached(bare: str) -> str | None:
     except Exception as e:
         logger.debug(f"[upstox] ISIN DB-cache lookup failed for {bare}: {e}")
 
-    resolved = await _resolve_isin_live(bare)
+    resolved = await _resolve_isin_live(bare, is_bse=is_bse)
     if resolved:
         isin, _source = resolved
         _ISIN_CACHE[bare] = isin
@@ -256,9 +270,17 @@ async def _resolve_isin_uncached(bare: str) -> str | None:
 
 
 async def get_instrument_key(symbol: str) -> str | None:
-    """Resolve symbol → Upstox instrument_key (e.g. 'NSE_EQ|INE002A01018')."""
-    bare = symbol.upper().replace(".NS", "").replace(" ", "")
-    
+    """Resolve symbol → Upstox instrument_key (e.g. 'NSE_EQ|INE002A01018').
+
+    Exchange-aware since 2026-07-31: a .BO-suffixed symbol resolves to
+    'BSE_EQ|...' rather than always 'NSE_EQ|...'. Previously every caller
+    hardcoded NSE_EQ regardless of suffix -- silently wrong for any BSE-only
+    listing (no NSE line to match against), which is exactly why the
+    long-tail BSE intraday sync needs this fixed to work at all.
+    """
+    is_bse = symbol.upper().endswith(".BO")
+    bare = symbol.upper().replace(".NS", "").replace(".BO", "").replace(" ", "")
+
     # ── Handle Indices explicitly for Option Chain ──
     index_map = {
         "NIFTY": "NSE_INDEX|Nifty 50",
@@ -270,7 +292,9 @@ async def get_instrument_key(symbol: str) -> str | None:
         return index_map[bare]
 
     isin = await get_isin(symbol)
-    return f"NSE_EQ|{isin}" if isin else None
+    if not isin:
+        return None
+    return f"BSE_EQ|{isin}" if is_bse else f"NSE_EQ|{isin}"
 
 
 # ── News ──────────────────────────────────────────────────────────────────────

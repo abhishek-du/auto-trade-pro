@@ -43,12 +43,14 @@ _MAX_POSITION_PCT = 0.05
 
 # ── DIRECT_NEWS post-entry re-confirmation (2026-07-29) ─────────────────────
 # See update_positions_with_current_prices()'s CONFIRMATION_LOST block below
-# for the CARTRADE.NS incident this closes. Per-process, in-memory -- same
-# tradeoff already accepted for PRICE_CACHE/SECTOR_CACHE elsewhere in this
-# codebase (crawler/live_prices.py, engine/intelligence_hub.py). Keyed by
-# trade_id -> last-checked monotonic time.
-_DIRECT_NEWS_RECHECK_STATE: dict[int, float] = {}
-_DIRECT_NEWS_RECHECK_INTERVAL_SEC = 15 * 60   # don't re-verify more than every 15 min
+# for the CARTRADE.NS incident this closes. The "don't re-verify more than
+# every 15 min" throttle itself lives in Redis (direct_news_recheck:{trade_id},
+# SET NX EX 900) rather than process memory (2026-07-31 fix) -- an in-process
+# dict here doesn't hold across Celery's 4 worker children or its frequent
+# auto-restarts, both of which reset it independently, so the same trade was
+# observed getting re-checked every 1-8 min instead of every 15 (AARTIIND.NS
+# 2026-07-31: 4 separate re-checks from 4 different worker PIDs in 12 min,
+# each rolling the dice against a noisy order-book snapshot).
 _DIRECT_NEWS_RECHECK_WINDOW = timedelta(hours=2)  # only during the early post-entry window
 _DIRECT_NEWS_RECHECK_GRACE_PERIOD = timedelta(minutes=15)  # give stock time to breathe before enforcing rule
 
@@ -965,9 +967,20 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             and (now - pos.opened_at) <= _DIRECT_NEWS_RECHECK_WINDOW
             and (now - pos.opened_at) > _DIRECT_NEWS_RECHECK_GRACE_PERIOD
         ):
-            _last_check = _DIRECT_NEWS_RECHECK_STATE.get(pos.trade_id, 0.0)
-            if (time.monotonic() - _last_check) >= _DIRECT_NEWS_RECHECK_INTERVAL_SEC:
-                _DIRECT_NEWS_RECHECK_STATE[pos.trade_id] = time.monotonic()
+            # Atomic, cross-process throttle (2026-07-31) -- SET NX EX is a single
+            # Redis round-trip that both checks AND records "checked" in one step,
+            # so it can't race the way a separate get-then-set could. TTL=900s
+            # (15 min) needs no manual cleanup -- the key just expires. See the
+            # constants block above for why this can't be a process-local dict.
+            import redis.asyncio as _aioredis
+            _recheck_redis = _aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            try:
+                _should_check = await _recheck_redis.set(
+                    f"direct_news_recheck:{pos.trade_id}", "1", nx=True, ex=900,
+                )
+            finally:
+                await _recheck_redis.aclose()
+            if _should_check:
                 try:
                     from crawler.market_snapshot import get_market_snapshot
                     from engine.entry_confirmation import check_price_volume_confirmation
@@ -994,7 +1007,6 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                             f"[confirmation_lost] {pos.symbol}: {_reason} — exited @ ₹{price:.2f} "
                             f"before Target 1 (DIRECT_NEWS re-check)"
                         )
-                        _DIRECT_NEWS_RECHECK_STATE.pop(pos.trade_id, None)
                     except Exception as exc:
                         logger.warning(f"update_positions: {pos.symbol} confirmation-lost close failed: {exc}")
                     continue

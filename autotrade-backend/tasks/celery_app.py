@@ -155,6 +155,22 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week="sunday", hour=1, minute=0),
     },
 
+    # Daily 03:00 UTC (08:30 IST): refresh last week of daily candles for the
+    # FULL BSE universe via Zerodha Kite — the BSE twin of the NSE job above,
+    # but daily rather than weekly (2026-07-31; BSE had no full-universe
+    # candle sync at all before this — see JUMBO.BO gap).
+    # Originally scheduled 01:00 UTC — moved here 2026-08-03 after it failed
+    # ("Zerodha not authenticated") every single day (1/2/3 Aug): 01:00 UTC is
+    # BEFORE autotrade-zerodha-refresh.timer's 02:30 UTC daily token refresh,
+    # so it was always running on the previous day's already-expired token.
+    # 03:00 UTC matches sync-nse-eq-instruments-daily below, which has been
+    # authenticating fine at this hour the whole time — same 30-min safety
+    # margin after the token refresh.
+    "full-bse-candles-daily": {
+        "task":     "tasks.refresh_full_bse_candles",
+        "schedule": crontab(hour=3, minute=0),
+    },
+
     # Daily 03:00 UTC (08:30 IST): sync ALL NSE+BSE EQ instruments from Zerodha's
     # full instrument master. This populates ~9,600 NSE EQ stocks into kite_instruments
     # so EVERY stock gets automatic candle ingestion — not just the 30 hardcoded ones.
@@ -245,6 +261,18 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.india_trade_loop",
         "schedule": 60,
         "options":  {"countdown": 15},
+    },
+
+    # Every 30 min during NSE hours: intraday candles, via Upstox, for every
+    # NSE+BSE EQ symbol NOT already covered by the Kite-based Hub universe
+    # crawl (2026-07-31). Task self-gates on _is_india_trading_window(), same
+    # pattern as india_trade_loop above. Separate broker (Upstox) from every
+    # other price-crawl task here (Kite) by design — can't compete with or
+    # slow down the Hub universe's live-trading price cadence.
+    "long-tail-intraday-every-30min": {
+        "task":     "tasks.sync_long_tail_intraday",
+        "schedule": 1800,
+        "options":  {"countdown": 45},
     },
 
     # Every 5 min: reconcile the spreadsheet trade journal (catches trades that
