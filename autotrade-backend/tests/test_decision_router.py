@@ -532,3 +532,62 @@ class TestMarketHoursGate:
              patch("crawler.india_price_feed.is_nse_market_open", return_value=False):
             result = await authorize_trade_intent(intent, make_session())
         assert result.outcome != RoutingOutcome.BLOCKED_MARKET_CLOSED
+
+
+# ── 8. Sector-mood entry gate (2026-08-04) ────────────────────────────────────
+# HONASA.NS: entered while NSE-wide breadth was already STRONGLY_BEARISH (the
+# existing check only halved size), then auto-closed 27 seconds later by the
+# sector-reversal exit in paper_trading/trade_simulator.py -- which checks
+# THIS symbol's own sector mood, a different signal the entry gate never
+# looked at. execute_trade_intent() now blocks outright when the entry
+# symbol's own sector already matches that exit trigger, instead of just
+# halving size on the broader (and different) breadth signal.
+
+def _fno_snap_none_session(canonical=None) -> AsyncMock:
+    """Like make_session(), but also wires session.execute().scalar_one_or_none()
+    to None so execute_trade_intent()'s F&O/OptionsChainSnapshot block
+    (which runs before the sector-mood check) is a clean no-op."""
+    session = make_session(canonical)
+    exec_result = MagicMock()
+    exec_result.scalars.return_value.all.return_value = []
+    exec_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=exec_result)
+    return session
+
+
+class TestSectorMoodEntryGate:
+    @pytest.mark.asyncio
+    async def test_blocks_buy_when_own_sector_already_strongly_bearish(self):
+        from engine.decision_router import execute_trade_intent
+
+        canonical = make_canonical_event(materiality="HIGH", bullish=["TESTCO"], bearish=[])
+        intent = make_intent(position_size_hint={"units": 10, "usd_value": 1000.0})
+        wallet_patch, risk_patch = _patch_equity_approval()
+        sector_ctx = SimpleNamespace(sector_moods={"IT": "STRONGLY_BEARISH"})
+        with _patch_resolve_mode(), wallet_patch, risk_patch, \
+             patch("engine.intelligence_hub._get_sector_for_symbol", return_value="IT"), \
+             patch("engine.intelligence_hub.build_sector_context", return_value=sector_ctx):
+            result = await execute_trade_intent(intent, _fno_snap_none_session(canonical))
+        assert result.outcome == RoutingOutcome.BLOCKED_GATE
+        assert "sector" in result.reason.lower() and "strongly_bearish" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_does_not_block_when_own_sector_is_neutral(self):
+        # Positive control: a NEUTRAL sector mood must not trip the new gate
+        # (route_decision is mocked so the test doesn't need a full open-
+        # position execution path -- the point is only that this check
+        # doesn't wrongly block).
+        from engine.decision_router import execute_trade_intent
+
+        canonical = make_canonical_event(materiality="HIGH", bullish=["TESTCO"], bearish=[])
+        intent = make_intent(position_size_hint={"units": 10, "usd_value": 1000.0})
+        wallet_patch, risk_patch = _patch_equity_approval()
+        sector_ctx = SimpleNamespace(sector_moods={"IT": "NEUTRAL"})
+        fake_route_result = MagicMock(outcome=RoutingOutcome.EXECUTED_PAPER)
+        with _patch_resolve_mode(), wallet_patch, risk_patch, \
+             patch("engine.intelligence_hub._get_sector_for_symbol", return_value="IT"), \
+             patch("engine.intelligence_hub.build_sector_context", return_value=sector_ctx), \
+             patch("engine.decision_router.route_decision", AsyncMock(return_value=fake_route_result)), \
+             patch("engine.decision_router._log_intent_audit", AsyncMock()):
+            result = await execute_trade_intent(intent, _fno_snap_none_session(canonical))
+        assert result.outcome != RoutingOutcome.BLOCKED_GATE or "sector" not in (result.reason or "").lower()
