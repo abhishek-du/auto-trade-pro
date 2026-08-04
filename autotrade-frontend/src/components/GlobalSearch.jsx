@@ -8,8 +8,8 @@
  * Recent searches are stored in localStorage under "atp_recent_searches".
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Search, Clock, TrendingUp, BookOpen, Newspaper, Zap, X } from 'lucide-react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { Search, Clock, TrendingUp, BookOpen, Newspaper, Zap, X, ArrowLeftRight } from 'lucide-react';
 import { apiFetch } from '../api/client';
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
@@ -151,6 +151,7 @@ function ActionRow({ icon: Icon, label, kbd, active, onMouseDown }) {
 
 export default function GlobalSearch({ open, onClose }) {
   const navigate   = useNavigate();
+  const location   = useLocation();
   const inputRef   = useRef(null);
   const [query, setQuery] = useState('');
   const [stocks, setStocks] = useState([]);
@@ -336,6 +337,27 @@ export default function GlobalSearch({ open, onClose }) {
 
           {/* Results */}
           <div className="max-h-[60vh] overflow-y-auto">
+
+            {/* Trades-page quick actions (no query, only when already on /trades) */}
+            {!hasQuery && location.pathname === '/trades' && (
+              <>
+                <SectionHeader label="On this page" />
+                <ActionRow
+                  icon={ArrowLeftRight}
+                  label="Search open positions by symbol"
+                  kbd="/"
+                  active={false}
+                  onMouseDown={onClose}
+                />
+                <ActionRow
+                  icon={Zap}
+                  label="Show all Trades keyboard shortcuts"
+                  kbd="?"
+                  active={false}
+                  onMouseDown={onClose}
+                />
+              </>
+            )}
 
             {/* Recent (no query) */}
             {!hasQuery && recent.length > 0 && (

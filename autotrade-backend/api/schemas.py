@@ -44,6 +44,10 @@ class OpenPositionOut(BaseModel):
     atr:            float | None = None
     trailing:       bool         = False  # True once T1 hit → stop trails by 1×ATR
     level_source:   str | None   = None   # 'dynamic' | 'atr' | 'static'
+    # Sector grouping (2026-08-04, /trades redesign): real lookup via
+    # utils.sector_cache.get_sector(), not a frontend mock -- see that
+    # module's docstring for the cache/live-fallback chain. 'GENERAL' on miss.
+    sector:         str | None   = None
 
 
 class PerformanceSnapshotOut(BaseModel):

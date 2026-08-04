@@ -37,6 +37,7 @@ export default function PositionCard({ position: pos, sparklineSlot = null, inde
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, delay: Math.min(index, 12) * 0.015 }}
       tabIndex={0}
+      data-position-nav="true"
       role="button"
       aria-label={`${pos.symbol} ${isBuy ? 'buy' : 'sell'} position, unrealised P&L ${isProfit ? 'gain' : 'loss'} of ${fmt(Math.abs(pnl))}. Press Enter for details.`}
       onClick={() => onSelect?.(pos)}
