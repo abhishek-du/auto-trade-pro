@@ -45,13 +45,19 @@ async def get_symbols_to_backfill(session, skip_fresh: bool) -> list[str]:
     from sqlalchemy import select, text
     from db.models import KiteInstrument
 
-    # All NSE EQ symbols
+    # All NSE EQ symbols. GOI/SDL/digit-prefix-bond exclusion (2026-08-04):
+    # same filter as crawler/zerodha_market.py::hydrate_tokens_from_db() --
+    # see that function's docstring for why digit-prefix + "-XX" suffix (not
+    # just "-SG"/"-SK") is the correct, complete exclusion.
     result = await session.execute(
         select(KiteInstrument.tradingsymbol)
         .where(
             KiteInstrument.instrument_type == "EQ",
             KiteInstrument.segment == "NSE",
             KiteInstrument.name != "",
+            KiteInstrument.name.notilike("GOI %"),
+            KiteInstrument.name.notilike("SDL %"),
+            ~KiteInstrument.tradingsymbol.op("~")(r"^[0-9].*-[A-Z0-9]{2}$"),
         )
         .order_by(KiteInstrument.tradingsymbol)
     )

@@ -375,10 +375,18 @@ async def sync_live_1m_candles(
 
     Designed to be called every 3 min while NSE is open. Uses upsert so
     repeated runs for the same bar are idempotent. Fetches concurrently
-    (semaphore=3) to cover 500+ hub symbols in ~90 seconds.
+    (semaphore=3); hub_universe has grown well past the original "500+
+    symbols in ~90s" estimate (2,569 as of 2026-08-04), so a run logging
+    past _SLOW_RUN_WARN_SEC below is a signal this task's Celery
+    soft_time_limit/time_limit (tasks/india_tasks.py::kite_live_candles_task)
+    needs re-tuning again, not something to silently absorb.
     Symbols default to the hub universe from DB; falls back to nse_symbols.
     """
+    import time as _time
     from zoneinfo import ZoneInfo
+
+    _SLOW_RUN_WARN_SEC = 900
+    _run_start = _time.monotonic()
 
     _IST = ZoneInfo("Asia/Kolkata")
     now_ist = _dt.datetime.now(_IST).replace(tzinfo=None)
@@ -414,11 +422,15 @@ async def sync_live_1m_candles(
         except Exception:
             await session.rollback()
 
+    elapsed = _time.monotonic() - _run_start
     summary = {
         "symbols": len(symbols),
         "candles": len(all_candles),
         "saved":   saved,
         "errors":  len(errors),
     }
-    logger.info(f"[live_1m] → {summary}")
+    if elapsed >= _SLOW_RUN_WARN_SEC:
+        logger.warning(f"[live_1m] slow run ({elapsed:.0f}s) → {summary}")
+    else:
+        logger.info(f"[live_1m] → {summary}")
     return summary
