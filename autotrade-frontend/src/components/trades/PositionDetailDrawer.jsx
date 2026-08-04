@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { X, Clock, ShieldAlert, Target, LineChart, Info } from 'lucide-react';
+import { motion, AnimatePresence, useReducedMotion, useDragControls } from 'framer-motion';
+import { X, Clock, ShieldAlert, Target, LineChart, Info, GripVertical } from 'lucide-react';
 import DirectionBadge from './DirectionBadge';
 import PnLPct from './PnLPct';
 import { fmt, fmtQty, elapsed } from '../../utils/tradeFormat';
@@ -99,6 +99,17 @@ function SimulatedSlTpForm({ position }) {
 export default function PositionDetailDrawer({ position, onClose }) {
   const prefersReducedMotion = useReducedMotion();
   const panelRef = useRef(null);
+  const dragControls = useDragControls();
+
+  // Swipe-right-to-dismiss (touch), gated behind reduced-motion since it's a
+  // physical, animated gesture -- the X button and Escape remain the
+  // always-available non-drag alternative, matching WCAG's dragging-movements
+  // guidance. Drag is bound via dragControls to the header's grip handle only
+  // (dragListener={false} on the panel), so it doesn't fight the panel body's
+  // own vertical scroll.
+  function handleDragEnd(_e, info) {
+    if (info.offset.x > 100 || info.velocity.x > 500) onClose();
+  }
 
   useEffect(() => {
     if (!position) return;
@@ -142,11 +153,27 @@ export default function PositionDetailDrawer({ position, onClose }) {
             animate={prefersReducedMotion ? { opacity: 1 } : { x: 0 }}
             exit={prefersReducedMotion ? { opacity: 0 } : { x: '100%' }}
             transition={{ duration: 0.22, ease: 'easeOut' }}
+            drag={prefersReducedMotion ? false : 'x'}
+            dragControls={dragControls}
+            dragListener={false}
+            dragConstraints={{ left: 0, right: 0 }}
+            dragElastic={{ left: 0, right: 0.6 }}
+            onDragEnd={handleDragEnd}
             className="fixed top-0 right-0 h-full w-full sm:w-[420px] bg-panel border-l border-border z-50 overflow-y-auto focus:outline-none"
           >
             {/* Header */}
             <div className="sticky top-0 bg-panel border-b border-border px-5 py-4 flex items-center justify-between z-10">
               <div className="flex items-center gap-2">
+                {!prefersReducedMotion && (
+                  <span
+                    onPointerDown={(e) => dragControls.start(e)}
+                    aria-hidden="true"
+                    title="Drag to close"
+                    className="touch-none cursor-grab active:cursor-grabbing text-muted -ml-1 p-1 sm:hidden"
+                  >
+                    <GripVertical size={16} />
+                  </span>
+                )}
                 <span className="font-bold text-lg text-slate-100">{pos.symbol}</span>
                 <DirectionBadge direction={pos.direction} />
               </div>

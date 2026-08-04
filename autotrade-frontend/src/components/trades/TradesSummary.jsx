@@ -21,6 +21,8 @@ const fmt = (n, dec = 2) => formatINR(n ?? 0, dec);
 export default function TradesSummary({ wallet, agentStatus, trades = [], positions = [] }) {
   const prefersReducedMotion = useReducedMotion();
   const [snapshots, setSnapshots] = useState(null);
+  const [lastAnnouncedPnl, setLastAnnouncedPnl] = useState(null);
+  const [announcement, setAnnouncement] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +55,20 @@ export default function TradesSummary({ wallet, agentStatus, trades = [], positi
   const agentCash = agentPortfolio?.cash ?? null;
   const roiPct = START_CAPITAL > 0 ? ((portfolioValue - START_CAPITAL) / START_CAPITAL) * 100 : 0;
   const isGain = totalPnl >= 0;
+
+  // Screen-reader announcement for "major" P&L moves -- 0.5% of starting
+  // capital, so the threshold scales with account size instead of a magic
+  // absolute rupee figure. "Adjust state during render" (compare against
+  // last-announced value, same idiom as FilterBar.jsx/usePositionSparklineBuffer.js)
+  // rather than an effect, so this doesn't trip react-hooks/set-state-in-effect.
+  const announceThreshold = Math.max(1, Math.abs(START_CAPITAL) * 0.005);
+  if (lastAnnouncedPnl === null) {
+    setLastAnnouncedPnl(totalPnl);
+  } else if (Math.abs(totalPnl - lastAnnouncedPnl) >= announceThreshold) {
+    const dir = totalPnl >= lastAnnouncedPnl ? 'up' : 'down';
+    setLastAnnouncedPnl(totalPnl);
+    setAnnouncement(`Total profit and loss moved ${dir} to ${isGain ? '+' : ''}${fmt(totalPnl)}`);
+  }
 
   const openTrades = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
 
@@ -99,6 +115,8 @@ export default function TradesSummary({ wallet, agentStatus, trades = [], positi
 
   return (
     <div className="space-y-3">
+      <div aria-live="polite" role="status" className="sr-only">{announcement}</div>
+
       {/* Mobile (<640px): horizontal scroll-snap carousel. sm+: responsive grid. */}
       <div
         className="
