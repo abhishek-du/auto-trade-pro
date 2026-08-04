@@ -88,6 +88,18 @@ def compute_trade_levels(action: str, entry: float, sig=None) -> dict:
             # MIN_STOP_DISTANCE_PCT docstring above).
             if valid and abs(entry - sl) / entry < MIN_STOP_DISTANCE_PCT:
                 valid = False
+            # target_1 must be at least as far from entry as the stop-loss
+            # (R:R >= 1:1 at the trailing-stop trigger) -- matches the ATR
+            # tier's own T1 = 2xATR = SL-distance relationship below. Without
+            # this, a T1 sourced from a stray pivot/resistance level with no
+            # relation to risk can sit a fraction of a percent from entry,
+            # triggering an economically meaningless scale-out + breakeven
+            # stop almost immediately after entry (INOXGREEN + PFC,
+            # 2026-08-04: T1 only 0.24%/0.65% away vs 5.1%/3.24% real stops
+            # and 15.3%/10% T2 targets -- neither trade got a real chance to
+            # work before being cut to breakeven).
+            if valid and abs(t1 - entry) < abs(entry - sl):
+                valid = False
             if valid:
                 # Carry S&R levels so validate_signal() can apply Varsity's 4% gate.
                 _sup = setup.get("support", 0.0) or 0.0

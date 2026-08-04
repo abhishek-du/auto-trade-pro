@@ -867,6 +867,32 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
     if intent.action == "BUY" and position_size.get("units", 0) > 1:
         from crawler.market_breadth import get_breadth_cache
         from utils.logger import logger
+
+        # Block outright, don't just half-size, when this symbol's OWN sector
+        # is already in the exact state that would immediately trigger the
+        # sector-reversal exit in update_positions_with_current_prices()
+        # (paper_trading/trade_simulator.py) -- otherwise we enter (even at
+        # half size) into a position we're about to auto-close within the
+        # next monitoring cycle. HONASA.NS 2026-08-04: entry logged "Market
+        # breadth is STRONGLY_BEARISH" in the same breath as opening the
+        # trade; the sector-reversal check closed it 27 seconds later for a
+        # loss. The two checks were reading different signals (broad NSE
+        # breadth here vs. this symbol's specific sector mood there) that
+        # happened to agree -- checking the sector mood here too closes that
+        # gap directly.
+        try:
+            from engine.intelligence_hub import build_sector_context, _get_sector_for_symbol
+            _sector = _get_sector_for_symbol(intent.symbol)
+            _sector_mood = build_sector_context().sector_moods.get(_sector)
+            if _sector_mood == "STRONGLY_BEARISH":
+                msg = (f"Sector {_sector} already STRONGLY_BEARISH -- would trigger "
+                       f"immediate sector-reversal exit")
+                logger.info(f"[execution_gate] {intent.symbol}: {msg}")
+                return RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=auth.mode,
+                                      reason=msg, metadata={"strategy": intent.strategy})
+        except Exception as exc:
+            logger.debug(f"[execution_gate] {intent.symbol}: sector-mood pre-check failed: {exc}")
+
         breadth = get_breadth_cache()
         # Ensure we check the NSE breadth
         nse_breadth = breadth.get("nse", {})

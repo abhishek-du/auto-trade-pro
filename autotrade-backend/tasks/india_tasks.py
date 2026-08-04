@@ -39,7 +39,7 @@ def _is_india_trading_window() -> bool:
     return ((h, m) >= (9, 15)) and ((h, m) <= (16, 0))
 
 
-# ── 1. india_price_scan — every 30 s ─────────────────────────────────────────
+# ── 1. india_price_scan — every 5 min ────────────────────────────────────────
 
 async def _india_price_scan():
     from crawler.india_price_feed import (
@@ -81,10 +81,55 @@ async def _india_price_scan():
     )
 
 
-@celery_app.task(name="tasks.india_price_scan")
+@celery_app.task(
+    name="tasks.india_price_scan",
+    # 2026-08-04: previously had no override, so it inherited the celery-wide
+    # default (300s/600s, tasks/celery_app.py) -- which exactly equals this
+    # task's own 300s (5 min) beat interval. Measured real run durations
+    # today: min 8s, max 1793s (~30 min), avg 657s, with 19/25 cycles
+    # exceeding 300s -- same disease as kite_live_candles (see that task's
+    # comment for the full failure chain: SoftTimeLimitExceeded landing
+    # inside save_candles_to_db()'s chunk loop). The shared per-chunk-commit
+    # fix there already contains the worst case here too, but the task was
+    # still routinely overrunning its own kill limit. 2400/2460 gives real
+    # headroom above the observed worst case; yfinance (external, rate-
+    # limited) is more variable than Kite's REST API, so more headroom than
+    # kite_live_candles's 1200/1260.
+    soft_time_limit=2400,
+    time_limit=2460,
+)
 def india_price_scan():
-    """Fetch OHLCV candles + NIFTY/SENSEX/BANKNIFTY/VIX snapshots. Every 30 s."""
-    _run_async(_india_price_scan())
+    """Fetch OHLCV candles + NIFTY/SENSEX/BANKNIFTY/VIX snapshots. Every 5 min."""
+    from utils.config import settings
+    import redis.asyncio as _aioredis
+
+    # Overlap guard (2026-08-04) -- confirmed live: two separate Celery
+    # worker child processes were both running full india_price_scan crawls
+    # at the same time (10-min window, PIDs 3025992 and 3025995 both
+    # independently calling fetch_nse_candles), tying up half the 4-worker
+    # pool on duplicate work. Same SET NX EX pattern as kite_live_candles_task
+    # and the DIRECT_NEWS recheck throttle (paper_trading/trade_simulator.py).
+    async def _acquire_lock() -> bool:
+        _r = _aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            return bool(await _r.set("india_price_scan:running", "1", nx=True, ex=2520))
+        finally:
+            await _r.aclose()
+
+    async def _release_lock():
+        _r = _aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await _r.delete("india_price_scan:running")
+        finally:
+            await _r.aclose()
+
+    if not _run_async(_acquire_lock()):
+        return {"skipped": "already_running"}
+
+    try:
+        _run_async(_india_price_scan())
+    finally:
+        _run_async(_release_lock())
 
 
 # ── 2. india_fii_dii_fetch — daily 13:00 UTC (18:30 IST) ─────────────────────
