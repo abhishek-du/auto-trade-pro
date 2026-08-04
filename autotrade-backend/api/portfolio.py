@@ -61,6 +61,8 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
             if tm:
                 mgmt_by_trade[tid] = tm
 
+    from utils.sector_cache import get_sector
+
     out = []
     for p in positions:
         tm = mgmt_by_trade.get(p.trade_id, {})
@@ -85,6 +87,7 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
             atr=tm.get("atr"),
             trailing=bool(tm.get("trailing", False)),
             level_source=tm.get("level_source"),
+            sector=get_sector(p.symbol) if p.symbol else None,
         ))
     return out
 
@@ -98,6 +101,7 @@ async def get_paper_trades(
     db: AsyncSession = Depends(get_db),
 ):
     from db.models import PaperTrade, OpenPosition
+    from utils.sector_cache import get_sector
 
     rows = (await db.execute(
         select(PaperTrade).order_by(desc(PaperTrade.opened_at)).limit(limit)
@@ -165,6 +169,7 @@ async def get_paper_trades(
             "option_type":      getattr(r, "option_type", None),
             "expiry_date":      r.expiry_date.isoformat() if getattr(r, "expiry_date", None) else None,
             "lot_size":         getattr(r, "lot_size", 1),
+            "sector":           get_sector(r.symbol) if r.symbol else None,
         })
     return out
 

@@ -173,6 +173,7 @@ export default function PositionsTable({ positions, onSelectPosition }) {
       key={row.id}
       role="row"
       tabIndex={0}
+      data-position-nav="true"
       aria-label={`${row.original.symbol} position, press Enter for details`}
       style={{ ...style, display: 'grid', gridTemplateColumns: gridTemplate }}
       className="items-center border-b border-border/50 px-3 text-xs hover:bg-white/[0.02] cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent transition-colors"
