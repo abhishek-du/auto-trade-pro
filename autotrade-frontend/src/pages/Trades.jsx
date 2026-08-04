@@ -7,6 +7,7 @@ import TradeHistoryTableSkeleton from '../components/trades/TradeHistoryTableSke
 import { TradesPreferencesProvider } from '../contexts/TradesPreferencesContext';
 import { fmt } from '../utils/tradeFormat';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useTradeEventToasts } from '../hooks/trades/useTradeEventToasts';
 import { useLivePrices } from '../contexts/LivePricesContext';
 import { getPortfolio, getPortfolioPositions } from '../api/client';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -30,6 +31,7 @@ function TradesInner() {
   const [agentStatus,   setAgentStatus]   = useState(null);
   const [agentActivity, setAgentActivity] = useState(null); // last agent event
   const { prices: livePrices, connected, lastAgentEvent } = useLivePrices();
+  useTradeEventToasts();
 
   /* ── HTTP fallback — refresh every 30 s (WebSocket is primary) ── */
   useEffect(() => {

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { LayoutGrid, Table2, Layers } from 'lucide-react';
+import { LayoutGrid, Table2, Layers, Download, Settings as SettingsIcon } from 'lucide-react';
 import PositionsGrid from './PositionsGrid';
 import PositionsTable from './PositionsTable';
 import PositionSparkline from './PositionSparkline';
@@ -8,7 +8,9 @@ import FilterBar from './FilterBar';
 import PresetsDropdown from './PresetsDropdown';
 import SectorGroupHeader from './SectorGroupHeader';
 import ShortcutsHelpModal from './ShortcutsHelpModal';
+import SettingsPanel from './SettingsPanel';
 import { fmt } from '../../utils/tradeFormat';
+import { exportToCsv } from '../../utils/csvExport';
 import { DEFAULT_FILTERS, matchesFilters } from '../../utils/positionFilters';
 import { useTradesPreferences } from '../../contexts/TradesPreferencesContext';
 import { useKeyboardShortcuts } from '../../hooks/trades/useKeyboardShortcuts';
@@ -37,6 +39,7 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
   });
   const [collapsedSectors, setCollapsedSectors] = useState(() => new Set());
   const [helpOpen, setHelpOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const searchInputRef = useRef(null);
 
   useKeyboardShortcuts({
@@ -139,6 +142,18 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
     }));
   }
 
+  function handleExport() {
+    const headers = ['Symbol', 'Sector', 'Source', 'Direction', 'Qty', 'Invested', 'Entry', 'Current', 'Current Value', 'Unrealised P&L', 'Unrealised %', 'Stop Loss', 'Take Profit', 'Opened'];
+    const rows = filtered.map((p) => [
+      (p.symbol ?? '').replace('.NS', ''), p.sector ?? '', p.strategySource ?? 'Unknown',
+      p.direction ?? '', p.size_units ?? '', p.size_usd ?? '', p.entry_price ?? '',
+      p.current_price ?? '', (p.size_usd ?? 0) + (p.unrealised_pnl ?? 0),
+      p.unrealised_pnl ?? 0, p.unrealised_pct ?? 0, p.stop_loss ?? '', p.take_profit ?? '',
+      p.opened_at ?? '',
+    ]);
+    exportToCsv('open_positions.csv', headers, rows);
+  }
+
   if (!positions || positions.length === 0) return null;
 
   const renderList = (items) => (
@@ -215,6 +230,26 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
 
           <button
             type="button"
+            onClick={handleExport}
+            aria-label="Export open positions as CSV"
+            title="Export CSV"
+            className="flex items-center justify-center w-6 h-6 rounded-lg border border-border text-muted hover:text-slate-200 hover:border-accent/50 transition-colors"
+          >
+            <Download size={13} aria-hidden="true" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Trades page settings"
+            title="Settings"
+            className="flex items-center justify-center w-6 h-6 rounded-lg border border-border text-muted hover:text-slate-200 hover:border-accent/50 transition-colors"
+          >
+            <SettingsIcon size={13} aria-hidden="true" />
+          </button>
+
+          <button
+            type="button"
             onClick={() => setHelpOpen(true)}
             aria-label="Show keyboard shortcuts"
             title="Keyboard shortcuts"
@@ -260,6 +295,7 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
 
       <PositionDetailDrawer position={selectedPosition} onClose={() => setSelectedId(null)} />
       <ShortcutsHelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
