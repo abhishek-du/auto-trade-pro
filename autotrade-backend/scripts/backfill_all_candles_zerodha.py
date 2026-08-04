@@ -60,11 +60,17 @@ async def get_symbols(skip_fresh: bool, fresh_days: int,
         `fresh_days`.
     """
     async with AsyncSessionLocal() as s:
+        # GOI/SDL/digit-prefix-bond exclusion (2026-08-04): same filter as
+        # crawler/zerodha_market.py::hydrate_tokens_from_db() -- see that
+        # function's docstring for why digit-prefix + "-XX" suffix (not just
+        # "-SG"/"-SK") is the correct, complete exclusion.
         rows = (await s.execute(text("""
             SELECT tradingsymbol, instrument_token
             FROM kite_instruments
             WHERE segment='NSE' AND instrument_type='EQ'
               AND name != '' AND instrument_token > 0
+              AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
+              AND tradingsymbol !~ '^[0-9].*-[A-Z0-9]{2}$'
             ORDER BY tradingsymbol
         """))).all()
         all_syms = [(r.tradingsymbol, r.instrument_token) for r in rows]

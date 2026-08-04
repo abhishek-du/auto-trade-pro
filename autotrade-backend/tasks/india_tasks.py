@@ -2936,11 +2936,24 @@ def kite_sync_holdings_task():
     return result
 
 
-@celery_app.task(name="tasks.kite_live_candles")
+@celery_app.task(
+    name="tasks.kite_live_candles",
+    # 2026-08-04: previously had no override, so it inherited the celery-wide
+    # default (300s/600s, tasks/celery_app.py). hub_universe has grown to
+    # 2,569 symbols since this task's original "~500 in ~90s" design point,
+    # so real runs now regularly exceed 300s. The soft-limit hit was landing
+    # mid-chunk inside save_candles_to_db(), rolling back the whole run's
+    # uncommitted inserts while the task still logged a false "saved: N"
+    # success — see crawler/price_feed.py::save_candles_to_db for the
+    # matching per-chunk-commit fix. 1200/1260 gives real headroom for the
+    # current universe size.
+    soft_time_limit=1200,
+    time_limit=1260,
+)
 def kite_live_candles_task():
     """Fetch 1-minute candles from Kite every 3 min while NSE market is open.
 
-    Covers the full hub universe (~500 symbols) via concurrent fetching
+    Covers the full hub universe (2,569+ symbols) via concurrent fetching
     (semaphore=3). Runs 09:15–15:30 IST Mon–Fri via beat. Upsert-safe.
     """
     from utils.config import settings
@@ -2952,6 +2965,32 @@ def kite_live_candles_task():
     in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
     if not in_session:
         return {"skipped": "outside_market_hours"}
+
+    # Overlap guard (2026-08-04) -- runtime now regularly exceeds the 3-min
+    # beat interval, so without this, successive beat ticks were stacking
+    # multiple instances on the same 4-worker/4-core box, worsening both the
+    # timeout above and the CPU contention already fixed for
+    # _pre_event_gap_scan_loop. Same atomic SET NX EX pattern as the
+    # DIRECT_NEWS recheck throttle (paper_trading/trade_simulator.py) --
+    # single Redis round-trip, self-clearing TTL, no manual cleanup needed.
+    import redis.asyncio as _aioredis
+
+    async def _acquire_lock() -> bool:
+        _r = _aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            return bool(await _r.set("kite_live_candles:running", "1", nx=True, ex=1320))
+        finally:
+            await _r.aclose()
+
+    async def _release_lock():
+        _r = _aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await _r.delete("kite_live_candles:running")
+        finally:
+            await _r.aclose()
+
+    if not _run_async(_acquire_lock()):
+        return {"skipped": "already_running"}
 
     async def _run():
         from tasks._db import celery_session
@@ -2966,7 +3005,10 @@ def kite_live_candles_task():
             symbols = [s.replace(".NS", "").replace(".BO", "") for s in hub_syms]
             return await sync_live_1m_candles(session, symbols=symbols)
 
-    result = _run_async(_run())
+    try:
+        result = _run_async(_run())
+    finally:
+        _run_async(_release_lock())
     logger.info(f"[kite_live_candles] {result}")
     return result
 

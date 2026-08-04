@@ -458,10 +458,19 @@ async def analyze_all_india_symbols(
             all_symbols = user_syms
             source = f"user_watchlist({len(user_syms)})"
         else:
-            # Cold start bootstrap — use kite_instruments top 50
+            # Cold start bootstrap — use kite_instruments top 50. GOI/SDL/
+            # digit-prefix-bond exclusion (2026-08-04): same reasoning as
+            # crawler/india_price_feed.py's identical cold-start fallback --
+            # see crawler/zerodha_market.py::hydrate_tokens_from_db() for why
+            # digit-prefix + "-XX" suffix (not just "-SG"/"-SK") is correct.
             ki_res = await session.execute(
                 _select(KiteInstrument.tradingsymbol)
-                .where(KiteInstrument.instrument_type == "EQ", KiteInstrument.segment == "NSE", KiteInstrument.name != "")
+                .where(
+                    KiteInstrument.instrument_type == "EQ", KiteInstrument.segment == "NSE",
+                    KiteInstrument.name != "",
+                    KiteInstrument.name.notilike("GOI %"), KiteInstrument.name.notilike("SDL %"),
+                    ~KiteInstrument.tradingsymbol.op("~")(r"^[0-9].*-[A-Z0-9]{2}$"),
+                )
                 .order_by(KiteInstrument.tradingsymbol)
                 .limit(50)
             )

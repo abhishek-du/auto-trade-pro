@@ -403,13 +403,24 @@ async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
         try:
             stmt   = pg_insert(Candle).values(chunk).on_conflict_do_nothing(constraint="uq_candle_bar")
             result = await session.execute(stmt)
+            # Commit per chunk (2026-08-04) -- a single late chunk raising
+            # (e.g. Celery SoftTimeLimitExceeded on a large, multi-chunk save)
+            # used to roll back every chunk in this call, including ones
+            # already executed successfully, because nothing was durable
+            # until one final flush() at the very end. That silently wiped
+            # entire runs of kite_live_candles_task while it kept logging a
+            # "saved: N" success summary computed from the now-discarded,
+            # never-committed total. Committing here makes each chunk durable
+            # the moment it succeeds, so `total` only ever reflects rows that
+            # actually landed, and a later chunk's failure can only cost that
+            # one chunk.
+            await session.commit()
             total += result.rowcount
         except Exception as exc:
             logger.error(f"save_candles_to_db error (chunk {i}–{i+len(chunk)}): {exc}")
             await session.rollback()
             return total
 
-    await session.flush()
     return total
 
 

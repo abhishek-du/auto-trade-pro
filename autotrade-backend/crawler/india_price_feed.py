@@ -710,13 +710,23 @@ async def run_india_price_crawl(
         equity_syms = shortlist_syms
         source = f"market_shortlist ({len(equity_syms)} symbols)"
     else:
-        # Cold start: top 50 NSE EQ + top 30 BSE EQ from kite_instruments
+        # Cold start: top 50 NSE EQ + top 30 BSE EQ from kite_instruments.
+        # GOI/SDL/digit-prefix-bond exclusion (2026-08-04): without it, digit-
+        # prefixed bond tickers (e.g. "675KA33-SG") sort before real stocks in
+        # ORDER BY tradingsymbol, so an empty-shortlist cold start would
+        # return mostly bonds instead of real top-NSE names. Same filter as
+        # crawler/zerodha_market.py::hydrate_tokens_from_db() -- see that
+        # function's docstring for why digit-prefix + "-XX" suffix (not just
+        # "-SG"/"-SK") is the correct, complete exclusion.
         ki_nse = await session.execute(
             _sel(KiteInstrument.tradingsymbol)
             .where(
                 KiteInstrument.instrument_type == "EQ",
                 KiteInstrument.segment == "NSE",
                 KiteInstrument.name != "",
+                KiteInstrument.name.notilike("GOI %"),
+                KiteInstrument.name.notilike("SDL %"),
+                ~KiteInstrument.tradingsymbol.op("~")(r"^[0-9].*-[A-Z0-9]{2}$"),
             )
             .order_by(KiteInstrument.tradingsymbol)
             .limit(50)
@@ -727,6 +737,9 @@ async def run_india_price_crawl(
                 KiteInstrument.instrument_type == "EQ",
                 KiteInstrument.segment == "BSE",
                 KiteInstrument.name != "",
+                KiteInstrument.name.notilike("GOI %"),
+                KiteInstrument.name.notilike("SDL %"),
+                ~KiteInstrument.tradingsymbol.op("~")(r"^[0-9].*-[A-Z0-9]{2}$"),
             )
             .order_by(KiteInstrument.tradingsymbol)
             .limit(30)

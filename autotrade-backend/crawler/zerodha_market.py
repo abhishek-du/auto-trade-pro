@@ -440,11 +440,38 @@ async def hydrate_tokens_from_db(session: AsyncSession) -> int:
     with "No instrument token" warnings for legitimate symbols.
 
     Idempotent: safe to call on every startup. Returns the count loaded.
+
+    Excludes GOI/SDL/gilt-style bonds (2026-08-04) -- Zerodha tags these
+    `instrument_type='EQ'` same as real equities, with no other
+    distinguishing field. Without this, ~1,198+ State Development Loan/gilt
+    bonds (e.g. "675KA33-SG" = 6.75% Karnataka SDL 2033) end up in
+    NSE_TOKENS, get bulk-subscribed on the live Kite WebSocket ticker
+    (crawler/zerodha_ticker.py), get mirrored into live_prices.PRICE_CACHE on
+    every tick, and then fail yfinance's fetch forever (35,328 failed
+    'exchangeTimezoneName' attempts in one day, confirmed live) since
+    PRICE_CACHE has no expiry.
+
+    First pass (same day) only excluded "-SG"/"-SK" suffixes (matching
+    engine/portfolio_service.py's stock search) -- caught the single largest
+    category (SG, 4,290 of 5,969 digit-prefixed instruments) but missed ~70
+    other 2-letter suffix codes (GS, TB, NA-NZ, YA-YZ, ZA-ZZ...) covering the
+    same bond population, confirmed live post-fix (new "-NE"/"-NG"/"-NI"...
+    failures appeared within minutes of restart). Real NSE tradingsymbols
+    never start with a digit UNLESS they're one of a small set of genuine
+    companies (3MINDIA, 5PAISA, 360ONE, 63MOONS, 20MICRONS, 3PLAND,
+    3IINFOLTD, 3BBLACKBIO, 21STCENMGM) -- none of which carry a trailing
+    "-XX" suffix. So digit-prefix + "-XX" suffix together is what actually
+    identifies this bond population (verified: 5,960 matches, zero mention
+    "Ltd"/"Limited" the way every real company name does) without excluding
+    those 9 real companies.
     """
     rows = (await session.execute(
         select(KiteInstrument.tradingsymbol, KiteInstrument.instrument_token).where(
             KiteInstrument.exchange == "NSE",
             KiteInstrument.instrument_type == "EQ",
+            KiteInstrument.name.notilike("GOI %"),
+            KiteInstrument.name.notilike("SDL %"),
+            ~KiteInstrument.tradingsymbol.op("~")(r"^[0-9].*-[A-Z0-9]{2}$"),
         )
     )).all()
     loaded = 0
