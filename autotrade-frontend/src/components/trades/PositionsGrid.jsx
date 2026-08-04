@@ -38,7 +38,7 @@ function useResponsiveColumns(containerRef) {
 
 const VIRTUALIZE_THRESHOLD = 30;
 
-export default function PositionsGrid({ positions, renderSparkline }) {
+export default function PositionsGrid({ positions, renderSparkline, onSelectPosition }) {
   const containerRef = useRef(null);
   const columns = useResponsiveColumns(containerRef);
 
@@ -76,6 +76,7 @@ export default function PositionsGrid({ positions, renderSparkline }) {
               position={pos}
               index={i}
               sparklineSlot={renderSparkline ? renderSparkline(pos) : null}
+              onSelect={onSelectPosition}
             />
           ))}
         </AnimatePresence>
@@ -113,6 +114,7 @@ export default function PositionsGrid({ positions, renderSparkline }) {
                   position={pos}
                   index={i}
                   sparklineSlot={renderSparkline ? renderSparkline(pos) : null}
+              onSelect={onSelectPosition}
                 />
               ))}
             </div>

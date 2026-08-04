@@ -120,7 +120,7 @@ const columnDefs = {
 const ROW_HEIGHT = 44;
 const VIRTUALIZE_THRESHOLD = 30;
 
-export default function PositionsTable({ positions }) {
+export default function PositionsTable({ positions, onSelectPosition }) {
   const { prefs, setPrefs } = useTradesPreferences();
   const columnsPref = prefs.positionsColumns;
   const scrollRef = useRef(null);
@@ -172,8 +172,17 @@ export default function PositionsTable({ positions }) {
     <div
       key={row.id}
       role="row"
+      tabIndex={0}
+      aria-label={`${row.original.symbol} position, press Enter for details`}
       style={{ ...style, display: 'grid', gridTemplateColumns: gridTemplate }}
-      className="items-center border-b border-border/50 px-3 text-xs hover:bg-white/[0.02] transition-colors"
+      className="items-center border-b border-border/50 px-3 text-xs hover:bg-white/[0.02] cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent transition-colors"
+      onClick={() => onSelectPosition?.(row.original)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelectPosition?.(row.original);
+        }
+      }}
     >
       {row.getVisibleCells().map((cell) => (
         <div key={cell.id} role="cell" className="py-2 pr-3 truncate">
