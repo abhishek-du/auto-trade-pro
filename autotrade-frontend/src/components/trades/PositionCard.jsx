@@ -13,7 +13,7 @@ import { fmt, fmtQty, elapsed } from '../../utils/tradeFormat';
  * PositionSparkline, so wiring it in later doesn't require touching this
  * component's layout again.
  */
-export default function PositionCard({ position: pos, sparklineSlot = null, index = 0 }) {
+export default function PositionCard({ position: pos, sparklineSlot = null, index = 0, onSelect }) {
   const pnl = pos.unrealised_pnl ?? 0;
   const pct = pos.unrealised_pct ?? 0;
   const isBuy = pos.direction?.toUpperCase() === 'BUY';
@@ -37,9 +37,16 @@ export default function PositionCard({ position: pos, sparklineSlot = null, inde
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, delay: Math.min(index, 12) * 0.015 }}
       tabIndex={0}
-      role="article"
-      aria-label={`${pos.symbol} ${isBuy ? 'buy' : 'sell'} position, unrealised P&L ${isProfit ? 'gain' : 'loss'} of ${fmt(Math.abs(pnl))}`}
-      className={`glass-panel rounded-xl p-5 space-y-3 hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent transition-all duration-300 border ${
+      role="button"
+      aria-label={`${pos.symbol} ${isBuy ? 'buy' : 'sell'} position, unrealised P&L ${isProfit ? 'gain' : 'loss'} of ${fmt(Math.abs(pnl))}. Press Enter for details.`}
+      onClick={() => onSelect?.(pos)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect?.(pos);
+        }
+      }}
+      className={`glass-panel rounded-xl p-5 space-y-3 cursor-pointer hover:-translate-y-1 hover:shadow-[0_8px_30px_rgba(0,0,0,0.3)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent transition-all duration-300 border ${
         isProfit ? 'border-profit/30 shadow-[0_0_15px_rgba(0,230,118,0.05)]' : 'border-loss/30 shadow-[0_0_15px_rgba(255,23,68,0.05)]'
       }`}
     >

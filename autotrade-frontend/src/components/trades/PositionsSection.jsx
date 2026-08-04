@@ -1,7 +1,9 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { LayoutGrid, Table2 } from 'lucide-react';
 import PositionsGrid from './PositionsGrid';
 import PositionsTable from './PositionsTable';
+import PositionSparkline from './PositionSparkline';
+import PositionDetailDrawer from './PositionDetailDrawer';
 import { fmt } from '../../utils/tradeFormat';
 import { useTradesPreferences } from '../../contexts/TradesPreferencesContext';
 
@@ -20,6 +22,7 @@ import { useTradesPreferences } from '../../contexts/TradesPreferencesContext';
 export default function PositionsSection({ positions, livePrices = {}, trades = [] }) {
   const { prefs, setPrefs } = useTradesPreferences();
   const view = prefs.positionsView; // 'grid' | 'table'
+  const [selectedId, setSelectedId] = useState(null);
 
   const tradeById = useMemo(() => {
     const m = new Map();
@@ -49,6 +52,10 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
   const totalInvested = useMemo(() => enriched.reduce((s, p) => s + (p.size_usd ?? 0), 0), [enriched]);
   const totalUnrealised = useMemo(() => enriched.reduce((s, p) => s + (p.unrealised_pnl ?? 0), 0), [enriched]);
   const isGain = totalUnrealised >= 0;
+  const selectedPosition = useMemo(
+    () => enriched.find((p) => p.id === selectedId) ?? null,
+    [enriched, selectedId],
+  );
 
   if (!positions || positions.length === 0) return null;
 
@@ -103,10 +110,16 @@ export default function PositionsSection({ positions, livePrices = {}, trades = 
       </div>
 
       {view === 'table' ? (
-        <PositionsTable positions={enriched} />
+        <PositionsTable positions={enriched} onSelectPosition={(p) => setSelectedId(p.id)} />
       ) : (
-        <PositionsGrid positions={enriched} />
+        <PositionsGrid
+          positions={enriched}
+          onSelectPosition={(p) => setSelectedId(p.id)}
+          renderSparkline={(pos) => <PositionSparkline currentPrice={pos.current_price} />}
+        />
       )}
+
+      <PositionDetailDrawer position={selectedPosition} onClose={() => setSelectedId(null)} />
     </div>
   );
 }
