@@ -1,5 +1,5 @@
 import { Clock, ShieldAlert, Target, ArrowUpRight } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import DirectionBadge from './DirectionBadge';
 import PnLPct from './PnLPct';
 import { fmt, fmtQty, elapsed } from '../../utils/tradeFormat';
@@ -14,6 +14,7 @@ import { fmt, fmtQty, elapsed } from '../../utils/tradeFormat';
  * component's layout again.
  */
 export default function PositionCard({ position: pos, sparklineSlot = null, index = 0, onSelect }) {
+  const prefersReducedMotion = useReducedMotion();
   const pnl = pos.unrealised_pnl ?? 0;
   const pct = pos.unrealised_pct ?? 0;
   const isBuy = pos.direction?.toUpperCase() === 'BUY';
@@ -32,10 +33,10 @@ export default function PositionCard({ position: pos, sparklineSlot = null, inde
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 8 }}
+      layout={!prefersReducedMotion}
+      initial={prefersReducedMotion ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.18, delay: Math.min(index, 12) * 0.015 }}
+      transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.18, delay: Math.min(index, 12) * 0.015 }}
       tabIndex={0}
       data-position-nav="true"
       role="button"

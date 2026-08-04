@@ -1,8 +1,9 @@
 import { ChevronDown } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { fmt } from '../../utils/tradeFormat';
 
 export default function SectorGroupHeader({ sector, count, totalPnl, collapsed, onToggle }) {
+  const prefersReducedMotion = useReducedMotion();
   const isGain = totalPnl >= 0;
   return (
     <button
@@ -14,7 +15,7 @@ export default function SectorGroupHeader({ sector, count, totalPnl, collapsed, 
       <div className="flex items-center gap-2">
         <motion.span
           animate={{ rotate: collapsed ? -90 : 0 }}
-          transition={{ duration: 0.15 }}
+          transition={{ duration: prefersReducedMotion ? 0 : 0.15 }}
           className="text-muted"
         >
           <ChevronDown size={14} aria-hidden="true" />

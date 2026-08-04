@@ -167,6 +167,11 @@ export default function PositionsTable({ positions, onSelectPosition }) {
   const gridTemplate = visibleLeafColumns
     .map((c) => `${COLUMN_WIDTH[c.id] ?? 100}px`)
     .join(' ');
+  // Fixed pixel columns don't shrink to fit a narrow (mobile) viewport --
+  // giving the header/body their natural summed width and scrolling the
+  // container horizontally (below) keeps every column readable instead of
+  // squishing them illegibly.
+  const totalWidth = visibleLeafColumns.reduce((s, c) => s + (COLUMN_WIDTH[c.id] ?? 100), 0);
 
   const renderRow = (row, style) => (
     <div
@@ -175,7 +180,7 @@ export default function PositionsTable({ positions, onSelectPosition }) {
       tabIndex={0}
       data-position-nav="true"
       aria-label={`${row.original.symbol} position, press Enter for details`}
-      style={{ ...style, display: 'grid', gridTemplateColumns: gridTemplate }}
+      style={{ ...style, display: 'grid', gridTemplateColumns: gridTemplate, minWidth: totalWidth }}
       className="items-center border-b border-border/50 px-3 text-xs hover:bg-white/[0.02] cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent transition-colors"
       onClick={() => onSelectPosition?.(row.original)}
       onKeyDown={(e) => {
@@ -202,58 +207,62 @@ export default function PositionsTable({ positions, onSelectPosition }) {
         />
       </div>
 
-      {/* Header */}
-      <div
-        role="row"
-        style={{ display: 'grid', gridTemplateColumns: gridTemplate }}
-        className="items-center px-3 py-2 border-b border-border bg-white/[0.02] text-[10px] uppercase tracking-wide text-muted font-medium"
-      >
-        {table.getFlatHeaders().map((header) => {
-          const sorted = header.column.getIsSorted();
-          return (
-            <button
-              key={header.id}
-              role="columnheader"
-              type="button"
-              onClick={header.column.getToggleSortingHandler()}
-              className="flex items-center gap-1 pr-3 text-left hover:text-slate-200 transition-colors"
-              aria-sort={sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none'}
-            >
-              {flexRender(header.column.columnDef.header, header.getContext())}
-              {sorted === 'asc' ? <ArrowUp size={10} aria-hidden="true" />
-                : sorted === 'desc' ? <ArrowDown size={10} aria-hidden="true" />
-                : <ArrowUpDown size={10} className="opacity-30" aria-hidden="true" />}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Body */}
-      {!shouldVirtualize ? (
-        <div role="rowgroup">
-          {visibleRows.map((row) => renderRow(row, { height: ROW_HEIGHT }))}
-        </div>
-      ) : (
+      {/* Header + body scroll horizontally together so fixed-width columns
+          stay readable instead of squishing on narrow viewports. */}
+      <div className="overflow-x-auto">
+        {/* Header */}
         <div
-          ref={scrollRef}
-          role="rowgroup"
-          className="overflow-y-auto"
-          style={{ maxHeight: '70vh' }}
+          role="row"
+          style={{ display: 'grid', gridTemplateColumns: gridTemplate, minWidth: totalWidth }}
+          className="items-center px-3 py-2 border-b border-border bg-white/[0.02] text-[10px] uppercase tracking-wide text-muted font-medium"
         >
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
-            {virtualizer.getVirtualItems().map((virtualRow) =>
-              renderRow(visibleRows[virtualRow.index], {
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: `${virtualRow.size}px`,
-                transform: `translateY(${virtualRow.start}px)`,
-              }),
-            )}
-          </div>
+          {table.getFlatHeaders().map((header) => {
+            const sorted = header.column.getIsSorted();
+            return (
+              <button
+                key={header.id}
+                role="columnheader"
+                type="button"
+                onClick={header.column.getToggleSortingHandler()}
+                className="flex items-center gap-1 pr-3 text-left hover:text-slate-200 transition-colors"
+                aria-sort={sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none'}
+              >
+                {flexRender(header.column.columnDef.header, header.getContext())}
+                {sorted === 'asc' ? <ArrowUp size={10} aria-hidden="true" />
+                  : sorted === 'desc' ? <ArrowDown size={10} aria-hidden="true" />
+                  : <ArrowUpDown size={10} className="opacity-30" aria-hidden="true" />}
+              </button>
+            );
+          })}
         </div>
-      )}
+
+        {/* Body */}
+        {!shouldVirtualize ? (
+          <div role="rowgroup">
+            {visibleRows.map((row) => renderRow(row, { height: ROW_HEIGHT }))}
+          </div>
+        ) : (
+          <div
+            ref={scrollRef}
+            role="rowgroup"
+            className="overflow-y-auto"
+            style={{ maxHeight: '70vh' }}
+          >
+            <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: totalWidth }}>
+              {virtualizer.getVirtualItems().map((virtualRow) =>
+                renderRow(visibleRows[virtualRow.index], {
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: `${virtualRow.size}px`,
+                  transform: `translateY(${virtualRow.start}px)`,
+                }),
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
