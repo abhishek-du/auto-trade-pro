@@ -187,16 +187,19 @@ async def open_future_paper_trade(
 
     # ── Telegram alert (F&O futures) ──────────────────────────────────────────
     try:
-        if settings.telegram_available:
-            from integrations.telegram_service import send
-            await send(
-                f"📈 <b>F&O FUTURES {spec.direction}</b>\n"
-                f"<b>{spec.underlying} FUT</b>  ·  {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
-                f"Entry: <b>{spec.entry:,.0f}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
-                f"SL {spec.stop:,.0f}  ·  TP {spec.target:,.0f}\n"
-                f"Margin: ₹{spec.margin:,.0f}  |  Notional: ₹{spec.notional:,.0f}\n"
-                f"Conviction: {confidence:.0f}%"
-            )
+        msg = (
+            f"📈 <b>F&O FUTURES {spec.direction}</b>\n"
+            f"<b>{spec.underlying} FUT</b>  ·  {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
+            f"Entry: <b>{spec.entry:,.0f}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
+            f"SL {spec.stop:,.0f}  ·  TP {spec.target:,.0f}\n"
+            f"Margin: ₹{spec.margin:,.0f}  |  Notional: ₹{spec.notional:,.0f}\n"
+            f"Conviction: {confidence:.0f}%"
+        )
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+            symbol=spec.underlying, trade_id=trade.id, payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.debug(f"[fno/fut] telegram alert failed: {exc}")
 

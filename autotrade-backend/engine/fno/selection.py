@@ -264,18 +264,21 @@ async def open_option_paper_trade(
 
     # ── Telegram alert (F&O option buy) ───────────────────────────────────────
     try:
-        if settings.telegram_available:
-            from integrations.telegram_service import send
-            be = (spec.strike + spec.premium) if spec.option_type == "CE" else (spec.strike - spec.premium)
-            await send(
-                f"🎯 <b>F&O OPTION BUY</b>\n"
-                f"<b>{spec.underlying} {spec.strike:.0f} {spec.option_type}</b>\n"
-                f"Premium: <b>₹{spec.premium}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
-                f"Expiry: {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
-                f"SL ₹{spec.stop}  ·  TP ₹{spec.target}  ·  Breakeven {be:,.0f}\n"
-                f"Premium paid (max loss): ₹{spec.notional:,.0f}\n"
-                f"Conviction: {confidence:.0f}%"
-            )
+        be = (spec.strike + spec.premium) if spec.option_type == "CE" else (spec.strike - spec.premium)
+        msg = (
+            f"🎯 <b>F&O OPTION BUY</b>\n"
+            f"<b>{spec.underlying} {spec.strike:.0f} {spec.option_type}</b>\n"
+            f"Premium: <b>₹{spec.premium}</b>  |  {spec.lots} lot × {spec.lot_size} = {spec.qty} qty\n"
+            f"Expiry: {spec.expiry:%d-%b-%Y} ({spec.dte}d)\n"
+            f"SL ₹{spec.stop}  ·  TP ₹{spec.target}  ·  Breakeven {be:,.0f}\n"
+            f"Premium paid (max loss): ₹{spec.notional:,.0f}\n"
+            f"Conviction: {confidence:.0f}%"
+        )
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+            symbol=spec.underlying, trade_id=trade.id, payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.debug(f"[fno/exec] telegram alert failed: {exc}")
 
@@ -978,16 +981,26 @@ async def monitor_spread_exits(session: AsyncSession) -> list[dict]:
         )
 
         try:
-            if settings.telegram_available:
-                from integrations.telegram_service import send
-                emoji = "✅" if net_pnl >= 0 else "🛑"
-                await send(
-                    f"{emoji} <b>SPREAD EXIT — {underlying} {opt_type}</b>\n"
-                    f"Reason: {reason}\n"
-                    f"BUY  leg: ₹{buy_pos.entry_price} → ₹{cur_buy:.1f}  ({pnl_buy:+,.0f})\n"
-                    f"SELL leg: ₹{sell_pos.entry_price} → ₹{cur_sell:.1f}  ({pnl_sell:+,.0f})\n"
-                    f"<b>Net P&L: ₹{net_pnl:+,.0f}</b>"
-                )
+            emoji = "✅" if net_pnl >= 0 else "🛑"
+            msg = (
+                f"{emoji} <b>SPREAD EXIT — {underlying} {opt_type}</b>\n"
+                f"Reason: {reason}\n"
+                f"BUY  leg: ₹{buy_pos.entry_price} → ₹{cur_buy:.1f}  ({pnl_buy:+,.0f})\n"
+                f"SELL leg: ₹{sell_pos.entry_price} → ₹{cur_sell:.1f}  ({pnl_sell:+,.0f})\n"
+                f"<b>Net P&L: ₹{net_pnl:+,.0f}</b>"
+            )
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.FNO_SIGNAL, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                symbol=underlying,
+                # No single trade_id (2-leg spread) -- a composite key of both
+                # legs' trade_ids keeps this genuinely unique per close event,
+                # instead of falling back to a symbol-only key that would wrongly
+                # suppress a later, distinct spread exit on the same underlying
+                # within the (FNO_SIGNAL, EXIT) default 7-day cooldown window.
+                dedup_key=f"FNO_SIGNAL:EXIT:{buy_pos.trade_id}:{sell_pos.trade_id}",
+                payload=RawTextPayload(text=msg),
+            ))
         except Exception:
             pass
 
@@ -1229,20 +1242,23 @@ async def open_spread_paper_trade(
     logger.info(f"[PAPER-FNO] {spread_name} {label} | {spec.lots} lot(s) | Net Debit ₹{spec.net_premium} | Margin ₹{spec.margin_blocked:,.0f}")
 
     try:
-        if settings.telegram_available:
-            from integrations.telegram_service import send
-            max_profit = (abs(spec.strike_sell - spec.strike_buy) - spec.net_premium) * spec.qty
-            max_loss = spec.net_premium * spec.qty
-            await send(
-                f"🎯 <b>F&O {spread_name}</b>\n"
-                f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
-                f"BUY  {spec.strike_buy:.0f}{spec.option_type} @ ₹{spec.premium_buy}\n"
-                f"SELL {spec.strike_sell:.0f}{spec.option_type} @ ₹{spec.premium_sell}\n"
-                f"Net Premium: <b>₹{spec.net_premium}</b>  |  {spec.lots} lot(s)\n"
-                f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
-                f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
-                f"Conviction: {confidence:.0f}%"
-            )
+        max_profit = (abs(spec.strike_sell - spec.strike_buy) - spec.net_premium) * spec.qty
+        max_loss = spec.net_premium * spec.qty
+        msg = (
+            f"🎯 <b>F&O {spread_name}</b>\n"
+            f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
+            f"BUY  {spec.strike_buy:.0f}{spec.option_type} @ ₹{spec.premium_buy}\n"
+            f"SELL {spec.strike_sell:.0f}{spec.option_type} @ ₹{spec.premium_sell}\n"
+            f"Net Premium: <b>₹{spec.net_premium}</b>  |  {spec.lots} lot(s)\n"
+            f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
+            f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
+            f"Conviction: {confidence:.0f}%"
+        )
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+            symbol=spec.underlying, payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.debug(f"[fno/exec] telegram alert failed: {exc}")
 

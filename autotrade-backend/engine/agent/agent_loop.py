@@ -33,10 +33,8 @@ _macro      = MacroSectorAgent()
 _decision   = DecisionEngine()
 _executor   = AgentExecutionManager()
 
-# Tracks symbols that already received a shortlist alert this session.
-# Key = symbol (bare), value = datetime sent. Prevents repeat spam every 60s.
-_shortlist_alerted: dict[str, datetime] = {}
-_SHORTLIST_ALERT_COOLDOWN_HOURS = 4   # re-alert after this many hours
+# Shortlist alert content-delta dedup now lives in integrations/alerts/dedup.py
+# (shared across worker processes via Redis) -- see _send_shortlist_alert().
 _MAX_SHORTLIST_ALERTS_PER_CYCLE = 5   # cap: top-5 per cycle to avoid LLM queue pile-up
 _shortlist_alerts_this_cycle: int = 0  # reset at the start of each run_agent_cycle
 
@@ -972,23 +970,28 @@ async def _process_symbol(
         # Telegram entry alert.
         # Hub-override trades already got the full shortlist alert → send a brief
         # "TRADE PLACED" follow-up. Technical-only trades get the full fmt_entry.
-        if settings.telegram_available:
-            from integrations.telegram_service import send, fmt_entry
-            if hub_override:
-                _sym_bare = _sym.replace(".NS", "")
-                _t2 = portfolio.open_positions[_sym].get("target2", decision.target)
-                placed_msg = (
-                    f"✅ <b>TRADE PLACED</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📌 <b>{_sym_bare}</b>  "
-                    f"· BUY {decision.qty} shares @ ₹{decision.entry:,.2f}\n"
-                    f"🛑 Stop ₹{decision.stop:,.2f}  "
-                    f"·  🎯 T2 ₹{_t2:,.2f}\n"
-                    f"<i>Position opened — see analysis above</i>"
-                )
-                await send(placed_msg)
-            else:
-                await send(fmt_entry(decision))
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeEntryPayload, TradeEntryRawPayload
+        if hub_override:
+            _sym_bare = _sym.replace(".NS", "")
+            _t2 = portfolio.open_positions[_sym].get("target2", decision.target)
+            placed_msg = (
+                f"✅ <b>TRADE PLACED</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <b>{_sym_bare}</b>  "
+                f"· BUY {decision.qty} shares @ ₹{decision.entry:,.2f}\n"
+                f"🛑 Stop ₹{decision.stop:,.2f}  "
+                f"·  🎯 T2 ₹{_t2:,.2f}\n"
+                f"<i>Position opened — see analysis above</i>"
+            )
+            await publish(AlertEvent(
+                category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                symbol=_sym, payload=TradeEntryRawPayload(text=placed_msg),
+            ))
+        else:
+            await publish(AlertEvent(
+                category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                symbol=_sym, payload=TradeEntryPayload(decision=decision, qty=getattr(decision, "qty", 0)),
+            ))
 
     return decision.to_dict()
 
@@ -1002,30 +1005,31 @@ async def _send_shortlist_alert(
 
     Called for every high-score Hub candidate, regardless of whether the
     trade was actually executed (fund/risk constraints may have blocked it).
-    Respects a 4-hour per-symbol cooldown so the channel isn't spammed.
+    Re-alerts a symbol only when its content changes (content-delta dedup,
+    consolidated with tasks/india_tasks.py's shortlist alert in
+    integrations/alerts/dedup.py) — `executed=True` always alerts.
     """
     if not settings.telegram_available:
         return
 
-    bare = candidate.symbol.replace(".NS", "")
-    now  = datetime.utcnow()
+    bare   = candidate.symbol.replace(".NS", "")
+    subs   = getattr(candidate, "hub_subscores", {}) or {}
+    score  = candidate.master_score or 0.0
+    news_s = float(subs.get("news", 0))
 
-    # Cooldown: skip if we already alerted for this symbol recently AND the
-    # trade wasn't just executed (executed = always send)
-    if not executed:
-        last_sent = _shortlist_alerted.get(bare)
-        if last_sent and (now - last_sent).total_seconds() < _SHORTLIST_ALERT_COOLDOWN_HOURS * 3600:
-            return
+    # Cheap read-only peek so an alert that will just be suppressed doesn't
+    # burn Tavily/LLM credits on research first. The authoritative,
+    # state-mutating dedup decision happens once, inside publish() below.
+    from integrations.alerts.dedup import shortlist_would_alert
+    if not await shortlist_would_alert(bare, score, news_s, executed):
+        return
 
     # Build AI explanation — try Tavily research first (real web data), then LLM.
     ai_note = ""
-    subs   = getattr(candidate, "hub_subscores", {}) or {}
     regime = getattr(candidate, "regime", "") or subs.get("regime", "")
     tech   = float(subs.get("technical",   0))
-    news_s = float(subs.get("news",        0))
     earn   = float(subs.get("earnings",    0))
     fund   = float(subs.get("fundamental", 0))
-    score  = candidate.master_score or 0.0
     entry  = candidate.entry
     stop   = candidate.stop
     risk   = abs(entry - stop)
@@ -1072,10 +1076,15 @@ async def _send_shortlist_alert(
 
     # Send
     try:
-        from integrations.telegram_service import send, fmt_shortlist_alert
-        msg = fmt_shortlist_alert(candidate, df=df, ai_note=ai_note, executed=executed)
-        await send(msg)
-        _shortlist_alerted[bare] = now
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, ShortlistPayload
+        await publish(AlertEvent(
+            category=AlertCategory.SHORTLIST, action=AlertAction.ALERT, severity=Severity.INFO,
+            symbol=bare,
+            payload=ShortlistPayload(
+                candidate=candidate, score=score, news_subscore=news_s, executed=executed,
+                df=df, ai_note=ai_note,
+            ),
+        ))
         logger.info(f"[agent/shortlist] ✓ Telegram alert sent for {bare} (executed={executed})")
     except Exception as exc:
         logger.warning(f"[agent/shortlist] Telegram send failed for {bare}: {exc}")

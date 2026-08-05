@@ -571,18 +571,17 @@ class AgentExecutionManager:
         except Exception:
             pass
 
-        if trade and settings.telegram_available:
-            try:
-                from integrations.telegram_service import send, fmt_exit
-                await send(fmt_exit(
-                    symbol=symbol,
-                    side=trade.side,
-                    entry=float(trade.entry_price),
-                    exit_price=exit_price,
-                    qty=int(trade.qty),
-                    pnl=pnl,
-                    reason=reason,
-                ))
-            except Exception:
-                pass
+        if trade:
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeExitPayload
+            await publish(AlertEvent(
+                # Severity reflects operational urgency, not win/loss -- a losing
+                # trade is a normal outcome (rendered in red/loss styling by the
+                # template), not an operational WARNING.
+                category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                symbol=symbol, trade_id=trade.id,
+                payload=TradeExitPayload(
+                    symbol=symbol, side=trade.side, entry=float(trade.entry_price),
+                    exit_price=exit_price, qty=int(trade.qty), pnl=pnl, reason=reason,
+                ),
+            ))
 
