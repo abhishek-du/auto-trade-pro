@@ -291,12 +291,12 @@ async def _send_corp_action_alert(event: CorporateActionEvent) -> None:
     try:
         bare = event.symbol.replace(".NS", "").replace(".BO", "")
         msg = (
-            f"🔀 *Corporate Action Detected — {bare}*\n"
+            f"🔀 <b>Corporate Action Detected — {bare}</b>\n"
             f"Type: {event.action_type}\n"
             f"Ratio: 1 old share → {event.ratio:.2f} new shares\n"
             f"Price: ₹{event.price_before:.2f} → ₹{event.price_after:.2f}\n"
             f"Positions adjusted: {event.positions_adjusted}\n\n"
-            f"📰 *News:* {event.news_summary[:300]}"
+            f"📰 <b>News:</b> {event.news_summary[:300]}"
         )
         from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
         await publish(AlertEvent(
