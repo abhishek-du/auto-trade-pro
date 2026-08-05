@@ -1,6 +1,7 @@
 """Tests for integrations/alerts/ — the event bus that replaced 29 scattered
-telegram_service.send()/fire() call sites (Phase 1 of the Telegram
-notification redesign).
+telegram_service.send()/fire() call sites (Phase 1), and the real
+decision-first/reason/detail template engine that replaced the old
+fmt_entry/fmt_exit/fmt_shortlist_alert renderers (Phase 2).
 
 Run:
     cd autotrade-backend
@@ -8,6 +9,7 @@ Run:
 """
 from __future__ import annotations
 
+import re
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +21,38 @@ def _uniq(prefix: str) -> str:
     with a multi-day TTL) never collide with leftover state from a previous
     test run."""
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+_ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre", "a", "blockquote"}
+_TAG_RE = re.compile(r"</?([a-zA-Z]+)[^>]*>")
+
+
+def assert_balanced_html(text: str) -> None:
+    """Every tag Telegram's HTML subset supports must open/close in a
+    properly nested stack -- a real risk once templates build multi-section
+    messages with string concatenation instead of one static f-string."""
+    stack: list[str] = []
+    for m in _TAG_RE.finditer(text):
+        tag = m.group(1).lower()
+        is_close = m.group(0).startswith("</")
+        assert tag in _ALLOWED_TAGS, f"unsupported Telegram HTML tag <{tag}> in: {text!r}"
+        if is_close:
+            assert stack and stack[-1] == tag, f"unbalanced </{tag}> in: {text!r}"
+            stack.pop()
+        else:
+            stack.append(tag)
+    assert not stack, f"unclosed tag(s) {stack} in: {text!r}"
+
+
+def assert_no_markdown_leakage(text: str) -> None:
+    """No literal *bold*/_italic_/`code` markdown syntax should reach the
+    chat -- Telegram is always sent with parse_mode=HTML, so markdown-style
+    asterisks/underscores render as literal characters, not formatting."""
+    # Strip anything already inside a <code>/<pre> block (raw text there is fine).
+    stripped = re.sub(r"<(code|pre)>.*?</\1>", "", text, flags=re.DOTALL)
+    assert not re.search(r"(?<!\w)\*[^*\n]+\*(?!\w)", stripped), f"literal *markdown* found in: {text!r}"
+    assert not re.search(r"(?<!\w)`[^`\n]+`(?!\w)", stripped), f"literal `markdown` found in: {text!r}"
+
 
 from integrations.alerts import (
     AlertAction,
@@ -32,7 +66,7 @@ from integrations.alerts import (
     publish,
 )
 from integrations.alerts.dedup import shortlist_gate, shortlist_would_alert
-from integrations.telegram_service import fmt_entry, fmt_exit, fmt_shortlist_alert
+from integrations.alerts.templates import render
 
 
 class _FakeDecision:
@@ -72,21 +106,31 @@ def mock_post():
         yield m
 
 
-# ── render() byte-identical to the old fmt_* call shape ─────────────────────
+# ── render() structure: decision-first, valid HTML, no markdown leakage ─────
 
 @pytest.mark.asyncio
-async def test_trade_entry_renders_like_old_fmt_entry(mock_post):
+async def test_trade_entry_renders_decision_first(mock_post):
     decision = _FakeDecision()
+    decision.hub_subscores = {"technical": 30.0, "news": 12.0}
     await publish(AlertEvent(
         category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
         symbol=decision.symbol, payload=TradeEntryPayload(decision=decision, qty=5),
     ))
     mock_post.assert_awaited_once()
-    assert mock_post.call_args[0][0] == fmt_entry(decision, qty=5)
+    text = mock_post.call_args[0][0]
+    assert_balanced_html(text)
+    assert_no_markdown_leakage(text)
+    # Decision-first: symbol, entry/stop/target, and confidence all appear
+    # before the 7-factor breakdown section.
+    decision_end = text.index("Confidence")
+    assert "TCS" in text[:decision_end]
+    assert "Entry" in text[:decision_end] and "Stop" in text[:decision_end]
+    assert "7-Factor Breakdown" in text
+    assert text.index("7-Factor Breakdown") > decision_end
 
 
 @pytest.mark.asyncio
-async def test_trade_exit_renders_like_old_fmt_exit(mock_post):
+async def test_trade_exit_renders_decision_first(mock_post):
     trade_id = int(uuid.uuid4().int % 1_000_000_000)  # unique per run -- see _uniq()
     await publish(AlertEvent(
         category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
@@ -95,29 +139,67 @@ async def test_trade_exit_renders_like_old_fmt_exit(mock_post):
                                   qty=10, pnl=50.0, reason="TAKE_PROFIT"),
     ))
     mock_post.assert_awaited_once()
-    expected = fmt_exit(symbol="TCS.NS", side="BUY", entry=100.0, exit_price=105.0,
-                         qty=10, pnl=50.0, reason="TAKE_PROFIT")
-    assert mock_post.call_args[0][0] == expected
+    text = mock_post.call_args[0][0]
+    assert_balanced_html(text)
+    assert_no_markdown_leakage(text)
+    assert "POSITION CLOSED" in text
+    assert "TCS" in text
+    assert "+₹50" in text or "50" in text
 
 
 @pytest.mark.asyncio
-async def test_shortlist_renders_like_old_fmt_shortlist_alert(mock_post):
+async def test_shortlist_renders_decision_first(mock_post):
     candidate = _FakeCandidate()
+    candidate.hub_subscores = {"signal": "STRONG_BUY", "technical": 20.0}
     await publish(AlertEvent(
         category=AlertCategory.SHORTLIST, action=AlertAction.ALERT, severity=Severity.INFO,
         symbol="TCS", payload=ShortlistPayload(candidate=candidate, score=42.0, news_subscore=0.0, executed=True),
     ))
     mock_post.assert_awaited_once()
-    assert mock_post.call_args[0][0] == fmt_shortlist_alert(candidate, df=None, ai_note="", executed=True, crawl_data=None)
+    text = mock_post.call_args[0][0]
+    assert_balanced_html(text)
+    assert_no_markdown_leakage(text)
+    assert "SHORTLIST" in text
+    assert "EXECUTED" in text  # executed=True must be visible in the decision line
 
 
 @pytest.mark.asyncio
-async def test_raw_text_passthrough_unchanged(mock_post):
+async def test_raw_text_gets_consistent_severity_header(mock_post):
     await publish(AlertEvent(
         category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
-        dedup_key=_uniq("raw-text"), payload=RawTextPayload(text="⚠️ *unchanged text*"),
+        dedup_key=_uniq("raw-text"), payload=RawTextPayload(text="body line one\nbody line two"),
     ))
-    mock_post.assert_awaited_once_with("⚠️ *unchanged text*")
+    mock_post.assert_awaited_once()
+    text = mock_post.call_args[0][0]
+    assert_balanced_html(text)
+    # Severity badge + category label prepended, original body preserved verbatim after it.
+    assert text.startswith("🔴 <b>System</b>")
+    assert "body line one\nbody line two" in text
+
+
+def test_render_all_categories_produce_valid_html():
+    """Every payload type, rendered directly (no dedup/network involved),
+    must produce balanced HTML with no markdown leakage -- a cheap,
+    exhaustive sweep across every category the router can emit."""
+    decision = _FakeDecision()
+    candidate = _FakeCandidate()
+    cases = [
+        AlertEvent(category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                   payload=TradeEntryPayload(decision=decision, qty=1)),
+        AlertEvent(category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                   payload=TradeExitPayload(symbol="X.NS", side="SELL", entry=1.0, exit_price=0.9,
+                                             qty=1, pnl=-1.0, reason="STOP_LOSS")),
+        AlertEvent(category=AlertCategory.SHORTLIST, action=AlertAction.ALERT, severity=Severity.INFO,
+                   payload=ShortlistPayload(candidate=candidate, score=-10.0, news_subscore=0.0, executed=False)),
+        AlertEvent(category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.EMERGENCY,
+                   payload=RawTextPayload(text="x")),
+        AlertEvent(category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
+                   payload=RawTextPayload(text="y")),
+    ]
+    for event in cases:
+        text = render(event)
+        assert_balanced_html(text)
+        assert_no_markdown_leakage(text)
 
 
 # ── availability + severity gating ───────────────────────────────────────────

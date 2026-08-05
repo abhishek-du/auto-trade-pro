@@ -1415,8 +1415,8 @@ async def _india_trade_loop():
                             category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
                             symbol=t.get("tradingsymbol"), trade_id=t.get("trade_id"),
                             payload=RawTextPayload(text=(
-                                f"📊 *F&O Option Opened*\n"
-                                f"`{t['tradingsymbol']}`\n"
+                                f"📊 <b>F&O Option Opened</b>\n"
+                                f"<code>{t['tradingsymbol']}</code>\n"
                                 f"Direction: {t['direction']} | Premium: ₹{t.get('premium', 0):.2f} "
                                 f"| Lots: {t.get('lots', 1)} | Score: {t.get('score', 0):+.0f}"
                             )),
@@ -2227,18 +2227,18 @@ async def _intraday_entry_task():
         # ── Step 7: Telegram summary with full breakdown ───────────────────────
         if opened:
             lines = [
-                f"🌅 *Intraday MIS Entry — {now_ist.strftime('%d %b %H:%M')} IST*",
+                f"🌅 <b>Intraday MIS Entry — {now_ist.strftime('%d %b %H:%M')} IST</b>",
                 f"Placed: {opened} trade(s)  |  Vetoed: {len(vetoed)}",
                 "",
             ]
             for d in opened_details:
                 lines.append(
-                    f"• *{d['symbol']}*  score={d['score']:+.0f}  "
+                    f"• <b>{d['symbol']}</b>  score={d['score']:+.0f}  "
                     f"×{d['units']} @₹{d['price']:.2f}  "
                     f"SL ₹{d['sl']:.2f} → TP ₹{d['tp']:.2f}"
                 )
             if vetoed:
-                lines.append(f"\n_Vetoed: {', '.join(s.replace('.NS','') for s in vetoed)}_")
+                lines.append(f"\n<i>Vetoed: {', '.join(s.replace('.NS','') for s in vetoed)}</i>")
             from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
             await publish(AlertEvent(
                 category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
@@ -2435,7 +2435,7 @@ async def _intraday_squareoff_task():
         if closed:
             detail_str = " · ".join(details) if details else ""
             msg = (
-                f"📊 *Intraday Squareoff Complete*\n"
+                f"📊 <b>Intraday Squareoff Complete</b>\n"
                 f"Closed: {closed} MIS position(s)\n"
                 f"Total P&L: ₹{sign}{total_pnl:,.0f}\n"
             )

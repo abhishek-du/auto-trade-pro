@@ -292,13 +292,13 @@ async def inject_breakouts_to_universe(
     # ── Telegram alert ─────────────────────────────────────────────────────────
     if send_telegram and injected_symbols:
         try:
-            lines = ["🔍 *Breakout Auto-Discovery* — New stocks added to agent universe:\n"]
+            lines = ["🔍 <b>Breakout Auto-Discovery</b> — New stocks added to agent universe:\n"]
             for s in injected_symbols[:10]:
                 sym_bare = s["symbol"].replace(".NS", "")
                 lines.append(
-                    f"• *{sym_bare}*  {s['change_pct']:+.1f}%  "
+                    f"• <b>{sym_bare}</b>  {s['change_pct']:+.1f}%  "
                     f"vol {s['volume_ratio']:.1f}×avg  RSI {s['rsi']:.0f}\n"
-                    f"  _{s['reason']}_"
+                    f"  <i>{s['reason']}</i>"
                 )
             lines.append("\n_Agent will score these in the next 15-min Hub cycle._")
             from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
