@@ -33,8 +33,16 @@ from db.models import (
     Candle,
     FundamentalData,
     PortfolioPolicy,
-    VirtualWallet,
 )
+# NOT db.models.VirtualWallet (a SQLAlchemy row model with no get_summary()
+# method) -- paper_trading.virtual_wallet.VirtualWallet is the class with
+# the actual wallet business logic (get_summary/deduct_margin/etc). The two
+# share a name; db.models even imports the row model as `VirtualWallet as
+# WalletRow` internally to avoid exactly this collision. This file was
+# importing the wrong one, so save_capital_snapshot() below silently failed
+# on every call with AttributeError (caught by its own broad except) until
+# fixed 2026-08-05.
+from paper_trading.virtual_wallet import VirtualWallet
 from utils.logger import logger
 
 
