@@ -136,6 +136,14 @@ class PaperTrade(Base):
     mae_r:              Mapped[float | None] = mapped_column(Float, nullable=True)
     max_open_profit:    Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Telegram message_id of this trade's entry alert (added for alert
+    # threading, integrations/alerts/router.py Phase 3) -- an exit/update
+    # alert for the same trade replies onto this id so the whole lifecycle
+    # threads together in the chat. NULL until the entry alert is actually
+    # sent (and stays NULL if Telegram was unreachable at entry time, in
+    # which case later alerts for this trade just send un-threaded).
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     open_position: Mapped["OpenPosition | None"] = relationship(
         "OpenPosition", back_populates="trade", uselist=False
     )
@@ -1189,6 +1197,12 @@ class AgentTrade(Base):
     # "AI"; "AI Predict" for the parallel Pre-Event Expectation Gap strategy.
     source:        Mapped[str | None]   = mapped_column(String(20),  nullable=True)
     created_at:    Mapped[datetime]     = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    # See PaperTrade.telegram_message_id's docstring -- same purpose (alert
+    # threading), same nullable/best-effort semantics, on the agent's own
+    # trade table since engine/agent/execution.py records exits against
+    # AgentTrade, not PaperTrade.
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     def __repr__(self) -> str:
         return f"<AgentTrade {self.side} {self.symbol} qty={self.qty} @ {self.entry_price}>"
