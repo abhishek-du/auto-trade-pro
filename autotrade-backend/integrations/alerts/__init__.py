@@ -3,6 +3,7 @@ from .events import (
     AlertCategory,
     AlertEvent,
     RawTextPayload,
+    ReportPayload,
     Severity,
     ShortlistPayload,
     TradeEntryPayload,
@@ -15,5 +16,5 @@ __all__ = [
     "publish", "publish_sync",
     "AlertCategory", "AlertAction", "Severity", "AlertEvent",
     "TradeEntryPayload", "TradeEntryRawPayload", "TradeExitPayload",
-    "ShortlistPayload", "RawTextPayload",
+    "ShortlistPayload", "RawTextPayload", "ReportPayload",
 ]

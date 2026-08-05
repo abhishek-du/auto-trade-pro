@@ -154,6 +154,7 @@ pytz==2026.2
 PyYAML==6.0.3
 redis==6.4.0
 regex==2026.5.9
+reportlab==5.0.0
 requests==2.34.2
 requests-oauthlib==2.0.0
 rich==15.0.0

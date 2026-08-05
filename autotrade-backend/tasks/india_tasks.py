@@ -2816,101 +2816,54 @@ def save_capital_snapshot_task():
     logger.info("[capital_snapshot] Done")
 
 
-# ── 17. Weekly portfolio rebalancing ─────────────────────────────────────────
+# ── 17/18. Weekly portfolio report (merged, Phase 5) ─────────────────────────
+# Was two separate, uncoordinated Sunday tasks 30 minutes apart
+# (weekly_portfolio_rebalance + weekly_ai_portfolio_report), each
+# independently computing similar Sharpe/Treynor/Alpha risk metrics and
+# sending its own Telegram message. Merged into one task, one publish()
+# call: structured metrics + rebalance signals render directly in the
+# message, the LLM narrative becomes a smaller "AI commentary" addendum,
+# and a companion PDF (full metrics table + equity curve) goes out as a
+# reply document.
 
-async def _weekly_portfolio_rebalance():
-    from engine.portfolio_analytics import compute_rebalance_trades, save_capital_snapshot
-    from tasks._db import celery_session
-    from utils.config import settings
-
-    async with celery_session() as session:
-        snap = await save_capital_snapshot(session)
-        trades = await compute_rebalance_trades(session)
-        await session.commit()
-
-    if not trades:
-        logger.info("[rebalance] No rebalancing needed this week")
-        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
-        await publish(AlertEvent(
-            category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
-            payload=RawTextPayload(text="⚖️ <b>Weekly Rebalance Check</b>\n\nPortfolio is within tolerance — no rebalancing needed."),
-        ))
-        return
-
-    lines = [f"⚖️ <b>Weekly Portfolio Rebalance — {datetime.date.today()}</b>\n"]
-    for t in trades[:10]:
-        action_emoji = "🟢" if t["action"] == "BUY" else "🔴"
-        lines.append(
-            f"{action_emoji} <b>{t['action']}</b> {t['symbol'].replace('.NS','')}: "
-            f"current {t['current_weight']:.1f}% → target {t['target_weight']:.1f}% "
-            f"(drift {t['drift']:.1f}%)"
-        )
-        lines.append(f"   <i>{t['reason']}</i>")
-
-    if snap:
-        lines.append(
-            f"\n📊 Sharpe: <b>{snap.sharpe_ratio:.2f}</b>  "
-            f"Treynor: <b>{snap.treynor_ratio:.2f}</b>  "
-            f"Alpha: <b>{snap.jensens_alpha:+.2f}%</b>"
-            if snap.sharpe_ratio else "\n📊 Insufficient data for risk metrics"
-        )
-
-    msg = "\n".join(lines)
-    logger.info(f"[rebalance] {len(trades)} rebalance signals generated")
-    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
-    await publish(AlertEvent(
-        category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
-        payload=RawTextPayload(text=msg),
-    ))
-
-
-@celery_app.task(name="tasks.india_tasks.weekly_portfolio_rebalance")
-def weekly_portfolio_rebalance():
-    """Weekly portfolio rebalancing check: equal-weight top-10 Hub BUY signals.
-    Sends Telegram alert with BUY/SELL signals + performance metrics.
-    Runs Sunday 17:00 UTC (10:30 PM IST).
-    """
-    logger.info("[rebalance] Starting weekly portfolio rebalance check")
-    _run_async(_weekly_portfolio_rebalance())
-
-
-# ── 18. Weekly AI portfolio report via Telegram ───────────────────────────────
-
-async def _weekly_ai_portfolio_report():
+async def _weekly_report_task():
     from engine.portfolio_analytics import (
         compute_performance_metrics,
+        compute_rebalance_trades,
         get_position_weights,
         get_sector_weights,
+        save_capital_snapshot,
     )
     from tasks._db import celery_session
     from utils.config import settings
-    from utils.llm import llm_client
 
     if not settings.telegram_available:
         return
 
     async with celery_session() as session:
+        await save_capital_snapshot(session)
+        rebalance_trades = await compute_rebalance_trades(session)
         metrics = await compute_performance_metrics(session, days=30)
         pos_weights = await get_position_weights(session)
         sector_weights = await get_sector_weights(session, pos_weights)
+        await session.commit()
 
-    # ── Build LLM prompt ──────────────────────────────────────────────────────
-    metrics_text = (
-        f"Portfolio Return (annualized): {metrics.get('portfolio_return', 'N/A')}%\n"
-        f"NIFTY Benchmark Return: {metrics.get('benchmark_return', 'N/A')}%\n"
-        f"Portfolio Beta: {metrics.get('portfolio_beta', 'N/A')}\n"
-        f"Std Deviation (annualized): {metrics.get('portfolio_stddev', 'N/A')}%\n"
-        f"Sharpe Ratio: {metrics.get('sharpe_ratio', 'N/A')}\n"
-        f"Treynor Ratio: {metrics.get('treynor_ratio', 'N/A')}\n"
-        f"Jensen's Alpha: {metrics.get('jensens_alpha', 'N/A')}%\n"
-        f"Risk-free Rate: {metrics.get('risk_free_rate', 7.1)}%"
-    )
-    top_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)[:5]
-    sectors_text = "\n".join(f"  {s}: {w:.1f}%" for s, w in top_sectors)
-    top_positions = sorted(pos_weights.items(), key=lambda x: x[1], reverse=True)[:8]
-    positions_text = "\n".join(f"  {s.replace('.NS','')}: {w:.1f}%" for s, w in top_positions)
-
-    prompt = f"""You are AutoTrade Pro's AI portfolio manager. Write a brief (150-200 word) weekly portfolio report for a paper-trading agent focused on NSE Indian equities.
+    # ── AI commentary (best-effort; a metrics-only fallback if the LLM fails) ──
+    ai_text = ""
+    if metrics.get("sharpe_ratio") is not None:
+        top_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)[:5]
+        sectors_text = "\n".join(f"  {s}: {w:.1f}%" for s, w in top_sectors)
+        top_positions = sorted(pos_weights.items(), key=lambda x: x[1], reverse=True)[:8]
+        positions_text = "\n".join(f"  {s.replace('.NS','')}: {w:.1f}%" for s, w in top_positions)
+        metrics_text = (
+            f"Portfolio Return (annualized): {metrics.get('portfolio_return', 'N/A')}%\n"
+            f"NIFTY Benchmark Return: {metrics.get('benchmark_return', 'N/A')}%\n"
+            f"Portfolio Beta: {metrics.get('portfolio_beta', 'N/A')}\n"
+            f"Sharpe Ratio: {metrics.get('sharpe_ratio', 'N/A')}\n"
+            f"Treynor Ratio: {metrics.get('treynor_ratio', 'N/A')}\n"
+            f"Jensen's Alpha: {metrics.get('jensens_alpha', 'N/A')}%"
+        )
+        prompt = f"""You are AutoTrade Pro's AI portfolio manager. Write a brief (100-150 word) weekly commentary for a paper-trading agent focused on NSE Indian equities. The structured metrics are already shown separately -- do not repeat them verbatim, interpret them.
 
 Performance Metrics (last 30 days):
 {metrics_text}
@@ -2921,47 +2874,58 @@ Top Sector Exposure:
 Top Position Weights:
 {positions_text}
 
-Write a professional 3-paragraph Telegram-friendly report:
-1. Performance summary vs benchmark (NIFTY)
-2. Risk analysis (Sharpe, Treynor, Jensen interpretation — is alpha positive?)
-3. Actionable recommendation for next week
+Write 2 short paragraphs: (1) is the risk-adjusted performance (Sharpe/Treynor/Jensen) good or bad, and why; (2) one actionable recommendation for next week. Plain text, no HTML tags."""
+        try:
+            from utils.llm import llm_client
+            client = llm_client()
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.3,
+            )
+            ai_text = response.choices[0].message.content.strip()
+        except Exception as exc:
+            logger.warning(f"[weekly_report] LLM commentary failed: {exc}")
 
-Use plain text with minimal HTML tags (only <b> for emphasis). Be concise and specific."""
-
+    # ── Companion PDF (best-effort; the Telegram message is the primary
+    #    deliverable and must still go out if PDF building fails) ──────────────
+    pdf_bytes = None
     try:
-        client = llm_client()
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            temperature=0.3,
+        from integrations.alerts.charts import build_equity_curve_chart, fetch_equity_snapshots
+        from integrations.alerts.reports import build_weekly_pdf
+        snapshots = await fetch_equity_snapshots()
+        equity_png = build_equity_curve_chart(snapshots) if snapshots else None
+        pdf_bytes = build_weekly_pdf(
+            metrics=metrics, rebalance_trades=rebalance_trades,
+            sector_weights=sector_weights, position_weights=pos_weights,
+            ai_commentary=ai_text, equity_curve_png=equity_png,
+            report_date=str(datetime.date.today()),
         )
-        ai_text = response.choices[0].message.content.strip()
     except Exception as exc:
-        logger.warning(f"[weekly_report] LLM failed: {exc}")
-        ai_text = (
-            f"Portfolio Return: {metrics.get('portfolio_return', 'N/A')}% vs NIFTY "
-            f"{metrics.get('benchmark_return', 'N/A')}%\n"
-            f"Sharpe: {metrics.get('sharpe_ratio', 'N/A')}  "
-            f"Alpha: {metrics.get('jensens_alpha', 'N/A')}%"
-        )
+        logger.warning(f"[weekly_report] PDF build failed: {exc}")
 
-    header = f"📈 <b>Weekly Portfolio Report — {datetime.date.today()}</b>\n\n"
-    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, ReportPayload
     await publish(AlertEvent(
         category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
-        payload=RawTextPayload(text=header + ai_text),
+        payload=ReportPayload(
+            metrics=metrics, rebalance_trades=rebalance_trades,
+            sector_weights=sector_weights, position_weights=pos_weights,
+            ai_commentary=ai_text, pdf_bytes=pdf_bytes,
+        ),
     ))
-    logger.info("[weekly_report] AI portfolio report sent")
+    logger.info(f"[weekly_report] sent — {len(rebalance_trades)} rebalance signal(s), pdf={'yes' if pdf_bytes else 'no'}")
 
 
-@celery_app.task(name="tasks.india_tasks.weekly_ai_portfolio_report")
-def weekly_ai_portfolio_report():
-    """Generate and send weekly AI portfolio performance report via Telegram.
-    Runs Sunday 17:30 UTC (11:00 PM IST).
+@celery_app.task(name="tasks.india_tasks.weekly_report")
+def weekly_report():
+    """Weekly portfolio report: rebalance signals + risk metrics + AI
+    commentary + companion PDF, one Telegram message. Runs Sunday 17:00
+    UTC (10:30 PM IST). Replaces the previously-separate
+    weekly_portfolio_rebalance/weekly_ai_portfolio_report tasks.
     """
-    logger.info("[weekly_report] Starting weekly AI portfolio report")
-    _run_async(_weekly_ai_portfolio_report())
+    logger.info("[weekly_report] Starting weekly portfolio report")
+    _run_async(_weekly_report_task())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
