@@ -312,3 +312,34 @@ async def test_shortlist_would_alert_does_not_mutate_state():
     assert first is True
     second = await shortlist_would_alert(sym, score=30.0, news_subscore=0.0, executed=False)
     assert second is True  # unchanged by the peek -- no state was written
+
+
+# ── chart attachment (Phase 4) ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_trade_entry_triggers_chart_send(mock_post):
+    """publish() for a TRADE ENTRY must also send a chart photo, threaded
+    onto the just-sent text message via reply_to_message_id."""
+    mock_post.return_value = 424242
+    decision = _FakeDecision()
+    with patch("integrations.telegram_service._post_photo", new_callable=AsyncMock) as mock_photo, \
+         patch("integrations.alerts.charts.fetch_recent_candles", new_callable=AsyncMock) as mock_fetch:
+        mock_fetch.return_value = None  # no candle data -- chart must still be attempted
+        await publish(AlertEvent(
+            category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+            symbol=decision.symbol, payload=TradeEntryPayload(decision=decision, qty=5),
+        ))
+    mock_photo.assert_awaited_once()
+    assert mock_photo.call_args.kwargs.get("reply_to_message_id") == 424242
+    png_bytes = mock_photo.call_args[0][0]
+    assert isinstance(png_bytes, (bytes, bytearray)) and len(png_bytes) > 0
+
+
+@pytest.mark.asyncio
+async def test_non_entry_events_do_not_trigger_chart_send(mock_post):
+    with patch("integrations.telegram_service._post_photo", new_callable=AsyncMock) as mock_photo:
+        await publish(AlertEvent(
+            category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
+            dedup_key=_uniq("no-chart"), payload=RawTextPayload(text="x"),
+        ))
+    mock_photo.assert_not_awaited()

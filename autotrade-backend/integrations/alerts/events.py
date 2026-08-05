@@ -113,4 +113,5 @@ class AlertEvent:
     trade_id: int | str | None = None   # PaperTrade.id (int) or AgentTrade.id (uuid str)
     dedup_key: str | None = None        # override; default derived from category+action+symbol/trade_id
     cooldown_seconds: int | None = None  # override the category/action default cooldown
+    chart_df: object = None             # optional pre-fetched OHLC DataFrame (Phase 4 charts)
     created_at: datetime = field(default_factory=datetime.utcnow)
