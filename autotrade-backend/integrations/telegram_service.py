@@ -18,7 +18,15 @@ logger = logging.getLogger(__name__)
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-async def _post(text: str) -> None:
+async def _post(text: str, reply_to_message_id: int | None = None) -> int | None:
+    """Sends `text` and returns Telegram's own message_id on success (used
+    by integrations/alerts/router.py to thread a trade's lifecycle -- an
+    exit alert replies onto its entry alert's message_id), or None on any
+    failure/suppression. `reply_to_message_id`, when given, is passed
+    through as Telegram's own reply_to_message_id -- if the referenced
+    message no longer exists (e.g. deleted from the chat), Telegram sends
+    the message normally rather than erroring, so this is safe to pass
+    speculatively."""
     # Hard guard: never send a live Telegram message from inside a test run.
     # pytest sets PYTEST_CURRENT_TEST for every test, so this fires even for
     # tests that forget to stub the notifier. Fixture data like the "TESTCO
@@ -26,12 +34,12 @@ async def _post(text: str) -> None:
     import os
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("DISABLE_TELEGRAM"):
         logger.debug("[telegram] suppressed (test / DISABLE_TELEGRAM env)")
-        return
+        return None
     token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
     chat_id = getattr(settings, "TELEGRAM_CHAT_ID",   "")
     if not token or not chat_id:
         logger.warning("[telegram] missing token or chat_id")
-        return
+        return None
     # api.telegram.org can be slow on this network — generous timeout + retries
     # so alerts (equity AND F&O) aren't silently dropped on a transient delay.
     import asyncio as _aio
@@ -41,17 +49,23 @@ async def _post(text: str) -> None:
         "parse_mode":               "HTML",
         "disable_web_page_preview": True,
     }
+    if reply_to_message_id is not None:
+        payload["reply_to_message_id"] = reply_to_message_id
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 r = await client.post(_API_URL.format(token=token), json=payload)
             if r.status_code == 200:
                 logger.info(f"[telegram] ✓ sent to {chat_id}")
-                return
+                try:
+                    return r.json().get("result", {}).get("message_id")
+                except Exception:
+                    return None
             logger.warning(f"[telegram] {r.status_code}: {r.text[:200]}")
-            return  # non-200 (e.g. bad chat) — don't retry
+            return None  # non-200 (e.g. bad chat) — don't retry
         except Exception as exc:
             if attempt == 2:
                 logger.warning(f"[telegram] send failed after retries: {exc}")
             else:
                 await _aio.sleep(2)
+    return None
