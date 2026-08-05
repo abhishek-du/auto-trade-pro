@@ -19,7 +19,7 @@ import logging
 from utils.config import settings
 
 from . import dedup as _dedup
-from .events import AlertAction, AlertCategory, AlertEvent, ShortlistPayload, Severity
+from .events import AlertAction, AlertCategory, AlertEvent, ShortlistPayload, Severity, TradeEntryPayload
 from .templates import render
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,37 @@ async def _store_message_id(trade_id, message_id: int) -> None:
         logger.debug(f"[alerts.router] thread write-back failed for trade_id={trade_id}: {exc}")
 
 
+async def _maybe_send_chart(event: AlertEvent, reply_to: int | None) -> None:
+    """Best-effort: attach a price/SL/target chart to a TRADE entry alert as
+    a reply onto the just-sent text message. Independent of DB threading
+    (Phase 3) -- this only needs the message_id this same publish() call
+    just got back, not anything read from the database. Any failure here
+    must never affect the already-sent text alert."""
+    if event.action != AlertAction.ENTRY or not isinstance(event.payload, TradeEntryPayload):
+        return
+    try:
+        d = event.payload.decision
+        entry = getattr(d, "entry", None) or getattr(d, "entry_price", 0.0) or 0.0
+        stop = getattr(d, "stop", None) or getattr(d, "stop_loss", 0.0) or 0.0
+        target = getattr(d, "target", None) or getattr(d, "take_profit", 0.0) or 0.0
+        if not (entry and stop and target):
+            return
+
+        from .charts import build_entry_chart, fetch_recent_candles
+        df = event.chart_df
+        if df is None:
+            df = await fetch_recent_candles(d.symbol)
+
+        sym = d.symbol.replace(".NS", "")
+        png = build_entry_chart(sym, entry, stop, target, df)
+        caption = f"{sym}  Entry {entry:,.2f}  ·  SL {stop:,.2f}  ·  TP {target:,.2f}"
+
+        from integrations.telegram_service import _post_photo
+        await _post_photo(png, caption=caption, reply_to_message_id=reply_to)
+    except Exception as exc:
+        logger.debug(f"[alerts.router] chart send failed: {exc}")
+
+
 async def publish(event: AlertEvent) -> None:
     if not settings.telegram_available:
         return
@@ -131,6 +162,8 @@ async def publish(event: AlertEvent) -> None:
 
         if event.action == AlertAction.ENTRY and event.trade_id is not None and message_id is not None:
             await _store_message_id(event.trade_id, message_id)
+
+        await _maybe_send_chart(event, message_id)
     except Exception as exc:
         logger.warning(f"[alerts.router] publish failed ({event.category}/{event.action}): {exc}")
 
