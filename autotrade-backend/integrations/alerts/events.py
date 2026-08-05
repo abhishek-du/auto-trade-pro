@@ -90,16 +90,30 @@ class ShortlistPayload:
 
 @dataclass(frozen=True, slots=True)
 class RawTextPayload:
-    """Phase-1 catch-all for every call site that today builds its own
-    inline HTML string (F&O, discovery, news, operations, weekly report).
-    Text is passed through unchanged — Phase 2 replaces these with real
-    per-category templates without touching the call sites again."""
+    """Catch-all for call sites that build their own inline HTML string
+    (F&O, discovery, news, operations). Text is passed through unchanged,
+    with a consistent severity-badge header prepended at render time."""
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReportPayload:
+    """Phase 5: the merged weekly report (rebalance signals + risk metrics
+    + AI commentary), replacing what used to be two separate, uncoordinated
+    Sunday tasks 30 minutes apart. Structured metrics render directly in
+    the Telegram message; `ai_commentary` is a smaller addendum, not the
+    whole message. `pdf_bytes`, when set, is sent as a companion document."""
+    metrics: dict                      # compute_performance_metrics()'s return dict
+    rebalance_trades: list             # compute_rebalance_trades()'s return list
+    sector_weights: dict
+    position_weights: dict
+    ai_commentary: str = ""
+    pdf_bytes: bytes | None = None
 
 
 AlertPayload = (
     TradeEntryPayload | TradeEntryRawPayload | TradeExitPayload
-    | ShortlistPayload | RawTextPayload
+    | ShortlistPayload | RawTextPayload | ReportPayload
 )
 
 

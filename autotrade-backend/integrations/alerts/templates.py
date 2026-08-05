@@ -15,6 +15,7 @@ from __future__ import annotations
 from .events import (
     AlertEvent,
     RawTextPayload,
+    ReportPayload,
     Severity,
     ShortlistPayload,
     TradeEntryPayload,
@@ -163,6 +164,51 @@ def _render_shortlist(payload: ShortlistPayload) -> str:
     return "\n".join(lines)
 
 
+def _render_report(payload: ReportPayload) -> str:
+    m = payload.metrics or {}
+    has_metrics = m.get("sharpe_ratio") is not None
+
+    lines = [f"📈 <b>Weekly Portfolio Report</b>", _DIVIDER]
+
+    # ── Decision-first: rebalance signals, if any ─────────────────────────────
+    if payload.rebalance_trades:
+        lines.append(f"<b>{len(payload.rebalance_trades)} rebalance signal(s)</b>")
+        for t in payload.rebalance_trades[:10]:
+            emoji = "🟢" if t["action"] == "BUY" else "🔴"
+            lines.append(
+                f"{emoji} <b>{t['action']}</b> {t['symbol'].replace('.NS', '')}: "
+                f"{t['current_weight']:.1f}% → {t['target_weight']:.1f}% (drift {t['drift']:.1f}%)"
+            )
+    else:
+        lines.append("<b>Portfolio within tolerance</b> — no rebalancing needed")
+
+    # ── Reason: one-line risk read ────────────────────────────────────────────
+    if has_metrics:
+        alpha = m["jensens_alpha"]
+        lines.append(f"\nWhy: Sharpe <b>{m['sharpe_ratio']:.2f}</b>, alpha {'positive' if alpha and alpha > 0 else 'negative'} ({alpha:+.2f}%)")
+    else:
+        lines.append("\n<i>Insufficient history yet for risk metrics</i>")
+
+    if payload.ai_commentary:
+        lines.append(f"\n<i>{payload.ai_commentary[:500]}</i>")
+
+    # ── Detail: structured metrics table + top sectors/positions ─────────────
+    if has_metrics:
+        lines += [
+            f"\n{_DIVIDER}",
+            "<b>Risk Metrics (30d)</b>",
+            f"Return {m.get('portfolio_return', 0):+.1f}%  ·  NIFTY {m.get('benchmark_return', 0):+.1f}%  ·  Beta {m.get('portfolio_beta', 0):.2f}",
+            f"Sharpe {m.get('sharpe_ratio', 0):.2f}  ·  Treynor {m.get('treynor_ratio', 0):.2f}  ·  Alpha {m.get('jensens_alpha', 0):+.2f}%",
+        ]
+
+    if payload.sector_weights:
+        top_sectors = sorted(payload.sector_weights.items(), key=lambda x: x[1], reverse=True)[:5]
+        lines.append("\n<b>Top Sectors</b>")
+        lines += [f"{s}: {w:.1f}%" for s, w in top_sectors]
+
+    return "\n".join(lines)
+
+
 _CATEGORY_LABEL = {
     "TRADE": "Trade", "FNO_SIGNAL": "F&O", "SHORTLIST": "Shortlist",
     "DISCOVERY": "Discovery", "NEWS_EVENT": "Market News",
@@ -193,6 +239,8 @@ def render(event: AlertEvent) -> str:
         return _render_trade_exit(p)
     if isinstance(p, ShortlistPayload):
         return _render_shortlist(p)
+    if isinstance(p, ReportPayload):
+        return _render_report(p)
     if isinstance(p, (RawTextPayload, TradeEntryRawPayload)):
         return _render_raw_text(event, p)
 

@@ -72,6 +72,58 @@ def build_entry_chart(symbol: str, entry: float, stop: float, target: float, df=
     return buf.getvalue()
 
 
+def build_equity_curve_chart(snapshots: list[tuple[object, float]]) -> bytes:
+    """Renders a PNG equity curve from a chronologically-ordered list of
+    (date, equity) pairs -- used by the weekly report's PDF (Phase 5).
+    `snapshots` empty/None still produces a valid (near-blank) chart rather
+    than raising, matching build_entry_chart's "always returns a usable
+    image" contract."""
+    fig, ax = plt.subplots(figsize=(8, 3.5), dpi=110)
+
+    if snapshots:
+        equities = [s[1] for s in snapshots]
+        ax.plot(range(len(equities)), equities, color=_TARGET_COLOR, linewidth=1.8)
+        ax.fill_between(range(len(equities)), equities, min(equities), color=_TARGET_COLOR, alpha=0.08)
+
+    ax.set_title("Equity Curve", fontsize=13, fontweight="bold", loc="left", color="white")
+    ax.set_facecolor(_BG)
+    fig.patch.set_facecolor(_BG)
+    ax.tick_params(colors=_TEXT, labelsize=8)
+    ax.set_xticks([])
+    for spine in ax.spines.values():
+        spine.set_color(_AXIS)
+    ax.grid(True, color=_GRID, linewidth=0.6, axis="y")
+
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png", facecolor=_BG)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+async def fetch_equity_snapshots(limit: int = 60) -> list[tuple[object, float]]:
+    """Best-effort fetch of the last `limit` days of AgentCapitalSnapshot
+    equity history, oldest first. Returns [] on any failure -- an empty
+    equity curve is a fine fallback, never a reason to skip the PDF."""
+    try:
+        from sqlalchemy import select
+
+        from db.models import AgentCapitalSnapshot
+        from tasks._db import celery_session
+
+        async with celery_session() as session:
+            rows = (await session.execute(
+                select(AgentCapitalSnapshot.snapshot_date, AgentCapitalSnapshot.equity)
+                .order_by(AgentCapitalSnapshot.snapshot_date.desc())
+                .limit(limit)
+            )).all()
+        return [(r[0], r[1]) for r in reversed(rows)]
+    except Exception as exc:
+        logger.debug(f"[alerts.charts] equity snapshot fetch failed: {exc}")
+        return []
+
+
 async def fetch_recent_candles(symbol: str, timeframe: str = "1d", limit: int = 30):
     """Best-effort fetch of the last `limit` candles for `symbol`, oldest
     first (matplotlib plots left-to-right chronologically). Returns None on

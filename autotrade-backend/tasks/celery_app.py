@@ -372,16 +372,13 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=10, minute=45),
     },
 
-    # Weekly Sunday 17:00 UTC = 10:30 PM IST: rebalance check + Telegram alert
-    "weekly-portfolio-rebalance": {
-        "task":     "tasks.india_tasks.weekly_portfolio_rebalance",
+    # Weekly Sunday 17:00 UTC = 10:30 PM IST: rebalance signals + risk metrics +
+    # AI commentary + PDF, one Telegram message (merged from the previously
+    # separate weekly-portfolio-rebalance/weekly-ai-portfolio-report entries,
+    # Phase 5 of the alert redesign).
+    "weekly-report": {
+        "task":     "tasks.india_tasks.weekly_report",
         "schedule": crontab(day_of_week="sunday", hour=17, minute=0),
-    },
-
-    # Weekly Sunday 17:30 UTC = 11:00 PM IST: AI portfolio report via Telegram
-    "weekly-ai-portfolio-report": {
-        "task":     "tasks.india_tasks.weekly_ai_portfolio_report",
-        "schedule": crontab(day_of_week="sunday", hour=17, minute=30),
     },
 
     # ── Kite library tasks (post market-close holdings, daily candles, etc.) ──

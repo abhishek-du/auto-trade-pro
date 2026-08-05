@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _PHOTO_API_URL = "https://api.telegram.org/bot{token}/sendPhoto"
+_DOCUMENT_API_URL = "https://api.telegram.org/bot{token}/sendDocument"
 
 
 async def _post(text: str, reply_to_message_id: int | None = None) -> int | None:
@@ -107,6 +108,49 @@ async def _post_photo(photo_bytes: bytes, caption: str = "", reply_to_message_id
         except Exception as exc:
             if attempt == 2:
                 logger.warning(f"[telegram] photo send failed after retries: {exc}")
+            else:
+                await _aio.sleep(2)
+    return None
+
+
+async def _post_document(
+    doc_bytes: bytes, filename: str, caption: str = "", reply_to_message_id: int | None = None,
+) -> int | None:
+    """Sends a document (multipart sendDocument, e.g. the weekly report
+    PDF) with an optional caption, returning Telegram's message_id on
+    success or None on any failure/suppression -- same shape as
+    _post()/_post_photo()."""
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("DISABLE_TELEGRAM"):
+        logger.debug("[telegram] document suppressed (test / DISABLE_TELEGRAM env)")
+        return None
+    token   = getattr(settings, "TELEGRAM_BOT_TOKEN", "")
+    chat_id = getattr(settings, "TELEGRAM_CHAT_ID",   "")
+    if not token or not chat_id:
+        logger.warning("[telegram] missing token or chat_id")
+        return None
+    import asyncio as _aio
+    data = {"chat_id": chat_id, "parse_mode": "HTML"}
+    if caption:
+        data["caption"] = caption[:1024]
+    if reply_to_message_id is not None:
+        data["reply_to_message_id"] = str(reply_to_message_id)
+    files = {"document": (filename, doc_bytes, "application/pdf")}
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:  # PDFs are bigger than a chart PNG
+                r = await client.post(_DOCUMENT_API_URL.format(token=token), data=data, files=files)
+            if r.status_code == 200:
+                logger.info(f"[telegram] ✓ document sent to {chat_id}")
+                try:
+                    return r.json().get("result", {}).get("message_id")
+                except Exception:
+                    return None
+            logger.warning(f"[telegram] document {r.status_code}: {r.text[:200]}")
+            return None
+        except Exception as exc:
+            if attempt == 2:
+                logger.warning(f"[telegram] document send failed after retries: {exc}")
             else:
                 await _aio.sleep(2)
     return None

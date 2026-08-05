@@ -19,7 +19,7 @@ import logging
 from utils.config import settings
 
 from . import dedup as _dedup
-from .events import AlertAction, AlertCategory, AlertEvent, ShortlistPayload, Severity, TradeEntryPayload
+from .events import AlertAction, AlertCategory, AlertEvent, ReportPayload, ShortlistPayload, Severity, TradeEntryPayload
 from .templates import render
 
 logger = logging.getLogger(__name__)
@@ -127,6 +127,21 @@ async def _maybe_send_chart(event: AlertEvent, reply_to: int | None) -> None:
         logger.debug(f"[alerts.router] chart send failed: {exc}")
 
 
+async def _maybe_send_pdf(event: AlertEvent, reply_to: int | None) -> None:
+    """Best-effort: send the weekly report's companion PDF (Phase 5) as a
+    reply onto the just-sent text message, if the producer attached one."""
+    if not isinstance(event.payload, ReportPayload) or not event.payload.pdf_bytes:
+        return
+    try:
+        from integrations.telegram_service import _post_document
+        await _post_document(
+            event.payload.pdf_bytes, filename="weekly_report.pdf",
+            caption="📄 Full weekly report", reply_to_message_id=reply_to,
+        )
+    except Exception as exc:
+        logger.debug(f"[alerts.router] PDF send failed: {exc}")
+
+
 async def publish(event: AlertEvent) -> None:
     if not settings.telegram_available:
         return
@@ -164,6 +179,7 @@ async def publish(event: AlertEvent) -> None:
             await _store_message_id(event.trade_id, message_id)
 
         await _maybe_send_chart(event, message_id)
+        await _maybe_send_pdf(event, message_id)
     except Exception as exc:
         logger.warning(f"[alerts.router] publish failed ({event.category}/{event.action}): {exc}")
 
