@@ -293,19 +293,20 @@ async def inject_momentum_to_universe(
     # Telegram alert
     if send_telegram and injected_symbols:
         try:
-            from utils.config import settings as _s
-            if _s.telegram_available:
-                from integrations.telegram_service import send
-                lines = ["📈 *Slow-Momentum Discovery* — Sustained uptrend stocks:\n"]
-                for s in injected_symbols[:10]:
-                    bare = s["symbol"].replace(".NS", "")
-                    lines.append(
-                        f"• *{bare}*  {s['return_30d']:+.1f}% (30d)  "
-                        f"vol {s['volume_trend']:.1f}×  RSI {s['rsi']:.0f}\n"
-                        f"  _{s['reason']}_"
-                    )
-                lines.append("\n_These will be Hub-scored in the next 15-min cycle._")
-                await send("\n".join(lines))
+            lines = ["📈 *Slow-Momentum Discovery* — Sustained uptrend stocks:\n"]
+            for s in injected_symbols[:10]:
+                bare = s["symbol"].replace(".NS", "")
+                lines.append(
+                    f"• *{bare}*  {s['return_30d']:+.1f}% (30d)  "
+                    f"vol {s['volume_trend']:.1f}×  RSI {s['rsi']:.0f}\n"
+                    f"  _{s['reason']}_"
+                )
+            lines.append("\n_These will be Hub-scored in the next 15-min cycle._")
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.DISCOVERY, action=AlertAction.ALERT, severity=Severity.INFO,
+                payload=RawTextPayload(text="\n".join(lines)),
+            ))
         except Exception as exc:
             logger.debug(f"[momentum_screener] Telegram failed: {exc}")
 

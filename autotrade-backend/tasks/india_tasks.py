@@ -134,9 +134,6 @@ def india_price_scan():
 
 # ── 2. india_fii_dii_fetch — daily 13:00 UTC (18:30 IST) ─────────────────────
 
-_last_fii_dii_stale_alert = None   # module-level cooldown (per worker process)
-
-
 async def _india_fii_dii_fetch():
     import datetime
     from zoneinfo import ZoneInfo
@@ -167,23 +164,24 @@ async def _india_fii_dii_fetch():
     # (2026-07-14 and 2026-07-06 both silently missing) — and because
     # save_fii_dii_to_db() upserts keyed on the FALLBACK data's own date (not
     # today's), a failed day leaves no row of its own at all, just a
-    # redundant re-save of the previous day's row. 1-hour cooldown mirrors
-    # _candle_staleness_watchdog's pattern so a multi-day outage doesn't spam.
-    global _last_fii_dii_stale_alert
+    # redundant re-save of the previous day's row. 1-hour cooldown (shared
+    # via Redis, see integrations/alerts/router.py's OPERATIONS/ERROR default)
+    # so a multi-day outage doesn't spam.
     if not is_fresh:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        if not _last_fii_dii_stale_alert or (now - _last_fii_dii_stale_alert).total_seconds() >= 3600:
-            _last_fii_dii_stale_alert = now
-            try:
-                from integrations.telegram_service import send
-                await send(
+        try:
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
+                dedup_key="fii_dii_stale",
+                payload=RawTextPayload(text=(
                     f"⚠️ <b>FII/DII data stale</b> — latest available is {data_date}, "
                     f"today is {today_ist}. NSE fetch (curl_cffi + httpx fallback) likely "
                     f"blocked or today's data not yet published. The macro tool will keep "
                     f"serving this stale figure until the next successful crawl."
-                )
-            except Exception as exc:
-                logger.warning(f"[india_fii_dii] stale-data telegram alert failed: {exc}")
+                )),
+            ))
+        except Exception as exc:
+            logger.warning(f"[india_fii_dii] stale-data telegram alert failed: {exc}")
 
 
 @celery_app.task(name="tasks.india_fii_dii_fetch")
@@ -437,46 +435,35 @@ def india_fundamental_update():
 
 # ── 6. india_trade_loop — every 60 s ─────────────────────────────────────────
 
-# De-dup tracking: re-alert a symbol ONLY when its content changes — the 7-factor
-# Hub score moved meaningfully OR the news subscore changed — not on a fixed timer.
-# Maps bare symbol → {"score": float, "news": float, "ts": datetime} of the last alert.
-_shortlist_alerted_loop: dict[str, dict] = {}
-_exit_alerted_trade_ids: set[int] = set()   # dedup: never send exit Telegram twice for same trade
 _fast_sl_heartbeat_ts: float = 0.0          # throttle the fast-SL "alive" heartbeat log
-_SHORTLIST_SCORE_DELTA   = 5.0   # re-alert if |Δ master score| ≥ this
-_SHORTLIST_MIN_REALERT_M = 30    # anti-spam floor: never re-alert within this many minutes
 _MAX_SHORTLIST_PER_CYCLE = 5
 
 
 async def _send_loop_shortlist_alert(signal) -> None:
     """Send a full shortlist Telegram alert with 7-factor breakdown + web research.
 
-    Fires regardless of whether a trade was actually opened. Re-alerts a symbol
-    ONLY when its 7-factor Hub score moves by >= _SHORTLIST_SCORE_DELTA or its news
-    subscore changes — so an unchanged signal is never re-sent. A short minimum
-    interval guards against flip-flap. Non-blocking; swallows all errors.
+    Fires regardless of whether a trade was actually opened (executed=False
+    always, for this call path). Re-alerts a symbol ONLY when its content
+    changes — content-delta dedup now lives in integrations/alerts/dedup.py
+    (shared across worker processes via Redis; this was previously an
+    in-process dict, duplicated with a slightly different policy in
+    engine/agent/agent_loop.py's _send_shortlist_alert — both now go through
+    the same shortlist_gate()). Non-blocking; swallows all errors.
     """
     from utils.config import settings as _s
     if not _s.telegram_available:
         return
     bare = signal.symbol.replace(".NS", "")
-    now  = datetime.datetime.utcnow()
     score    = round(signal.final_score, 1)
     cur_news = round(float((getattr(signal, "hub_subscores", {}) or {}).get("news", 0) or 0), 1)
 
-    prev = _shortlist_alerted_loop.get(bare)
-    if prev is not None:
-        # Anti-spam floor: never re-alert the same symbol too quickly.
-        if (now - prev["ts"]).total_seconds() < _SHORTLIST_MIN_REALERT_M * 60:
-            return
-        score_changed = abs(score - prev["score"]) >= _SHORTLIST_SCORE_DELTA
-        news_changed  = cur_news != prev["news"]
-        if not (score_changed or news_changed):
-            logger.debug(
-                f"[trade_loop/shortlist] {bare} unchanged "
-                f"(score {prev['score']}→{score}, news {prev['news']}→{cur_news}) — skip"
-            )
-            return
+    # Cheap read-only peek so an alert that will just be suppressed doesn't
+    # burn Tavily/LLM credits on research first. The authoritative,
+    # state-mutating dedup decision happens once, inside publish() below.
+    from integrations.alerts.dedup import shortlist_would_alert
+    if not await shortlist_would_alert(bare, score, cur_news, executed=False):
+        logger.debug(f"[trade_loop/shortlist] {bare} unchanged or too recent — skip")
+        return
 
     # ── Tavily search + crawl (advanced depth = full article text) ────────────
     crawl_data: dict = {}
@@ -505,16 +492,15 @@ async def _send_loop_shortlist_alert(signal) -> None:
         logger.debug(f"[trade_loop/shortlist] research failed {bare}: {exc}")
 
     try:
-        from integrations.telegram_service import send, fmt_shortlist_alert
-        msg = fmt_shortlist_alert(
-            signal,
-            df=None,
-            ai_note=ai_note,
-            executed=False,
-            crawl_data=crawl_data or None,
-        )
-        await send(msg)
-        _shortlist_alerted_loop[bare] = {"score": score, "news": cur_news, "ts": now}
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, ShortlistPayload
+        await publish(AlertEvent(
+            category=AlertCategory.SHORTLIST, action=AlertAction.ALERT, severity=Severity.INFO,
+            symbol=bare,
+            payload=ShortlistPayload(
+                candidate=signal, score=score, news_subscore=cur_news, executed=False,
+                df=None, ai_note=ai_note, crawl_data=crawl_data or None,
+            ),
+        ))
         logger.info(f"[trade_loop/shortlist] ✓ alert sent for {bare} score={score:+.0f} news={cur_news:+.0f}")
     except Exception as exc:
         logger.debug(f"[trade_loop/shortlist] send failed {bare}: {exc}")
@@ -629,19 +615,16 @@ async def _india_trade_loop():
             logger.info(
                 f"[india_trade_loop] {len(auto_closed)} position(s) auto-closed"
             )
-            from utils.config import settings as _s
-            if _s.telegram_available:
-                from integrations.telegram_service import send, fmt_exit
-                for c in auto_closed:
-                    await send(fmt_exit(
-                        symbol=c["symbol"],
-                        side=c["direction"],
-                        entry=c["entry_price"],
-                        exit_price=c["exit_price"],
-                        qty=c["size_units"],
-                        pnl=c["pnl"],
-                        reason=c["reason"],
-                    ))
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeExitPayload
+            for c in auto_closed:
+                await publish(AlertEvent(
+                    category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                    symbol=c["symbol"], trade_id=c.get("trade_id"),
+                    payload=TradeExitPayload(
+                        symbol=c["symbol"], side=c["direction"], entry=c["entry_price"],
+                        exit_price=c["exit_price"], qty=c["size_units"], pnl=c["pnl"], reason=c["reason"],
+                    ),
+                ))
 
         # ── AI Dynamic Management: LLM manages SL/TP for open positions ────────
         try:
@@ -1398,10 +1381,12 @@ async def _india_trade_loop():
                 notification = format_paper_trade_notification(trade, explanation)
                 logger.info(notification)
 
-            from utils.config import settings as _s
-            if _s.telegram_available:
-                from integrations.telegram_service import send, fmt_entry
-                await send(fmt_entry(signal, qty=pos_size.get("units", 0)))
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeEntryPayload
+            await publish(AlertEvent(
+                category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                symbol=signal.symbol, trade_id=_trade_id,
+                payload=TradeEntryPayload(decision=signal, qty=pos_size.get("units", 0)),
+            ))
 
         logger.info(f"[india_trade_loop] opened {opened} new position(s) this cycle")
 
@@ -1424,15 +1409,18 @@ async def _india_trade_loop():
                         + ", ".join(f"{t['tradingsymbol']} ({t['direction']})" for t in fno_opened)
                     )
                     # Telegram alert for each option opened
-                    if getattr(settings, "telegram_available", False):
-                        from integrations.telegram_service import send
-                        for t in fno_opened:
-                            await send(
+                    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+                    for t in fno_opened:
+                        await publish(AlertEvent(
+                            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                            symbol=t.get("tradingsymbol"), trade_id=t.get("trade_id"),
+                            payload=RawTextPayload(text=(
                                 f"📊 *F&O Option Opened*\n"
                                 f"`{t['tradingsymbol']}`\n"
                                 f"Direction: {t['direction']} | Premium: ₹{t.get('premium', 0):.2f} "
                                 f"| Lots: {t.get('lots', 1)} | Score: {t.get('score', 0):+.0f}"
-                            )
+                            )),
+                        ))
             except Exception as exc:
                 logger.warning(f"[india_trade_loop] F&O option pass failed: {exc}")
 
@@ -1659,27 +1647,21 @@ async def _fast_sl_check() -> None:
                 logger.warning(f"[fast_sl] close failed for {pos.symbol}: {exc}")
                 await session.rollback()
 
-        # Telegram alerts for live exits — deduplicated by trade_id
-        from utils.config import settings as _cfg
-        if closed and _cfg.telegram_available:
+        # Telegram alerts for live exits — deduplicated by trade_id (now via
+        # integrations/alerts/router.py's shared Redis dedup, replacing the
+        # in-process _exit_alerted_trade_ids set).
+        if closed:
             try:
-                from integrations.telegram_service import send, fmt_exit
+                from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeExitPayload
                 for c in closed:
-                    tid = c.get("trade_id")
-                    if tid and tid in _exit_alerted_trade_ids:
-                        logger.debug(f"[fast_sl] exit alert already sent for trade {tid} ({c['symbol']}) — skipping")
-                        continue
-                    await send(fmt_exit(
-                        symbol=c["symbol"],
-                        side=c["direction"],
-                        entry=c["entry_price"],
-                        exit_price=c["exit_price"],
-                        qty=c["qty"],
-                        pnl=c["pnl"],
-                        reason=c["reason"],
+                    await publish(AlertEvent(
+                        category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                        symbol=c["symbol"], trade_id=c.get("trade_id"),
+                        payload=TradeExitPayload(
+                            symbol=c["symbol"], side=c["direction"], entry=c["entry_price"],
+                            exit_price=c["exit_price"], qty=c["qty"], pnl=c["pnl"], reason=c["reason"],
+                        ),
                     ))
-                    if tid:
-                        _exit_alerted_trade_ids.add(tid)
             except Exception as exc:
                 logger.debug(f"[fast_sl] Telegram notify failed: {exc}")
 
@@ -1711,19 +1693,21 @@ async def _market_shock_guard() -> None:
     if not summary or not (summary.get("closed") or summary.get("tightened")):
         return
 
-    if settings.telegram_available:
-        try:
-            from integrations.telegram_service import send
-            lines = [f"⚠️ MARKET SHOCK — {summary['level']}"]
-            if summary.get("reason"):
-                lines.append(summary["reason"])
-            for c in summary.get("closed", []):
-                lines.append(f"FLATTEN {c['symbol']} @ ₹{c['price']:.2f} (pnl ₹{c['pnl']:,.0f})")
-            if summary.get("tightened"):
-                lines.append(f"Tightened stops on {len(summary['tightened'])} long(s)")
-            await send("\n".join(lines))
-        except Exception as exc:
-            logger.debug(f"[shock] telegram notify failed: {exc}")
+    try:
+        lines = [f"⚠️ MARKET SHOCK — {summary['level']}"]
+        if summary.get("reason"):
+            lines.append(summary["reason"])
+        for c in summary.get("closed", []):
+            lines.append(f"FLATTEN {c['symbol']} @ ₹{c['price']:.2f} (pnl ₹{c['pnl']:,.0f})")
+        if summary.get("tightened"):
+            lines.append(f"Tightened stops on {len(summary['tightened'])} long(s)")
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.NEWS_EVENT, action=AlertAction.ALERT, severity=Severity.WARNING,
+            payload=RawTextPayload(text="\n".join(lines)),
+        ))
+    except Exception as exc:
+        logger.debug(f"[shock] telegram notify failed: {exc}")
 
 
 @celery_app.task(name="tasks.market_shock_guard")
@@ -1795,18 +1779,20 @@ async def _market_news_alert() -> None:
             return
 
         logger.warning(f"[news_alert] {len(hits)} high-impact headline(s) detected")
-        if settings.telegram_available:
-            try:
-                from integrations.telegram_service import send
-                cap = int(settings.NEWS_ALERT_MAX_PER_CYCLE)
-                lines = [f"🔴 HIGH-IMPACT MARKET NEWS ({len(hits)})"]
-                for r in hits[:cap]:
-                    lines.append(f"• {r.headline[:120]}  [{r.source}]")
-                if len(hits) > cap:
-                    lines.append(f"…+{len(hits) - cap} more")
-                await send("\n".join(lines))
-            except Exception as exc:
-                logger.debug(f"[news_alert] telegram notify failed: {exc}")
+        try:
+            cap = int(settings.NEWS_ALERT_MAX_PER_CYCLE)
+            lines = [f"🔴 HIGH-IMPACT MARKET NEWS ({len(hits)})"]
+            for r in hits[:cap]:
+                lines.append(f"• {r.headline[:120]}  [{r.source}]")
+            if len(hits) > cap:
+                lines.append(f"…+{len(hits) - cap} more")
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.NEWS_EVENT, action=AlertAction.ALERT, severity=Severity.WARNING,
+                payload=RawTextPayload(text="\n".join(lines)),
+            ))
+        except Exception as exc:
+            logger.debug(f"[news_alert] telegram notify failed: {exc}")
 
 
 @celery_app.task(name="tasks.market_news_alert")
@@ -2239,8 +2225,7 @@ async def _intraday_entry_task():
         )
 
         # ── Step 7: Telegram summary with full breakdown ───────────────────────
-        if opened and _cfg.telegram_available:
-            from integrations.telegram_service import send
+        if opened:
             lines = [
                 f"🌅 *Intraday MIS Entry — {now_ist.strftime('%d %b %H:%M')} IST*",
                 f"Placed: {opened} trade(s)  |  Vetoed: {len(vetoed)}",
@@ -2254,7 +2239,11 @@ async def _intraday_entry_task():
                 )
             if vetoed:
                 lines.append(f"\n_Vetoed: {', '.join(s.replace('.NS','') for s in vetoed)}_")
-            await send("\n".join(lines))
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+                payload=RawTextPayload(text="\n".join(lines)),
+            ))
 
 
 async def _open_index_option_mis(
@@ -2443,9 +2432,7 @@ async def _intraday_squareoff_task():
         sign = "+" if total_pnl >= 0 else ""
         logger.info(f"[intraday_squareoff] closed {closed} MIS position(s), P&L ₹{sign}{total_pnl:,.0f}")
 
-        from utils.config import settings as _cfg
-        if closed and _cfg.telegram_available:
-            from integrations.telegram_service import send
+        if closed:
             detail_str = " · ".join(details) if details else ""
             msg = (
                 f"📊 *Intraday Squareoff Complete*\n"
@@ -2454,7 +2441,15 @@ async def _intraday_squareoff_task():
             )
             if detail_str:
                 msg += f"Detail: {detail_str}"
-            await send(msg)
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.TRADE, action=AlertAction.EXIT, severity=Severity.SUCCESS,
+                # Batch summary (many trades, no single trade_id) -- key it by
+                # day so the (TRADE, EXIT) default 7-day cooldown doesn't
+                # swallow tomorrow's squareoff summary too.
+                dedup_key=f"intraday_squareoff:{datetime.datetime.utcnow().date()}",
+                payload=RawTextPayload(text=msg),
+            ))
 
 
 @celery_app.task(name="tasks.intraday_entry")
@@ -2605,8 +2600,11 @@ async def _check_zerodha_token():
     )
     logger.error(f"[zerodha] {msg}")
     try:
-        from integrations.telegram_service import send
-        await send(msg)
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
+            dedup_key="zerodha_token_dead", payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.warning(f"[zerodha] telegram alert failed: {exc}")
 
@@ -2832,9 +2830,11 @@ async def _weekly_portfolio_rebalance():
 
     if not trades:
         logger.info("[rebalance] No rebalancing needed this week")
-        if settings.telegram_available:
-            from integrations.telegram_service import send
-            await send("⚖️ <b>Weekly Rebalance Check</b>\n\nPortfolio is within tolerance — no rebalancing needed.")
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
+            payload=RawTextPayload(text="⚖️ <b>Weekly Rebalance Check</b>\n\nPortfolio is within tolerance — no rebalancing needed."),
+        ))
         return
 
     lines = [f"⚖️ <b>Weekly Portfolio Rebalance — {datetime.date.today()}</b>\n"]
@@ -2857,9 +2857,11 @@ async def _weekly_portfolio_rebalance():
 
     msg = "\n".join(lines)
     logger.info(f"[rebalance] {len(trades)} rebalance signals generated")
-    if settings.telegram_available:
-        from integrations.telegram_service import send
-        await send(msg)
+    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+    await publish(AlertEvent(
+        category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
+        payload=RawTextPayload(text=msg),
+    ))
 
 
 @celery_app.task(name="tasks.india_tasks.weekly_portfolio_rebalance")
@@ -2945,8 +2947,11 @@ Use plain text with minimal HTML tags (only <b> for emphasis). Be concise and sp
         )
 
     header = f"📈 <b>Weekly Portfolio Report — {datetime.date.today()}</b>\n\n"
-    from integrations.telegram_service import send
-    await send(header + ai_text)
+    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+    await publish(AlertEvent(
+        category=AlertCategory.WEEKLY_REPORT, action=AlertAction.REPORT, severity=Severity.INFO,
+        payload=RawTextPayload(text=header + ai_text),
+    ))
     logger.info("[weekly_report] AI portfolio report sent")
 
 
@@ -3492,13 +3497,17 @@ def refresh_upstox_token_task():
     if not ok:
         logger.error("[upstox_token_refresh] Token refresh failed after 3 attempts")
         try:
-            from integrations.telegram_service import send
-            _run_async(send(
-                "⚠️ <b>Upstox token refresh failed</b> (3 attempts).\n"
-                "Company-intelligence enrichment (fundamentals/shareholding/"
-                "corporate actions) will be unavailable until this is fixed — "
-                "check UPSTOX_TOTP_SECRET/UPSTOX_PIN in .env, or visit "
-                "<code>/api/v1/upstox/login</code> to re-authenticate manually."
+            from integrations.alerts import publish_sync, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            publish_sync(AlertEvent(
+                category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
+                dedup_key="upstox_token_refresh_failed",
+                payload=RawTextPayload(text=(
+                    "⚠️ <b>Upstox token refresh failed</b> (3 attempts).\n"
+                    "Company-intelligence enrichment (fundamentals/shareholding/"
+                    "corporate actions) will be unavailable until this is fixed — "
+                    "check UPSTOX_TOTP_SECRET/UPSTOX_PIN in .env, or visit "
+                    "<code>/api/v1/upstox/login</code> to re-authenticate manually."
+                )),
             ))
         except Exception as exc:
             logger.warning(f"[upstox_token_refresh] telegram alert failed: {exc}")
@@ -3565,16 +3574,14 @@ def kite_start_ticker_task():
 
 
 # ── Price-feed watchdog: alert if candles stop being written during market hours ──
-_last_candle_stale_alert = None   # module-level cooldown (per worker process)
-
 
 async def _candle_staleness_watchdog():
     """During NSE hours, alert (≤1×/hour) if no intraday (5m) candle has been
     written in CANDLE_STALENESS_ALERT_MIN minutes — the early-warning the system
     lacked when the feed silently froze for days. 5m is the broadest signal (whole
     universe via yfinance), so it catches a wedged worker, a dead ticker, or an
-    expired Kite token alike."""
-    global _last_candle_stale_alert
+    expired Kite token alike. Cooldown now lives in integrations/alerts/router.py's
+    shared Redis dedup (OPERATIONS/ERROR default 1hr), not an in-process global."""
     from crawler.india_price_feed import is_nse_market_open
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
@@ -3594,11 +3601,8 @@ async def _candle_staleness_watchdog():
     if age <= threshold:
         return {"status": "fresh", "age_min": round(age, 1)}
 
-    # Stale — alert, with a 1-hour cooldown so a multi-hour outage doesn't spam.
-    now = datetime.datetime.now(datetime.timezone.utc)
-    if _last_candle_stale_alert and (now - _last_candle_stale_alert).total_seconds() < 3600:
-        return {"status": "stale_suppressed", "age_min": round(age, 1)}
-    _last_candle_stale_alert = now
+    # Stale — alert, with a 1-hour cooldown (shared via Redis) so a multi-hour
+    # outage doesn't spam.
     msg = (
         f"⚠️ <b>Price feed stale</b> — newest 5m candle is {age:.0f} min old "
         f"(threshold {threshold} min) during market hours.\n"
@@ -3607,8 +3611,11 @@ async def _candle_staleness_watchdog():
     )
     logger.error(f"[watchdog] {msg}")
     try:
-        from integrations.telegram_service import send
-        await send(msg)
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.OPERATIONS, action=AlertAction.ERROR, severity=Severity.CRITICAL,
+            dedup_key="candle_staleness", payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.warning(f"[watchdog] telegram alert failed: {exc}")
     return {"status": "stale_alerted", "age_min": round(age, 1)}

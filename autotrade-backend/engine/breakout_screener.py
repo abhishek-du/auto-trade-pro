@@ -292,19 +292,20 @@ async def inject_breakouts_to_universe(
     # ── Telegram alert ─────────────────────────────────────────────────────────
     if send_telegram and injected_symbols:
         try:
-            from utils.config import settings as _s
-            if _s.telegram_available:
-                from integrations.telegram_service import send
-                lines = ["🔍 *Breakout Auto-Discovery* — New stocks added to agent universe:\n"]
-                for s in injected_symbols[:10]:
-                    sym_bare = s["symbol"].replace(".NS", "")
-                    lines.append(
-                        f"• *{sym_bare}*  {s['change_pct']:+.1f}%  "
-                        f"vol {s['volume_ratio']:.1f}×avg  RSI {s['rsi']:.0f}\n"
-                        f"  _{s['reason']}_"
-                    )
-                lines.append("\n_Agent will score these in the next 15-min Hub cycle._")
-                await send("\n".join(lines))
+            lines = ["🔍 *Breakout Auto-Discovery* — New stocks added to agent universe:\n"]
+            for s in injected_symbols[:10]:
+                sym_bare = s["symbol"].replace(".NS", "")
+                lines.append(
+                    f"• *{sym_bare}*  {s['change_pct']:+.1f}%  "
+                    f"vol {s['volume_ratio']:.1f}×avg  RSI {s['rsi']:.0f}\n"
+                    f"  _{s['reason']}_"
+                )
+            lines.append("\n_Agent will score these in the next 15-min Hub cycle._")
+            from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+            await publish(AlertEvent(
+                category=AlertCategory.DISCOVERY, action=AlertAction.ALERT, severity=Severity.INFO,
+                payload=RawTextPayload(text="\n".join(lines)),
+            ))
         except Exception as exc:
             logger.debug(f"[breakout_screener] Telegram alert failed: {exc}")
 

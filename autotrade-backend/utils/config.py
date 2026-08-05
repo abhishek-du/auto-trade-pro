@@ -147,6 +147,11 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""   # from @BotFather
     TELEGRAM_CHAT_ID:   str = ""   # user/channel ID (e.g. 693584236)
 
+    # ── Alert bus (integrations/alerts/) ──────────────────────────────────────
+    # Events below this severity are dropped by the router before rendering/
+    # sending. Order: INFO < SUCCESS < WARNING < CRITICAL < EMERGENCY.
+    TELEGRAM_MIN_SEVERITY: str = "INFO"
+
     # ── Web research (Tavily) ─────────────────────────────────────────────────
     # Real-time news enrichment for small-caps + shortlist alert AI notes.
     # 1000 free credits/month (basic search = 1 credit, advanced = 2 credits).

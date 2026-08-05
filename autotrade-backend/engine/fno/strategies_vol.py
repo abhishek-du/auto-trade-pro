@@ -415,22 +415,27 @@ async def open_iron_condor_paper_trade(
     logger.info(f"[PAPER-FNO] IRON CONDOR {label} | {spec.lots} lot(s) | Net Credit ₹{spec.net_credit} | Margin ₹{spec.margin_blocked:,.0f}")
 
     try:
-        if settings.telegram_available:
-            from integrations.telegram_service import send
-            max_profit = spec.net_credit * spec.qty
-            max_loss = ((spec.strike_long_ce - spec.strike_short_ce) - spec.net_credit) * spec.qty
-            await send(
-                f"🦅 <b>F&O IRON CONDOR</b>\n"
-                f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
-                f"SELL {spec.strike_short_ce:.0f}CE @ ₹{spec.premium_short_ce:.1f}\n"
-                f"BUY  {spec.strike_long_ce:.0f}CE @ ₹{spec.premium_long_ce:.1f}\n"
-                f"SELL {spec.strike_short_pe:.0f}PE @ ₹{spec.premium_short_pe:.1f}\n"
-                f"BUY  {spec.strike_long_pe:.0f}PE @ ₹{spec.premium_long_pe:.1f}\n"
-                f"Net Credit: <b>₹{spec.net_credit}</b>  |  {spec.lots} lot(s)\n"
-                f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
-                f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
-                f"IV Rank: {confidence:.0f}% (High IV)"
-            )
+        max_profit = spec.net_credit * spec.qty
+        max_loss = ((spec.strike_long_ce - spec.strike_short_ce) - spec.net_credit) * spec.qty
+        msg = (
+            f"🦅 <b>F&O IRON CONDOR</b>\n"
+            f"<b>{spec.underlying}</b> ({spec.expiry:%d-%b-%Y})\n"
+            f"SELL {spec.strike_short_ce:.0f}CE @ ₹{spec.premium_short_ce:.1f}\n"
+            f"BUY  {spec.strike_long_ce:.0f}CE @ ₹{spec.premium_long_ce:.1f}\n"
+            f"SELL {spec.strike_short_pe:.0f}PE @ ₹{spec.premium_short_pe:.1f}\n"
+            f"BUY  {spec.strike_long_pe:.0f}PE @ ₹{spec.premium_long_pe:.1f}\n"
+            f"Net Credit: <b>₹{spec.net_credit}</b>  |  {spec.lots} lot(s)\n"
+            f"Max Profit: ₹{max_profit:,.0f}  |  Max Loss: ₹{max_loss:,.0f}\n"
+            f"Margin Blocked: ₹{spec.margin_blocked:,.0f}\n"
+            f"IV Rank: {confidence:.0f}% (High IV)"
+        )
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            # No single trade_id -- a 4-leg strategy has 4 rows; dedup falls
+            # back to symbol-based key, which is fine for an entry alert.
+            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+            symbol=spec.underlying, payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.debug(f"[fno/exec] telegram alert failed: {exc}")
 

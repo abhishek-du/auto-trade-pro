@@ -289,10 +289,6 @@ async def check_and_handle_corporate_actions(session: "AsyncSession") -> list[Co
 async def _send_corp_action_alert(event: CorporateActionEvent) -> None:
     """Send a Telegram alert for a detected corporate action."""
     try:
-        from utils.config import settings
-        if not settings.telegram_available:
-            return
-        from integrations.telegram_service import send
         bare = event.symbol.replace(".NS", "").replace(".BO", "")
         msg = (
             f"🔀 *Corporate Action Detected — {bare}*\n"
@@ -302,6 +298,10 @@ async def _send_corp_action_alert(event: CorporateActionEvent) -> None:
             f"Positions adjusted: {event.positions_adjusted}\n\n"
             f"📰 *News:* {event.news_summary[:300]}"
         )
-        await send(msg)
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
+        await publish(AlertEvent(
+            category=AlertCategory.NEWS_EVENT, action=AlertAction.ALERT, severity=Severity.INFO,
+            symbol=event.symbol, payload=RawTextPayload(text=msg),
+        ))
     except Exception as exc:
         logger.debug(f"[corp_action] Telegram alert failed: {exc}")

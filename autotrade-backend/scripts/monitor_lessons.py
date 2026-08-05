@@ -144,9 +144,12 @@ async def _amain():
     print(f"\n[monitor] report saved → {path}")
     # telegram (best-effort)
     try:
-        from integrations.telegram_service import send
+        from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
         head = report if len(report) < 3500 else report[:3500] + "\n…(truncated)"
-        await send("<pre>" + head.replace("<", "&lt;").replace(">", "&gt;") + "</pre>")
+        await publish(AlertEvent(
+            category=AlertCategory.OPERATIONS, action=AlertAction.REPORT, severity=Severity.INFO,
+            payload=RawTextPayload(text="<pre>" + head.replace("<", "&lt;").replace(">", "&gt;") + "</pre>"),
+        ))
         print("[monitor] telegram summary sent")
     except Exception as exc:
         print(f"[monitor] telegram skipped: {exc}")

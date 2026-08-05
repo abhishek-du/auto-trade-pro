@@ -498,12 +498,31 @@ async def _execute_news_trade(
         return False
 
     logger.warning(f"✅ NEWS-TRIGGERED TRADE OPENED: {ticker} {side} @ {entry_price} ({result.outcome.value})")
-    if getattr(settings, "telegram_available", False):
+
+    trade_id = (result.metadata or {}).get("trade_id")
+    # Real quantity, not the previous hardcoded qty=0 -- fetch it from the
+    # PaperTrade row execute_trade_intent just opened (position_size, where
+    # the real units live, is local to decision_router.py and not returned).
+    qty = 0
+    if trade_id:
         try:
-            from integrations.telegram_service import send, fmt_entry
-            await send(fmt_entry(_intent_to_signal_for_alert(ticker, side, entry_price, confidence), qty=0))
+            async with AsyncSessionLocal() as _qty_session:
+                from db.models import PaperTrade
+                _trade = await _qty_session.get(PaperTrade, trade_id)
+                if _trade:
+                    qty = _trade.size_units or 0
         except Exception as exc:
-            logger.warning(f"[news_engine] Telegram alert failed: {exc}")
+            logger.debug(f"[news_engine] qty lookup for alert failed: {exc}")
+
+    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, TradeEntryPayload
+    await publish(AlertEvent(
+        category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
+        symbol=ticker, trade_id=trade_id,
+        payload=TradeEntryPayload(
+            decision=_intent_to_signal_for_alert(ticker, side, entry_price, confidence),
+            qty=qty,
+        ),
+    ))
     return True
 
 
