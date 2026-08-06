@@ -7,6 +7,7 @@ import {
   Globe, Zap, Wallet, LineChart, TestTube2, Briefcase, Radio, BookMarked,
   CandlestickChart as ChartIcon, Activity, LayoutGrid, CalendarDays, IndianRupee, Target, Receipt, Rocket,
   Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale, Layers, GitBranch,
+  BookOpen,
 } from 'lucide-react';
 import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
@@ -61,6 +62,7 @@ export const SECTIONS = [
     items: [
       { to: '/intelligence',   label: 'Intelligence Hub', Icon: Sparkles, badge: 'hubBadge' },
       { to: '/pipeline',       label: 'Pipeline Flow',    Icon: GitBranch },
+      { to: '/documentation',  label: 'Documentation',    Icon: BookOpen },
       { to: '/agent-log',      label: 'Agent Log',        Icon: ClipboardList },
       { to: '/news',           label: 'News',             Icon: Newspaper },
       { to: '/news-decisions', label: 'Decision Journal', Icon: BookOpenText },
