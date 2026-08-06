@@ -157,7 +157,7 @@ function Node({ Icon, title, subtitle, timing, stats = [], accent = 'cyan', stat
 
   return (
     <div
-      className={`rounded-2xl border ${borderColor} p-4 ${wide ? 'w-full max-w-2xl' : 'w-64'}`}
+      className={`rounded-2xl border ${borderColor} p-4 ${wide ? 'w-full max-w-2xl' : 'w-full sm:w-72'}`}
       style={{ background: bgGlow }}
     >
       <div className="flex items-start gap-3">
@@ -358,7 +358,7 @@ export default function PipelineFlow() {
             accent="cyan"
             title="Price Scan"
             subtitle="OHLCV candles + NIFTY/SENSEX/BANKNIFTY/VIX snapshots via Zerodha Kite + yfinance backstop"
-            timing="every 30s"
+            timing="every 5 min"
           />
           <SmallNode
             Icon={Zap}
@@ -396,6 +396,14 @@ export default function PipelineFlow() {
             title="Options Chain Refresh"
             subtitle="NIFTY/BANKNIFTY/FINNIFTY chain, Greeks, PCR, max-pain, IV-rank — feeds the F&O pipeline"
             timing="every 15 min"
+          />
+          <SmallNode
+            Icon={BrainCircuit}
+            accent="purple"
+            title="ML Direction Predictor"
+            subtitle="Runs per-symbol 18-feature LSTM models for 3-class (UP/DOWN/FLAT) daily predictions. Injects ±15 confidence into the confluence engine."
+            timing="on-demand & weekly train"
+            badge="AI"
           />
         </div>
       </div>
@@ -538,8 +546,9 @@ export default function PipelineFlow() {
           <p className="mt-3 text-[10px] text-muted italic border-t border-border pt-2 flex gap-1 items-start">
             <ShieldCheck size={12} className="text-amber-500 shrink-0 mt-0.5" />
             <span>
-              <strong>Gating Logic:</strong> Engine automatically picks Event Swing if News ≥ 85 & Tech ≥ 60. 
-              Picks Technical Swing if Tech ≥ 85 & Vol ≥ 70. 
+              <strong>Gating Logic:</strong> Engine automatically picks Event Swing if News ≥ 85 & Tech ≥ 60,
+              Technical Swing if Tech ≥ 85 & Vol ≥ 70, or Positional if Fundamentals ≥ 80 — checked in that order.
+              Otherwise falls back to whichever swing strategy scores higher (or Intraday Momentum outside swing mode).
               A flat −20 penalty applies across all swing strategies when Nifty macro regime is BEAR.
             </span>
           </p>
@@ -586,7 +595,7 @@ export default function PipelineFlow() {
       <p className="text-[11px] text-muted uppercase tracking-widest text-center mb-1">
         Five semi-independent engines evaluate candidates — only three may place an order
       </p>
-      <div className="rounded-xl border border-rose-500/25 bg-rose-500/5 px-4 py-2.5 mb-1 flex items-start gap-2">
+      <div className="rounded-xl border border-rose-500/25 bg-rose-500/5 px-4 py-2.5 mb-1 flex flex-col sm:flex-row items-start gap-2">
         <Ban size={14} className="text-rose-400 shrink-0 mt-0.5" />
         <p className="text-[11px] text-rose-200/90 leading-snug">
           <strong className="text-rose-300">News-Only architecture hard-block (2026-07-21):</strong> TECHNICAL-family
@@ -643,7 +652,7 @@ export default function PipelineFlow() {
           ]}
         />
       </div>
-      <div className="rounded-xl border border-cyan/20 bg-cyan/5 px-4 py-2.5 flex items-start gap-2">
+      <div className="rounded-xl border border-cyan/20 bg-cyan/5 px-4 py-2.5 flex flex-col sm:flex-row items-start gap-2 mt-2">
         <ShieldCheck size={14} className="text-cyan shrink-0 mt-0.5" />
         <p className="text-[11px] text-cyan-100/90 leading-snug">
           <strong className="text-cyan">Market-hours gate (2026-07-27):</strong> every EQUITY TradeIntent, from every
@@ -731,7 +740,7 @@ export default function PipelineFlow() {
 
       {/* ── STEP 9: Telegram ─────────────────────────────────────────────────── */}
       <div className="flex justify-center">
-        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/5 px-6 py-4 flex items-center gap-4 w-full max-w-2xl">
+        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/5 px-6 py-4 flex flex-col sm:flex-row items-center sm:items-start text-center sm:text-left gap-4 w-full max-w-2xl">
           <div className="p-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10">
             <Bell size={18} className="text-amber-400" />
           </div>
@@ -753,8 +762,8 @@ export default function PipelineFlow() {
         </p>
         <div className="space-y-2">
           {[
-            { time: 'continuous', event: 'Price scan every 30s · live-price backstop refresh every 15s', color: 'text-cyan', dot: 'bg-cyan' },
-            { time: 'every 5m', event: 'Narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
+            { time: 'continuous', event: 'Live-price backstop refresh every 15s', color: 'text-cyan', dot: 'bg-cyan' },
+            { time: 'every 5m', event: 'India price scan (NIFTY/SENSEX/BANKNIFTY/VIX + OHLCV) · narrative/macro intel refresh · breakout screener (NSE-open gated, +60s offset)', color: 'text-emerald-400', dot: 'bg-emerald-400' },
             { time: 'every 15m', event: 'Options chain refresh · Master Intelligence Cycle scoring (Path A) — scoring only, hard-blocked from executing', color: 'text-slate-400', dot: 'bg-slate-500' },
             { time: 'every 15m', event: 'Pre-Event Expectation Gap scan (Path D) — scans, entries only before 15:20 IST', color: 'text-purple-400', dot: 'bg-purple-400' },
             { time: 'every 30m', event: 'Momentum discovery scan — runs 24/7, not market-hours gated', color: 'text-slate-300', dot: 'bg-slate-400' },
