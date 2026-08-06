@@ -4418,7 +4418,23 @@ async def _pre_event_gap_scan_loop(min_days_until: int = 1, max_days_until: int 
                 extra=extra_meta,
                 target_2=levels["target_2"],
                 atr=levels["atr"],
-                confidence_factors={"score_breakdown": pred.score_breakdown, "source": TRADE_SOURCE},
+                confidence_factors={
+                    "score_breakdown": pred.score_breakdown,
+                    "source": TRADE_SOURCE,
+                    # Post-event reversal check (paper_trading/trade_simulator.py's
+                    # update_positions_with_current_prices) needs these to know
+                    # WHEN the event resolves and WHICH direction the thesis bet
+                    # on -- without this, a pre-event trade just rides the
+                    # generic SL/TP for however long, even after the event it
+                    # was betting on has already resolved the opposite way
+                    # (found 2026-08-06, EPACKPEB.NS: result reaction gapped
+                    # down against a POSITIVE nowcast, position held 6+ days
+                    # on the original stop before being asked about).
+                    "event_date": pred.event.event_date.isoformat(),
+                    "event_type": pred.event.event_type.value,
+                    "nowcast_direction": pred.nowcast.profit_direction.value,
+                    "nowcast_confidence": pred.nowcast.confidence,
+                },
             )
 
             result = await execute_trade_intent(intent, session)

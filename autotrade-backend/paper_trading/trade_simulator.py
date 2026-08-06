@@ -947,6 +947,62 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     logger.warning(f"update_positions: {pos.symbol} sector-exit close failed: {exc}")
                 continue
 
+        # ── Post-event reversal: tighten stop once the thesis has resolved ─────
+        # PRE_EVENT_EXPECTATION_GAP bets on a scheduled corporate event (results,
+        # etc.) not yet being priced in. Once that event's date has passed, the
+        # trade is no longer "pre-event" — it's resolved, and shouldn't keep
+        # riding its full original (wide) stop for days regardless of which way
+        # the market actually reacted. Found 2026-08-06, EPACKPEB.NS: nowcast
+        # said POSITIVE, results reaction gapped down ~7%, and the position sat
+        # on its original -7.8% stop for 6+ days before anyone noticed.
+        # Only ever TIGHTENS (same "never loosens" rule as the T1 trail below)
+        # and fires once per position (post_event_handled flag) — it doesn't
+        # force an immediate market exit at a single noisy tick, since the
+        # post-event reaction can itself whipsaw hard (EPACKPEB rallied back to
+        # within ₹4 of entry the very next session before fading again).
+        if pos.trade and pos.trade.strategy_name == "PRE_EVENT_EXPECTATION_GAP":
+            _pe_snap = pos.trade.indicator_snapshot or {}
+            _pe_cf   = _pe_snap.get("confidence_factors") or {}
+            _pe_tm   = _pe_snap.get("trade_mgmt") or {}
+            _event_date_str = _pe_cf.get("event_date")
+            _nowcast_dir    = _pe_cf.get("nowcast_direction")
+            if _event_date_str and _nowcast_dir and not _pe_tm.get("post_event_handled"):
+                from datetime import date as _date
+                try:
+                    _event_date = _date.fromisoformat(_event_date_str)
+                except ValueError:
+                    _event_date = None
+                # UTC->IST offset for the trading-day comparison (matches candle
+                # timestamp convention used elsewhere in this codebase).
+                _today_ist = (now + timedelta(hours=5, minutes=30)).date()
+                if _event_date and _today_ist > _event_date:
+                    _cur_pct = (
+                        (price - pos.entry_price) / pos.entry_price * 100.0 if is_buy
+                        else (pos.entry_price - price) / pos.entry_price * 100.0
+                    )
+                    _expected_up = _nowcast_dir == "POSITIVE"
+                    _adverse = (
+                        (is_buy and _expected_up and _cur_pct <= -3.0) or
+                        (not is_buy and not _expected_up and _cur_pct <= -3.0)
+                    )
+                    if _adverse:
+                        _room = abs(price - pos.stop_loss)
+                        _new_sl = (price - _room / 2) if is_buy else (price + _room / 2)
+                        _tightened = (
+                            (is_buy and _new_sl > pos.stop_loss) or
+                            (not is_buy and _new_sl < pos.stop_loss)
+                        )
+                        if _tightened:
+                            pos.stop_loss = round(_new_sl, 4)
+                            pos.trade.stop_loss = pos.stop_loss
+                        _pe_tm = {**_pe_tm, "post_event_handled": True}
+                        pos.trade.indicator_snapshot = {**_pe_snap, "trade_mgmt": _pe_tm}
+                        logger.warning(
+                            f"[pre_event_reversal] {pos.symbol}: event {_event_date_str} resolved "
+                            f"against nowcast ({_nowcast_dir}), {_cur_pct:.1f}% unrealised — "
+                            f"stop {'tightened to ₹' + format(pos.stop_loss, '.2f') if _tightened else 'already tighter, left unchanged'}"
+                        )
+
         # ── DIRECT_NEWS post-entry re-confirmation exit ─────────────────────────
         # DIRECT_NEWS has no LLM/technical step (see engine/direct_news_strategy.py
         # docstring) -- its only entry gates run ONCE, at entry
@@ -1114,9 +1170,13 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         )
 
         if hit_sl or hit_tp:
-            is_trailing = bool(tm.get("trailing")) if tm else False
-            reason = ("TRAIL_STOP" if hit_sl and is_trailing
-                      else "STOP_LOSS" if hit_sl else "TAKE_PROFIT")
+            is_trailing   = bool(tm.get("trailing")) if tm else False
+            is_post_event = bool(tm.get("post_event_handled")) if tm else False
+            reason = (
+                "TRAIL_STOP" if hit_sl and is_trailing
+                else "POST_EVENT_REVERSAL" if hit_sl and is_post_event
+                else "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
+            )
             try:
                 # SAVEPOINT: isolate this close so a deadlock/DB error here can't
                 # poison the shared session and silently break SL/TP monitoring
