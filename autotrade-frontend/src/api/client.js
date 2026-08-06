@@ -28,6 +28,18 @@ api.interceptors.response.use(
 
 // Fetch-compatible helper used by hooks/pages migrated off raw fetch().
 // Throws on non-2xx so callers can rely on a resolved value being valid JSON.
+//
+// Timeout (2026-08-06): plain fetch() has NO default timeout — if the
+// backend accepts the TCP connection but never responds (hung process, not
+// a clean connection-refused), this used to hang forever. Any caller doing
+// Promise.all([apiFetch(...), ...]).finally(() => setLoading(false)) would
+// then never leave its loading state, no matter how long the page waited —
+// confirmed live: Settings.jsx stuck on "Loading settings…" indefinitely
+// while the backend was unresponsive. The sibling `api` axios instance
+// above already had a 10s timeout; this brings apiFetch to the same
+// standard so no page depending on it can hang forever again.
+const DEFAULT_TIMEOUT_MS = 10000;
+
 export async function apiFetch(path, options = {}) {
   const url = (baseURL || '') + path;
   const token = getToken();
@@ -36,7 +48,22 @@ export async function apiFetch(path, options = {}) {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers || {}),
   };
-  const res = await fetch(url, { ...options, headers });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(url, { ...options, headers, signal: options.signal ?? controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      const timeoutErr = new Error(`Request timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms for ${path}`);
+      timeoutErr.status = 0;
+      timeoutErr.isTimeout = true;
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     const err = new Error(
