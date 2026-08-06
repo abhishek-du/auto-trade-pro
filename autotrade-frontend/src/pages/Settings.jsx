@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Save, Plus, X, Settings as SettingsIcon, AlertTriangle, TrendingUp, Shield } from 'lucide-react';
+import { Save, Plus, X, Settings as SettingsIcon, AlertTriangle, TrendingUp, Shield, Layers, Ban, Ghost } from 'lucide-react';
 import toast from 'react-hot-toast';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getSettings, saveSettings, apiFetch } from '../api/client';
@@ -194,6 +194,284 @@ function NseWatchlistEditor() {
   );
 }
 
+// ── Strategy toggles (UI-only — not wired to the backend) ───────────────────
+// Every strategy path documented in /pipeline and /documentation, with its
+// real current status. Toggle state lives entirely in the browser
+// (localStorage) — flipping a switch here does not call any API and does
+// not change what the live agent actually does. See STORAGE_KEY below.
+
+const STORAGE_KEY = 'prajna_strategy_toggles_v1';
+
+const STRATEGIES = [
+  {
+    id: 'news_strategy',
+    name: 'News Strategy (Event-Driven)',
+    desc: 'Clusters headlines into a canonical event, runs an LLM ReAct debate, trades on TAKE. The primary equity engine.',
+    status: 'LIVE',
+  },
+  {
+    id: 'pre_event_gap',
+    name: 'Pre-Event Expectation Gap',
+    desc: 'Nowcasts the likely surprise on scheduled corporate events (earnings, board meetings) 1–15 days out.',
+    status: 'LIVE',
+  },
+  {
+    id: 'direct_news',
+    name: 'Direct News',
+    desc: 'Trades directly off event classification — no LLM debate. Fires alongside News Strategy on the same event.',
+    status: 'LIVE',
+  },
+  {
+    id: 'fno_options',
+    name: 'F&O — Option Buying',
+    desc: 'Options buying off the symbol-aware options factor.',
+    status: 'LIVE',
+  },
+  {
+    id: 'fno_futures',
+    name: 'F&O — Futures',
+    desc: 'Futures execution with its own margin model.',
+    status: 'LIVE',
+  },
+  {
+    id: 'fno_hedge',
+    name: 'F&O — Hedging',
+    desc: 'Protective hedge overlay on open positions.',
+    status: 'LIVE',
+  },
+  {
+    id: 'fno_vol',
+    name: 'F&O — Volatility Strategies',
+    desc: 'Volatility-targeting option strategies (spreads/straddles).',
+    status: 'LIVE',
+  },
+  {
+    id: 'intraday_mis',
+    name: 'Intraday MIS',
+    desc: 'Same-day equity + index-option entries, scheduled 9:30am entry and 3:10pm square-off.',
+    status: 'LIVE',
+  },
+  {
+    id: 'shock_guard',
+    name: 'Market Shock Guard',
+    desc: 'Tightens or flattens open longs on a sudden index drop or high-severity news burst.',
+    status: 'LIVE',
+  },
+  {
+    id: 'ml_predictor',
+    name: 'ML Direction Predictor',
+    desc: 'Per-symbol LSTM 3-class (UP/DOWN/FLAT) prediction, ±15 nudge on the technical score.',
+    status: 'LIVE',
+  },
+  {
+    id: 'master_intel_cycle',
+    name: 'Master Intelligence Cycle (Path A)',
+    desc: 'Pure technical scan. Hard-blocked from opening trades by the News-Only architecture decision — scores only, feeds context to the live paths.',
+    status: 'BLOCKED',
+  },
+  {
+    id: 'india_trade_loop',
+    name: 'India Trade Loop (Path B)',
+    desc: 'Same News-Only hard-block as Path A — runs for instrumentation only, never executes.',
+    status: 'BLOCKED',
+  },
+  {
+    id: 'scan_paper_trader',
+    name: 'SCAN Paper Trader',
+    desc: 'A second, independent scanner-driven paper-trading loop referenced by a config flag with no code behind it yet.',
+    status: 'OFF',
+  },
+];
+
+const STATUS_META = {
+  LIVE:    { label: 'LIVE',    dot: 'bg-emerald-400', text: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/25' },
+  BLOCKED: { label: 'BLOCKED', dot: 'bg-amber-400',   text: 'text-amber-400',   bg: 'bg-amber-500/10',   border: 'border-amber-500/25' },
+  OFF:     { label: 'OFF',     dot: 'bg-slate-500',   text: 'text-slate-400',   bg: 'bg-slate-500/10',   border: 'border-slate-500/25' },
+};
+
+function loadToggleState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    const saved = raw ? JSON.parse(raw) : {};
+    const state = {};
+    for (const s of STRATEGIES) {
+      state[s.id] = s.id in saved ? Boolean(saved[s.id]) : s.status === 'LIVE';
+    }
+    return state;
+  } catch {
+    const state = {};
+    for (const s of STRATEGIES) state[s.id] = s.status === 'LIVE';
+    return state;
+  }
+}
+
+function StatusPill({ status }) {
+  const m = STATUS_META[status];
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full ${m.bg} ${m.text} border ${m.border} shrink-0`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${m.dot}`} />
+      {m.label}
+    </span>
+  );
+}
+
+function ToggleSwitch({ checked, onClick, disabled }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={onClick}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-cyan/50 disabled:opacity-40 disabled:cursor-not-allowed ${
+        checked ? 'bg-emerald-500' : 'bg-slate-700'
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+          checked ? 'translate-x-6' : 'translate-x-1'
+        }`}
+      />
+    </button>
+  );
+}
+
+function ConfirmToggleDialog({ strategy, nextState, onConfirm, onCancel }) {
+  if (!strategy) return null;
+  const turningOn = nextState;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={onCancel}>
+      <div
+        className="glass-panel border border-border rounded-xl max-w-md w-full p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-3">
+          <div className={`p-2 rounded-lg shrink-0 ${turningOn ? 'bg-emerald-500/15' : 'bg-red-500/15'}`}>
+            <AlertTriangle size={18} className={turningOn ? 'text-emerald-400' : 'text-red-400'} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-slate-100 font-semibold text-sm">
+              {turningOn ? 'Turn on' : 'Turn off'} "{strategy.name}"?
+            </p>
+            <p className="text-muted text-xs mt-1.5 leading-relaxed">{strategy.desc}</p>
+            {strategy.status === 'LIVE' && (
+              <p className="text-amber-400 text-[11px] mt-2 leading-relaxed">
+                This strategy is currently <strong>live</strong>. This switch is a local UI preference only —
+                it does not call the trading agent and does not change what it actually does.
+              </p>
+            )}
+            {strategy.status === 'BLOCKED' && (
+              <p className="text-amber-400 text-[11px] mt-2 leading-relaxed">
+                Blocked by the News-Only architecture decision, not a settings flag — this switch cannot
+                actually re-enable it.
+              </p>
+            )}
+            {strategy.status === 'OFF' && (
+              <p className="text-muted text-[11px] mt-2 leading-relaxed">
+                No code currently reads this flag — this switch has no effect either way.
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg text-sm font-medium text-muted hover:text-slate-200 hover:bg-white/5 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              turningOn
+                ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30'
+                : 'bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30'
+            }`}
+          >
+            Confirm {turningOn ? 'On' : 'Off'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StrategiesPanel() {
+  const [toggles,  setToggles]  = useState(loadToggleState);
+  const [pending,  setPending]  = useState(null); // strategy pending confirmation, or null
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toggles));
+  }, [toggles]);
+
+  const requestToggle = (strategy) => setPending(strategy);
+
+  const confirmToggle = () => {
+    if (!pending) return;
+    const next = !toggles[pending.id];
+    setToggles(t => ({ ...t, [pending.id]: next }));
+    toast.success(`${pending.name} turned ${next ? 'on' : 'off'} (local preference only)`);
+    setPending(null);
+  };
+
+  const groups = [
+    { key: 'LIVE',    label: 'Live',                 items: STRATEGIES.filter(s => s.status === 'LIVE') },
+    { key: 'BLOCKED', label: 'Blocked (architecture)', items: STRATEGIES.filter(s => s.status === 'BLOCKED') },
+    { key: 'OFF',     label: 'Off (no backend flag)',  items: STRATEGIES.filter(s => s.status === 'OFF') },
+  ];
+
+  return (
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
+        <Layers size={16} className="text-purple-400" />
+        <h2 className="text-slate-200 font-semibold text-sm">Strategies</h2>
+        <span className="text-muted text-xs">— every strategy path present in the code</span>
+      </div>
+
+      <div className="flex items-start gap-2.5 mx-5 mt-4 bg-blue-500/10 border border-blue-500/25 rounded-lg px-3 py-2.5">
+        <AlertTriangle size={13} className="text-blue-400 mt-0.5 shrink-0" />
+        <p className="text-blue-300 text-[11px] leading-relaxed">
+          These switches are a <strong>local display preference only</strong> — they are not wired to the
+          trading agent. Turning a live strategy off here does not stop it from trading.
+        </p>
+      </div>
+
+      <div className="px-5 py-2">
+        {groups.map(group => group.items.length > 0 && (
+          <div key={group.key} className="py-3">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted mb-2 flex items-center gap-1.5">
+              {group.key === 'BLOCKED' && <Ban size={11} />}
+              {group.key === 'OFF' && <Ghost size={11} />}
+              {group.label}
+            </p>
+            <div className="divide-y divide-border/50">
+              {group.items.map(s => (
+                <div key={s.id} className="flex items-center gap-3 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-slate-200 text-sm font-medium">{s.name}</p>
+                      <StatusPill status={s.status} />
+                    </div>
+                    <p className="text-muted text-[11px] mt-0.5 leading-snug">{s.desc}</p>
+                  </div>
+                  <ToggleSwitch checked={!!toggles[s.id]} onClick={() => requestToggle(s)} />
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <ConfirmToggleDialog
+        strategy={pending}
+        nextState={pending ? !toggles[pending.id] : false}
+        onConfirm={confirmToggle}
+        onCancel={() => setPending(null)}
+      />
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -240,8 +518,12 @@ export default function Settings() {
     }
   };
 
-  if (loading) return <LoadingSpinner message="Loading settings…" />;
-
+  // Strategies is a self-contained, localStorage-only panel with no backend
+  // dependency at all — it must never wait on the settings/agent-status
+  // fetch below. Rendered unconditionally, above the loading gate, so a
+  // slow or unresponsive backend (confirmed live 2026-08-06: apiFetch had
+  // no timeout and could hang the whole page forever, fixed in api/client.js)
+  // can no longer hide a section that never needed that data in the first place.
   return (
     <div className="space-y-6 max-w-2xl">
 
@@ -253,6 +535,14 @@ export default function Settings() {
           Changes take effect on the next agent cycle (within 60 s).
         </p>
       </div>
+
+      {/* Strategies — always visible, never blocked by the backend fetch below */}
+      <StrategiesPanel />
+
+      {loading ? (
+        <LoadingSpinner message="Loading settings…" />
+      ) : (
+        <>
 
       {/* Risk & Position Controls */}
       <div className="glass-panel border border-border rounded-xl overflow-hidden">
@@ -352,6 +642,9 @@ export default function Settings() {
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
       </div>
+
+        </>
+      )}
 
     </div>
   );
