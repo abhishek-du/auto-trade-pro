@@ -13,7 +13,6 @@ const PAGE_TITLES = {
   '/news':             'News Feed',
   '/simulation':       'Simulation',
   '/settings':         'Settings',
-  '/documentation':    'Documentation',
   '/india':            'India Overview',
   '/india/signals':    'NSE Signals',
   '/mutual-funds':     'Mutual Funds',
