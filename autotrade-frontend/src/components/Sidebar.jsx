@@ -78,7 +78,6 @@ export const SECTIONS = [
       { to: '/analytics',     label: 'Analytics',         Icon: BarChart2 },
       { to: '/simulation',    label: 'Simulation',        Icon: FlaskConical },
       { to: '/settings',      label: 'Settings',          Icon: Settings },
-      { to: '/documentation', label: 'Documentation',     Icon: BookOpenText },
     ],
   },
 ];

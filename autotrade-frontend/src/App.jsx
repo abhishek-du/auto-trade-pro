@@ -58,7 +58,6 @@ import News             from './pages/News';
 import NewsDecisions    from './pages/NewsDecisions';
 import Simulation       from './pages/Simulation';
 import Settings         from './pages/Settings';
-import Documentation    from './pages/Documentation';
 import IndiaMarket      from './pages/IndiaMarket';
 import IndiaSignals     from './pages/IndiaSignals';
 import FnO              from './pages/FnO';
@@ -150,7 +149,6 @@ function AppShell() {
               <Route path="/news-decisions" element={<NewsDecisions />}     />
               <Route path="/simulation"    element={<Simulation />}        />
               <Route path="/settings"      element={<Settings />}          />
-              <Route path="/documentation" element={<Documentation />}     />
               <Route path="/india"         element={<IndiaMarket />}       />
               <Route path="/india/signals" element={<IndiaSignals />}      />
               <Route path="/fno"           element={<FnO />}               />
