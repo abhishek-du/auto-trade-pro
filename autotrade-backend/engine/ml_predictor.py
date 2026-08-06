@@ -58,12 +58,14 @@ try:
     from keras.models import Sequential, load_model
     from keras.layers import LSTM, Dense, Dropout, BatchNormalization
     from keras.callbacks import EarlyStopping
+    from keras.optimizers import Adam
     _KERAS_AVAILABLE = True
 except ImportError:
     try:
         from tensorflow.keras.models import Sequential, load_model  # type: ignore
         from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization  # type: ignore
         from tensorflow.keras.callbacks import EarlyStopping  # type: ignore
+        from tensorflow.keras.optimizers import Adam  # type: ignore
         _KERAS_AVAILABLE = True
     except ImportError:
         pass
@@ -163,7 +165,18 @@ def _compute_raw_features(df: pd.DataFrame, indicators=None) -> np.ndarray:
     vol_ratio_ch = volume_ratio.pct_change().fillna(0).clip(-5, 5)
 
     # Momentum
-    rsi_norm        = _rsi(close) / 100.0
+    # .fillna(0.5) (2026-08-06): _rsi()'s very first row is always NaN --
+    # close.diff() has nothing to diff row 0 against, and .ewm().mean() has
+    # nothing to skip-forward from for that lone leading NaN, so gain/loss
+    # (hence rsi) start NaN. Every OTHER raw feature in this function already
+    # has a .fillna(...) guard -- this was the one left uncovered. Found
+    # 2026-08-06: a SINGLE NaN row anywhere in the training set is enough to
+    # poison an entire LSTM training run via Adam's moment accumulators (not
+    # just the batch containing it) -- all 33 previously-trained models had
+    # 100% NaN weights traced back to exactly this. 0.5 = RSI 50, the neutral
+    # reading, matching the "no signal yet" semantics of the other defaults
+    # below (ema ratios -> 1, macd/atr -> 0).
+    rsi_norm        = (_rsi(close) / 100.0).fillna(0.5)
     macd_line, macd_sig = _macd(close)
     macd_norm       = (macd_line    / (close + 1e-10)).fillna(0)
     macd_sig_norm   = (macd_sig     / (close + 1e-10)).fillna(0)
@@ -174,7 +187,10 @@ def _compute_raw_features(df: pd.DataFrame, indicators=None) -> np.ndarray:
     bb_upper = bb_sma + 2 * bb_std
     bb_lower = bb_sma - 2 * bb_std
     bb_width = (bb_upper - bb_lower).clip(lower=1e-10)
-    bb_pos   = ((close - bb_lower) / bb_width).clip(0, 1)
+    # Same NaN source as rsi_norm above: row 0 needs 2 periods (min_periods=2)
+    # but only has 1, so bb_sma/bb_upper/bb_lower/bb_width are all NaN there.
+    # 0.5 = price at the middle band, the neutral %B reading.
+    bb_pos   = ((close - bb_lower) / bb_width).clip(0, 1).fillna(0.5)
 
     # ATR
     atr_norm = (_atr(df) / (close + 1e-10)).fillna(0).clip(0, 0.2)
@@ -292,8 +308,19 @@ def build_lstm_model(input_shape: tuple):
         Dense(16, activation="relu"),
         Dense(3, activation="softmax"),     # DOWN, FLAT, UP
     ])
+    # clipnorm=1.0 (2026-08-06): found ALL 33 previously-trained models had
+    # 100% NaN weights -- every single one, going back at least to 2026-07-26,
+    # confirmed via direct weight inspection (np.isnan on every array in
+    # model.get_weights()). Plain "adam" with no gradient clipping is a known
+    # LSTM failure mode: one batch with an extreme feature value (this model's
+    # raw features include unbounded ratios like ema200_ratio) can blow the
+    # gradient up, Adam's moment estimates then propagate NaN into every
+    # subsequent update, and EarlyStopping's restore_best_weights can't save
+    # you if the very first epoch is already NaN -- there's no valid "best" to
+    # restore to. Norm-clipping the gradient before the Adam step is the
+    # standard fix for this exact failure mode.
     model.compile(
-        optimizer="adam",
+        optimizer=Adam(clipnorm=1.0),
         loss="categorical_crossentropy",
         metrics=["accuracy"],
     )
@@ -369,6 +396,18 @@ def train_model(symbol: str, df: pd.DataFrame) -> dict:
             callbacks=[es],
             verbose=0,
         )
+
+        # Save-time NaN guard (2026-08-06): the clipnorm fix on build_lstm_model
+        # above should prevent this, but never trust one fix alone to keep a
+        # whole model zoo healthy -- this is the last line of defense so a
+        # future bad batch/run can corrupt at most the SYMBOL currently
+        # training, not silently overwrite a previously-good model file with
+        # garbage. All 33 pre-fix models were 100% NaN and nothing had ever
+        # caught it before this.
+        if any(np.isnan(w).any() for w in model.get_weights()):
+            msg = "training produced NaN weights -- refusing to save, previous model file (if any) left untouched"
+            logger.warning(f"[train_model] {symbol}: {msg}")
+            return {"symbol": symbol, "error": msg}
 
         model_path = _MODEL_DIR / f"{symbol}_lstm.h5"
         model.save(str(model_path))
@@ -782,14 +821,20 @@ def _build_rf_features(
     vol   = df["volume"]
 
     # ── Technical (14) ───────────────────────────────────────────────────────
-    rsi_s    = _rsi(close) / 100.0
+    # .fillna(0.5) on rsi_s/bb_pos: same leading-NaN-row footgun as
+    # prepare_features() above (see its comment) -- row 0 of _rsi() and of a
+    # min_periods=2 rolling window are always NaN, and this feature matrix
+    # isn't currently RF-trained on (0 *_rf.pkl files exist yet), but fixing
+    # it now so RF training doesn't inherit the exact bug that corrupted all
+    # 33 LSTM models.
+    rsi_s    = (_rsi(close) / 100.0).fillna(0.5)
     ml, ms_  = _macd(close)
     mh       = ml - ms_
     macd_n   = (ml / (close + 1e-10)).fillna(0)
     mh_n     = (mh / (close + 1e-10)).fillna(0)
     bb_sma   = close.rolling(20, min_periods=2).mean()
     bb_std   = close.rolling(20, min_periods=2).std().fillna(0)
-    bb_pos   = ((close - (bb_sma - 2*bb_std)) / (4*bb_std + 1e-10)).clip(0, 1)
+    bb_pos   = ((close - (bb_sma - 2*bb_std)) / (4*bb_std + 1e-10)).clip(0, 1).fillna(0.5)
     atr_n    = (_atr(df) / (close + 1e-10)).fillna(0).clip(0, 0.2)
     sk, sd   = _stochastic(df)
     adx_v, pdi, ndi = _adx_indicators(df)
