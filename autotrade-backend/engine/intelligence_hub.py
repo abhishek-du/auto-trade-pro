@@ -990,6 +990,25 @@ def _score_symbol_sync(
         # available (market hours); zero outside hours.
         _intraday_adj, _intraday_info = _intraday_overlay(df_1m)
         technical_score = max(-100.0, min(100.0, technical_score + _intraday_adj))
+
+    # ML direction overlay (2026-08-06): 18-feature LSTM + Random Forest
+    # consensus, ±15 nudge on technical_score -- same additive pattern as the
+    # intraday overlay above. Found ENABLE_ML_PREDICTIONS=True alone doesn't
+    # make this live: get_combined_ml_score() existed but had zero call sites
+    # anywhere in the scoring path (confirmed via full-repo grep) -- this is
+    # the missing wire-up. Safe to call unconditionally: it self-gates to 0.0
+    # when the flag is off or no trained model exists for this symbol (only
+    # 33/~3000 hub symbols have one as of 2026-08-06), and any internal
+    # prediction error already falls back to a neutral 0.0 inside ml_predictor.
+    try:
+        from engine.ml_predictor import get_combined_ml_score
+        _ml_adj = get_combined_ml_score(symbol, df)
+    except Exception as exc:
+        logger.debug(f"[hub/ml] {symbol}: ml overlay failed: {exc}")
+        _ml_adj = 0.0
+    if _ml_adj:
+        technical_score = max(-100.0, min(100.0, technical_score + _ml_adj))
+
     try:
         features = analyzer.compute_features(df)
         regime = features.regime
