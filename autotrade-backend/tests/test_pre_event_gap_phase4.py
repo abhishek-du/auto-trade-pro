@@ -87,6 +87,88 @@ class TestScoring:
         assert no_anchor.data_quality_score < full.data_quality_score
 
 
+class TestEvidenceRecentering:
+    """P2-5 (2026-08-17 forensic post-mortem): the 0.5-centered subscores must
+    contribute 0 — not half their factor — when they carry no information.
+
+    Before this, the weakest candidate that could reach the LONG branch scored
+    67.81 against a LONG_SCORE_BAR of 60, and the MINIMUM score across all 224
+    executed trades was 62.3: the bar rejected nothing at all.
+    """
+
+    def _weakest_long_candidate(self):
+        """Barely-positive gap, weakest sector confidence, not overextended —
+        i.e. structurally eligible but carrying essentially no evidence."""
+        return compute_score(
+            _nc(conf=0.06, implied=0.0, baseline=0.0),
+            _exp(gap=0.001),
+            _pd(PriceDiscountStatus.NOT_DISCOUNTED),
+            RelativeStrength(vs_nifty=0.0, vs_sector=0.0, score=0.0),
+            regime_score=0.7,
+        )
+
+    def test_zero_evidence_candidate_falls_below_the_long_bar(self):
+        b = self._weakest_long_candidate()
+        assert b.total < LONG_SCORE_BAR, (
+            f"a no-evidence candidate scored {b.total}, still clearing the "
+            f"{LONG_SCORE_BAR} bar — the bar is decorative again")
+
+    def test_neutral_reads_contribute_nothing(self):
+        """A dead-neutral nowcast/gap/relative must add 0, not half."""
+        b = compute_score(
+            _nc(profit=Direction.NEUTRAL, conf=0.0),
+            _exp(gap=0.0),
+            _pd(PriceDiscountStatus.NOT_DISCOUNTED),
+            RelativeStrength(vs_nifty=0.0, vs_sector=0.0, score=0.0),
+            regime_score=0.7,
+        )
+        assert b.components["nowcast"] == 0.0
+        assert b.components["gap"] == 0.0
+        assert b.components["relative"] == 0.0
+
+    def test_contrary_evidence_clamps_to_zero_not_negative(self):
+        """Readings below neutral are already NO_TRADE at the direction gate;
+        they must not earn partial credit here, nor go negative."""
+        b = compute_score(
+            _nc(profit=Direction.NEGATIVE, conf=0.4),
+            _exp(gap=-0.20),
+            _pd(PriceDiscountStatus.NOT_DISCOUNTED),
+            RelativeStrength(vs_nifty=0.0, vs_sector=0.0, score=-0.8),
+            regime_score=0.7,
+        )
+        for k in ("nowcast", "gap", "relative"):
+            assert b.components[k] == 0.0, f"{k} = {b.components[k]}"
+
+    def test_stronger_evidence_still_scores_strictly_higher(self):
+        """Re-centering must preserve ordering — it rescales, not flattens."""
+        weak = compute_score(_nc(conf=0.10), _exp(gap=0.02), _pd(), _rs(score=0.0), 0.7)
+        strong = compute_score(_nc(conf=0.10), _exp(gap=0.20), _pd(), _rs(score=0.6), 0.7)
+        assert strong.total > weak.total
+
+    def test_raw_subscores_are_still_reported_uncentered(self):
+        """The audit trail / UI explain from the raw 0.5-centered values, and
+        they must stay comparable to historical rows — only the CONTRIBUTION
+        is re-centered."""
+        b = compute_score(
+            _nc(profit=Direction.NEUTRAL, conf=0.0), _exp(gap=0.0), _pd(),
+            RelativeStrength(vs_nifty=0.0, vs_sector=0.0, score=0.0), 0.7)
+        assert b.subscores["nowcast"] == 0.5     # raw, unchanged
+        assert b.components["nowcast"] == 0.0    # contribution, re-centered
+
+    def test_sector_confidence_bias_is_reduced(self):
+        """nc.confidence is a per-sector constant (0.06 Banking … 0.24 IT), so
+        identical evidence used to score ~8.4 points apart purely by sector.
+        Re-centering can't remove that entirely (confidence IS the nowcast
+        magnitude) but must materially shrink it."""
+        common = dict(expectation=_exp(gap=0.10), price_discount=_pd(),
+                      relative_strength=RelativeStrength(vs_nifty=0.0, vs_sector=0.0, score=0.0),
+                      regime_score=0.7)
+        banking = compute_score(nowcast=_nc(conf=0.06), **common)
+        it      = compute_score(nowcast=_nc(conf=0.24), **common)
+        spread = it.total - banking.total
+        assert 0 < spread < 8.44, f"sector spread {spread:.2f} not reduced from 8.44"
+
+
 # ── Decision gates (pure) ────────────────────────────────────────────────────
 
 def _score(total=70.0, dq=1.0):

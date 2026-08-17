@@ -53,7 +53,55 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+# ── Evidence re-centering (P2-5, 2026-08-17 forensic post-mortem) ────────────
+# Three subscores below are SIGNED reads centered on 0.5: nowcast, gap and
+# relative each return 0.5 for "no information" and move up/down from there.
+# Feeding that 0.5 straight into a weighted sum meant a completely
+# uninformative read still earned HALF its factor's points, so the composite
+# was mostly a constant. Measured consequences on the live book:
+#
+#   * The weakest candidate that can even reach the LONG branch scored 67.81
+#     against a LONG_SCORE_BAR of 60 — the bar was unreachable from below.
+#   * Across all 224 executed trades the MINIMUM score was 62.3. The bar
+#     rejected nothing; it was decorative.
+#   * Only ~15 of those ~68 points were evidence-sensitive; the rest were
+#     floors and constants.
+#   * Worse, nowcast's own movement off 0.5 is scaled by nc.confidence, which
+#     is a per-SECTOR constant (8 distinct values across 199 trades, 1:1 with
+#     sector — 0.06 Banking … 0.24 IT). So an IT candidate outscored a Banking
+#     candidate on identical evidence: a sector label laundered into 25% of
+#     the score.
+#
+# _evidence_above_neutral() rescales a 0.5-centered read onto [0, 1] measuring
+# only evidence ABOVE neutral, so "no information" contributes 0 rather than
+# half. Readings BELOW neutral (i.e. contrary evidence) clamp to 0 — they are
+# already handled as NO_TRADE by decision.py's direction gates, so they must
+# not also earn partial credit here.
+#
+# The raw 0.5-centered subscores are still reported in ScoreBreakdown.subscores
+# for auditability; only their CONTRIBUTION to the total is re-centered.
+_NEUTRAL_CENTERED = ("nowcast", "gap", "relative")
+
+
+def _evidence_above_neutral(subscore: float, neutral: float = 0.5) -> float:
+    """Map a `neutral`-centered [0,1] read onto [0,1] evidence-above-neutral."""
+    if neutral >= 1.0:
+        return 0.0
+    return _clamp01((subscore - neutral) / (1.0 - neutral))
+
+
 def _nowcast_subscore(nc: NowcastResult) -> float:
+    """Directional read on the pending period, 0.5-centered.
+
+    NOTE (P2-5): the magnitude here is nc.confidence, which is a per-sector
+    constant, NOT per-trade conviction — see the _evidence_above_neutral()
+    block above. It is deliberately left as the adapter reports it so the
+    raw value stays auditable and comparable to historical rows; the
+    re-centering in compute_score() is what stops it from contributing a
+    sector-shaped floor to the total. Per-trade magnitude for this factor
+    would need `implied_profit_growth`, which already drives the `gap`
+    subscore — using it here too would double-count the same evidence.
+    """
     if nc.status != NowcastStatus.OK:
         return 0.0
     dir_val = {Direction.POSITIVE: 1.0, Direction.NEGATIVE: -1.0, Direction.NEUTRAL: 0.0}[nc.profit_direction]
@@ -106,11 +154,21 @@ def compute_score(
         "regime":       _clamp01(regime_score),
         "data_quality": _data_quality(nowcast, expectation, price_discount),
     }
-    contributions = {k: round(WEIGHTS[k] * subs[k] * 100, 2) for k in WEIGHTS}
+    # Re-center the 0.5-centered reads so "no information" contributes 0 rather
+    # than half the factor (P2-5 — see _evidence_above_neutral above). The other
+    # three are already natural 0-1 magnitudes, not signed reads, so they pass
+    # through unchanged.
+    effective = {
+        k: (_evidence_above_neutral(v) if k in _NEUTRAL_CENTERED else v)
+        for k, v in subs.items()
+    }
+    contributions = {k: round(WEIGHTS[k] * effective[k] * 100, 2) for k in WEIGHTS}
     total = round(sum(contributions.values()), 2)
     return ScoreBreakdown(
         total=total,
         data_quality_score=subs["data_quality"],
         components=contributions,
+        # Raw, un-recentered subscores — these stay comparable to historical
+        # rows and are what the audit trail / UI explain from.
         subscores={k: round(v, 3) for k, v in subs.items()},
     )
