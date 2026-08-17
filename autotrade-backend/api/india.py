@@ -1216,35 +1216,34 @@ async def refresh_fundamentals(
     summary="Rich company profile: description, employees, website, industry",
 )
 async def get_company_profile(symbol: str):
-    """Returns yfinance longBusinessSummary, website, employees, industry etc.
+    """Returns company profile and sector info using Upstox API.
     Used by the StockDetail Company tab."""
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    ns_sym = sym + ".NS"
-    try:
-        import asyncio
-        import yfinance as yf
-        info = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: yf.Ticker(ns_sym).info
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"yfinance failed for {sym}: {exc}")
-
-    if not info:
+    
+    from crawler.upstox_data import get_company_profile as upstox_profile, get_isin
+    
+    prof = await upstox_profile(sym)
+    if not prof:
         raise HTTPException(status_code=404, detail=f"No info for {sym}")
-
+        
+    mcap_crores = prof.get("sector_market_cap_inr", {}).get("value", 0)
+    mcap = int(mcap_crores * 10000000) if mcap_crores else None
+    
+    isin = await get_isin(sym) or ""
+    
     return {
         "symbol":       sym,
-        "company_name": info.get("longName") or info.get("shortName", sym),
-        "description":  info.get("longBusinessSummary", ""),
-        "industry":     info.get("industry", ""),
-        "sector":       info.get("sector", ""),
-        "website":      info.get("website", ""),
-        "employees":    info.get("fullTimeEmployees"),
-        "country":      info.get("country", "India"),
-        "city":         info.get("city", ""),
-        "exchange":     info.get("exchange", "NSE"),
-        "market_cap":   info.get("marketCap"),
-        "isin":         info.get("isin", ""),
+        "company_name": sym, # Upstox doesn't provide long name in profile endpoint
+        "description":  prof.get("company_profile", ""),
+        "industry":     prof.get("sector", ""),
+        "sector":       prof.get("sector", ""),
+        "website":      "",
+        "employees":    None,
+        "country":      "India",
+        "city":         "",
+        "exchange":     "NSE",
+        "market_cap":   mcap,
+        "isin":         isin,
     }
 
 
@@ -1253,48 +1252,38 @@ async def get_company_profile(symbol: str):
     summary="Annual income statement and balance sheet from yfinance",
 )
 async def get_financials(symbol: str):
-    """Returns last 4 years of P&L and balance sheet in ₹ Crores.
+    """Returns Annual income statement, balance sheet, and cashflow from Upstox.
     Used by the StockDetail Financials tab."""
-    import asyncio
-    import math
-
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    ns_sym = sym + ".NS"
 
-    def _fetch():
-        import yfinance as yf
-        t = yf.Ticker(ns_sym)
-        return t.income_stmt, t.balance_sheet, t.cashflow
-
-    try:
-        income_df, balance_df, cashflow_df = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"yfinance financials failed for {sym}: {exc}")
-
-    def _df_to_rows(df, max_years=4) -> dict:
-        if df is None or df.empty:
+    from crawler.upstox_data import get_income_statement, get_balance_sheet, get_cash_flow
+    
+    inc = await get_income_statement(sym)
+    bal = await get_balance_sheet(sym)
+    cf = await get_cash_flow(sym)
+    
+    def _convert(stmt_data):
+        if not stmt_data or "full_statement" not in stmt_data:
             return {}
         out = {}
-        for col in list(df.columns)[:max_years]:
-            year = str(col)[:10]
-            out[year] = {}
-            for idx in df.index:
-                val = df.loc[idx, col]
-                if val is not None and not (isinstance(val, float) and math.isnan(val)):
-                    # Convert from absolute INR to Crores (÷ 1e7)
-                    try:
-                        out[year][str(idx)] = round(float(val) / 1e7, 2)
-                    except Exception:
-                        pass
+        for row in stmt_data["full_statement"]:
+            part = row.get("particular", "")
+            for h in row.get("history", []):
+                period = h.get("period", "")
+                val = h.get("value")
+                if period not in out:
+                    out[period] = {}
+                if val is not None:
+                    out[period][part] = val
         return out
-
+        
     return {
         "symbol":       sym,
         "currency":     "INR",
         "unit":         "₹ Crores",
-        "income_stmt":  _df_to_rows(income_df),
-        "balance_sheet": _df_to_rows(balance_df),
-        "cashflow":     _df_to_rows(cashflow_df),
+        "income_stmt":  _convert(inc),
+        "balance_sheet": _convert(bal),
+        "cashflow":     _convert(cf),
     }
 
 
@@ -1935,6 +1924,11 @@ async def get_live_price_symbol(symbol: str):
     result = await fetch_prices_batch([symbol])
     if symbol in result:
         PRICE_CACHE[symbol] = result[symbol]
+        # Keeps this on-demand symbol alive in the 15s refresh loop while it's
+        # still being looked at; the loop prunes it once nobody asks for a few
+        # hours (see live_prices._DYNAMIC_SYMBOL_TTL).
+        from crawler.live_prices import touch_dynamic_symbol
+        touch_dynamic_symbol(symbol)
         return result[symbol]
     raise HTTPException(status_code=404, detail=f"Symbol {symbol!r} not found")
 
@@ -3239,3 +3233,25 @@ async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
         "news_mood": news_mood,
         "generated_at": __import__("datetime").datetime.utcnow().isoformat(),
     }
+
+@router.get("/key-ratios/{symbol}", summary="Key financial ratios from Upstox")
+async def get_key_ratios_api(symbol: str):
+    """Returns key financial ratios for the symbol from Upstox."""
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    from crawler.upstox_data import get_key_ratios
+    try:
+        ratios = await get_key_ratios(sym)
+        return {"symbol": sym, "data": ratios}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch key ratios: {e}")
+
+@router.get("/corporate-actions/{symbol}", summary="Corporate actions from Upstox")
+async def get_corporate_actions_api(symbol: str):
+    """Returns corporate actions (dividends, splits, etc) for the symbol from Upstox."""
+    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
+    from crawler.upstox_data import get_corporate_actions
+    try:
+        actions = await get_corporate_actions(sym)
+        return {"symbol": sym, "data": actions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch corporate actions: {e}")

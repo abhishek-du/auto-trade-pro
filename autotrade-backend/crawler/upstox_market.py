@@ -28,6 +28,44 @@ async def get_market_quote(symbol: str) -> dict:
         logger.error(f"[upstox/market_quote] Failed for {symbol}: {e}")
     return {}
 
+async def get_market_quote_batch(symbols: list[str]) -> dict[str, dict]:
+    """Fetch live quotes for multiple symbols at once."""
+    if not symbols or not await ensure_upstox_token_fresh():
+        return {}
+        
+    ikeys = []
+    key_to_sym = {}
+    for sym in symbols:
+        ik = await get_instrument_key(sym)
+        if ik:
+            ikeys.append(ik)
+            key_to_sym[ik] = sym
+            
+    if not ikeys:
+        return {}
+        
+    results = {}
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            # Upstox recommends max 500 instrument keys per request
+            for i in range(0, len(ikeys), 500):
+                batch_keys = ikeys[i:i+500]
+                r = await c.get(
+                    f"{_V2}/market-quote/quotes",
+                    headers=_headers(),
+                    params={"instrument_key": ",".join(batch_keys)},
+                )
+                if r.status_code == 200:
+                    data = r.json().get("data", {})
+                    for ik, quote in data.items():
+                        sym = key_to_sym.get(ik)
+                        if sym:
+                            results[sym] = quote
+    except Exception as e:
+        logger.error(f"[upstox/market_quote_batch] Failed: {e}")
+        
+    return results
+
 async def get_ltp(symbol: str) -> float | None:
     """Fetch live LTP for a symbol."""
     if not await ensure_upstox_token_fresh():

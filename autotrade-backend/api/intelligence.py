@@ -297,7 +297,7 @@ def _build_factor_explanations(components: dict, reasoning: dict) -> dict:
     if fw == 0:
         fund_detail = (
             "Fundamental score not yet cached for this stock. "
-            "The Hub scores ~2,000 NSE stocks weekly using yfinance + Screener data "
+            "The Hub scores ~2,000 NSE stocks weekly using Upstox + Screener data "
             "(ROE, ROCE, D/E, current ratio, revenue growth, promoter holding, earnings quality). "
             "First-time additions and infrequently traded stocks may not yet have a cached score."
         )

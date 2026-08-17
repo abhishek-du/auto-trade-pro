@@ -252,70 +252,138 @@ def _get_market_status() -> str:
 # ── Price fetch (fast, 15-second cycle) ───────────────────────────────────────
 
 async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
-    """Fetch latest prices for a list of symbols using yfinance fast_info.
-    Merges INFO_CACHE fundamentals and computes derived ratio fields.
-    """
+    """Fetch latest prices for a list of symbols using Kite -> Upstox -> yfinance."""
     loop = asyncio.get_event_loop()
 
-    def _fetch_sync() -> dict[str, dict]:
+    def _fetch_kite() -> dict[str, dict]:
+        from utils.config import settings as _s
+        import crawler.zerodha_kite_lib as _zkl
         results: dict[str, dict] = {}
+        
+        if getattr(_s, "ZERODHA_ENABLED", False) and getattr(_s, "ZERODHA_ACCESS_TOKEN", ""):
+            kite_symbols = []
+            sym_map = {}
+            for sym in symbols:
+                if sym == "^NSEI": k_sym = "NSE:NIFTY 50"
+                elif sym == "^NSEBANK": k_sym = "NSE:NIFTY BANK"
+                elif sym.endswith(".NS"): k_sym = f"NSE:{sym[:-3]}"
+                elif sym.endswith(".BO"): k_sym = f"BSE:{sym[:-3]}"
+                else: k_sym = f"NSE:{sym}"
+                kite_symbols.append(k_sym)
+                sym_map[k_sym] = sym
+                
+            try:
+                quotes = {}
+                for i in range(0, len(kite_symbols), 500):
+                    batch = kite_symbols[i:i+500]
+                    q = _zkl.get_quote(batch)
+                    if q: quotes.update(q)
+                        
+                for k_sym, q in quotes.items():
+                    sym = sym_map.get(k_sym)
+                    if not sym or not q: continue
+                    last_price = float(q.get("last_price", 0) or 0)
+                    if last_price == 0: continue
+                    
+                    prev_close = float(q.get("ohlc", {}).get("close", 0) or 0)
+                    open_price = float(q.get("ohlc", {}).get("open", 0) or 0)
+                    day_high   = float(q.get("ohlc", {}).get("high", 0) or 0)
+                    day_low    = float(q.get("ohlc", {}).get("low", 0) or 0)
+                    volume     = int(q.get("volume", 0) or 0)
+                    
+                    change     = last_price - prev_close if prev_close else 0.0
+                    change_pct = (change / prev_close * 100) if prev_close else 0.0
+                    
+                    info_data  = INFO_CACHE.get(sym, {})
+                    avg_vol_3m = info_data.get("three_month_average_volume", 0)
+                    avg_vol_10 = info_data.get("avg_volume_10d") or (avg_vol_3m or None)
+                    vol_ratio  = round(volume / avg_vol_10, 2) if avg_vol_10 and avg_vol_10 > 0 and volume > 0 else None
+                    day_range_pct = round((day_high - day_low) / prev_close * 100, 2) if prev_close > 0 and day_high > 0 and day_low > 0 else None
+                    
+                    prev = PRICE_CACHE.get(sym, {})
+                    w52_high = float(info_data.get("fifty_two_week_high", prev.get("52w_high", 0)) or 0)
+                    w52_low  = float(info_data.get("fifty_two_week_low", prev.get("52w_low", 0)) or 0)
+                    
+                    from_52w_high = round((w52_high - last_price) / w52_high * 100, 2) if w52_high > 0 else None
+                    from_52w_low = round((last_price - w52_low) / w52_low * 100, 2) if w52_low > 0 else None
+
+                    meta = _SYMBOL_META.get(sym, {})
+                    results[sym] = {
+                        "symbol":         sym,
+                        "name":           meta.get("name", sym),
+                        "type":           meta.get("type", "stock"),
+                        "price":          round(last_price, 2),
+                        "change":         round(change, 2),
+                        "change_pct":     round(change_pct, 2),
+                        "open":           round(open_price, 2),
+                        "high":           round(day_high, 2),
+                        "low":            round(day_low, 2),
+                        "prev_close":     round(prev_close, 2),
+                        "volume":         volume,
+                        "52w_high":       round(w52_high, 2),
+                        "52w_low":        round(w52_low, 2),
+                        "avg_volume_10d":  avg_vol_10,
+                        "volume_ratio":    vol_ratio,
+                        "day_range_pct":   day_range_pct,
+                        "from_52w_high":   from_52w_high,
+                        "from_52w_low":    from_52w_low,
+                        "price_vs_ema20":  None,
+                        "market_cap":      info_data.get("market_cap"),
+                        "pe_ratio":        info_data.get("pe_ratio"),
+                        "pb_ratio":        info_data.get("pb_ratio"),
+                        "dividend_yield":  info_data.get("dividend_yield"),
+                        "beta":            info_data.get("beta"),
+                        "sector":          info_data.get("sector") or SECTOR_MAP.get(sym),
+                        "signal":             prev.get("signal"),
+                        "signal_confidence":  prev.get("signal_confidence"),
+                        "last_updated":   datetime.datetime.now(_IST).isoformat(),
+                        "market_status":  _get_market_status(),
+                    }
+            except Exception as exc:
+                logger.warning(f"[live_prices] Zerodha batch fetch failed: {exc}")
+        return results
+
+    def _fetch_yf(missing_symbols: list[str]) -> dict[str, dict]:
+        results = {}
         try:
-            tickers = yf.Tickers(" ".join(symbols))
+            tickers = yf.Tickers(" ".join(missing_symbols))
         except Exception as exc:
             logger.warning(f"[live_prices] yf.Tickers init failed: {exc}")
             return results
 
-        for sym in symbols:
+        rate_limited = False
+        for sym in missing_symbols:
             try:
                 t = tickers.tickers.get(sym)
-                if t is None:
-                    continue
+                if t is None: continue
+                time.sleep(0.05)
                 fi = t.fast_info
 
-                last_price  = float(getattr(fi, "last_price",              0) or 0)
-                prev_close  = float(getattr(fi, "previous_close",          0) or 0)
-                open_price  = float(getattr(fi, "open",                    0) or 0)
-                day_high    = float(getattr(fi, "day_high",                0) or 0)
-                day_low     = float(getattr(fi, "day_low",                 0) or 0)
-                w52_high    = float(getattr(fi, "fifty_two_week_high",     0) or 0)
-                w52_low     = float(getattr(fi, "fifty_two_week_low",      0) or 0)
-                volume      = int(getattr(fi,   "last_volume",             0) or 0)
-                avg_vol_3m  = int(getattr(fi,   "three_month_average_volume", 0) or 0)
-
-                if last_price == 0:
-                    continue
-
+                last_price  = float(getattr(fi, "last_price", 0) or 0)
+                if last_price == 0: continue
+                
+                prev_close  = float(getattr(fi, "previous_close", 0) or 0)
+                open_price  = float(getattr(fi, "open", 0) or 0)
+                day_high    = float(getattr(fi, "day_high", 0) or 0)
+                day_low     = float(getattr(fi, "day_low", 0) or 0)
+                w52_high    = float(getattr(fi, "fifty_two_week_high", 0) or 0)
+                w52_low     = float(getattr(fi, "fifty_two_week_low", 0) or 0)
+                volume      = int(getattr(fi, "last_volume", 0) or 0)
+                
                 change     = last_price - prev_close if prev_close else 0.0
                 change_pct = (change / prev_close * 100) if prev_close else 0.0
 
-                # ── Derived ratio fields ──────────────────────────────────────
                 info_data  = INFO_CACHE.get(sym, {})
+                avg_vol_3m = int(getattr(fi, "three_month_average_volume", 0) or 0)
                 avg_vol_10 = info_data.get("avg_volume_10d") or (avg_vol_3m or None)
-                vol_ratio  = (
-                    round(volume / avg_vol_10, 2)
-                    if avg_vol_10 and avg_vol_10 > 0 and volume > 0
-                    else None
-                )
-                day_range_pct = (
-                    round((day_high - day_low) / prev_close * 100, 2)
-                    if prev_close > 0 and day_high > 0 and day_low > 0
-                    else None
-                )
-                from_52w_high = (
-                    round((w52_high - last_price) / w52_high * 100, 2)
-                    if w52_high > 0
-                    else None
-                )
-                from_52w_low = (
-                    round((last_price - w52_low) / w52_low * 100, 2)
-                    if w52_low > 0
-                    else None
-                )
-
-                # Preserve existing signal data across price refreshes
-                prev = PRICE_CACHE.get(sym, {})
+                vol_ratio  = round(volume / avg_vol_10, 2) if avg_vol_10 and avg_vol_10 > 0 and volume > 0 else None
+                day_range_pct = round((day_high - day_low) / prev_close * 100, 2) if prev_close > 0 and day_high > 0 and day_low > 0 else None
+                
+                from_52w_high = round((w52_high - last_price) / w52_high * 100, 2) if w52_high > 0 else None
+                from_52w_low = round((last_price - w52_low) / w52_low * 100, 2) if w52_low > 0 else None
 
                 meta = _SYMBOL_META.get(sym, {})
+                prev = PRICE_CACHE.get(sym, {})
                 results[sym] = {
                     "symbol":         sym,
                     "name":           meta.get("name", sym),
@@ -330,45 +398,181 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
                     "volume":         volume,
                     "52w_high":       round(w52_high, 2),
                     "52w_low":        round(w52_low, 2),
-                    # ── enriched fields ───────────────────────────────────────
                     "avg_volume_10d":  avg_vol_10,
                     "volume_ratio":    vol_ratio,
                     "day_range_pct":   day_range_pct,
                     "from_52w_high":   from_52w_high,
                     "from_52w_low":    from_52w_low,
-                    "price_vs_ema20":  None,  # requires historical data
+                    "price_vs_ema20":  None,
                     "market_cap":      info_data.get("market_cap"),
                     "pe_ratio":        info_data.get("pe_ratio"),
                     "pb_ratio":        info_data.get("pb_ratio"),
                     "dividend_yield":  info_data.get("dividend_yield"),
                     "beta":            info_data.get("beta"),
                     "sector":          info_data.get("sector") or SECTOR_MAP.get(sym),
-                    # ── signal fields (preserved across refreshes) ─────────────
                     "signal":             prev.get("signal"),
                     "signal_confidence":  prev.get("signal_confidence"),
-                    # ── meta ──────────────────────────────────────────────────
                     "last_updated":   datetime.datetime.now(_IST).isoformat(),
                     "market_status":  _get_market_status(),
                 }
             except Exception as exc:
-                logger.warning(f"[live_prices] Failed to fetch {sym}: {exc}")
-
+                if "Rate limit" in str(exc) or "RateLimitError" in type(exc).__name__:
+                    if not rate_limited:
+                        logger.warning(f"[live_prices] Yahoo Finance rate limit hit on {sym}. Suppressing further warnings.")
+                        rate_limited = True
+                    break
+                else:
+                    logger.warning(f"[live_prices] Failed to fetch {sym}: {exc}")
         return results
 
-    return await loop.run_in_executor(None, _fetch_sync)
+    # Execute Tier 1: Zerodha
+    results = await loop.run_in_executor(None, _fetch_kite)
+    
+    missing = [s for s in symbols if s not in results]
+    if not missing:
+        return results
+        
+    # Execute Tier 2: Upstox
+    from crawler.upstox_market import get_market_quote_batch
+    try:
+        upstox_quotes = await get_market_quote_batch(missing)
+        for sym, q in upstox_quotes.items():
+            last_price = float(q.get("last_price", 0) or 0)
+            if last_price == 0: continue
+            
+            prev_close = float(q.get("ohlc", {}).get("close", 0) or 0)
+            open_price = float(q.get("ohlc", {}).get("open", 0) or 0)
+            day_high   = float(q.get("ohlc", {}).get("high", 0) or 0)
+            day_low    = float(q.get("ohlc", {}).get("low", 0) or 0)
+            volume     = int(q.get("volume", 0) or 0)
+            
+            change     = last_price - prev_close if prev_close else 0.0
+            change_pct = (change / prev_close * 100) if prev_close else 0.0
+            
+            info_data  = INFO_CACHE.get(sym, {})
+            avg_vol_3m = info_data.get("three_month_average_volume", 0)
+            avg_vol_10 = info_data.get("avg_volume_10d") or (avg_vol_3m or None)
+            vol_ratio  = round(volume / avg_vol_10, 2) if avg_vol_10 and avg_vol_10 > 0 and volume > 0 else None
+            day_range_pct = round((day_high - day_low) / prev_close * 100, 2) if prev_close > 0 and day_high > 0 and day_low > 0 else None
+            
+            prev = PRICE_CACHE.get(sym, {})
+            w52_high = float(info_data.get("fifty_two_week_high", prev.get("52w_high", 0)) or 0)
+            w52_low  = float(info_data.get("fifty_two_week_low", prev.get("52w_low", 0)) or 0)
+            
+            w52_high = float(q.get("fifty_two_week_high", w52_high) or w52_high)
+            w52_low  = float(q.get("fifty_two_week_low", w52_low) or w52_low)
+            
+            from_52w_high = round((w52_high - last_price) / w52_high * 100, 2) if w52_high > 0 else None
+            from_52w_low = round((last_price - w52_low) / w52_low * 100, 2) if w52_low > 0 else None
+
+            meta = _SYMBOL_META.get(sym, {})
+            results[sym] = {
+                "symbol":         sym,
+                "name":           meta.get("name", sym),
+                "type":           meta.get("type", "stock"),
+                "price":          round(last_price, 2),
+                "change":         round(change, 2),
+                "change_pct":     round(change_pct, 2),
+                "open":           round(open_price, 2),
+                "high":           round(day_high, 2),
+                "low":            round(day_low, 2),
+                "prev_close":     round(prev_close, 2),
+                "volume":         volume,
+                "52w_high":       round(w52_high, 2),
+                "52w_low":        round(w52_low, 2),
+                "avg_volume_10d":  avg_vol_10,
+                "volume_ratio":    vol_ratio,
+                "day_range_pct":   day_range_pct,
+                "from_52w_high":   from_52w_high,
+                "from_52w_low":    from_52w_low,
+                "price_vs_ema20":  None,
+                "market_cap":      info_data.get("market_cap"),
+                "pe_ratio":        info_data.get("pe_ratio"),
+                "pb_ratio":        info_data.get("pb_ratio"),
+                "dividend_yield":  info_data.get("dividend_yield"),
+                "beta":            info_data.get("beta"),
+                "sector":          info_data.get("sector") or SECTOR_MAP.get(sym),
+                "signal":             prev.get("signal"),
+                "signal_confidence":  prev.get("signal_confidence"),
+                "last_updated":   datetime.datetime.now(_IST).isoformat(),
+                "market_status":  _get_market_status(),
+            }
+    except Exception as e:
+        logger.warning(f"[live_prices] Upstox batch fetch failed: {e}")
+        
+    missing_2 = [s for s in symbols if s not in results]
+    if not missing_2:
+        return results
+        
+    # Execute Tier 3: yfinance
+    yf_results = await loop.run_in_executor(None, _fetch_yf, missing_2)
+    results.update(yf_results)
+
+    return results
+
+
+
+# Dynamic symbols (added on-demand by a page view / open position) are dropped
+# after this long without being touched again. Without it the dynamic set only
+# ever GREW: every symbol anyone ever looked at was re-fetched every 15s
+# forever. Live on 2026-08-17 that was ~2,970 symbols in PRICE_CACHE against a
+# configured list a fraction of that size — one stock-detail page view added a
+# permanent recurring fetch. The refetch cost (Kite + Upstox + yfinance tiers)
+# is what actually hurts, not the dict itself.
+#
+# Open positions are never evicted regardless of age: their prices drive SL/TP.
+_DYNAMIC_SYMBOL_TTL = 3 * 3600
+_dynamic_last_seen: dict[str, float] = {}
+
+
+def touch_dynamic_symbol(symbol: str) -> None:
+    """Mark a dynamically-added symbol as still wanted (called on cache insert)."""
+    _dynamic_last_seen[symbol] = time.time()
+
+
+def _prune_dynamic_symbols(configured: set[str], protected: set[str]) -> int:
+    """Drop dynamic symbols nobody has asked about in _DYNAMIC_SYMBOL_TTL."""
+    now = time.time()
+    stale = [
+        s for s in list(PRICE_CACHE)
+        if s not in configured and s not in protected
+        and (now - _dynamic_last_seen.get(s, now)) > _DYNAMIC_SYMBOL_TTL
+    ]
+    for s in stale:
+        PRICE_CACHE.pop(s, None)
+        _dynamic_last_seen.pop(s, None)
+    return len(stale)
 
 
 async def refresh_all_prices() -> dict[str, dict]:
     """Refresh PRICE_CACHE for configured symbols + any dynamically added ones."""
     t0         = time.monotonic()
     configured = [cfg["symbol"] for cfg in SYMBOLS_CONFIG]
+    _cfg_set   = set(configured)
+
+    # Never evict symbols we hold positions in — their prices drive SL/TP.
+    protected: set[str] = set()
+    try:
+        from crawler.zerodha_ticker import _OPEN_POSITION_SYMBOLS
+        protected = set(_OPEN_POSITION_SYMBOLS)
+    except Exception:
+        pass
+
+    pruned = _prune_dynamic_symbols(_cfg_set, protected)
+
     # Include symbols added on-demand (e.g. open positions, stock detail page views)
-    dynamic    = [s for s in PRICE_CACHE if s not in configured]
+    dynamic    = [s for s in PRICE_CACHE if s not in _cfg_set]
     symbols    = configured + dynamic
     updated    = await fetch_prices_batch(symbols)
     PRICE_CACHE.update(updated)
+    for s in updated:
+        if s not in _cfg_set:
+            _dynamic_last_seen.setdefault(s, time.time())
     elapsed    = int((time.monotonic() - t0) * 1000)
-    logger.info(f"[live_prices] Cache refreshed — {len(updated)} symbols ({len(dynamic)} dynamic) — {elapsed}ms")
+    logger.info(
+        f"[live_prices] Cache refreshed — {len(updated)} symbols "
+        f"({len(dynamic)} dynamic, {pruned} pruned) — {elapsed}ms"
+    )
     return PRICE_CACHE
 
 

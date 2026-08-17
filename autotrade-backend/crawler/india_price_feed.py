@@ -153,6 +153,9 @@ def _to_float(value, default: float = 0.0) -> float:
 
 # ── 2. NSE candle fetcher ─────────────────────────────────────────────────────
 
+import time
+_YF_RATE_LIMIT_UNTIL = 0.0
+
 def fetch_nse_candles(
     symbol: str,
     interval: str = "1h",
@@ -171,7 +174,166 @@ def fetch_nse_candles(
     list of dicts compatible with ``save_candles_to_db()``.
     Returns ``[]`` on any error — never raises.
     """
+    global _YF_RATE_LIMIT_UNTIL
+    if time.time() < _YF_RATE_LIMIT_UNTIL:
+        return []
+        
+    from utils.config import settings as _s
+    if getattr(_s, "ZERODHA_ENABLED", False) and getattr(_s, "ZERODHA_ACCESS_TOKEN", ""):
+        try:
+            import datetime as _dt
+            from crawler.zerodha_historical import get_token
+            from crawler.zerodha_kite_lib import get_historical_data
+
+            yf_to_kite = {
+                "1m": "minute", "3m": "3minute", "5m": "5minute",
+                "10m": "10minute", "15m": "15minute", "30m": "30minute",
+                "1h": "60minute", "1d": "day", "1wk": "day", "1mo": "day"
+            }
+            kite_interval = yf_to_kite.get(interval)
+            
+            days_back = 60
+            if period.endswith("d"): days_back = int(period[:-1])
+            elif period.endswith("mo"): days_back = int(period[:-2]) * 30
+            elif period.endswith("y"): days_back = int(period[:-1]) * 365
+            elif period == "max": days_back = 3650
+            
+            pure_sym = symbol
+            if pure_sym.endswith(".NS"): pure_sym = pure_sym[:-3]
+            elif pure_sym.endswith(".BO"): pure_sym = pure_sym[:-3]
+            elif pure_sym == "^NSEI": pure_sym = "NIFTY 50"
+            elif pure_sym == "^NSEBANK": pure_sym = "NIFTY BANK"
+            
+            token = get_token(pure_sym)
+            if token and kite_interval:
+                to_date = _dt.datetime.now()
+                from_date = to_date - _dt.timedelta(days=days_back)
+                
+                raw = []
+                for attempt in range(4):
+                    try:
+                        raw = get_historical_data(
+                            instrument_token=token,
+                            from_date=from_date,
+                            to_date=to_date,
+                            interval=kite_interval,
+                            oi=False
+                        )
+                        break
+                    except Exception as k_exc:
+                        if "Too many requests" in str(k_exc) or "429" in str(k_exc):
+                            if attempt < 3:
+                                time.sleep(1.0 * (attempt + 1))
+                                continue
+                        break
+                
+                if raw:
+                    rows = []
+                    for c in raw:
+                        ts = c.get("date") or c.get("timestamp")
+                        if not ts: continue
+                        if isinstance(ts, str):
+                            try: ts = _dt.datetime.fromisoformat(ts)
+                            except: pass
+                        if isinstance(ts, _dt.datetime):
+                            if ts.tzinfo is not None:
+                                ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+                            if interval in ("1d", "1wk", "1mo"):
+                                ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+                        
+                        rows.append({
+                            "symbol": symbol,
+                            "timeframe": interval,
+                            "open": float(c.get("open", 0)),
+                            "high": float(c.get("high", 0)),
+                            "low": float(c.get("low", 0)),
+                            "close": float(c.get("close", 0)),
+                            "volume": float(c.get("volume", 0)),
+                            "timestamp": ts,
+                        })
+                    if rows:
+                        logger.info(f"Kite NSE  ✓  {symbol:<15}  {len(rows):4d} candles  interval={interval}  latest={rows[-1]['timestamp'].strftime('%Y-%m-%d %H:%M')}")
+                        return rows
+        except Exception as e:
+            pass
+
+    # Upstox Fallback
+    if getattr(_s, "UPSTOX_ENABLED", False) and getattr(_s, "UPSTOX_ACCESS_TOKEN", ""):
+        try:
+            import datetime as _dt
+            import asyncio
+            from crawler.upstox_historical import get_historical_candles
+
+            yf_to_upstox = {
+                "1m": "1minute", "5m": "5minute", "30m": "30minute",
+                "1d": "day", "1wk": "week", "1mo": "month"
+            }
+            # Upstox supports fewer intervals. If not matched, fallback to yf.
+            upstox_interval = yf_to_upstox.get(interval)
+
+            if upstox_interval:
+                days_back = 60
+                if period.endswith("d"): days_back = int(period[:-1])
+                elif period.endswith("mo"): days_back = int(period[:-2]) * 30
+                elif period.endswith("y"): days_back = int(period[:-1]) * 365
+                elif period == "max": days_back = 3650
+                
+                pure_sym = symbol
+                if pure_sym.endswith(".NS"): pure_sym = pure_sym[:-3]
+                elif pure_sym.endswith(".BO"): pure_sym = pure_sym[:-3]
+                elif pure_sym == "^NSEI": pure_sym = "NIFTY 50"
+                elif pure_sym == "^NSEBANK": pure_sym = "NIFTY BANK"
+
+                to_date = _dt.date.today()
+                from_date = to_date - _dt.timedelta(days=days_back)
+                
+                # Try to use asyncio.run safely
+                raw = []
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Cannot use asyncio.run in a running loop, but fetch_nse_candles
+                    # is usually run in a ThreadPoolExecutor. So this will raise RuntimeError.
+                except RuntimeError:
+                    # Good, no running loop. We can use asyncio.run
+                    raw = asyncio.run(get_historical_candles(
+                        symbol=pure_sym,
+                        interval=upstox_interval,
+                        from_date=from_date.isoformat(),
+                        to_date=to_date.isoformat()
+                    ))
+
+                if raw:
+                    rows = []
+                    for c in raw:
+                        ts = c.get("timestamp")
+                        if not ts: continue
+                        if isinstance(ts, str):
+                            try: ts = _dt.datetime.fromisoformat(ts)
+                            except: pass
+                        if isinstance(ts, _dt.datetime):
+                            if ts.tzinfo is not None:
+                                ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+                            if interval in ("1d", "1wk", "1mo"):
+                                ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+                        rows.append({
+                            "symbol": symbol,
+                            "timeframe": interval,
+                            "open": float(c.get("open", 0)),
+                            "high": float(c.get("high", 0)),
+                            "low": float(c.get("low", 0)),
+                            "close": float(c.get("close", 0)),
+                            "volume": float(c.get("volume", 0)),
+                            "timestamp": ts,
+                        })
+                    if rows:
+                        logger.info(f"Upstox NSE✓  {symbol:<15}  {len(rows):4d} candles  interval={interval}  latest={rows[-1]['timestamp'].strftime('%Y-%m-%d %H:%M')}")
+                        return rows
+        except Exception as e:
+            pass # Fallback to yfinance
+
     try:
+        time.sleep(0.1) # Small throttle to avoid triggering 429
         df = _silently(lambda: yf.Ticker(symbol).history(period=period, interval=interval))
 
         if df.empty:
@@ -210,8 +372,14 @@ def fetch_nse_candles(
         return rows
 
     except Exception as exc:
+        if "Rate limit" in str(exc) or "429" in str(exc) or "RateLimitError" in type(exc).__name__:
+            if time.time() > _YF_RATE_LIMIT_UNTIL:
+                logger.warning(f"[fetch_nse_candles] Yahoo Finance rate limit hit on {symbol}. Muting yfinance candle fetches for 15 mins.")
+                _YF_RATE_LIMIT_UNTIL = time.time() + 900
+            return []
         logger.warning(f"fetch_nse_candles: failed {symbol}: {exc}")
         return []
+
 
 
 # ── 3. NIFTY / SENSEX / BANKNIFTY snapshots ──────────────────────────────────

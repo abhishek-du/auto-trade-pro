@@ -12,29 +12,20 @@ class EventClassification(BaseModel):
     # can't reliably produce even these, the classification genuinely isn't
     # usable and SHOULD fail (return None) — that's a correct "no event, no
     # trade", not a bug.
-    category: str = Field(description="Category of news (e.g. ORDER_WIN, EARNINGS_BEAT, REGULATORY_APPROVAL, MACRO_EVENT, RUMOR, MANAGEMENT_INTERVIEW)")
-    impact: str = Field(description="Impact level: HIGH, MEDIUM, LOW")
-    confidence: float = Field(description="Confidence in this classification from 0.0 to 1.0")
-    bullish: bool = Field(description="True if bullish, False if bearish")
+    category: str = Field(default="UNKNOWN", description="Category of news (e.g. ORDER_WIN, EARNINGS_BEAT, REGULATORY_APPROVAL, MACRO_EVENT, RUMOR, MANAGEMENT_INTERVIEW)")
+    impact: str = Field(default="LOW", description="Impact level: HIGH, MEDIUM, LOW")
+    confidence: float = Field(default=0.0, description="Confidence in this classification from 0.0 to 1.0")
+    bullish: bool = Field(default=False, description="True if bullish, False if bearish")
     entities: dict = Field(default_factory=dict, description="Affected entities: {'companies': [], 'sectors': [], 'countries': []}")
 
-    # Optional (2026-07-27 forensic) — these are informational/bookkeeping only
-    # (never read by _build_evidence's DecisionEvidence, and the CausalEvent
-    # row degrades gracefully with a neutral default for each). Live-observed:
-    # nemotron occasionally omits one of these under an elaborate 13-field
-    # schema (e.g. "1 validation error for EventClassification" for a missing
-    # `source_reliability` or `is_new_information`), which used to hard-fail
-    # the ENTIRE classification — "no event, no trade" — even though the
-    # decision-critical fields above were present and perfectly usable. A
-    # missing optional field must not discard a genuine, usable catalyst.
-    subcategories: list[str] = Field(default_factory=list, description="List of subcategories (e.g. ['GOVERNMENT', 'INFRASTRUCTURE'])")
-    time_horizon: str = Field(default="UNKNOWN", description="Expected time horizon (e.g. '2_5_DAYS', 'WEEKS')")
-    expected_half_life_hours: int = Field(default=48, description="Exponential decay half-life in hours")
-    reasoning: str = Field(default="", description="Reasoning behind the classification")
-    surprise_score: int = Field(default=50, description="Impact score from 1 to 100 representing market surprise")
-    is_new_information: bool = Field(default=True, description="Is this genuinely new information or circulating old news?")
-    market_priced_in: float = Field(default=0.0, description="Estimated % of how much the market has already priced this in (0.0 to 1.0)")
-    source_reliability: float = Field(default=0.7, description="Reliability of the source (0.0 to 1.0) e.g., NSE=1.0, Rumor=0.3")
+    subcategories: list | None = Field(default_factory=list, description="List of subcategories (e.g. ['GOVERNMENT', 'INFRASTRUCTURE'])")
+    time_horizon: str | None = Field(default="UNKNOWN", description="Expected time horizon (e.g. '2_5_DAYS', 'WEEKS')")
+    expected_half_life_hours: int | float | None = Field(default=48, description="Exponential decay half-life in hours")
+    reasoning: str | None = Field(default="", description="Reasoning behind the classification")
+    surprise_score: int | float | None = Field(default=50, description="Impact score from 1 to 100 representing market surprise")
+    is_new_information: bool | None = Field(default=True, description="Is this genuinely new information or circulating old news?")
+    market_priced_in: float | None = Field(default=0.0, description="Estimated % of how much the market has already priced this in (0.0 to 1.0)")
+    source_reliability: float | None = Field(default=0.7, description="Reliability of the source (0.0 to 1.0) e.g., NSE=1.0, Rumor=0.3")
 
 async def classify_event(headline: str, summary: str | None = None) -> EventClassification | None:
     """

@@ -53,24 +53,31 @@ async def get_kite_candles_for_range(
     """
     token = get_token(symbol)
     if token is None:
-        logger.warning(f"[zerodha_historical] No instrument token for {symbol}")
+        logger.debug(f"[zerodha_historical] No instrument token for {symbol}")
         return []
 
     from crawler.zerodha_kite_lib import get_historical_data
 
     kite_interval = _to_kite_interval(interval)
-    try:
-        raw = await asyncio.to_thread(
-            get_historical_data,
-            instrument_token=token,
-            from_date=from_date,
-            to_date=to_date,
-            interval=kite_interval,
-            oi=oi,
-        )
-    except Exception as exc:
-        logger.warning(f"[zerodha_historical] Fetch failed for {symbol}: {exc}")
-        return []
+    raw = []
+    for attempt in range(4):
+        try:
+            raw = await asyncio.to_thread(
+                get_historical_data,
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval=kite_interval,
+                oi=oi,
+            )
+            break
+        except Exception as exc:
+            if "Too many requests" in str(exc) or "429" in str(exc):
+                if attempt < 3:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+            logger.warning(f"[zerodha_historical] Fetch failed for {symbol}: {exc}")
+            return []
 
     # Normalise into Candle DB row format
     tf_reverse = {v: k for k, v in INTERVAL_MAP.items()}
