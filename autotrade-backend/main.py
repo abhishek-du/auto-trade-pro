@@ -60,18 +60,44 @@ async def lifespan(app: FastAPI):
         )
 
     import asyncio as _asyncio
-    for _attempt in range(5):
-        try:
-            await init_db()
-            logger.info("Database tables ready")
-            break
-        except Exception as exc:
+
+    async def _init_db_with_retries() -> None:
+        """Run schema DDL OFF the startup path (2026-08-17).
+
+        init_db() issues DDL (create_all / ADD COLUMN IF NOT EXISTS) needing an
+        ACCESS EXCLUSIVE lock. Long-lived read transactions elsewhere hold
+        conflicting locks — observed live: three connections idle-in-transaction
+        on news_items for 1-4 min (crawler/news_crawler.py holds a read txn open
+        across slow LLM sentiment work) with an ALTER TABLE blocked behind them
+        for 76s. DDL then waits indefinitely.
+
+        This previously ran INLINE and had been commented out entirely to stop
+        it hanging boot — which silently meant a fresh deploy or wiped DB never
+        got its schema. Awaiting it inline (even with a timeout) is also wrong:
+        uvicorn cannot service SIGTERM while lifespan startup is still running,
+        so a blocked DDL made the process unkillable except by SIGKILL and left
+        it not serving. Backgrounding it keeps the schema work AND lets startup
+        complete immediately.
+        """
+        for _attempt in range(5):
+            try:
+                await _asyncio.wait_for(init_db(), timeout=20)
+                logger.info("Database tables ready")
+                return
+            except _asyncio.TimeoutError:
+                logger.warning(
+                    f"DB init attempt {_attempt+1} timed out after 20s — DDL is "
+                    "blocked, most likely behind an idle-in-transaction session "
+                    "(check pg_stat_activity for Lock/relation waits)"
+                )
+            except _asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"DB init attempt {_attempt+1} failed ({type(exc).__name__}): {exc}")
             if _attempt < 4:
-                _wait = 5 * (_attempt + 1)
-                logger.warning(f"DB init attempt {_attempt+1} failed ({type(exc).__name__}) — retrying in {_wait}s")
-                await _asyncio.sleep(_wait)
-            else:
-                logger.warning(f"DB init skipped after 5 attempts — will retry on first request: {exc}")
+                await _asyncio.sleep(5 * (_attempt + 1))
+        logger.warning("DB init gave up after 5 attempts — schema may be stale")
 
     # ── Preload NSE token map from kite_instruments ──────────────────────────
     # The hardcoded NSE_TOKENS dict only covers ~30 large-caps. If the daily
@@ -104,6 +130,11 @@ async def lifespan(app: FastAPI):
     from api.websocket import live_price_manager
 
     _stop_event = _asyncio.Event()
+    # Tracked so shutdown can cancel exactly these and nothing else.
+    _bg_tasks: list[_asyncio.Task] = []
+
+    # Schema DDL runs here, off the startup path — see _init_db_with_retries.
+    _bg_tasks.append(_asyncio.create_task(_init_db_with_retries()))
 
     async def _live_price_loop():
         # Initial warm-up fetch
@@ -128,7 +159,7 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning(f"[live_prices] Refresh error: {exc}")
 
-    _bg_task = _asyncio.create_task(_live_price_loop())
+    _bg_tasks.append(_asyncio.create_task(_live_price_loop()))
 
     # ── Breadth refresh background task (NSE advances/declines) ─────────────
     # Celery worker has its own in-memory BREADTH_CACHE that the regime engine
@@ -148,7 +179,7 @@ async def lifespan(app: FastAPI):
             except _asyncio.TimeoutError:
                 pass
 
-    _asyncio.create_task(_breadth_loop())
+    _bg_tasks.append(_asyncio.create_task(_breadth_loop()))
 
     # Warm up INFO_CACHE (PE, market cap, beta…) in the background so first
     # watchlist page load has fundamental data without waiting 24 h.
@@ -161,7 +192,7 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.warning(f"[info_cache] Warmup failed: {exc}")
 
-    _asyncio.create_task(_warmup_info_cache())
+    _bg_tasks.append(_asyncio.create_task(_warmup_info_cache()))
 
     # ── Kite WebSocket ticker ────────────────────────────────────────────────
     # Start whenever Zerodha is enabled + token is present — market-hours check
@@ -170,8 +201,19 @@ async def lifespan(app: FastAPI):
     # fires at market open as a belt-and-suspenders guarantee.
     if settings.ZERODHA_ENABLED and settings.ZERODHA_ACCESS_TOKEN:
         try:
+            import threading as _threading
             from crawler.zerodha_ticker import start_kite_ticker
-            _asyncio.create_task(_asyncio.to_thread(start_kite_ticker))
+            # Explicit DAEMON thread, not asyncio.to_thread (2026-08-17).
+            # to_thread runs on the default ThreadPoolExecutor, whose workers
+            # are non-daemon and are JOINED at interpreter exit. The Kite
+            # ticker owns a long-lived WebSocket loop that never returns, so
+            # that join blocked process exit indefinitely — contributing to
+            # every shutdown needing SIGKILL. A daemon thread is torn down with
+            # the process instead. (The ticker holds no un-flushed state: it
+            # only writes to the in-memory LIVE_TICKS/PRICE_CACHE dicts.)
+            _threading.Thread(
+                target=start_kite_ticker, name="kite-ticker", daemon=True,
+            ).start()
             logger.info("Kite WebSocket ticker started on app startup")
         except Exception as exc:
             logger.warning(f"Kite ticker startup failed: {exc}")
@@ -179,15 +221,19 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
+    # Cancel only OUR OWN background tasks. The previous version cancelled
+    # asyncio.all_tasks() indiscriminately, which also cancelled uvicorn's own
+    # server/connection tasks mid-shutdown and left the loop unable to finish
+    # its sequence — every stop then hit systemd's TimeoutStopSec and was
+    # SIGKILLed ("State 'stop-sigterm' timed out. Killing." on 04-Aug, 06-Aug
+    # and 17-Aug). A SIGKILLed process never runs this block at all, so
+    # connections and the engine pool were never released cleanly either.
     _stop_event.set()
-    for _task in _asyncio.all_tasks():
-        if _task is not _asyncio.current_task():
-            _task.cancel()
-    _bg_task.cancel()
-    try:
-        await _bg_task
-    except _asyncio.CancelledError:
-        pass
+    for _task in _bg_tasks:
+        _task.cancel()
+    # Bounded: a task stuck in un-cancellable C code must not hold up shutdown.
+    if _bg_tasks:
+        await _asyncio.wait(_bg_tasks, timeout=5)
     logger.info("Prajna shutting down")
     await engine.dispose()
 
