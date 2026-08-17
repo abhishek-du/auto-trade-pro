@@ -30,10 +30,23 @@ def _run_async(coro):
 
 async def _refresh_and_publish() -> dict:
     from crawler.live_prices import refresh_all_prices, publish_prices_to_redis
+    from crawler.sector_data import refresh_sector_data, publish_sector_cache_to_redis
 
     prices = await refresh_all_prices()
     published = await publish_prices_to_redis(prices)
-    return {"symbols": len(prices), "published": published}
+
+    # Sector moods derive from the prices just fetched. refresh_sector_data()
+    # offloads the per-symbol yfinance lookups to a thread; publishing it here
+    # is what keeps the API from ever computing it inline on its event loop
+    # (see crawler.sector_data.get_sector_cache).
+    sectors = 0
+    try:
+        await refresh_sector_data()
+        sectors = await publish_sector_cache_to_redis()
+    except Exception as exc:
+        logger.warning(f"[price_cache] sector refresh/publish failed: {exc}")
+
+    return {"symbols": len(prices), "published": published, "sectors": sectors}
 
 
 @celery_app.task(
@@ -72,7 +85,8 @@ def refresh_price_cache():
         result = _run_async(_refresh_and_publish())
         logger.info(
             f"[price_cache] refreshed {result['symbols']} symbols, "
-            f"published {result['published']} to redis"
+            f"published {result['published']} prices + "
+            f"{result['sectors']} sectors to redis"
         )
         return result
     finally:

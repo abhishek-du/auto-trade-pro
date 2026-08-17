@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI):
     # ── Live price refresh background task ───────────────────────────────────
     import asyncio as _asyncio
     from crawler.live_prices import hydrate_prices_from_redis
+    from crawler.sector_data import hydrate_sector_cache_from_redis
     from api.websocket import live_price_manager
 
     _stop_event = _asyncio.Event()
@@ -151,6 +152,7 @@ async def lifespan(app: FastAPI):
         """
         try:
             await hydrate_prices_from_redis()
+            await hydrate_sector_cache_from_redis()
         except Exception as exc:
             logger.warning(f"[live_prices] Initial hydrate failed: {exc}")
 
@@ -163,6 +165,7 @@ async def lifespan(app: FastAPI):
                 if _stop_event.is_set():
                     break
                 updated = await hydrate_prices_from_redis()
+                await hydrate_sector_cache_from_redis()
                 if live_price_manager.connections:
                     await live_price_manager.broadcast_prices(updated)
                     logger.debug(

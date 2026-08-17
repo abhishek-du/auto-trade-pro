@@ -271,9 +271,69 @@ def get_sector_rotation_signal() -> dict:
     }
 
 
+_SECTOR_REDIS_KEY = "sector_cache:snapshot"
+_SECTOR_REDIS_TTL = 3600
+
+
 def get_sector_cache() -> dict:
-    """Return SECTOR_CACHE, computing from PRICE_CACHE if not yet populated."""
-    return dict(SECTOR_CACHE) if SECTOR_CACHE else compute_sector_from_cache()
+    """Return SECTOR_CACHE. NEVER computes inline.
+
+    This used to fall back to compute_sector_from_cache() when the cache was
+    empty. That is the exact hazard refresh_sector_data()'s docstring warns
+    about — compute_sector_from_cache() calls utils.sector_cache.get_sector()
+    per symbol, which makes a SYNCHRONOUS yfinance HTTP call for every symbol
+    missing from the on-disk cache. refresh_sector_data() offloads it to a
+    thread for that reason; this path did not.
+
+    It bit us because SECTOR_CACHE is populated by a Celery task, so in the API
+    process it is always empty: /api/v1/intelligence/context calls
+    build_sector_context() -> get_sector_cache() on EVERY request and therefore
+    recomputed synchronously on the event loop. Measured 2026-08-17 with the
+    endpoint instrumented: total 16.94s, of which sector_build was 16.74s.
+
+    The cache is now filled by hydrate_sector_cache_from_redis(), published by
+    the same Celery task that publishes prices. An empty return degrades the
+    sector fields to neutral for a cycle — strictly better than stalling the
+    whole event loop.
+    """
+    if not SECTOR_CACHE:
+        logger.debug("[sectors] cache empty — returning {} (publisher not run yet)")
+    return dict(SECTOR_CACHE)
+
+
+async def publish_sector_cache_to_redis() -> int:
+    """Publish SECTOR_CACHE for other processes. Best-effort."""
+    if not SECTOR_CACHE:
+        return 0
+    try:
+        import json
+        from utils.cache import get_redis
+        await get_redis().set(
+            _SECTOR_REDIS_KEY, json.dumps(SECTOR_CACHE, default=str), ex=_SECTOR_REDIS_TTL
+        )
+        return len(SECTOR_CACHE)
+    except Exception as exc:
+        logger.debug(f"[sectors] redis publish failed: {exc}")
+        return 0
+
+
+async def hydrate_sector_cache_from_redis() -> int:
+    """Load the published SECTOR_CACHE into this process. One Redis GET."""
+    global SECTOR_CACHE
+    try:
+        import json
+        from utils.cache import get_redis
+        raw = await get_redis().get(_SECTOR_REDIS_KEY)
+        if not raw:
+            return 0
+        data = json.loads(raw)
+    except Exception as exc:
+        logger.debug(f"[sectors] redis hydrate failed: {exc}")
+        return 0
+    if isinstance(data, dict) and data:
+        SECTOR_CACHE = data
+        return len(SECTOR_CACHE)
+    return 0
 
 
 async def refresh_sector_data() -> dict:
