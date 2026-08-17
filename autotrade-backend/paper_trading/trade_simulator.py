@@ -54,6 +54,49 @@ _MAX_POSITION_PCT = 0.05
 _DIRECT_NEWS_RECHECK_WINDOW = timedelta(hours=2)  # only during the early post-entry window
 _DIRECT_NEWS_RECHECK_GRACE_PERIOD = timedelta(minutes=15)  # give stock time to breathe before enforcing rule
 
+# ── PRE_EVENT_EXPECTATION_GAP post-event exits (2026-08-17 forensic) ─────────
+# Post-mortem of 223 trades (docs/2026-08-17_FORENSIC_POST_MORTEM.md) found the
+# holding period relative to the EVENT date is the single strongest predictor in
+# the whole dataset — stronger than score, confidence, sector or regime:
+#
+#     exited <=2 days after event : n=43  win 46.5%  PnL +30,432
+#     held 3-5 days after event   : n=18  win 27.8%  PnL -25,412
+#     held  >5 days after event   : n= 4  win  0.0%  PnL  -2,473
+#
+# Every rupee of profit is made in the 0-2 day post-event window; beyond it the
+# book loses -27,885. Validated that this cap does NOT cut the winners: all 10
+# TAKE_PROFIT exits and 14 of 15 T1_REVERSAL_EXIT exits already complete within
+# 2 days of the event (only TEGA.NS, +1,426, sits outside).
+_POST_EVENT_MAX_TRADING_DAYS = 2
+
+# Unrealised % that counts as "the event resolved against the nowcast". Kept at
+# the original -3.0 threshold; what changed (2026-08-17) is the RESPONSE to it —
+# see the POST_EVENT_REVERSAL block below.
+_POST_EVENT_ADVERSE_PCT = -3.0
+
+
+def _trading_days_since(event_date, today) -> int:
+    """NSE trading days elapsed from event_date to today (exclusive of the event
+    day itself). Weekends and NSE holidays don't count, so a Friday event
+    checked on the following Monday is 1 trading day, not 3 calendar days.
+
+    Falls back to calendar days if the holiday calendar can't be loaded — the
+    time-based exit must never be silently disabled by a calendar failure.
+    """
+    if today <= event_date:
+        return 0
+    try:
+        from engine.calendar_engine import _HOLIDAY_SET
+    except Exception:
+        _HOLIDAY_SET = set()
+    days = 0
+    cur = event_date
+    while cur < today:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5 and cur not in _HOLIDAY_SET:
+            days += 1
+    return days
+
 
 def estimate_trade_cost(qty: int, price: float, side: str = "BUY") -> float:
     """Realistic Indian equity delivery transaction cost (Varsity Module 7).
@@ -947,26 +990,35 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     logger.warning(f"update_positions: {pos.symbol} sector-exit close failed: {exc}")
                 continue
 
-        # ── Post-event reversal: tighten stop once the thesis has resolved ─────
+        # ── Post-event exits: the thesis has resolved, stop holding ────────────
         # PRE_EVENT_EXPECTATION_GAP bets on a scheduled corporate event (results,
-        # etc.) not yet being priced in. Once that event's date has passed, the
-        # trade is no longer "pre-event" — it's resolved, and shouldn't keep
-        # riding its full original (wide) stop for days regardless of which way
-        # the market actually reacted. Found 2026-08-06, EPACKPEB.NS: nowcast
-        # said POSITIVE, results reaction gapped down ~7%, and the position sat
-        # on its original -7.8% stop for 6+ days before anyone noticed.
-        # Only ever TIGHTENS (same "never loosens" rule as the T1 trail below)
-        # and fires once per position (post_event_handled flag) — it doesn't
-        # force an immediate market exit at a single noisy tick, since the
-        # post-event reaction can itself whipsaw hard (EPACKPEB rallied back to
-        # within ₹4 of entry the very next session before fading again).
+        # etc.) not yet being priced in. Once that event's date has passed the
+        # trade is no longer "pre-event" — it's resolved, and its original
+        # rationale no longer applies regardless of which way the market reacted.
+        #
+        # REWRITTEN 2026-08-17 after the forensic post-mortem
+        # (docs/2026-08-17_FORENSIC_POST_MORTEM.md). The previous version only
+        # TIGHTENED the stop (to the midpoint between price and the old stop) and
+        # fired once per position. Measured over 10 live firings it went
+        # 0-for-10 for -16,275: because it can only trigger once the position is
+        # ALREADY >=3% under water and then merely halves the remaining room, it
+        # is mathematically incapable of producing a winner — a "lose more
+        # slowly" device, not a protective one. The EPACKPEB.NS whipsaw that
+        # motivated the gentle version (rallied back near entry the next session
+        # before fading again) turned out to be the exception; across the full
+        # sample, holding through post-event noise lost money consistently.
+        #
+        # Two exits now, both closing the position outright:
+        #   P0-2  adverse   — event resolved against the nowcast -> exit now.
+        #   P0-1  time-based — >2 TRADING days past the event -> exit regardless
+        #                      of direction, since all profit is made in the 0-2
+        #                      day window (see _POST_EVENT_MAX_TRADING_DAYS).
         if pos.trade and pos.trade.strategy_name == "PRE_EVENT_EXPECTATION_GAP":
             _pe_snap = pos.trade.indicator_snapshot or {}
             _pe_cf   = _pe_snap.get("confidence_factors") or {}
-            _pe_tm   = _pe_snap.get("trade_mgmt") or {}
             _event_date_str = _pe_cf.get("event_date")
             _nowcast_dir    = _pe_cf.get("nowcast_direction")
-            if _event_date_str and _nowcast_dir and not _pe_tm.get("post_event_handled"):
+            if _event_date_str:
                 from datetime import date as _date
                 try:
                     _event_date = _date.fromisoformat(_event_date_str)
@@ -980,28 +1032,43 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         (price - pos.entry_price) / pos.entry_price * 100.0 if is_buy
                         else (pos.entry_price - price) / pos.entry_price * 100.0
                     )
+                    # P0-2: reaction contradicts the nowcast that opened the trade.
+                    # _nowcast_dir may be absent on older rows — then this check is
+                    # skipped and the time-based exit below still applies.
                     _expected_up = _nowcast_dir == "POSITIVE"
-                    _adverse = (
-                        (is_buy and _expected_up and _cur_pct <= -3.0) or
-                        (not is_buy and not _expected_up and _cur_pct <= -3.0)
+                    _adverse = bool(_nowcast_dir) and (
+                        (is_buy and _expected_up and _cur_pct <= _POST_EVENT_ADVERSE_PCT) or
+                        (not is_buy and not _expected_up and _cur_pct <= _POST_EVENT_ADVERSE_PCT)
                     )
-                    if _adverse:
-                        _room = abs(price - pos.stop_loss)
-                        _new_sl = (price - _room / 2) if is_buy else (price + _room / 2)
-                        _tightened = (
-                            (is_buy and _new_sl > pos.stop_loss) or
-                            (not is_buy and _new_sl < pos.stop_loss)
-                        )
-                        if _tightened:
-                            pos.stop_loss = round(_new_sl, 4)
-                            pos.trade.stop_loss = pos.stop_loss
-                        _pe_tm = {**_pe_tm, "post_event_handled": True}
-                        pos.trade.indicator_snapshot = {**_pe_snap, "trade_mgmt": _pe_tm}
-                        logger.warning(
-                            f"[pre_event_reversal] {pos.symbol}: event {_event_date_str} resolved "
-                            f"against nowcast ({_nowcast_dir}), {_cur_pct:.1f}% unrealised — "
-                            f"stop {'tightened to ₹' + format(pos.stop_loss, '.2f') if _tightened else 'already tighter, left unchanged'}"
-                        )
+                    # P0-1: held past the profitable post-event window.
+                    _elapsed = _trading_days_since(_event_date, _today_ist)
+                    _stale = _elapsed > _POST_EVENT_MAX_TRADING_DAYS
+
+                    if _adverse or _stale:
+                        _reason = "POST_EVENT_REVERSAL" if _adverse else "POST_EVENT_TIME_EXIT"
+                        try:
+                            async with session.begin_nested():   # see SAVEPOINT note below
+                                closed_trade = await close_paper_trade(pos, price, _reason, session)
+                            auto_closed.append({
+                                "trade_id":    closed_trade.id,
+                                "symbol":      closed_trade.symbol,
+                                "reason":      _reason,
+                                "exit_price":  price,
+                                "pnl":         closed_trade.pnl,
+                                "entry_price": closed_trade.entry_price,
+                                "size_units":  closed_trade.size_units,
+                                "direction":   pos.direction.value,
+                            })
+                            logger.warning(
+                                f"[pre_event_exit] {pos.symbol}: event {_event_date_str} "
+                                + (f"resolved against nowcast ({_nowcast_dir})"
+                                   if _adverse else
+                                   f"was {_elapsed} trading day(s) ago (> {_POST_EVENT_MAX_TRADING_DAYS})")
+                                + f", {_cur_pct:+.1f}% unrealised — exited @ ₹{price:.2f} ({_reason})"
+                            )
+                        except Exception as exc:
+                            logger.warning(f"update_positions: {pos.symbol} post-event close failed: {exc}")
+                        continue
 
         # ── DIRECT_NEWS post-entry re-confirmation exit ─────────────────────────
         # DIRECT_NEWS has no LLM/technical step (see engine/direct_news_strategy.py
@@ -1170,11 +1237,13 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         )
 
         if hit_sl or hit_tp:
-            is_trailing   = bool(tm.get("trailing")) if tm else False
-            is_post_event = bool(tm.get("post_event_handled")) if tm else False
+            # The old `post_event_handled` branch was dropped 2026-08-17: the
+            # post-event rule now closes the position itself (above) instead of
+            # tightening a stop for this check to later trip, so that flag is
+            # never set and the branch was unreachable.
+            is_trailing = bool(tm.get("trailing")) if tm else False
             reason = (
                 "TRAIL_STOP" if hit_sl and is_trailing
-                else "POST_EVENT_REVERSAL" if hit_sl and is_post_event
                 else "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
             )
             try:
