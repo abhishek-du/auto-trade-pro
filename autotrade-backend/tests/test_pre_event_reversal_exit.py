@@ -1,24 +1,30 @@
-"""Regression test for paper_trading/trade_simulator.py's post-event reversal
-stop-tightening (added 2026-08-06).
+"""Regression tests for paper_trading/trade_simulator.py's post-event exits.
 
-EPACKPEB.NS incident: PRE_EVENT_EXPECTATION_GAP bought ahead of a quarterly
-result with nowcast POSITIVE (conf 0.10). The result reaction gapped down
-~7%, directly contradicting the nowcast -- and the position just sat on its
-original, wide entry-time stop-loss for 6+ days with nothing re-evaluating
-the thesis once the event it was betting on had actually resolved.
+History
+-------
+2026-08-06 (EPACKPEB.NS): PRE_EVENT_EXPECTATION_GAP bought ahead of a quarterly
+result with nowcast POSITIVE (conf 0.10). The reaction gapped down ~7%,
+contradicting the nowcast, and the position sat on its original wide stop for
+6+ days with nothing re-evaluating the thesis. The first fix TIGHTENED the stop
+to the midpoint between price and the original stop, once per position.
 
-This test exercises the new post-event-reversal block inside
-update_positions_with_current_prices(): once `event_date` (from
-indicator_snapshot.confidence_factors) is in the past and the live P&L has
-moved >=3% against the nowcast's predicted direction, the position's
-stop-loss is tightened to the midpoint between current price and the
-original stop -- once per position (`trade_mgmt.post_event_handled`) -- and
-never loosened. A subsequent close triggered by that tightened stop reports
-exit_reason="POST_EVENT_REVERSAL" instead of the generic "STOP_LOSS", so it's
-distinguishable in trade history / Telegram alerts.
+2026-08-17 (forensic post-mortem, docs/2026-08-17_FORENSIC_POST_MORTEM.md):
+that gentle version was measured over 10 live firings and went **0-for-10 for
+-16,275**. Because it only triggers once a position is already >=3% under water
+and then merely halves the remaining room, it is mathematically incapable of
+producing a winner -- a "lose more slowly" device. It was replaced by two
+exits that actually close the position:
 
-Follows the same mocking pattern as test_trade_simulator_confirmation_lost.py
-(no prior coverage existed for this whole function before that file).
+  P0-2  POST_EVENT_REVERSAL  -- event resolved against the nowcast -> exit now.
+  P0-1  POST_EVENT_TIME_EXIT -- >2 TRADING days past the event -> exit
+        regardless of direction. All of the strategy's profit is made in the
+        0-2 day post-event window (+30,432); everything held longer returned
+        -27,885.
+
+These tests therefore assert CLOSURE, not stop mutation. A test that expects
+the stop to be tightened is asserting the old, disproven behaviour.
+
+Follows the same mocking pattern as test_trade_simulator_confirmation_lost.py.
 """
 from __future__ import annotations
 
@@ -102,54 +108,97 @@ def _patches(price: float):
     ]
 
 
-_PAST_EVENT = (datetime.utcnow() - timedelta(days=3)).date().isoformat()
+def _event_n_trading_days_ago(n: int) -> str:
+    """Event date that is exactly `n` NSE trading days before today (IST).
+
+    Computed via the production helper rather than a fixed calendar offset so
+    these tests can't go flaky depending on which weekday they run — a plain
+    "3 days ago" is 3 trading days midweek but only 1 across a weekend, which
+    would silently flip the P0-1 time-based exit on and off.
+    """
+    today = (datetime.utcnow() + timedelta(hours=5, minutes=30)).date()
+    d = today
+    while ts._trading_days_since(d, today) < n:
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+# 1 trading day back: past the event, but still INSIDE the 2-day hold window,
+# so only the adverse (P0-2) rule can fire here.
+_PAST_EVENT = _event_n_trading_days_ago(1)
+# 3 trading days back: outside the window, so the P0-1 time exit fires.
+_STALE_EVENT = _event_n_trading_days_ago(3)
 _FUTURE_EVENT = (datetime.utcnow() + timedelta(days=3)).date().isoformat()
+
+
+def _closed_stub():
+    return SimpleNamespace(
+        id=42, symbol="EPACKPEB.NS", pnl=-210.0, entry_price=100.0, size_units=10.0,
+    )
 
 
 class TestPostEventReversalExit:
     @pytest.mark.asyncio
-    async def test_adverse_reaction_after_event_tightens_stop_without_closing(self):
-        """entry=100, stop=70, price=90 (-10%, past the -3% threshold, against
-        a POSITIVE nowcast). New stop = (90+70)/2 = 80 -- tighter than 70, but
-        price (90) hasn't reached it yet, so the position stays open."""
+    async def test_adverse_reaction_after_event_exits_immediately(self):
+        """P0-2 (2026-08-17): entry=100, stop=70, price=90 (-10%, past the -3%
+        threshold, against a POSITIVE nowcast) -> close NOW at the live price.
+
+        Supersedes the original stop-tightening behaviour, which went 0-for-10
+        for -16,275 live because it could only fire once a position was already
+        >=3% down and then merely halved the remaining stop room -- it could
+        never produce a winner. The exit must happen on the FIRST cycle that
+        sees the adverse reaction, not after a second cycle drifts into a
+        tightened stop."""
         pos = _fake_position(entry_price=100.0, stop_loss=70.0, event_date=_PAST_EVENT)
         session = _session_for(pos)
         patches = _patches(90.0)
-        with patches[0], patches[1], patches[2], patches[3]:
-            auto_closed = await ts.update_positions_with_current_prices(session)
-
-        assert auto_closed == []
-        assert pos.stop_loss == 80.0
-        assert pos.trade.stop_loss == 80.0
-        assert pos.trade.indicator_snapshot["trade_mgmt"]["post_event_handled"] is True
-
-    @pytest.mark.asyncio
-    async def test_tightened_stop_later_hit_reports_post_event_reversal(self):
-        """Cycle 1 tightens 70 -> 80 (price 90, doesn't close). Cycle 2: price
-        drifts to 79, now below the TIGHTENED stop -- closes, and the reason
-        must be POST_EVENT_REVERSAL, not the generic STOP_LOSS, since the
-        close only happened because of this rule's tightened stop."""
-        pos = _fake_position(entry_price=100.0, stop_loss=70.0, event_date=_PAST_EVENT)
-        session = _session_for(pos)
-
-        p1 = _patches(90.0)
-        with p1[0], p1[1], p1[2], p1[3]:
-            await ts.update_positions_with_current_prices(session)
-        assert pos.stop_loss == 80.0
-
-        closed_trade = SimpleNamespace(
-            id=42, symbol="EPACKPEB.NS", pnl=-210.0, entry_price=100.0, size_units=10.0,
-        )
-        p2 = _patches(79.0)
-        with p2[0], p2[1], p2[2], p2[3], \
+        with patches[0], patches[1], patches[2], patches[3], \
              patch("paper_trading.trade_simulator.close_paper_trade",
-                   AsyncMock(return_value=closed_trade)) as mock_close:
+                   AsyncMock(return_value=_closed_stub())) as mock_close:
             auto_closed = await ts.update_positions_with_current_prices(session)
 
         mock_close.assert_called_once()
         assert mock_close.call_args.args[2] == "POST_EVENT_REVERSAL"
+        assert mock_close.call_args.args[1] == 90.0        # exits at the live price
         assert len(auto_closed) == 1
         assert auto_closed[0]["reason"] == "POST_EVENT_REVERSAL"
+        # and it must NOT have quietly tightened the stop on the way out
+        assert pos.stop_loss == 70.0
+
+    @pytest.mark.asyncio
+    async def test_stale_position_time_exits_even_when_profitable(self):
+        """P0-1 (2026-08-17): once the event is >2 TRADING days old the position
+        is closed regardless of direction -- here it's +10% and matching the
+        nowcast, so the adverse rule does NOT apply, yet it still exits.
+
+        Rationale (forensic post-mortem): exits <=2 days post-event returned
+        +30,432 while everything held longer returned -27,885. Holding past the
+        window is unprofitable whichever way the trade is currently pointing."""
+        pos = _fake_position(entry_price=100.0, stop_loss=70.0, event_date=_STALE_EVENT)
+        session = _session_for(pos)
+        patches = _patches(110.0)
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("paper_trading.trade_simulator.close_paper_trade",
+                   AsyncMock(return_value=_closed_stub())) as mock_close:
+            auto_closed = await ts.update_positions_with_current_prices(session)
+
+        mock_close.assert_called_once()
+        assert mock_close.call_args.args[2] == "POST_EVENT_TIME_EXIT"
+        assert len(auto_closed) == 1
+        assert auto_closed[0]["reason"] == "POST_EVENT_TIME_EXIT"
+
+    @pytest.mark.asyncio
+    async def test_trading_days_helper_skips_weekends(self):
+        """The window is in TRADING days, not calendar days: a Friday event
+        checked the following Monday is 1 day elapsed, not 3 -- otherwise every
+        position spanning a weekend would be force-exited a session early."""
+        from datetime import date
+        friday, monday = date(2026, 8, 14), date(2026, 8, 17)
+        assert friday.weekday() == 4 and monday.weekday() == 0
+        assert ts._trading_days_since(friday, monday) == 1
+        # same date / future date must never report elapsed time
+        assert ts._trading_days_since(monday, monday) == 0
+        assert ts._trading_days_since(monday, friday) == 0
 
     @pytest.mark.asyncio
     async def test_favorable_reaction_leaves_stop_untouched(self):
@@ -205,18 +254,37 @@ class TestPostEventReversalExit:
         assert not pos.trade.indicator_snapshot["trade_mgmt"].get("post_event_handled")
 
     @pytest.mark.asyncio
-    async def test_second_cycle_at_unchanged_price_does_not_retighten(self):
-        """Once post_event_handled is set, a second cycle at the same price
-        must not recompute/re-tighten again (one-shot, not every-cycle)."""
+    async def test_within_window_and_favorable_is_left_alone(self):
+        """The complement of the two exit rules: inside the 2-trading-day
+        window AND moving with the nowcast -> the position must be left to run.
+        This is the cohort that produced all of the strategy's profit, so it
+        must not be swept up by either new exit."""
         pos = _fake_position(entry_price=100.0, stop_loss=70.0, event_date=_PAST_EVENT)
         session = _session_for(pos)
+        patches = _patches(110.0)
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("paper_trading.trade_simulator.close_paper_trade",
+                   AsyncMock(return_value=_closed_stub())) as mock_close:
+            auto_closed = await ts.update_positions_with_current_prices(session)
 
-        p1 = _patches(90.0)
-        with p1[0], p1[1], p1[2], p1[3]:
-            await ts.update_positions_with_current_prices(session)
-        assert pos.stop_loss == 80.0
+        mock_close.assert_not_called()
+        assert auto_closed == []
+        assert pos.stop_loss == 70.0
 
-        p2 = _patches(90.0)
-        with p2[0], p2[1], p2[2], p2[3]:
-            await ts.update_positions_with_current_prices(session)
-        assert pos.stop_loss == 80.0  # unchanged, not re-tightened to (90+80)/2=85
+    @pytest.mark.asyncio
+    async def test_stale_event_exits_even_without_nowcast_direction(self):
+        """Legacy rows may carry event_date but no nowcast_direction. The
+        adverse rule can't evaluate without it, but the time-based exit must
+        still apply -- otherwise those positions would hold forever."""
+        pos = _fake_position(entry_price=100.0, stop_loss=70.0,
+                             event_date=_STALE_EVENT, nowcast_direction=None)
+        session = _session_for(pos)
+        patches = _patches(95.0)
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("paper_trading.trade_simulator.close_paper_trade",
+                   AsyncMock(return_value=_closed_stub())) as mock_close:
+            auto_closed = await ts.update_positions_with_current_prices(session)
+
+        mock_close.assert_called_once()
+        assert mock_close.call_args.args[2] == "POST_EVENT_TIME_EXIT"
+        assert len(auto_closed) == 1
