@@ -66,9 +66,14 @@ celery_app.conf.beat_schedule = {
         "task":     "tasks.market_scan.scan_watchlist",
         "schedule": 30,
     },
-    "crawl-news-every-1min": {
+    # 5 min, not 60s (2026-08-17). A crawl fetches 11 sources and then makes up
+    # to ~45 classify_event() LLM round-trips, so it cannot finish inside 60s --
+    # scheduling it that often just queued ticks the overlap guard now rejects.
+    # The comment on purge-old-news-weekly below already describes this as "the
+    # 5-minute crawl", so 60s was itself a drift from the documented intent.
+    "crawl-news-every-5min": {
         "task":     "tasks.news_scan.scan_news",
-        "schedule": 60,
+        "schedule": 300,
     },
     # Sunday 02:30 IST (21:00 UTC Saturday). Keeps news_items bounded; the
     # 5-minute crawl saves ~150 rows/cycle → ~43k/day → ~2.6M/2 months without

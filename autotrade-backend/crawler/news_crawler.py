@@ -1014,6 +1014,13 @@ _YF_MAX_SYMBOLS:    int = 60    # symbols to query per crawl cycle
 _YF_MAX_PER_SYMBOL: int = 8     # articles to take per symbol
 _YF_MAX_AGE_HOURS:  int = 168   # 7 days — Yahoo Finance NSE news is often 3-5 days old
 
+# Max classify_event() LLM round-trips per crawl (2026-08-17). Bounds the
+# crawl's dominant, previously-unbounded cost so it fits inside its Celery
+# time limit and always reaches the persist step — see the loop in
+# run_news_crawl() for the full rationale and measurements. Highest-|sentiment|
+# items win the budget; the rest are saved without news_metadata.
+_MAX_CLASSIFY_PER_CRAWL: int = 15
+
 
 async def _yf_news_symbols(session: AsyncSession, limit: int = _YF_MAX_SYMBOLS) -> list[str]:
     """Return the most Hub-relevant symbols for yfinance news fetching.
@@ -1343,8 +1350,40 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # one slow or retrying classification held locks for the whole batch.
     # Computing everything first keeps the write transaction open only for the
     # tight add+flush that follows.
+    # BOUNDED (2026-08-17). This loop is the crawl's dominant cost and was
+    # unbounded: every item over the sentiment threshold got its own LLM
+    # round-trip. A busy crawl-minute needs up to 45 of them (measured against
+    # 2026-08-07 data), each 2-4s, each retried up to 4x on malformed JSON,
+    # sharing one 90 RPM limiter with the trade loop and hub -- and a single
+    # hung call costs up to 180s (boto read_timeout=90 plus one manual retry).
+    # A measured run on 2026-08-17 was still going at 588s with no output for
+    # its last 6 minutes.
+    #
+    # Why the cap matters beyond speed: classification happens BEFORE the
+    # session.add() loop below, so a task killed in here loses the ENTIRE
+    # crawl's news, not just the enrichment. That is exactly what happened
+    # after the Bedrock key was restored -- 171 SoftTimeLimitExceeded and zero
+    # news_items persisted after 12:09 despite the crawler fetching fine.
+    #
+    # Capping makes the crawl's runtime predictable and guarantees it reaches
+    # persist. Items past the cap are still saved, just without news_metadata;
+    # they are strictly-lower-|sentiment| than the ones classified, and the
+    # trading-critical path (process_latest_events -> causal_events) does its
+    # own top-20 selection independently of this field.
+    _to_classify = sorted(
+        (i for i, s in enumerate(sentiments) if abs(s["score"]) > 0.6),
+        key=lambda i: abs(sentiments[i]["score"]), reverse=True,
+    )[:_MAX_CLASSIFY_PER_CRAWL]
+    _classify_idx = set(_to_classify)
+    if len(_classify_idx) < sum(1 for s in sentiments if abs(s["score"]) > 0.6):
+        logger.info(
+            f"[news_crawler] classifying the {len(_classify_idx)} strongest-sentiment "
+            f"items of {sum(1 for s in sentiments if abs(s['score']) > 0.6)} eligible "
+            f"(cap {_MAX_CLASSIFY_PER_CRAWL}) — the rest are saved unclassified"
+        )
+
     prepared: list[dict] = []
-    for item, sent in zip(new_items, sentiments):
+    for _i, (item, sent) in enumerate(zip(new_items, sentiments)):
         # yfinance items carry pre-tagged tickers — no extraction needed.
         # RSS/NewsAPI/Finnhub items get tickers extracted from the headline text.
         tickers = (
@@ -1354,7 +1393,7 @@ async def run_news_crawl(session: AsyncSession) -> dict:
         )
 
         metadata_dict = None
-        if abs(sent["score"]) > 0.6:
+        if _i in _classify_idx:
             classification = await classify_event(item["headline"], item.get("summary", ""))
             if classification:
                 metadata_dict = classification.model_dump()
