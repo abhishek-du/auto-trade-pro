@@ -628,6 +628,19 @@ class Settings(BaseSettings):
     MAX_POSITIONS_PER_SECTOR:  int   = 8      # ~20% of a full 40-position book
     MAX_SECTOR_CAPITAL_PCT:    float = 0.20   # ≤20% of equity deployed into one sector
 
+    # ── Pre-event expectation anchor (P2-1, 2026-08-17) ───────────────────────
+    # The strategy trades the gap vs MARKET expectation, but both consensus and
+    # guidance providers were unimplemented stubs, so every trade fell back to a
+    # 3yr-CAGR proxy the code itself flags as "not a market expectation" —
+    # leaving the premise unevaluated (profit factor 1.069 over 223 trades).
+    # The gate below restricts trading to symbols where a real consensus exists.
+    # Coverage of Indian small/mid-caps is thin (~17% of the forensic window's
+    # symbols clear MIN_ANALYSTS), so this deliberately shrinks the universe.
+    # Set to False to restore the old permissive behaviour.
+    ENABLE_PRE_EVENT_MARKET_EXPECTATION_GATE: bool = True
+    CONSENSUS_MIN_ANALYSTS: int = 3        # below this it isn't a "consensus"
+    CONSENSUS_CACHE_TTL:    int = 86_400   # estimates move slowly; stay off the rate limiter
+
     # Worker processes for score_universe's per-symbol scoring (Ichimoku/ADX/EMA-ribbon/
     # candlestick pattern detection is CPU-bound — asyncio.gather gives no real parallelism
     # for it, only a process pool does). Kept conservative on a 4-core box: this task shares

@@ -31,6 +31,7 @@ from engine.pre_event_expectation_gap.types import (
 )
 from engine.pre_event_expectation_gap.point_in_time import PointInTimeSnapshot
 from engine.pre_event_expectation_gap.financials import get_historical_baseline_3y_cagr
+from utils.logger import logger
 
 # Confidence ceilings by anchor strength. A weaker anchor caps overall
 # confidence lower — "final confidence must not exceed the weakest material input".
@@ -39,12 +40,31 @@ _CEILING_GUIDANCE  = 0.70
 _CEILING_BASELINE  = 0.40
 
 
-async def _fetch_consensus(symbol: str, snapshot: PointInTimeSnapshot):
+async def _fetch_consensus(symbol: str, snapshot: PointInTimeSnapshot,
+                           nowcast: NowcastResult | None = None):
     """Point-in-time public analyst consensus for expected PAT growth ->
-    (value, known_at) or None. No provider integrated — returns None. When a
-    real consensus feed (with a revision timestamp <= as_of) is added it plugs
-    in here and automatically becomes the preferred anchor."""
-    return None
+    (value, known_at) or None.
+
+    Wired to a real provider 2026-08-17 (P2-1) — see
+    engine/pre_event_expectation_gap/consensus.py for the coverage reality
+    (only ~17% of this universe clears the minimum-analyst bar) and the
+    point-in-time semantics. Returning None here is the COMMON case, not an
+    error path, and is what makes the historical-baseline fallback below
+    still matter.
+
+    The consensus must match the nowcast's own dimension: comparing a
+    quarterly implied trend against an annual consensus would produce a
+    meaningless gap, so `implied_is_annual` selects the period.
+    """
+    want_annual = bool(getattr(nowcast, "implied_is_annual", False))
+    try:
+        from engine.pre_event_expectation_gap.consensus import fetch_consensus_growth
+        return await fetch_consensus_growth(symbol, want_annual)
+    except Exception as exc:
+        # Fail-closed to "no consensus" — never let a provider outage
+        # fabricate an anchor or crash the prediction.
+        logger.debug(f"[expectation] consensus lookup failed for {symbol}: {exc}")
+        return None
 
 
 async def _fetch_guidance(symbol: str, snapshot: PointInTimeSnapshot):
@@ -81,7 +101,7 @@ async def compute_expectation(
     confidence_ceiling = None
     consensus_val = guidance_val = None
 
-    consensus = await _fetch_consensus(symbol, snapshot)
+    consensus = await _fetch_consensus(symbol, snapshot, nowcast)
     guidance  = await _fetch_guidance(symbol, snapshot)
 
     def _usable(pair):

@@ -34,9 +34,15 @@ def _nc(status=NowcastStatus.OK, profit=Direction.POSITIVE, conf=0.4, completene
                          margin_direction=profit, confidence=conf, data_completeness=completeness,
                          sector="AUTO", implied_profit_growth=implied, baseline_profit_growth=baseline)
 
-def _exp(gap=0.20, available=True, anchor="historical_baseline"):
+def _exp(gap=0.20, available=True, anchor="CONSENSUS", is_market_expectation=True):
+    """Default is now a CONSENSUS anchor: since P2-1 a candidate whose anchor is
+    not a real market expectation is rejected up front, so tests exercising the
+    DOWNSTREAM gates need a valid market-expectation anchor to reach them.
+    Pass is_market_expectation=False to exercise that gate itself."""
     return ExpectationEstimate(our_expected_pat_growth=0.40, expectation_gap=gap,
-                               gap_available=available, anchor_used=anchor)
+                               gap_available=available, anchor_used=anchor,
+                               anchor_type=anchor,
+                               is_market_expectation=is_market_expectation)
 
 def _pd(status=PriceDiscountStatus.NOT_DISCOUNTED, returns=None):
     return PriceDiscount(returns=returns if returns is not None else {"20d": 0.02},
@@ -173,6 +179,51 @@ class TestEvidenceRecentering:
 
 def _score(total=70.0, dq=1.0):
     return ScoreBreakdown(total=total, data_quality_score=dq, components={}, subscores={})
+
+
+class TestMarketExpectationGate:
+    """P2-1 (2026-08-17): the strategy trades the gap vs MARKET expectation, so
+    a candidate anchored on anything else (the 3yr-CAGR proxy that every live
+    trade silently used until now) must not trade at all."""
+
+    def test_non_market_anchor_is_no_trade(self):
+        d, reason = decide(
+            _score(total=95.0),                     # score can't buy past it
+            _nc(), _exp(anchor="HISTORICAL_BASELINE_3Y_CAGR", is_market_expectation=False),
+            _pd(), _rs(), _event())
+        assert d == PreEventDecision.NO_TRADE
+        assert "not a market expectation" in reason
+
+    def test_consensus_anchor_passes_the_gate(self):
+        d, _ = decide(_score(total=70.0), _nc(),
+                      _exp(anchor="CONSENSUS", is_market_expectation=True),
+                      _pd(), _rs(), _event())
+        assert d == PreEventDecision.LONG
+
+    def test_gate_can_be_disabled(self):
+        """The restriction is a deliberate universe cut, not a correctness
+        invariant — operators must be able to revert to the old behaviour."""
+        import engine.pre_event_expectation_gap.decision as dec
+        original = dec.REQUIRE_MARKET_EXPECTATION
+        try:
+            dec.REQUIRE_MARKET_EXPECTATION = False
+            d, _ = dec.decide(
+                _score(total=70.0), _nc(),
+                _exp(anchor="HISTORICAL_BASELINE_3Y_CAGR", is_market_expectation=False),
+                _pd(), _rs(), _event())
+            assert d == PreEventDecision.LONG
+        finally:
+            dec.REQUIRE_MARKET_EXPECTATION = original
+
+    def test_gate_runs_after_the_hard_data_gates(self):
+        """Ordering check: a candidate that fails an EARLIER gate must report
+        that failure, not the market-expectation one — the reason string is
+        the audit trail for why a trade didn't happen."""
+        d, reason = decide(
+            _score(total=70.0), _nc(status=NowcastStatus.UNAVAILABLE),
+            _exp(is_market_expectation=False), _pd(), _rs(), _event())
+        assert d == PreEventDecision.NO_TRADE
+        assert "nowcast unavailable" in reason
 
 
 class TestDecisionGates:

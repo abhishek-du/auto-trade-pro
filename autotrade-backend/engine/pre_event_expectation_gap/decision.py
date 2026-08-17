@@ -18,6 +18,31 @@ from engine.pre_event_expectation_gap.types import (
     ScheduledEvent, PreEventDecision, NowcastStatus, Direction, PriceDiscountStatus,
 )
 from engine.pre_event_expectation_gap.scoring import ScoreBreakdown
+from utils.config import settings
+
+# ── Universe restriction (P2-1, 2026-08-17) ─────────────────────────────────
+# This strategy's premise is trading the gap between what we infer and what the
+# MARKET expects. Until 2026-08-17 both market-expectation providers
+# (_fetch_consensus / _fetch_guidance) were stubs returning None, so every
+# trade silently fell back to a 3-year CAGR baseline that expectation.py itself
+# marks `is_market_expectation = False` — i.e. the premise was never actually
+# evaluated. Measured result over 223 trades: profit factor 1.069, statistically
+# indistinguishable from noise (docs/2026-08-17_FORENSIC_POST_MORTEM.md §3).
+#
+# With a real consensus provider now wired in, this gate restricts the strategy
+# to the universe where its premise is MEASURABLE, instead of letting it keep
+# trading a proxy and calling it an expectation gap.
+#
+# The cost is deliberate and large: analyst coverage of Indian small/mid-caps is
+# thin (measured 17% of the forensic window's symbols clear the minimum-analyst
+# bar; 0 of the 11-name loss cluster have any coverage at all), so this cuts the
+# tradable universe substantially and biases it toward larger names. That is the
+# intended trade-off — a smaller universe where the edge is checkable beats a
+# large one where it is not. Set ENABLE_PRE_EVENT_MARKET_EXPECTATION_GATE=false
+# to fall back to the old permissive behaviour.
+REQUIRE_MARKET_EXPECTATION: bool = bool(
+    getattr(settings, "ENABLE_PRE_EVENT_MARKET_EXPECTATION_GATE", True)
+)
 
 # Deterministic gate thresholds (v0.1, tunable).
 MIN_EVENT_CONFIDENCE = 0.6      # below → event timing too uncertain
@@ -50,6 +75,10 @@ def decide(
             f"data quality insufficient ({breakdown.data_quality_score:.2f} < {MIN_DATA_QUALITY})")
     if not expectation.gap_available:
         return PreEventDecision.NO_TRADE, "no expectation anchor available — gap cannot be established"
+    if REQUIRE_MARKET_EXPECTATION and not expectation.is_market_expectation:
+        return PreEventDecision.NO_TRADE, (
+            f"anchor is {expectation.anchor_type or 'unknown'}, not a market expectation — "
+            "cannot measure an expectation gap for this symbol")
 
     # ── 2. Direction bias ────────────────────────────────────────────────────
     gap = expectation.expectation_gap or 0.0
