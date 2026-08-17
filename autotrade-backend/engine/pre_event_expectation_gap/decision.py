@@ -20,29 +20,11 @@ from engine.pre_event_expectation_gap.types import (
 from engine.pre_event_expectation_gap.scoring import ScoreBreakdown
 
 # Deterministic gate thresholds (v0.1, tunable).
-MIN_EVENT_CONFIDENCE   = 0.6      # below → event timing too uncertain
-MIN_NOWCAST_CONFIDENCE = 0.15     # below → direction call itself too weak to trade (see note below)
-MIN_DATA_QUALITY       = 0.20     # below → not enough to decide
-LONG_SCORE_BAR         = 60.0     # A+ long bar
-WAIT_SCORE_FLOOR       = 45.0     # below → edge too small even for a WAIT
-GAP_NEG_THRESHOLD      = 0.02     # gap below −2pp counts as a bearish anchor
-
-# MIN_NOWCAST_CONFIDENCE note (added 2026-08-17, loss investigation): unlike
-# MIN_EVENT_CONFIDENCE (which gates whether the EVENT DATE is real), nothing
-# previously gated nc.confidence itself -- the direction call's own
-# trustworthiness. scoring.py's old _nowcast_subscore floored at 0.5 (neutral)
-# for ANY confidence including near-zero, so a 6-11% confidence guess (the
-# large majority of live nowcasts -- most sector adapters cap well under
-# their confidence_ceiling when point-in-time history is thin) still bought
-# ~half that factor's max score, unopposed by any gate. Audited 203 trades
-# closed 3-17 Aug 2026: win rate was NOT monotonic with confidence_bucket
-# (60->46%, 70->39%, 80->36% -- the highest-confidence bucket performed
-# WORST), and every one of the period's largest single losses (GENESYS
-# -17.8%, GODREJIND -7.2%, LLOYDSENT -9.0%, CPPLUS -8.8% ...) carried a raw
-# nowcast confidence of 0.06-0.11. 0.15 is set below every sector adapter's
-# achievable range with adequate history (confidence_ceiling floor across
-# adapters is 0.20, banking) so it only excludes the genuinely-thin-data
-# tail, not the strategy as a whole.
+MIN_EVENT_CONFIDENCE = 0.6      # below → event timing too uncertain
+MIN_DATA_QUALITY     = 0.20     # below → not enough to decide
+LONG_SCORE_BAR       = 60.0     # A+ long bar
+WAIT_SCORE_FLOOR     = 45.0     # below → edge too small even for a WAIT
+GAP_NEG_THRESHOLD    = 0.02     # gap below −2pp counts as a bearish anchor
 
 
 def decide(
@@ -61,9 +43,6 @@ def decide(
     if (event.event_confidence or 0.0) < MIN_EVENT_CONFIDENCE:
         return PreEventDecision.NO_TRADE, (
             f"event timing uncertain (confidence {event.event_confidence:.2f} < {MIN_EVENT_CONFIDENCE})")
-    if (nowcast.confidence or 0.0) < MIN_NOWCAST_CONFIDENCE:
-        return PreEventDecision.NO_TRADE, (
-            f"nowcast direction too weak to trade (confidence {nowcast.confidence:.2f} < {MIN_NOWCAST_CONFIDENCE})")
     if not price_discount.returns:
         return PreEventDecision.NO_TRADE, "recent price history unavailable — cannot verify positioning/R:R"
     if breakdown.data_quality_score < MIN_DATA_QUALITY:
