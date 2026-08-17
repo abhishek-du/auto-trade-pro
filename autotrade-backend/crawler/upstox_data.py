@@ -59,6 +59,59 @@ _TTL = {
 
 # ISIN lookup cache: NSE symbol (bare, no .NS) → ISIN string
 _ISIN_CACHE: dict[str, str] = {}
+# Symbols confirmed absent from symbol_isin_map by a bulk prime, so a per-symbol
+# DB round-trip for them is known-pointless. Separate from _ISIN_CACHE because
+# "no ISIN" is not a str and must not be returned as one.
+_ISIN_DB_MISS: set[str] = set()
+
+
+async def prime_isin_cache(symbols: list[str]) -> int:
+    """Load many symbols' ISINs in ONE query instead of one session each.
+
+    _resolve_isin_uncached() opens its own AsyncSessionLocal per symbol. That is
+    fine for a handful, but the API's live-price loop calls it for every symbol
+    in PRICE_CACHE — which grows as pages are viewed (~2,970 observed live) —
+    so it became thousands of separate sessions per refresh. With NullPool each
+    is a fresh TCP connect, and because the session's context-manager exit is an
+    await point, a congested event loop delays the close and leaves the SELECT
+    sitting idle-in-transaction. That was the ONLY leaking query observed when
+    sampling pg_stat_activity (16 hits, up to 6s each) and is what filled the
+    connection pool when pooling was briefly enabled (666c893).
+
+    Returns the number of symbols primed. Best-effort: on any DB error the
+    per-symbol path still works, just slower.
+    """
+    bare = {
+        s.upper().replace(".NS", "").replace(".BO", "").replace(" ", "")
+        for s in symbols
+    }
+    todo = [b for b in bare if b and b not in _ISIN_CACHE and b not in _ISIN_DB_MISS]
+    if not todo:
+        return 0
+    try:
+        from db.database import AsyncSessionLocal
+        from db.models import SymbolISINMap
+        from sqlalchemy import select as _select
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(
+                _select(SymbolISINMap.symbol, SymbolISINMap.isin)
+                .where(SymbolISINMap.symbol.in_(todo))
+            )).all()
+            # End the read transaction at the point of use rather than relying
+            # on the context-manager exit, which the event loop may defer.
+            await s.rollback()
+    except Exception as exc:
+        logger.debug(f"[upstox] bulk ISIN prime failed ({len(todo)} symbols): {exc}")
+        return 0
+
+    found = 0
+    for sym, isin in rows:
+        if isin:
+            _ISIN_CACHE[sym] = isin
+            found += 1
+    # Anything asked for and not returned genuinely isn't in the table.
+    _ISIN_DB_MISS.update(set(todo) - {sym for sym, _ in rows})
+    return found
 
 
 # ── Auth headers ──────────────────────────────────────────────────────────────
@@ -247,19 +300,28 @@ async def get_isin(symbol: str) -> str | None:
 async def _resolve_isin_uncached(bare: str, is_bse: bool = False) -> str | None:
     """The real DB-then-live resolution, called at most once concurrently per
     symbol -- see get_isin()'s single-flight wrapper above."""
-    try:
-        from db.database import AsyncSessionLocal
-        from db.models import SymbolISINMap
-        from sqlalchemy import select as _select
-        async with AsyncSessionLocal() as s:
-            row = (await s.execute(
-                _select(SymbolISINMap).where(SymbolISINMap.symbol == bare)
-            )).scalar_one_or_none()
-        if row and row.isin:
-            _ISIN_CACHE[bare] = row.isin
-            return row.isin
-    except Exception as e:
-        logger.debug(f"[upstox] ISIN DB-cache lookup failed for {bare}: {e}")
+    # Skip the DB round-trip entirely when a bulk prime already established this
+    # symbol isn't in the table (see prime_isin_cache).
+    if bare not in _ISIN_DB_MISS:
+        try:
+            from db.database import AsyncSessionLocal
+            from db.models import SymbolISINMap
+            from sqlalchemy import select as _select
+            async with AsyncSessionLocal() as s:
+                row = (await s.execute(
+                    _select(SymbolISINMap).where(SymbolISINMap.symbol == bare)
+                )).scalar_one_or_none()
+                # Close the read transaction here rather than at the context
+                # manager's exit: that exit is an await point, so under a busy
+                # event loop the connection can sit idle-in-transaction for
+                # seconds. Observed as the only such query in production.
+                await s.rollback()
+            if row and row.isin:
+                _ISIN_CACHE[bare] = row.isin
+                return row.isin
+            _ISIN_DB_MISS.add(bare)
+        except Exception as e:
+            logger.debug(f"[upstox] ISIN DB-cache lookup failed for {bare}: {e}")
 
     resolved = await _resolve_isin_live(bare, is_bse=is_bse)
     if resolved:

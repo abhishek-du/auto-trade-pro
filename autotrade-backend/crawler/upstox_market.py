@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 from crawler.upstox_auth import ensure_upstox_token_fresh
-from crawler.upstox_data import get_instrument_key, _headers, _V2
+from crawler.upstox_data import get_instrument_key, prime_isin_cache, _headers, _V2
 from utils.logger import logger
 
 async def get_market_quote(symbol: str) -> dict:
@@ -66,6 +66,10 @@ async def get_market_quote_batch(symbols: list[str]) -> dict[str, dict]:
     ]
     if not candidates:
         return {}
+
+    # One query for every symbol's ISIN instead of one session per symbol —
+    # see prime_isin_cache's docstring for the connection leak this removes.
+    await prime_isin_cache(candidates)
 
     # Bounded concurrency. An unbounded gather here is NOT safe: this is called
     # from the API's live-price loop with every symbol in PRICE_CACHE, which
