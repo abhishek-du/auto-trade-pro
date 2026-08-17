@@ -133,6 +133,18 @@ def on_ticks(ws, ticks: list[dict]) -> None:
         change = ltp - prev if prev else 0.0
         change_pct = (change / prev * 100) if prev else 0.0
         existing = PRICE_CACHE.get(sym, {})
+        # Classify the entry (2026-08-17). Consumers filter PRICE_CACHE on
+        # `type` — /india/watchlist returns only type == "stock" — and ticks
+        # never carried it. It used to be back-filled indirectly: the API's
+        # in-process refresh_all_prices() would see a ticked symbol as
+        # "dynamic", re-fetch it, and rewrite the entry with type from
+        # _SYMBOL_META (defaulting to "stock"). That refresh moved to Celery,
+        # so nothing was stamping it any more and the watchlist collapsed from
+        # ~2,970 stocks to the 16 hard-coded in SYMBOLS_CONFIG. Setting it at
+        # the source is both cheaper and less indirect than the old path.
+        if not existing.get("type"):
+            from crawler.live_prices import _SYMBOL_META
+            existing["type"] = (_SYMBOL_META.get(sym) or {}).get("type", "stock")
         existing.update({
             "symbol": sym,
             "price": ltp,

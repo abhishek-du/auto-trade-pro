@@ -125,8 +125,7 @@ async def lifespan(app: FastAPI):
 
     # ── Live price refresh background task ───────────────────────────────────
     import asyncio as _asyncio
-    from crawler.india_price_feed import is_nse_market_open
-    from crawler.live_prices import refresh_all_prices
+    from crawler.live_prices import hydrate_prices_from_redis
     from api.websocket import live_price_manager
 
     _stop_event = _asyncio.Event()
@@ -137,19 +136,33 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(_asyncio.create_task(_init_db_with_retries()))
 
     async def _live_price_loop():
-        # Initial warm-up fetch
+        """Hydrate this process's PRICE_CACHE from Redis and fan out to clients.
+
+        The actual broker/vendor fetch moved to tasks.price_cache (2026-08-17).
+        It used to run HERE, taking 4-23s per cycle inside the same event loop
+        that serves requests — /health, a static dict with no I/O, was answering
+        in 1.3-3.8s on 25 of 25 probes because of it. What remains is one Redis
+        GET plus a dict merge.
+
+        PRICE_CACHE itself is unchanged: 141 read sites across 29 modules keep
+        reading the same in-process dict, and the Kite WebSocket ticker still
+        writes sub-second ticks into it directly during market hours (hydrate
+        will not overwrite those).
+        """
         try:
-            await refresh_all_prices()
+            await hydrate_prices_from_redis()
         except Exception as exc:
-            logger.warning(f"[live_prices] Initial fetch failed: {exc}")
+            logger.warning(f"[live_prices] Initial hydrate failed: {exc}")
 
         while not _stop_event.is_set():
-            interval = 15 if is_nse_market_open() else 60
+            # Cheap now, so poll at the fast cadence regardless of session —
+            # freshness is bounded by the publisher's 30s tick, not by this.
+            interval = 15
             try:
                 await _asyncio.sleep(interval)
                 if _stop_event.is_set():
                     break
-                updated = await refresh_all_prices()
+                updated = await hydrate_prices_from_redis()
                 if live_price_manager.connections:
                     await live_price_manager.broadcast_prices(updated)
                     logger.debug(
@@ -157,7 +170,7 @@ async def lifespan(app: FastAPI):
                         f"{len(live_price_manager.connections)} clients"
                     )
             except Exception as exc:
-                logger.warning(f"[live_prices] Refresh error: {exc}")
+                logger.warning(f"[live_prices] Hydrate error: {exc}")
 
     _bg_tasks.append(_asyncio.create_task(_live_price_loop()))
 

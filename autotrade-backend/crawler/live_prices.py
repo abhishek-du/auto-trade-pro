@@ -544,6 +544,87 @@ def _prune_dynamic_symbols(configured: set[str], protected: set[str]) -> int:
     return len(stale)
 
 
+# ── Cross-process price transport (2026-08-17) ───────────────────────────────
+# PRICE_CACHE is a module-level dict, so every process has its own copy, and
+# 141 read sites across 29 modules depend on that shape. Rather than rewrite
+# those, the EXPENSIVE half is moved out: one Celery task does the actual
+# broker/vendor fetch and publishes the result here, and every other process
+# just hydrates its local PRICE_CACHE from Redis.
+#
+# Why it had to move: refresh_all_prices() ran inside the API process's own
+# lifespan loop and took 4-23s per cycle, during which /health -- a static dict
+# with no I/O -- answered in 1.3-3.8s (25 of 25 probes). Its cost was paid by
+# the event loop serving every request.
+_REDIS_PRICE_KEY = "live_prices:snapshot"
+_REDIS_PRICE_TTL = 900          # generous: staleness is judged per-entry below
+
+
+async def publish_prices_to_redis(prices: dict[str, dict]) -> int:
+    """Publish a price snapshot for other processes. Best-effort."""
+    if not prices:
+        return 0
+    try:
+        import json
+        from utils.cache import get_redis
+        payload = json.dumps({"published_at": time.time(), "prices": prices}, default=str)
+        await get_redis().set(_REDIS_PRICE_KEY, payload, ex=_REDIS_PRICE_TTL)
+        return len(prices)
+    except Exception as exc:
+        logger.debug(f"[live_prices] redis publish failed: {exc}")
+        return 0
+
+
+async def hydrate_prices_from_redis() -> dict[str, dict]:
+    """Merge the published snapshot into this process's PRICE_CACHE.
+
+    Cheap (one Redis GET + a dict merge) — this is what replaces the multi-
+    second refresh inside the API process.
+
+    Deliberately does NOT clobber a live Kite-WebSocket tick: the ticker runs
+    in-process and writes sub-second prices straight into PRICE_CACHE, whereas
+    this snapshot can be up to a poll-interval old. Signal fields are preserved
+    for the same reason they are elsewhere in this module — they are attached by
+    the scoring pipeline, not by the price feed.
+    """
+    try:
+        import json
+        from utils.cache import get_redis
+        raw = await get_redis().get(_REDIS_PRICE_KEY)
+    except Exception as exc:
+        logger.debug(f"[live_prices] redis hydrate failed: {exc}")
+        return PRICE_CACHE
+    if not raw:
+        return PRICE_CACHE
+
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return PRICE_CACHE
+
+    incoming = payload.get("prices") or {}
+    merged = 0
+    for sym, entry in incoming.items():
+        existing = PRICE_CACHE.get(sym)
+        if existing and existing.get("data_source") == "kite_ws":
+            # A live tick beats a polled snapshot; only fill in the slow-moving
+            # fields the ticker never sets.
+            for k, v in entry.items():
+                if k not in ("price", "change", "change_pct", "volume", "data_source"):
+                    existing.setdefault(k, v)
+            continue
+        if existing:
+            entry = {
+                **entry,
+                "signal":            existing.get("signal") or entry.get("signal"),
+                "signal_confidence": existing.get("signal_confidence") or entry.get("signal_confidence"),
+            }
+        PRICE_CACHE[sym] = entry
+        merged += 1
+    if merged:
+        logger.debug(f"[live_prices] hydrated {merged} symbols from redis")
+    return PRICE_CACHE
+
+
 async def refresh_all_prices() -> dict[str, dict]:
     """Refresh PRICE_CACHE for configured symbols + any dynamically added ones."""
     t0         = time.monotonic()

@@ -30,6 +30,7 @@ celery_app = Celery(
     include=[
         "tasks.market_scan",
         "tasks.news_scan",
+        "tasks.price_cache",
         "tasks.narrative_scan",
         # B16: tasks.paper_trade_loop removed — deprecated duplicate trade loop
         # that caused oversized/duplicate trades; not scheduled, dead weight.
@@ -61,6 +62,15 @@ celery_app.conf.update(
 celery_app.conf.beat_schedule = {
 
     # ── US / global market tasks ──────────────────────────────────────────────
+
+    # Live-price snapshot for every process (2026-08-17). Moved here out of the
+    # API's lifespan loop, where its 4-23s fetch was stalling the event loop.
+    # 30s matches the old in-process cadence closely enough; the Kite ticker
+    # still supplies sub-second prices to the API during market hours.
+    "refresh-price-cache-every-30s": {
+        "task":     "tasks.price_cache.refresh_price_cache",
+        "schedule": 30,
+    },
 
     "scan-prices-every-30s": {
         "task":     "tasks.market_scan.scan_watchlist",
