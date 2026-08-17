@@ -16,6 +16,7 @@ TradeSimulator.execute_buy / execute_sell / size_from_risk
 """
 
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -73,6 +74,37 @@ _POST_EVENT_MAX_TRADING_DAYS = 2
 # the original -3.0 threshold; what changed (2026-08-17) is the RESPONSE to it —
 # see the POST_EVENT_REVERSAL block below.
 _POST_EVENT_ADVERSE_PCT = -3.0
+
+
+def _pre_event_metadata(trade) -> tuple[str | None, str | None]:
+    """(event_date_iso, nowcast_direction) for a PRE_EVENT_EXPECTATION_GAP trade.
+
+    Reads `indicator_snapshot.confidence_factors` first, then falls back to
+    parsing `ai_reason`. The fallback is load-bearing, not defensive: trades
+    opened before those keys started being persisted carry ONLY the structured
+    score_breakdown in confidence_factors, with the event date living in the
+    ai_reason text ("Event: QUARTERLY_RESULT on 2026-08-04"). Without it the
+    time-based exit silently skipped every legacy position — i.e. exactly the
+    most overdue ones. Caught live 2026-08-17: the first run of the new exits
+    closed 16 positions but left 9 untouched, RITES.NS among them at 9 trading
+    days past its event.
+    """
+    snap = (trade.indicator_snapshot or {}) if trade else {}
+    cf = snap.get("confidence_factors") or {}
+    event_date = cf.get("event_date")
+    nowcast_dir = cf.get("nowcast_direction")
+
+    if not (event_date and nowcast_dir):
+        reason = getattr(trade, "ai_reason", "") or ""
+        if not event_date:
+            m = re.search(r"\bon (\d{4}-\d{2}-\d{2})", reason)
+            if m:
+                event_date = m.group(1)
+        if not nowcast_dir:
+            m = re.search(r"Nowcast profit:\s*(POSITIVE|NEGATIVE|NEUTRAL)", reason)
+            if m:
+                nowcast_dir = m.group(1)
+    return event_date, nowcast_dir
 
 
 def _trading_days_since(event_date, today) -> int:
@@ -1014,10 +1046,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         #                      of direction, since all profit is made in the 0-2
         #                      day window (see _POST_EVENT_MAX_TRADING_DAYS).
         if pos.trade and pos.trade.strategy_name == "PRE_EVENT_EXPECTATION_GAP":
-            _pe_snap = pos.trade.indicator_snapshot or {}
-            _pe_cf   = _pe_snap.get("confidence_factors") or {}
-            _event_date_str = _pe_cf.get("event_date")
-            _nowcast_dir    = _pe_cf.get("nowcast_direction")
+            _event_date_str, _nowcast_dir = _pre_event_metadata(pos.trade)
             if _event_date_str:
                 from datetime import date as _date
                 try:

@@ -57,6 +57,7 @@ def _fake_position(
     direction=TradeDirection.BUY,
     trade_mgmt_extra=None,
     confidence_factors_override=None,
+    ai_reason="",
 ):
     if confidence_factors_override is not None:
         cf = confidence_factors_override
@@ -76,6 +77,7 @@ def _fake_position(
         indicator_snapshot=snap,
         stop_loss=stop_loss,
         opened_at=datetime.utcnow() - timedelta(days=6),
+        ai_reason=ai_reason,
     )
     pos = SimpleNamespace(
         id=1, trade_id=42, symbol="EPACKPEB.NS", direction=direction,
@@ -186,6 +188,47 @@ class TestPostEventReversalExit:
         assert mock_close.call_args.args[2] == "POST_EVENT_TIME_EXIT"
         assert len(auto_closed) == 1
         assert auto_closed[0]["reason"] == "POST_EVENT_TIME_EXIT"
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_reads_event_date_from_ai_reason(self):
+        """Trades opened before event_date/nowcast_direction were persisted into
+        confidence_factors carry ONLY score_breakdown there — the event date
+        lives in the ai_reason text. The exits must still apply to them.
+
+        Regression for a live miss on 2026-08-17: the first run of these exits
+        closed 16 positions but left 9 untouched (RITES.NS at 9 trading days
+        past its event) because the guard read confidence_factors only."""
+        pos = _fake_position(
+            entry_price=100.0, stop_loss=70.0,
+            confidence_factors_override={"score_breakdown": {}, "source": "AI Predict"},
+            ai_reason=f"Event: QUARTERLY_RESULT on {_STALE_EVENT}\n"
+                      f"Nowcast profit: POSITIVE (conf: 0.10)\n",
+        )
+        session = _session_for(pos)
+        patches = _patches(105.0)          # profitable -> only the time exit can fire
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch("paper_trading.trade_simulator.close_paper_trade",
+                   AsyncMock(return_value=_closed_stub())) as mock_close:
+            auto_closed = await ts.update_positions_with_current_prices(session)
+
+        mock_close.assert_called_once()
+        assert mock_close.call_args.args[2] == "POST_EVENT_TIME_EXIT"
+        assert len(auto_closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_metadata_helper_prefers_structured_over_ai_reason(self):
+        """When both sources are present the structured field wins — ai_reason
+        is a fallback, not an override."""
+        trade = SimpleNamespace(
+            indicator_snapshot={"confidence_factors": {
+                "event_date": "2026-08-01", "nowcast_direction": "NEGATIVE"}},
+            ai_reason="Event: QUARTERLY_RESULT on 2026-08-09\nNowcast profit: POSITIVE (conf: 0.1)\n",
+        )
+        assert ts._pre_event_metadata(trade) == ("2026-08-01", "NEGATIVE")
+
+        # neither source -> (None, None), and must not raise
+        assert ts._pre_event_metadata(
+            SimpleNamespace(indicator_snapshot={}, ai_reason="")) == (None, None)
 
     @pytest.mark.asyncio
     async def test_trading_days_helper_skips_weekends(self):
