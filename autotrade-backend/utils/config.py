@@ -628,6 +628,14 @@ class Settings(BaseSettings):
     MAX_POSITIONS_PER_SECTOR:  int   = 8      # ~20% of a full 40-position book
     MAX_SECTOR_CAPITAL_PCT:    float = 0.20   # ≤20% of equity deployed into one sector
 
+    # No single strategy may become the whole book while its edge is unproven
+    # (P2-2). PRE_EVENT_EXPECTATION_GAP ran at 91% of trades / profit factor
+    # 1.069. Deliberately set ABOVE current utilisation (~19% of equity, all of
+    # it one strategy) so it does not disrupt today's book — it is a ceiling
+    # that binds if flow recovers, not an immediate cut. Enforced on deployed
+    # capital, not trade count. 0 disables.
+    MAX_STRATEGY_CAPITAL_PCT:  float = 0.35
+
     # ── Pre-event expectation anchor (P2-1, 2026-08-17) ───────────────────────
     # The strategy trades the gap vs MARKET expectation, but both consensus and
     # guidance providers were unimplemented stubs, so every trade fell back to a

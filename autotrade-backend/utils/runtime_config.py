@@ -45,6 +45,7 @@ _KNOWN_KEYS: dict[str, type] = {
     "max_concurrent_positions": int,   # 0 disables
     "max_positions_per_sector": int,   # 0 disables
     "max_sector_capital_pct":   float, # 0 disables
+    "max_strategy_capital_pct": float, # 0 disables
     # Indian market
     "indian_market_max_risk": float,
     "indian_intraday_sl_pct": float,
@@ -191,6 +192,11 @@ class RuntimeConfig:
     def max_sector_capital_pct(self) -> float:
         return float(self._get("max_sector_capital_pct",
                                getattr(settings, "MAX_SECTOR_CAPITAL_PCT", 0.20)))
+
+    @property
+    def max_strategy_capital_pct(self) -> float:
+        return float(self._get("max_strategy_capital_pct",
+                               getattr(settings, "MAX_STRATEGY_CAPITAL_PCT", 0.35)))
 
     @property
     def indian_market_max_risk(self) -> float:

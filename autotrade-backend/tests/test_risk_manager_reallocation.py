@@ -52,7 +52,7 @@ def _no_daily_loss_and_no_other_gates():
              max_open_positions=500, max_daily_loss=0.05, min_risk_reward=0.0,
              max_portfolio_risk=0.15, min_cash_buffer=0.10,
              max_concurrent_positions=0, max_positions_per_sector=0,
-             max_sector_capital_pct=0.0,
+             max_sector_capital_pct=0.0, max_strategy_capital_pct=0.0,
          ))):
         yield
 

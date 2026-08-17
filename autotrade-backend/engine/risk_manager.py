@@ -330,6 +330,41 @@ async def validate_signal(
                     _log_rejection(signal.symbol, reason)
                     return False, reason
 
+    # ── Check 1e: Per-strategy allocation cap (P2-2, 2026-08-17) ─────────────
+    # No single strategy should be able to become the whole book while its edge
+    # is unproven. PRE_EVENT_EXPECTATION_GAP was 243 of 266 trades (91%) at a
+    # profit factor of 1.069 -- statistically indistinguishable from noise --
+    # and no component of its score correlated with outcome (all |r| < 0.18).
+    # The sector/concurrency caps above bound WHAT the book holds; this bounds
+    # how much of the book any one strategy's thesis can represent, so a single
+    # broken thesis can't take the account with it.
+    #
+    # Enforced on deployed CAPITAL rather than trade count: a strategy holding
+    # 30 tiny positions is a smaller risk than one holding 5 large ones, and
+    # capital is what actually gets lost. Queried from PaperTrade because
+    # OpenPosition carries no strategy attribution and lazy-loading .trade
+    # inside an async session raises.
+    max_strategy_pct = cfg.max_strategy_capital_pct
+    _cand_strategy = getattr(signal, "strategy", getattr(signal, "strategy_name", None))
+    if max_strategy_pct > 0 and _cand_strategy and equity > 0:
+        _res = await session.execute(
+            select(func.coalesce(func.sum(PaperTrade.size_usd), 0.0)).where(
+                and_(
+                    PaperTrade.status == TradeStatus.OPEN,
+                    PaperTrade.strategy_name == _cand_strategy,
+                )
+            )
+        )
+        _strategy_capital = float(_res.scalar_one())
+        if (_strategy_capital + this_notional) > max_strategy_pct * equity:
+            reason = (
+                f"Strategy allocation cap: {_cand_strategy} at "
+                f"₹{_strategy_capital:.0f} + this ₹{this_notional:.0f} "
+                f"> {max_strategy_pct*100:.0f}% of ₹{equity:.0f} equity"
+            )
+            _log_rejection(signal.symbol, reason)
+            return False, reason
+
     # ── Check 2: Daily loss circuit-breaker (mark-to-market) ──────────────────
     # P2.11 fix: measure the day's loss as realised-closed P&L PLUS the current
     # unrealised P&L of open positions. The old check counted only closed trades,
