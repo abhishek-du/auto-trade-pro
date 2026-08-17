@@ -2,7 +2,7 @@ import json
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from utils.logger import logger
 from utils.llm import call_llm_chat
 
@@ -26,6 +26,29 @@ class EventClassification(BaseModel):
     is_new_information: bool | None = Field(default=True, description="Is this genuinely new information or circulating old news?")
     market_priced_in: float | None = Field(default=0.0, description="Estimated % of how much the market has already priced this in (0.0 to 1.0)")
     source_reliability: float | None = Field(default=0.7, description="Reliability of the source (0.0 to 1.0) e.g., NSE=1.0, Rumor=0.3")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_nulls(cls, data):
+        """Treat an explicit JSON `null` exactly like an absent key.
+
+        A pydantic default only applies when the key is MISSING. When the model
+        emits the key with a null value the default is bypassed and validation
+        fails outright — observed live 2026-08-17 on the required-but-defaulted
+        fields, e.g. `{"bullish": null}` -> "Input should be a valid boolean
+        [input_value=None]". classify_event() treats that as malformed JSON and
+        retries the whole call up to 4 times before giving up and returning
+        None, so one null field burned four LLM round-trips AND still dropped a
+        genuine catalyst ("no event, no trade").
+
+        Stripping nulls here lets the declared defaults do their job while
+        keeping the field types non-Optional for consumers
+        (_build_evidence/DecisionEvidence.from_classification read them
+        directly and would otherwise need None-guards at every use).
+        """
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
 
 async def classify_event(headline: str, summary: str | None = None) -> EventClassification | None:
     """

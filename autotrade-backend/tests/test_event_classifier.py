@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from engine.event_classifier import classify_event
+from engine.event_classifier import EventClassification, classify_event
 
 
 class TestClassifyEventLogsOnFalsyResponse:
@@ -71,3 +71,58 @@ class TestClassifyEventLogsOnFalsyResponse:
             result = await classify_event("headline", "summary")
         assert result is None
         assert mock_logger.error.called
+
+
+class TestNullFieldsUseDefaults:
+    """An explicit JSON `null` must behave exactly like an absent key
+    (2026-08-17).
+
+    A pydantic default only applies when the key is MISSING. When the model
+    emitted the key with a null value the default was bypassed and validation
+    failed -- observed live as `{"bullish": null}` -> "Input should be a valid
+    boolean [input_value=None]". classify_event() classifies that as malformed
+    JSON and retries the WHOLE LLM call up to 4 times before returning None, so
+    a single null field burned four round-trips and still dropped a genuine
+    catalyst ("no event, no trade").
+    """
+
+    def test_null_bullish_falls_back_to_default(self):
+        c = EventClassification(**{"category": "MACRO_EVENT", "impact": "LOW",
+                                   "confidence": 0.4, "bullish": None, "entities": {}})
+        assert c.bullish is False
+
+    def test_every_required_field_null_still_constructs(self):
+        c = EventClassification(**{"category": None, "impact": None, "confidence": None,
+                                   "bullish": None, "entities": None})
+        assert (c.category, c.impact, c.confidence, c.bullish, c.entities) == \
+               ("UNKNOWN", "LOW", 0.0, False, {})
+
+    def test_null_optional_fields_fall_back_to_defaults(self):
+        c = EventClassification(**{"category": "X", "bullish": True, "reasoning": None,
+                                   "surprise_score": None, "source_reliability": None})
+        assert c.reasoning == "" and c.surprise_score == 50 and c.source_reliability == 0.7
+
+    def test_real_values_pass_through_untouched(self):
+        """The null-stripping must not clobber legitimate falsy values or
+        rewrite anything the model actually supplied."""
+        c = EventClassification(**{"category": "EARNINGS_BEAT", "impact": "HIGH",
+                                   "confidence": 0.9, "bullish": True,
+                                   "entities": {"companies": ["TCS"]},
+                                   "surprise_score": 88, "source_reliability": 1.0,
+                                   "market_priced_in": 0.0})
+        assert c.bullish is True and c.confidence == 0.9 and c.surprise_score == 88
+        assert c.source_reliability == 1.0
+        assert c.market_priced_in == 0.0          # legitimate falsy, not a null
+        assert c.entities == {"companies": ["TCS"]}
+
+    def test_genuinely_wrong_types_are_still_rejected(self):
+        """This fix must not turn into blanket permissiveness -- a response
+        that is actually wrong should still fail so the retry path can run."""
+        with pytest.raises(Exception):
+            EventClassification(**{"confidence": "not-a-number"})
+
+    def test_non_dict_payload_is_passed_through(self):
+        """The validator must not assume a dict; a list/str payload should
+        reach pydantic's normal error handling rather than crash the validator."""
+        with pytest.raises(Exception):
+            EventClassification.model_validate(["not", "a", "dict"])
