@@ -1,0 +1,38 @@
+[Unit]
+Description=AutoTrade Pro — Uvicorn API server (no auto-reload)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python \
+    -m uvicorn main:app --host 127.0.0.1 --port 8000 \
+    --timeout-graceful-shutdown 12
+Restart=always
+RestartSec=5
+
+# Graceful-shutdown budget (was 8s). Uvicorn must close connections, cancel the
+# lifespan background tasks and dispose the DB engine; 8s was routinely not
+# enough, so every stop hit the timeout and was SIGKILLed -- which meant the
+# shutdown handler never ran and connections/pool were never released cleanly.
+TimeoutStopSec=30
+
+# Memory containment (2026-08-17). This service was OOM-killed twice in one
+# week -- 14-Aug at a 6.0G peak and 17-Aug at 5.6G -- BY THE KERNEL, which
+# picks its victim across the whole 22G box, so an unrelated process could
+# just as easily have been killed. With MemoryMax the cgroup kills only this
+# unit and Restart=always brings it straight back, turning a machine-wide
+# incident into a local restart.
+# MemoryHigh throttles + reclaims first, so a slow leak gets pushed back
+# before it ever reaches the hard cap. Normal steady state is ~355M, and the
+# highest legitimate working set observed is well under 1G, so 2G/3G is
+# generous headroom rather than a tight fit.
+MemoryAccounting=yes
+MemoryHigh=2G
+MemoryMax=3G
+StandardOutput=append:/tmp/uvicorn.log
+StandardError=append:/tmp/uvicorn.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=AutoTrade Pro — News-First Discovery Engine (24/7 RSS + LLM discovery, auto-reloads on .py changes)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment="PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend"
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/watchmedo \
+    auto-restart \
+    --directory=. \
+    --pattern="*.py" \
+    --recursive \
+    -- \
+    /home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python \
+    /home/cis/windows/auto-trade-pro/autotrade-backend/news_discovery_engine.py
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+StandardOutput=append:/tmp/news-engine.log
+StandardError=append:/tmp/news-engine.log
+
+[Install]
+WantedBy=default.target
