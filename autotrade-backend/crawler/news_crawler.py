@@ -1176,6 +1176,24 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # ── Identify symbols for yfinance (DB shortlist — async, must run first) ────
     yf_symbols = await _yf_news_symbols(session)
 
+    # Release the read transaction the two queries above opened, BEFORE the
+    # slow work below (2026-08-17). SQLAlchemy holds a transaction open from
+    # the first statement until commit/rollback, and this function's caller
+    # (tasks/news_scan.py) only commits at the very end — so the txn used to
+    # stay open across every network fetch and every LLM call in this crawl,
+    # i.e. for minutes.
+    #
+    # That is not merely untidy: an idle-in-transaction session blocks DDL.
+    # Confirmed live via pg_stat_activity — three sessions idle-in-transaction
+    # on news_items for 1-4 min with an ALTER TABLE stuck behind them for 76s,
+    # which is what made init_db() hang and forced it to be commented out of
+    # main.py's startup for days (see c14fb54).
+    #
+    # Nothing is pending here (the reads are read-only, writes happen further
+    # down), so this just ends the snapshot and returns the connection to an
+    # idle state. SQLAlchemy opens a fresh transaction lazily on next use.
+    await session.commit()
+
     # ── Fetch from all sources in parallel ───────────────────────────────────
     newsapi_rows, finnhub_rows, newsdata_rows, rss_rows, yf_rows, rbi_rows, pib_rows, sebi_rows, bulk_rows, block_rows, media_rows = await asyncio.gather(
         fetch_newsapi_headlines(),
@@ -1290,6 +1308,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     else:
         existing_urls = set()
 
+    # End the read transaction the dedup SELECT opened, for the same reason as
+    # the commit further up. Placed BEFORE the early return below, not after —
+    # "all duplicates" is the common outcome of a crawl, so that path was the
+    # one most often leaving a session idle-in-transaction.
+    await session.commit()
+
     new_items = [
         item for item in deduped
         if item.get("url") not in existing_urls
@@ -1312,9 +1336,14 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     headlines  = [item["headline"] for item in new_items]
     sentiments = analyser.analyse_batch(headlines)
 
-    # ── Persist to DB ─────────────────────────────────────────────────────────
-    total_saved = 0
-    broadcast_payloads: list[dict] = []
+    # ── Classify BEFORE touching the session (2026-08-17) ────────────────────
+    # classify_event() is an LLM round-trip per item. This loop used to be
+    # fused with the session.add() loop below, so the write transaction opened
+    # on the first add and then stayed open across every remaining LLM call —
+    # one slow or retrying classification held locks for the whole batch.
+    # Computing everything first keeps the write transaction open only for the
+    # tight add+flush that follows.
+    prepared: list[dict] = []
     for item, sent in zip(new_items, sentiments):
         # yfinance items carry pre-tagged tickers — no extraction needed.
         # RSS/NewsAPI/Finnhub items get tickers extracted from the headline text.
@@ -1323,13 +1352,23 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             if item.get("tickers_affected")
             else extract_tickers_from_headline(item["headline"])
         )
-        
+
         metadata_dict = None
         if abs(sent["score"]) > 0.6:
             classification = await classify_event(item["headline"], item.get("summary", ""))
             if classification:
                 metadata_dict = classification.model_dump()
-            
+
+        prepared.append({"item": item, "sent": sent,
+                         "tickers": tickers, "metadata": metadata_dict})
+
+    # ── Persist to DB ─────────────────────────────────────────────────────────
+    total_saved = 0
+    broadcast_payloads: list[dict] = []
+    for _p in prepared:
+        item, sent = _p["item"], _p["sent"]
+        tickers, metadata_dict = _p["tickers"], _p["metadata"]
+
         row = NewsItem(
             headline=item["headline"],
             source=item["source"],
@@ -1358,7 +1397,16 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             ),
         })
 
-    await session.flush()
+    # Commit, not just flush (2026-08-17). flush() emits the INSERTs but leaves
+    # the transaction — and its row locks — open until the caller commits at the
+    # very end, which is after the event-arbitrage and causal-event steps below.
+    # Both of those are slow (trade evaluation, more LLM calls), so the crawl's
+    # own writes used to pin a transaction open for that entire tail.
+    #
+    # Committing here is also safer for the data: the crawled headlines are
+    # independent of whether downstream trade evaluation succeeds, and this way
+    # a failure in that tail can no longer roll back the whole crawl's news.
+    await session.commit()
 
     # ── Strategy #5: Event-Driven Arbitrage (News Flash) ──────────────────────
     try:
