@@ -216,6 +216,21 @@ async def validate_signal(
         _log_rejection(signal.symbol, reason)
         return False, reason
 
+    # ── Check 1a-ii: Concurrency cap (diversification, 2026-08-17) ───────────
+    # Distinct from max_pos above: that is a runaway-loop guard (500), this
+    # bounds how many correlated names the book can hold at once. The 3-17 Aug
+    # post-mortem measured a peak of 101 concurrent positions (~69% of equity)
+    # with 99% long exposure — capital limits alone never constrained breadth
+    # because each individual position was small (median 0.68% of equity).
+    max_concurrent = cfg.max_concurrent_positions
+    if max_concurrent > 0 and len(open_positions) >= max_concurrent:
+        reason = (
+            f"Concurrency cap reached ({len(open_positions)}/{max_concurrent} positions) — "
+            f"book already at its diversification limit"
+        )
+        _log_rejection(signal.symbol, reason)
+        return False, reason
+
     this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
     this_risk = this_pos["risk_amount"]
     this_notional = this_pos["usd_value"]
@@ -264,6 +279,56 @@ async def validate_signal(
         current_open_risk = sum(
             abs(p.entry_price - p.stop_loss) * p.size_units for p in open_positions
         )
+
+    # ── Check 1d: Per-sector concentration (diversification, 2026-08-17) ─────
+    # Two bounds on one sector: how many NAMES it may hold, and how much
+    # CAPITAL it may absorb. Both are needed — 8 tiny positions and 2 large
+    # ones are different risks, and the post-mortem saw sector outcomes
+    # dominate selection outcomes (IT/Infra/Energy -39,322 vs Pharma/Metals
+    # +34,472 over the same fortnight).
+    #
+    # Deliberately fail-OPEN on an unresolvable sector: _get_sector_for_symbol
+    # reads a cached map that legitimately misses newly-listed/illiquid names,
+    # and silently blocking every unmapped symbol would quietly shrink the
+    # tradable universe in a way that looks like "no signals" rather than a
+    # rejection. Unmapped symbols still face every other check.
+    max_per_sector  = cfg.max_positions_per_sector
+    max_sector_pct  = cfg.max_sector_capital_pct
+    if (max_per_sector > 0 or max_sector_pct > 0) and open_positions:
+        try:
+            from engine.intelligence_hub import _get_sector_for_symbol
+            _cand_sector = _get_sector_for_symbol(signal.symbol)
+        except Exception as exc:
+            logger.debug(f"[risk_manager] sector lookup failed for {signal.symbol}: {exc}")
+            _cand_sector = None
+
+        if _cand_sector:
+            _same_sector = []
+            for p in open_positions:
+                try:
+                    if _get_sector_for_symbol(p.symbol) == _cand_sector:
+                        _same_sector.append(p)
+                except Exception:
+                    continue
+
+            if max_per_sector > 0 and len(_same_sector) >= max_per_sector:
+                reason = (
+                    f"Sector cap: {_cand_sector} already holds "
+                    f"{len(_same_sector)}/{max_per_sector} positions"
+                )
+                _log_rejection(signal.symbol, reason)
+                return False, reason
+
+            if max_sector_pct > 0 and equity > 0:
+                _sector_capital = sum(p.size_usd for p in _same_sector)
+                if (_sector_capital + this_notional) > max_sector_pct * equity:
+                    reason = (
+                        f"Sector capital cap: {_cand_sector} at "
+                        f"₹{_sector_capital:.0f} + this ₹{this_notional:.0f} "
+                        f"> {max_sector_pct*100:.0f}% of ₹{equity:.0f} equity"
+                    )
+                    _log_rejection(signal.symbol, reason)
+                    return False, reason
 
     # ── Check 2: Daily loss circuit-breaker (mark-to-market) ──────────────────
     # P2.11 fix: measure the day's loss as realised-closed P&L PLUS the current

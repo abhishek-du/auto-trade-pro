@@ -41,6 +41,10 @@ _KNOWN_KEYS: dict[str, type] = {
     "min_risk_reward":        float,
     "max_portfolio_risk":     float,   # total stop-loss risk across all open positions
     "min_cash_buffer":        float,   # minimum dry cash as fraction of equity
+    # Diversification caps (2026-08-17) — bound correlation, not capital
+    "max_concurrent_positions": int,   # 0 disables
+    "max_positions_per_sector": int,   # 0 disables
+    "max_sector_capital_pct":   float, # 0 disables
     # Indian market
     "indian_market_max_risk": float,
     "indian_intraday_sl_pct": float,
@@ -168,6 +172,25 @@ class RuntimeConfig:
     @property
     def min_cash_buffer(self) -> float:
         return float(self._get("min_cash_buffer", getattr(settings, "MIN_CASH_BUFFER", 0.10)))
+
+    # ── Diversification caps (2026-08-17 forensic post-mortem) ───────────────
+    # Each returns 0 when disabled; validate_signal() skips the corresponding
+    # check on 0 so these can be turned off at runtime without a redeploy.
+
+    @property
+    def max_concurrent_positions(self) -> int:
+        return int(self._get("max_concurrent_positions",
+                             getattr(settings, "MAX_CONCURRENT_POSITIONS", 40)))
+
+    @property
+    def max_positions_per_sector(self) -> int:
+        return int(self._get("max_positions_per_sector",
+                             getattr(settings, "MAX_POSITIONS_PER_SECTOR", 8)))
+
+    @property
+    def max_sector_capital_pct(self) -> float:
+        return float(self._get("max_sector_capital_pct",
+                               getattr(settings, "MAX_SECTOR_CAPITAL_PCT", 0.20)))
 
     @property
     def indian_market_max_risk(self) -> float:

@@ -606,6 +606,28 @@ class Settings(BaseSettings):
     CONVICTION_HIGH:       float = 70.0    # confidence at which risk hits RISK_PER_TRADE_MAX
     MAX_NEW_ENTRIES_PER_CYCLE: int = 8     # don't fill the whole budget in one 60s cycle
 
+    # ── Diversification limits (2026-08-17 forensic post-mortem) ──────────────
+    # The capital model above is deliberately count-agnostic, and MAX_OPEN_
+    # POSITIONS is only a runaway-loop guard — so nothing constrained how
+    # CORRELATED the book was. Measured over 3-17 Aug: peak 101 concurrent
+    # positions (~69% of equity), 99% of them long, and outcomes dominated by
+    # sector rather than selection —
+    #     IT -18,653 | Infra -15,223 | Energy -5,446   (= -39,322)
+    #     Pharma +19,310 | Metals +15,162              (= +34,472)
+    # A single sector rotation therefore propagated straight to P&L. These caps
+    # bound concentration WITHOUT touching the capital model: a trade is
+    # rejected when its sector is already too large, or the book already holds
+    # too many concurrent names, even if risk budget and cash buffer are fine.
+    #
+    # MAX_CONCURRENT_POSITIONS is intentionally separate from MAX_OPEN_POSITIONS
+    # (500). That one guards against a runaway loop and was deliberately raised
+    # from 25 on 2026-07-29 because the COUNT ceiling — not capital — was
+    # rejecting trades. This is a different constraint with a different job:
+    # diversification. Set it to 0 to disable.
+    MAX_CONCURRENT_POSITIONS:  int   = 40
+    MAX_POSITIONS_PER_SECTOR:  int   = 8      # ~20% of a full 40-position book
+    MAX_SECTOR_CAPITAL_PCT:    float = 0.20   # ≤20% of equity deployed into one sector
+
     # Worker processes for score_universe's per-symbol scoring (Ichimoku/ADX/EMA-ribbon/
     # candlestick pattern detection is CPU-bound — asyncio.gather gives no real parallelism
     # for it, only a process pool does). Kept conservative on a 4-core box: this task shares

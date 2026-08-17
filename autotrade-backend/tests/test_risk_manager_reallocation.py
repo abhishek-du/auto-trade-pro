@@ -41,11 +41,18 @@ def _open_position(size_usd=50_000.0, entry=100.0, stop=95.0, size_units=10.0, u
 @pytest.fixture(autouse=True)
 def _no_daily_loss_and_no_other_gates():
     """Everything past checks 1a/1b/1c passes by default so each test only
-    needs to exercise the one thing it's testing."""
+    needs to exercise the one thing it's testing.
+
+    The 2026-08-17 diversification caps are DISABLED here (0 = off) so these
+    tests keep exercising only the capital/ceiling logic they were written
+    for; they have their own coverage in test_risk_manager_diversification.py.
+    """
     with patch("engine.risk_manager._today_closed_pnl", AsyncMock(return_value=0.0)), \
          patch("engine.risk_manager.RuntimeConfig.load", AsyncMock(return_value=SimpleNamespace(
              max_open_positions=500, max_daily_loss=0.05, min_risk_reward=0.0,
              max_portfolio_risk=0.15, min_cash_buffer=0.10,
+             max_concurrent_positions=0, max_positions_per_sector=0,
+             max_sector_capital_pct=0.0,
          ))):
         yield
 
