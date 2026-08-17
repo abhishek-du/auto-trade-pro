@@ -13,7 +13,12 @@ import asyncio
 import re
 import html
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+# NSE publishes announcement timestamps as IST wall-clock; used by
+# _parse_nse_announcement_dt to normalise them to UTC like every other source.
+_IST_TZ = ZoneInfo("Asia/Kolkata")
 from functools import lru_cache
 
 import httpx
@@ -342,13 +347,27 @@ _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES: tuple[str, ...] = (
 
 
 def _parse_nse_announcement_dt(raw: str | None) -> datetime | None:
-    """NSE's an_dt/exchdisstime look like '14-Jul-2026 20:10:07'."""
+    """NSE's an_dt/exchdisstime look like '14-Jul-2026 20:10:07' — in IST.
+
+    Returns a naive UTC datetime, matching every other source in this module
+    (which all go through datetime.utcfromtimestamp) and the 62 DB columns
+    defaulting to func.now() on a UTC server.
+
+    Fixed 2026-08-17: this used to return the parsed value as-is, i.e. an IST
+    wall-clock stored in a UTC column. It was the ONLY source doing so, which
+    put 4,159 rows (15.3% of all news_items with a published_at) 5h30m in the
+    future relative to their own crawled_at — published_at appearing to precede
+    the crawl that found it. Anything filtering news by time (notably
+    get_market_sentiment's bar_date cutoff, which exists to prevent backtest
+    look-ahead) silently treated those rows as 5.5h newer than they were.
+    """
     if not raw:
         return None
     try:
-        return datetime.strptime(raw.strip(), "%d-%b-%Y %H:%M:%S")
+        naive_ist = datetime.strptime(raw.strip(), "%d-%b-%Y %H:%M:%S")
     except Exception:
         return None
+    return naive_ist.replace(tzinfo=_IST_TZ).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 async def fetch_nse_corporate_announcements(limit: int = 50) -> list[dict]:

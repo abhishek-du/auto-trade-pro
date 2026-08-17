@@ -1,15 +1,46 @@
 # Pydantic response models for all AutoTrade Pro API routes.
 # Used as response_model= in FastAPI decorators for automatic docs + validation.
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
+
+
+# ── Timestamp serialisation (2026-08-17) ─────────────────────────────────────
+# Every timestamp in this database is stored NAIVE UTC: 62 columns default to
+# func.now() on a UTC-configured Postgres, and app-side writers use
+# datetime.utcnow(). Pydantic serialised those naive values as-is —
+# "2026-08-17T13:26:02.926", with no offset — so a browser parsed them as LOCAL
+# time and rendered UTC values as if they were IST. Every timestamp in the UI
+# read 5h30m early.
+#
+# Fixed by tagging the offset the values actually carry rather than by
+# converting anything: naive values are marked +00:00 on the way out, so
+# JS `new Date(...)` converts to the viewer's zone (IST here) automatically.
+#
+# Deliberately NOT done by rewriting stored data to IST: the app clock
+# (datetime.utcnow()) is compared against candle timestamps in the SL/TP
+# freshness gates (paper_trading/trade_simulator.py, engine/agent/execution.py).
+# Shifting either side of that comparison by 5.5h would make every candle look
+# stale during market hours and silently disable stop-loss monitoring. Storage
+# stays uniformly UTC; only the wire format becomes explicit.
+_UTC = timezone.utc
+
+
+class _UtcAwareTimestamps(BaseModel):
+    """Mixin: emit naive datetimes as UTC-aware ISO 8601."""
+
+    @field_serializer("*", when_used="json", check_fields=False)
+    def _tag_utc(self, value, _info):
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=_UTC).isoformat()
+        return value
 
 
 # ── Wallet / Portfolio ────────────────────────────────────────────────────────
 
-class WalletSummary(BaseModel):
+class WalletSummary(_UtcAwareTimestamps):
     balance:        float
     equity:         float
     realised_pnl:   float
@@ -23,7 +54,7 @@ class WalletSummary(BaseModel):
     mode:           str
 
 
-class OpenPositionOut(BaseModel):
+class OpenPositionOut(_UtcAwareTimestamps):
     id:             int
     symbol:         str
     direction:      str
@@ -50,7 +81,7 @@ class OpenPositionOut(BaseModel):
     sector:         str | None   = None
 
 
-class PerformanceSnapshotOut(BaseModel):
+class PerformanceSnapshotOut(_UtcAwareTimestamps):
     id:             int
     date:           date
     balance:        float
@@ -61,7 +92,7 @@ class PerformanceSnapshotOut(BaseModel):
     snapshot_at:    datetime
 
 
-class PortfolioStatsOut(BaseModel):
+class PortfolioStatsOut(_UtcAwareTimestamps):
     total_signals_generated:  int
     trades_taken:             int
     trades_rejected:          int
@@ -76,7 +107,7 @@ class PortfolioStatsOut(BaseModel):
 
 # ── Trades ────────────────────────────────────────────────────────────────────
 
-class PaperTradeOut(BaseModel):
+class PaperTradeOut(_UtcAwareTimestamps):
     id:                   int
     symbol:               str
     direction:            str
@@ -105,7 +136,7 @@ class PaperTradeOut(BaseModel):
     confidence_factors:   dict = {}
 
 
-class TradeSummaryOut(BaseModel):
+class TradeSummaryOut(_UtcAwareTimestamps):
     total:      int
     open:       int
     closed:     int
@@ -118,7 +149,7 @@ class TradeSummaryOut(BaseModel):
 
 # ── Signals ───────────────────────────────────────────────────────────────────
 
-class SignalOut(BaseModel):
+class SignalOut(_UtcAwareTimestamps):
     id:             int
     symbol:         str
     timeframe:      str
@@ -130,7 +161,7 @@ class SignalOut(BaseModel):
     created_at:     datetime
 
 
-class SignalDetail(BaseModel):
+class SignalDetail(_UtcAwareTimestamps):
     symbol:           str
     action:           str
     confidence:       float
@@ -138,7 +169,7 @@ class SignalDetail(BaseModel):
     reasoning_points: list[str]
 
 
-class TriggerResult(BaseModel):
+class TriggerResult(_UtcAwareTimestamps):
     signals_generated: int
     actionable:        int
     symbols:           list[str]
@@ -147,7 +178,7 @@ class TriggerResult(BaseModel):
 
 # ── News ──────────────────────────────────────────────────────────────────────
 
-class NewsItemOut(BaseModel):
+class NewsItemOut(_UtcAwareTimestamps):
     id:               int
     headline:         str
     source:           str
@@ -161,7 +192,7 @@ class NewsItemOut(BaseModel):
     category:         Optional[str] = None
     company:          Optional[str] = None
 
-class CausalEventOut(BaseModel):
+class CausalEventOut(_UtcAwareTimestamps):
     id:               int
     # Optional: news_discovery_engine.py's own CausalEvent writes intentionally
     # leave this None (that pipeline doesn't link back to a NewsItem row) --
@@ -186,7 +217,7 @@ class CausalEventOut(BaseModel):
     company:          Optional[str] = None   # NSE-Announcements rows only
 
 
-class SSEAnnouncementOut(BaseModel):
+class SSEAnnouncementOut(_UtcAwareTimestamps):
     id:            int
     seq_id:        str
     comp_name:     Optional[str]
@@ -204,7 +235,7 @@ class SSEAnnouncementOut(BaseModel):
     crawled_at:    datetime
 
 
-class SentimentOut(BaseModel):
+class SentimentOut(_UtcAwareTimestamps):
     symbol:      str
     avg_score:   float
     description: str
@@ -212,7 +243,7 @@ class SentimentOut(BaseModel):
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 
-class SimulationLogOut(BaseModel):
+class SimulationLogOut(_UtcAwareTimestamps):
     id:         int
     event_type: str
     symbol:     str
@@ -221,7 +252,7 @@ class SimulationLogOut(BaseModel):
     timestamp:  datetime
 
 
-class AnalysisEntryOut(BaseModel):
+class AnalysisEntryOut(_UtcAwareTimestamps):
     id:              int
     timestamp:       Optional[str]
     symbol:          str
@@ -233,7 +264,7 @@ class AnalysisEntryOut(BaseModel):
     reject_reason:   Optional[str]
 
 
-class ShouldGoLiveOut(BaseModel):
+class ShouldGoLiveOut(_UtcAwareTimestamps):
     ready:   bool
     reason:  str
     metrics: dict[str, Any]
@@ -241,25 +272,25 @@ class ShouldGoLiveOut(BaseModel):
 
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
-class EquityPoint(BaseModel):
+class EquityPoint(_UtcAwareTimestamps):
     date:   Any
     equity: float
 
 
-class DailyPnlPoint(BaseModel):
+class DailyPnlPoint(_UtcAwareTimestamps):
     date:      Any
     daily_pnl: float
     balance:   float
 
 
-class PnlBySymbolOut(BaseModel):
+class PnlBySymbolOut(_UtcAwareTimestamps):
     symbol:    str
     trades:    int
     total_pnl: float
     win_rate:  float
 
 
-class AnalyticsOut(BaseModel):
+class AnalyticsOut(_UtcAwareTimestamps):
     win_rate:                  float
     avg_rr:                    Optional[float]
     total_trades:              int
@@ -276,7 +307,7 @@ class AnalyticsOut(BaseModel):
 
 # ── Indian market ─────────────────────────────────────────────────────────────
 
-class FIIDIIFlowOut(BaseModel):
+class FIIDIIFlowOut(_UtcAwareTimestamps):
     id:              int
     date:            date
     fii_net_buy:     float
@@ -289,7 +320,7 @@ class FIIDIIFlowOut(BaseModel):
     created_at:      datetime
 
 
-class OptionsSnapshotOut(BaseModel):
+class OptionsSnapshotOut(_UtcAwareTimestamps):
     id:                int
     symbol:            str
     expiry_date:       date
@@ -303,13 +334,13 @@ class OptionsSnapshotOut(BaseModel):
     snapshot_at:       datetime
 
 
-class VIXScoreOut(BaseModel):
+class VIXScoreOut(_UtcAwareTimestamps):
     vix:   Optional[float]
     score: float
     label: str   # 'CRASH_ZONE'|'EXTREME_FEAR'|'HIGH_FEAR'|'ELEVATED'|'NORMAL'|'BULL_RUN'|'COMPLACENCY'
 
 
-class SIPResultOut(BaseModel):
+class SIPResultOut(_UtcAwareTimestamps):
     scheme_code:       str
     scheme_name:       str
     monthly_amount:    float
@@ -321,7 +352,7 @@ class SIPResultOut(BaseModel):
     units_held:        float
 
 
-class MutualFundOut(BaseModel):
+class MutualFundOut(_UtcAwareTimestamps):
     scheme_code:    str
     scheme_name:    str
     fund_house:     str
@@ -338,13 +369,13 @@ class MutualFundOut(BaseModel):
     analyzed_at:    datetime
 
 
-class SIPProjectionIn(BaseModel):
+class SIPProjectionIn(_UtcAwareTimestamps):
     monthly_amount:             float
     expected_annual_return_pct: float
     months:                     int
 
 
-class SIPProjectionOut(BaseModel):
+class SIPProjectionOut(_UtcAwareTimestamps):
     monthly_amount:       float
     months:               int
     assumed_cagr_pct:     float
@@ -354,7 +385,7 @@ class SIPProjectionOut(BaseModel):
     absolute_return_pct:  float
 
 
-class FundamentalDataOut(BaseModel):
+class FundamentalDataOut(_UtcAwareTimestamps):
     symbol:             str
     company_name:       str
     pe_ratio:           Optional[float]
@@ -374,7 +405,7 @@ class FundamentalDataOut(BaseModel):
     last_updated:       datetime
 
 
-class SectorRotationOut(BaseModel):
+class SectorRotationOut(_UtcAwareTimestamps):
     symbol:  str
     sector:  str
     score:   float
@@ -382,7 +413,7 @@ class SectorRotationOut(BaseModel):
 
 # ── Mutual fund (DB-backed, replaces in-memory MutualFundOut) ─────────────────
 
-class MutualFundNAVOut(BaseModel):
+class MutualFundNAVOut(_UtcAwareTimestamps):
     id:                 int
     scheme_code:        str
     scheme_name:        str
@@ -398,7 +429,7 @@ class MutualFundNAVOut(BaseModel):
     recorded_at:        datetime
 
 
-class MutualFundWithSignalOut(BaseModel):
+class MutualFundWithSignalOut(_UtcAwareTimestamps):
     scheme_code:        str
     scheme_name:        str
     current_nav:        float
@@ -417,7 +448,7 @@ class MutualFundWithSignalOut(BaseModel):
     vix:                Optional[float]
 
 
-class SIPSimulationOut(BaseModel):
+class SIPSimulationOut(_UtcAwareTimestamps):
     scheme_code:     str
     monthly_amount:  float
     months:          int
@@ -431,7 +462,7 @@ class SIPSimulationOut(BaseModel):
     worst_month:     Optional[dict]
 
 
-class FundComparisonOut(BaseModel):
+class FundComparisonOut(_UtcAwareTimestamps):
     scheme_code:       str
     scheme_name:       str
     current_nav:       float
@@ -444,13 +475,13 @@ class FundComparisonOut(BaseModel):
 
 # ── Market status ─────────────────────────────────────────────────────────────
 
-class MarketIndexOut(BaseModel):
+class MarketIndexOut(_UtcAwareTimestamps):
     price:      Optional[float]
     change:     Optional[float]
     change_pct: Optional[float]
 
 
-class MarketStatusOut(BaseModel):
+class MarketStatusOut(_UtcAwareTimestamps):
     nse_open:      bool
     ist_time:      str
     nifty:         MarketIndexOut
@@ -463,24 +494,24 @@ class MarketStatusOut(BaseModel):
 
 # ── FII/DII summary ───────────────────────────────────────────────────────────
 
-class FIIDIITodayOut(BaseModel):
+class FIIDIITodayOut(_UtcAwareTimestamps):
     fii_net:          float
     dii_net:          float
     market_direction: str
 
 
-class FIIDIIAvgOut(BaseModel):
+class FIIDIIAvgOut(_UtcAwareTimestamps):
     fii_avg: float
     dii_avg: float
 
 
-class FIIDIIChartPoint(BaseModel):
+class FIIDIIChartPoint(_UtcAwareTimestamps):
     date:    date
     fii_net: float
     dii_net: float
 
 
-class FIIDIISummaryOut(BaseModel):
+class FIIDIISummaryOut(_UtcAwareTimestamps):
     today:        Optional[FIIDIITodayOut]
     five_day_avg: Optional[FIIDIIAvgOut]
     trend:        str   # ACCUMULATION | DISTRIBUTION | MIXED
@@ -490,7 +521,7 @@ class FIIDIISummaryOut(BaseModel):
 
 # ── Options chain detail ──────────────────────────────────────────────────────
 
-class OptionsStrikeOut(BaseModel):
+class OptionsStrikeOut(_UtcAwareTimestamps):
     strike:   float
     call_oi:  int
     put_oi:   int
@@ -498,7 +529,7 @@ class OptionsStrikeOut(BaseModel):
     put_ltp:  Optional[float]
 
 
-class OptionsChainDetailOut(BaseModel):
+class OptionsChainDetailOut(_UtcAwareTimestamps):
     spot_price:        Optional[float]
     expiry_date:       Optional[date]
     pcr:               Optional[float]
@@ -511,7 +542,7 @@ class OptionsChainDetailOut(BaseModel):
 
 # ── Mutual fund list (simplified) ─────────────────────────────────────────────
 
-class MutualFundBriefOut(BaseModel):
+class MutualFundBriefOut(_UtcAwareTimestamps):
     scheme_code:        str
     name:               str
     nav:                float
@@ -523,13 +554,13 @@ class MutualFundBriefOut(BaseModel):
     category:           str
 
 
-class MutualFundListOut(BaseModel):
+class MutualFundListOut(_UtcAwareTimestamps):
     funds: list[MutualFundBriefOut]
 
 
 # ── SIP brief ─────────────────────────────────────────────────────────────────
 
-class SIPBriefOut(BaseModel):
+class SIPBriefOut(_UtcAwareTimestamps):
     total_invested:  float
     current_value:   float
     cagr:            float
@@ -538,20 +569,20 @@ class SIPBriefOut(BaseModel):
 
 # ── Sector performance ────────────────────────────────────────────────────────
 
-class SectorPerfItem(BaseModel):
+class SectorPerfItem(_UtcAwareTimestamps):
     name:         str
     return_30d:   Optional[float]
     vs_nifty_pct: Optional[float]
     signal:       str   # OUTPERFORM | UNDERPERFORM | NEUTRAL
 
 
-class SectorPerfOut(BaseModel):
+class SectorPerfOut(_UtcAwareTimestamps):
     sectors: list[SectorPerfItem]
 
 
 # ── Seed result ───────────────────────────────────────────────────────────────
 
-class SeedResultOut(BaseModel):
+class SeedResultOut(_UtcAwareTimestamps):
     status:             str
     symbols_fetched:    int
     candles_saved:      int
@@ -564,7 +595,7 @@ class SeedResultOut(BaseModel):
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 
-class BacktestRequestIn(BaseModel):
+class BacktestRequestIn(_UtcAwareTimestamps):
     symbols:          Optional[list[str]] = None   # None → all NSE watchlist symbols
     timeframe:        str                 = "1d"
     atr_multiplier:   float               = 2.0
@@ -575,7 +606,7 @@ class BacktestRequestIn(BaseModel):
     lookback_candles: int                 = 200
 
 
-class BacktestSymbolResultOut(BaseModel):
+class BacktestSymbolResultOut(_UtcAwareTimestamps):
     symbol:           str
     timeframe:        str
     total_trades:     int
@@ -591,7 +622,7 @@ class BacktestSymbolResultOut(BaseModel):
     equity_curve:     list[float]
 
 
-class BacktestResultOut(BaseModel):
+class BacktestResultOut(_UtcAwareTimestamps):
     symbols_tested:   int
     timeframe:        str
     total_trades:     int
