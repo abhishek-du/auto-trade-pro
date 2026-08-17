@@ -57,8 +57,21 @@ def _nowcast_subscore(nc: NowcastResult) -> float:
     if nc.status != NowcastStatus.OK:
         return 0.0
     dir_val = {Direction.POSITIVE: 1.0, Direction.NEGATIVE: -1.0, Direction.NEUTRAL: 0.0}[nc.profit_direction]
-    # 0.5 neutral baseline, pushed by direction × confidence.
-    return _clamp01(0.5 + 0.5 * dir_val * nc.confidence)
+    # 0.5 neutral baseline, pushed by direction × confidence — BUT confidence
+    # is squared first (fixed 2026-08-17, loss investigation). The plain
+    # linear version put a genuinely near-zero confidence read (0.06-0.11 —
+    # the bulk of live nowcasts; most sector adapters cap well under their
+    # confidence_ceiling on thin point-in-time history) at ~0.53-0.56 — i.e.
+    # still ~half this factor's max score with essentially no real
+    # conviction behind it. Squaring confidence pins weak reads much closer
+    # to true neutral (0.10 -> 0.505 instead of 0.55) while barely touching
+    # genuinely higher-confidence reads (0.40 -> 0.58, vs 0.70 before), so
+    # the factor's score now actually tracks how much conviction is real.
+    # decision.py's MIN_NOWCAST_CONFIDENCE gate (added same day) is the
+    # primary fix — this keeps the score itself honest for whatever clears
+    # that gate.
+    weighted_conf = nc.confidence ** 2
+    return _clamp01(0.5 + 0.5 * dir_val * weighted_conf)
 
 
 def _gap_subscore(exp: ExpectationEstimate) -> float:
