@@ -20,7 +20,7 @@ from utils.config import settings
 
 from . import dedup as _dedup
 from .events import AlertAction, AlertCategory, AlertEvent, ReportPayload, ShortlistPayload, Severity, TradeEntryPayload
-from .templates import render
+from .templates import render_async
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ async def publish(event: AlertEvent) -> None:
         if event.action in (AlertAction.EXIT, AlertAction.UPDATE) and event.trade_id is not None:
             reply_to = await _lookup_reply_to(event.trade_id)
 
-        text = render(event)
+        text = await render_async(event)
         from integrations.telegram_service import _post
         message_id = await _post(text, reply_to_message_id=reply_to)
 
