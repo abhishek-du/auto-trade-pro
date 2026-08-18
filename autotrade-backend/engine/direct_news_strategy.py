@@ -243,8 +243,12 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
             return False
 
         # Technical Trend & Volume Confirmation (Added 2026-07-30)
-        from crawler.zerodha_historical import fetch_historical_data
-        hist_df = await fetch_historical_data(ticker, "day", limit=60)
+        import pandas as pd
+        import asyncio
+        from crawler.india_price_feed import fetch_nse_candles
+        candles = await asyncio.to_thread(fetch_nse_candles, f"{ticker}.NS", "1d", "60d")
+        hist_df = pd.DataFrame(candles) if candles else None
+        
         if hist_df is not None and not hist_df.empty and len(hist_df) > 20:
             close_price = hist_df["close"].iloc[-1]
             ema_20 = hist_df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
