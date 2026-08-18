@@ -697,6 +697,10 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
     event_id = None
     try:
         async with AsyncSessionLocal() as session:
+            bare_ticker = ticker.replace(".NS", "").replace(".BO", "").upper()
+            llm_companies = classification.entities.get("companies", [])
+            companies = list(set(llm_companies + [bare_ticker]))
+
             causal = CausalEvent(
                 news_id=None,  # this pipeline doesn't have a NewsItem row to link — see audit doc §3.6
                 event_title=classification.category,
@@ -705,8 +709,8 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
                 confidence=classification.confidence,
                 affected_sectors=classification.entities.get("sectors", []),
                 affected_indices=[],
-                bullish_stocks=classification.entities.get("companies", []) if classification.bullish else [],
-                bearish_stocks=classification.entities.get("companies", []) if not classification.bullish else [],
+                bullish_stocks=companies if classification.bullish else [],
+                bearish_stocks=companies if not classification.bullish else [],
                 duration=str(classification.expected_half_life_hours),
             )
             session.add(causal)
