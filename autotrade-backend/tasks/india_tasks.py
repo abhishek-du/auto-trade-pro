@@ -2876,15 +2876,17 @@ Top Position Weights:
 
 Write 2 short paragraphs: (1) is the risk-adjusted performance (Sharpe/Treynor/Jensen) good or bad, and why; (2) one actionable recommendation for next week. Plain text, no HTML tags."""
         try:
-            from utils.llm import llm_client
-            client = llm_client()
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+            from utils.llm import call_llm_chat
+            ai_text = await call_llm_chat(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300,
                 temperature=0.3,
+                model="nvidia.nemotron-super-3-120b"
             )
-            ai_text = response.choices[0].message.content.strip()
+            if ai_text:
+                ai_text = ai_text.strip()
+            else:
+                ai_text = ""
         except Exception as exc:
             logger.warning(f"[weekly_report] LLM commentary failed: {exc}")
 

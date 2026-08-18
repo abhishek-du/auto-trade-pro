@@ -20,6 +20,12 @@ async def _pre_diagnose_symbols(symbols: list[str]):
     try:
         for sym in symbols:
             sym = sym.strip().upper().replace(".NS", "")
+            
+            # Skip SME and illiquid stocks (which lack historical data and throw 404/422)
+            if sym.endswith(("-SM", "-ST", "-BE")):
+                logger.debug(f"[pre_diagnose] Skipping SME/illiquid stock: {sym}")
+                continue
+
             cache_key = f"deep_analysis:{sym}"
             try:
                 # We skip if already cached within the last 10 minutes to save Groq credits

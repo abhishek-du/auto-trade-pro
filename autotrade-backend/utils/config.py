@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     GEMINI_MODEL:   str = "gemini-2.5-flash"
     # Groq: cloud fast inference (SECONDARY — fallback when Gemini unavailable)
     GROQ_API_KEY:   str = ""
-    GROQ_MODEL:     str = "llama-3.3-70b-versatile"
+    GROQ_MODEL:     str = "nvidia.nemotron-super-3-120b"
     # Claude: detailed explanations — strategy breakdowns, deeper reasoning
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_MODEL:      str = "claude-sonnet-4-6"

@@ -75,8 +75,8 @@ async def fetch_rbi_press_releases() -> list[dict]:
 
 async def fetch_pib_releases() -> list[dict]:
     """Fetch PIB (Press Information Bureau) releases via RSS."""
-    # ModId=1 is All Releases
-    url = "https://pib.gov.in/RSSFeed.aspx?ModId=1"
+    # ModId=6&Lang=1&Regid=1 is English Press Releases
+    url = "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=1"
     
     def _fetch():
         try:
@@ -84,7 +84,7 @@ async def fetch_pib_releases() -> list[dict]:
             with httpx.Client(verify=False, timeout=15.0, follow_redirects=True) as client:
                 res = client.get(url, headers=headers)
                 res.raise_for_status()
-                feed_data = res.text
+                feed_data = res.content
             
             feed = feedparser.parse(feed_data)
             rows = []

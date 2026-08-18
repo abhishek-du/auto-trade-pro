@@ -34,6 +34,14 @@ from crawler.macro_crawler import fetch_rbi_press_releases, fetch_pib_releases, 
 from crawler.exchange_crawler import fetch_bulk_deals, fetch_block_deals
 from crawler.media_crawler import fetch_financial_media
 from crawler.event_pipeline import process_latest_events
+from crawler.news_router import (
+    COMPANY as ROUTE_COMPANY,
+    FILING  as ROUTE_FILING,
+    MACRO   as ROUTE_MACRO,
+    NOISE   as ROUTE_NOISE,
+    dedupe_key,
+    route_headline,
+)
 from engine.event_classifier import classify_event
 
 # Ensure NLTK vader_lexicon is available. Used as fallback by SentimentAnalyser.
@@ -153,34 +161,34 @@ async def fetch_newsapi_headlines(
         return []
 
     params = {
-        "q":        query,
-        "language": "en",
-        "sortBy":   "publishedAt",
-        "pageSize": 20,
-        "apiKey":   settings.NEWSAPI_KEY,
+        "keyword":       query,
+        "lang":          "eng",
+        "articlesCount": 20,
+        "resultType":    "articles",
+        "apiKey":        settings.NEWSAPI_KEY,
     }
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(_NEWSAPI_BASE, params=params)
+            resp = await client.get("https://eventregistry.org/api/v1/article/getArticles", params=params)
             resp.raise_for_status()
             data = resp.json()
 
-        articles = data.get("articles", [])
+        articles = data.get("articles", {}).get("results", [])
         result = [
             {
                 "headline":     a.get("title", "").strip(),
-                "source":       (a.get("source") or {}).get("name", "NewsAPI"),
+                "source":       (a.get("source") or {}).get("title", "EventRegistry"),
                 "url":          a.get("url"),
-                "published_at": _parse_dt(a.get("publishedAt")),
+                "published_at": _parse_dt(a.get("dateTime")),
             }
             for a in articles
-            if a.get("title") and a["title"] != "[Removed]"
+            if a.get("title")
         ]
-        logger.info(f"NewsAPI ✓  {len(result)} headlines  query={query!r}")
+        logger.info(f"EventRegistry ✓  {len(result)} headlines  query={query!r}")
         return result
 
     except Exception as exc:
-        logger.error(f"NewsAPI fetch failed: {exc}")
+        logger.error(f"EventRegistry fetch failed: {exc}")
         return []
 
 
@@ -1040,6 +1048,19 @@ _YF_MAX_AGE_HOURS:  int = 168   # 7 days — Yahoo Finance NSE news is often 3-5
 # items win the budget; the rest are saved without news_metadata.
 _MAX_CLASSIFY_PER_CRAWL: int = 15
 
+# Max macro LLM round-trips per crawl (2026-08-18). A SEPARATE budget from
+# _MAX_CLASSIFY_PER_CRAWL on purpose: macro items lose the classify budget by
+# construction, because that budget is won on |FinBERT score| and FinBERT is
+# out-of-domain on macro text. Sharing one pool would leave macro at zero on
+# any busy earnings day — the exact blind spot this path exists to close.
+#
+# Sized from measurement, not guesswork: 6,667 live headlines over 11-18 Aug
+# routed 7.3% MACRO, and 63% of those were syndicated near-duplicates, leaving
+# ~22 unique macro headlines/day. At a 5-minute crawl cadence that is well
+# under 5 per cycle; 6 leaves headroom for a genuine news burst without
+# re-creating the 17-Aug unbounded-LLM failure.
+_MAX_MACRO_LLM_PER_CRAWL: int = 6
+
 
 async def _yf_news_symbols(session: AsyncSession, limit: int = _YF_MAX_SYMBOLS) -> list[str]:
     """Return the most Hub-relevant symbols for yfinance news fetching.
@@ -1362,6 +1383,73 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     headlines  = [item["headline"] for item in new_items]
     sentiments = analyser.analyse_batch(headlines)
 
+    # ── Tier 0: route each headline to the right scorer (2026-08-18) ─────────
+    # FinBERT was the only scorer, and it is a company-earnings model. On the
+    # 549 macro headlines seen 11-18 Aug it was silent 25% of the time and
+    # confidently WRONG 69% of the time — "Rupee opens 5 paise lower" scored
+    # -0.962, a 0.05% move read as a strong bearish signal, above the 0.75
+    # gate evaluate_news_flash trades on. So macro items get their FinBERT
+    # score replaced by a real macro read, not supplemented by one.
+    #
+    # The router is deliberately deterministic, not an LLM: at 823 headlines/
+    # day (2,891 peak) a per-headline routing call would cost as much as the
+    # classification it routes to, and would re-create the 17-Aug failure
+    # (171 SoftTimeLimitExceeded, six hours with zero news persisted).
+    _routes = [
+        route_headline(
+            item["headline"],
+            item.get("source"),
+            item.get("tickers_affected"),
+        )
+        for item in new_items
+    ]
+
+    # Macro budget goes to DISTINCT stories. 63% of live macro volume is the
+    # same wire story republished under different URLs, which url-dedupe above
+    # cannot catch; without this, one Reuters oil story would eat the whole
+    # cycle's budget on copies of itself.
+    _macro_scores: dict[int, "MacroSentiment"] = {}
+    _macro_idx: list[int] = []
+    _seen_macro: set[str] = set()
+    for _i, _r in enumerate(_routes):
+        if _r != ROUTE_MACRO:
+            continue
+        _k = dedupe_key(new_items[_i]["headline"])
+        if _k in _seen_macro:
+            continue
+        _seen_macro.add(_k)
+        _macro_idx.append(_i)
+        if len(_macro_idx) >= _MAX_MACRO_LLM_PER_CRAWL:
+            break
+
+    if _macro_idx:
+        from engine.macro_sentiment import score_macro_headline
+        for _i in _macro_idx:
+            _ms = await score_macro_headline(
+                new_items[_i]["headline"], new_items[_i].get("summary")
+            )
+            # None means the LLM was unavailable. Leave FinBERT's score alone
+            # in that case: it degrades to the old (macro-blind) behaviour
+            # rather than inventing a neutral reading.
+            if _ms is not None:
+                _macro_scores[_i] = _ms
+                sentiments[_i] = {
+                    "sentiment": _ms.direction.lower(),
+                    "score":     _ms.score,
+                    "confidence": _ms.confidence,
+                }
+
+    # Logged unconditionally, including when nothing routed MACRO — the whole
+    # point of this path is that macro news was previously invisible, so
+    # "0 macro" is itself the observation worth having in the log.
+    logger.info(
+        f"[news_crawler] Tier 0 routing: "
+        f"{_routes.count(ROUTE_COMPANY)} company / {_routes.count(ROUTE_MACRO)} macro "
+        f"({len(_macro_idx)} unique scored, {len(_macro_scores)} succeeded, "
+        f"cap {_MAX_MACRO_LLM_PER_CRAWL}) / "
+        f"{_routes.count(ROUTE_FILING)} filing / {_routes.count(ROUTE_NOISE)} noise"
+    )
+
     # ── Classify BEFORE touching the session (2026-08-17) ────────────────────
     # classify_event() is an LLM round-trip per item. This loop used to be
     # fused with the session.add() loop below, so the write transaction opened
@@ -1389,15 +1477,27 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # they are strictly-lower-|sentiment| than the ones classified, and the
     # trading-critical path (process_latest_events -> causal_events) does its
     # own top-20 selection independently of this field.
+    #
+    # Routing narrows the candidate pool further (2026-08-18). MACRO items are
+    # excluded because they already spent an LLM call on the macro path, and
+    # classify_event extracts COMPANY-event structure that macro text has none
+    # of. NOISE (market wraps, "top gainers" listicles) is excluded because it
+    # describes moves that already happened — it is not a catalyst. Both used
+    # to compete for this budget purely on |FinBERT score|, which is how
+    # ambient wire copy crowded out real filings.
+    _eligible = lambda i: (
+        abs(sentiments[i]["score"]) > 0.6
+        and _routes[i] not in (ROUTE_MACRO, ROUTE_NOISE)
+    )
     _to_classify = sorted(
-        (i for i, s in enumerate(sentiments) if abs(s["score"]) > 0.6),
+        (i for i in range(len(sentiments)) if _eligible(i)),
         key=lambda i: abs(sentiments[i]["score"]), reverse=True,
     )[:_MAX_CLASSIFY_PER_CRAWL]
     _classify_idx = set(_to_classify)
-    if len(_classify_idx) < sum(1 for s in sentiments if abs(s["score"]) > 0.6):
+    if len(_classify_idx) < sum(1 for i in range(len(sentiments)) if _eligible(i)):
         logger.info(
             f"[news_crawler] classifying the {len(_classify_idx)} strongest-sentiment "
-            f"items of {sum(1 for s in sentiments if abs(s['score']) > 0.6)} eligible "
+            f"items of {sum(1 for i in range(len(sentiments)) if _eligible(i))} eligible "
             f"(cap {_MAX_CLASSIFY_PER_CRAWL}) — the rest are saved unclassified"
         )
 
@@ -1416,6 +1516,22 @@ async def run_news_crawl(session: AsyncSession) -> dict:
             classification = await classify_event(item["headline"], item.get("summary", ""))
             if classification:
                 metadata_dict = classification.model_dump()
+        elif _i in _macro_scores:
+            # Persist the macro read so the regime engine and the news UI can
+            # see WHY a macro score moved — a bare signed float is not enough
+            # to distinguish "oil spike, bearish for importers" from a routine
+            # currency tick, and that distinction is the whole point here.
+            _ms = _macro_scores[_i]
+            metadata_dict = {
+                "route":        ROUTE_MACRO,
+                "direction":    _ms.direction,
+                "macro_score":  _ms.score,
+                "confidence":   _ms.confidence,
+                "theme":        _ms.theme,
+                "sectors_hit":  _ms.sectors_hit,
+                "reasoning":    _ms.reasoning,
+                "is_actionable": _ms.is_actionable,
+            }
 
         prepared.append({"item": item, "sent": sent,
                          "tickers": tickers, "metadata": metadata_dict})
@@ -1469,7 +1585,15 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # ── Strategy #5: Event-Driven Arbitrage (News Flash) ──────────────────────
     try:
         from engine.agent.event_arbitrage import evaluate_news_flash
-        for item, sent in zip(new_items, sentiments):
+        for _i, (item, sent) in enumerate(zip(new_items, sentiments)):
+            # MACRO and NOISE never open a single-stock flash trade
+            # (2026-08-18). A macro story is market-wide and names no ticker,
+            # so this path could only pick a stock by inference — and until
+            # today it was picking on a FinBERT score that was out-of-domain
+            # and wrong 69% of the time on exactly this text. Macro belongs in
+            # the regime/market-wide read, not in a per-stock entry.
+            if _routes[_i] in (ROUTE_MACRO, ROUTE_NOISE):
+                continue
             if abs(sent["score"]) >= 0.75:
                 # Synchronous await within the same session context
                 await evaluate_news_flash(
