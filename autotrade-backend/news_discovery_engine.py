@@ -427,6 +427,47 @@ async def _execute_news_trade(
     except Exception as _gate_exc:
         logger.debug(f"[news_engine] {ticker}: late-entry gate check failed (fail-open): {_gate_exc}")
 
+    # 1c. Multi-session late-entry gate (2026-08-18). Deliberately SEPARATE
+    #     from the 30-minute check above, for two reasons learned from
+    #     BSE.NS:
+    #
+    #     (a) The intraday check runs off 15-minute bars, and when none are
+    #         stored for today `if _candles:` is False, so the whole gate is
+    #         skipped silently. On the day BSE was shorted there were no 15m
+    #         bars at all — the guard never executed.
+    #     (b) Even with data, ~30 minutes cannot see a move that happened on
+    #         previous sessions. BSE had already fallen 7.1% across four
+    #         sessions on the Jefferies downgrade; we shorted the next morning
+    #         at 3263, below the 3283 the news itself quoted as the low, and
+    #         it bounced.
+    #
+    #     Daily candles are far more reliably present than intraday ones, so
+    #     this runs off `1d` bars and covers the overnight gap too. Same
+    #     fail-open posture: a data gap must not halt all news trading —
+    #     authorize_trade_intent is the gate that fails closed.
+    try:
+        _look = int(getattr(settings, "NEWS_MULTISESSION_LOOKBACK_DAYS", 3))
+        _max_move = float(getattr(settings, "NEWS_MAX_MULTISESSION_MOVE_PCT", 5.0)) / 100.0
+        from crawler.price_feed import get_latest_candles
+        async with AsyncSessionLocal() as _sess:
+            _daily = await get_latest_candles(ticker, "1d", _look + 1, _sess)
+        # get_latest_candles returns newest-first; the oldest of the window is
+        # our reference close.
+        if _daily and len(_daily) >= 2:
+            _ref_close = float(_daily[-1].close)
+            if _ref_close > 0:
+                _move = (entry_price - _ref_close) / _ref_close
+                if (side == "BUY" and _move > _max_move) or (side == "SELL" and _move < -_max_move):
+                    logger.warning(
+                        f"[news_engine] {ticker}: MULTI-SESSION LATE-ENTRY GATE — price already "
+                        f"moved {_move:+.2%} over the last {len(_daily)-1} session(s) "
+                        f"(ref ₹{_ref_close}, now ₹{entry_price}); the catalyst is priced in — "
+                        f"skipping chase entry"
+                    )
+                    return False
+    except Exception as _ms_exc:
+        logger.debug(f"[news_engine] {ticker}: multi-session gate check failed (fail-open): {_ms_exc}")
+
     # 2. Structural/ATR-based SL/TP (Step 5, event-driven-pipeline-audit.md) —
     #    replaces the previous fixed 3%/7.5% template. See
     #    _compute_news_trade_levels() docstring for the full tier hierarchy.

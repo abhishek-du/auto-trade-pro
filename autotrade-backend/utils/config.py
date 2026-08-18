@@ -582,6 +582,17 @@ class Settings(BaseSettings):
     # a 2-session +10% extended high. Chasing a move that already happened is
     # buying someone else's exit liquidity, not anticipating the catalyst.
     NEWS_MAX_PRE_ENTRY_SPIKE_PCT: float = 2.0
+    # Multi-session companion to the 30-minute check above (2026-08-18). The
+    # intraday window cannot see a move that happened on PREVIOUS sessions or
+    # in the opening gap, and that is exactly how BSE.NS was shorted: Jefferies
+    # downgraded it on 17-Aug, the stock had already fallen 7.1% across four
+    # sessions (11-Aug -2.18%, 12-Aug -0.66%, 13-Aug -1.62%, 16-Aug -2.86%),
+    # and we entered the NEXT morning at 3263 — below the 3283 the news itself
+    # reported as the low. It promptly bounced. The docstring on the intraday
+    # gate already named this failure ("TVSMOTOR at the day high after a
+    # 2-session +10% run") but only the 30-minute half was ever implemented.
+    NEWS_MAX_MULTISESSION_MOVE_PCT: float = 5.0
+    NEWS_MULTISESSION_LOOKBACK_DAYS: int = 3
     MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
     MAX_OPEN_POSITIONS: int = 500          # SAFETY CEILING (bug guard against a runaway loop) —
                                             # NOT a real capital limiter; MAX_PORTFOLIO_RISK/
