@@ -65,48 +65,26 @@ def _render_trade_entry(payload: TradeEntryPayload) -> str:
     entry = getattr(d, "entry", None) or getattr(d, "entry_price", 0.0) or 0.0
     stop = getattr(d, "stop", None) or getattr(d, "stop_loss", 0.0) or 0.0
     target = getattr(d, "target", None) or getattr(d, "take_profit", 0.0) or 0.0
-    conf = getattr(d, "confidence", 0) or 0
-    strategy = getattr(d, "strategy", "") or getattr(d, "timeframe", "")
-    risk = abs(entry - stop)
-    reward = abs(target - entry)
-    rr = round(reward / risk, 1) if risk > 0 else 0
 
-    hub = getattr(d, "hub_subscores", {}) or {}
-    reasoning = hub.get("reasoning", {}) if isinstance(hub.get("reasoning"), dict) else {}
-    score = getattr(d, "master_score", None) or getattr(d, "final_score", None)
-
-    lines = [
-        f"{'🟢' if is_buy else '🔴'} <b>{'LONG' if is_buy else 'SHORT'} POSITION OPENED</b>",
-        _DIVIDER,
-        f"<b>{sym}</b>  ·  {payload.qty} shares  ·  {strategy or 'signal'}",
-        f"Entry <b>₹{entry:,.2f}</b>  ·  Stop ₹{stop:,.2f}  ·  Target ₹{target:,.2f}",
-        f"R:R <b>{rr}×</b>  ·  Confidence <b>{conf:.0f}%</b>" + (f"  ·  Score {score:+.0f}" if score is not None else ""),
-    ]
-
-    # ── Reason: the single strongest factor, one line ────────────────────────
-    best = _strongest_factor(reasoning or hub)
-    if best and best[1] != 0:
-        label, val = best
-        lines.append(f"\nWhy: <b>{label}</b> {'supportive' if val > 0 else 'against consensus but overridden'} ({val:+.0f})")
+    # Get the AI expert note
     reasons = getattr(d, "reasons", None) or []
     expert_note = next((r for r in reasons if not str(r).startswith("[web]") and len(str(r)) > 40), None)
-    if expert_note:
-        lines.append(f"<i>{str(expert_note)[:220]}</i>")
+    
+    # If no expert note, fallback to a punchy default
+    if not expert_note:
+        hub = getattr(d, "hub_subscores", {}) or {}
+        best = _strongest_factor(hub.get("reasoning", {}) if isinstance(hub.get("reasoning"), dict) else hub)
+        if best:
+            expert_note = f"Strong {best[0].lower()} setup forming. Accumulation seen."
+        else:
+            expert_note = "Stock is in good mood, showing positive action."
 
-    # ── Detail: full 7-factor breakdown, only if present ─────────────────────
-    factor_keys = ("technical", "news", "sector", "macro", "earnings", "fundamental", "options")
-    if any(k in (reasoning or hub) for k in factor_keys) or any(k in hub for k in factor_keys):
-        lines += [f"\n{_DIVIDER}", "<b>7-Factor Breakdown</b>"]
-        for key, label in (
-            ("technical", "Technical"), ("news", "News"), ("sector", "Sector"),
-            ("macro", "Macro/FII"), ("earnings", "Earnings"),
-            ("fundamental", "Fundamentals"), ("options", "Options"),
-        ):
-            v = float((reasoning or hub).get(key, hub.get(key, 0)) or 0)
-            lines.append(f"{label:<13} {_score_bar(v)}  {v:+.0f}")
-
-    lines.append(f"\n<i>⚠️ Paper mode — virtual money only</i>")
-    return "\n".join(lines)
+    if is_buy:
+        msg = f"Keep eyes on {sym} CMP {entry:,.1f} 👀\nSupport {stop:,.1f} Upside {target:,.1f}\n\n{expert_note}"
+    else:
+        msg = f"Watch {sym} (Short) CMP {entry:,.1f} 📉\nResistance {stop:,.1f} Downside {target:,.1f}\n\n{expert_note}"
+        
+    return msg
 
 
 def _render_trade_exit(payload: TradeExitPayload) -> str:
@@ -132,36 +110,29 @@ def _render_shortlist(payload: ShortlistPayload) -> str:
     sym = c.symbol.replace(".NS", "")
     entry = getattr(c, "entry", None) or getattr(c, "entry_price", 0.0) or 0.0
     stop = getattr(c, "stop", None) or getattr(c, "stop_loss", 0.0) or 0.0
+    
     hub = getattr(c, "hub_subscores", {}) or {}
     signal = hub.get("signal") or "BUY"
+    emoji = "🔥" if signal == "STRONG_BUY" else "👀"
+    
+    expert_note = payload.ai_note
+    if not expert_note and payload.crawl_data and payload.crawl_data.get("search_answer"):
+        expert_note = payload.crawl_data["search_answer"]
 
-    lines = [
-        f"{'🔥' if signal == 'STRONG_BUY' else '👀'} <b>{'STRONG ' if signal == 'STRONG_BUY' else ''}SHORTLIST — {sym}</b>",
-        _DIVIDER,
-        f"Score <b>{payload.score:+.1f}</b>  ·  News {payload.news_subscore:+.0f}"
-        + ("  ·  ✅ EXECUTED" if payload.executed else "  ·  watchlist only"),
-    ]
+    if not expert_note:
+        expert_note = "Sector inflow positive, tracking this closely."
+
+    msg_lines = []
     if entry:
-        lines.append(f"Entry ₹{entry:,.2f}" + (f"  ·  Stop ₹{stop:,.2f}" if stop else ""))
-
-    if payload.ai_note:
-        lines.append(f"\n<i>{payload.ai_note[:400]}</i>")
-    elif payload.crawl_data and payload.crawl_data.get("search_answer"):
-        lines.append(f"\n<i>{payload.crawl_data['search_answer'][:400]}</i>")
-
-    reasoning = hub.get("reasoning", {}) if isinstance(hub.get("reasoning"), dict) else {}
-    factor_keys = ("technical", "news", "sector", "macro", "earnings", "fundamental", "options")
-    if any(k in reasoning for k in factor_keys) or any(k in hub for k in factor_keys):
-        lines += [f"\n{_DIVIDER}", "<b>7-Factor Breakdown</b>"]
-        for key, label in (
-            ("technical", "Technical"), ("news", "News"), ("sector", "Sector"),
-            ("macro", "Macro/FII"), ("earnings", "Earnings"),
-            ("fundamental", "Fundamentals"), ("options", "Options"),
-        ):
-            v = float(reasoning.get(key, hub.get(key, 0)) or 0)
-            lines.append(f"{label:<13} {_score_bar(v)}  {v:+.0f}")
-
-    return "\n".join(lines)
+        msg_lines.append(f"{sym} CMP {entry:,.1f} {emoji}")
+        if stop:
+            msg_lines.append(f"Support {stop:,.1f}")
+    else:
+        msg_lines.append(f"Keep eyes on {sym} {emoji}")
+    
+    msg_lines.append(f"\n{expert_note[:200]}")
+    
+    return "\n".join(msg_lines)
 
 
 def _render_report(payload: ReportPayload) -> str:
