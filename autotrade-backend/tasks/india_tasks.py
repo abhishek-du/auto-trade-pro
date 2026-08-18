@@ -1781,11 +1781,11 @@ async def _market_news_alert() -> None:
         logger.warning(f"[news_alert] {len(hits)} high-impact headline(s) detected")
         try:
             cap = int(settings.NEWS_ALERT_MAX_PER_CYCLE)
-            lines = [f"🔴 HIGH-IMPACT MARKET NEWS ({len(hits)})"]
+            lines = ["⚡ Breaking Market News ⚡\n"]
             for r in hits[:cap]:
-                lines.append(f"• {r.headline[:120]}  [{r.source}]")
+                lines.append(f"📌 {r.headline[:150]}\n👀 Keep eyes on this.\n")
             if len(hits) > cap:
-                lines.append(f"…+{len(hits) - cap} more")
+                lines.append(f"…and {len(hits) - cap} more.")
             from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
             await publish(AlertEvent(
                 category=AlertCategory.NEWS_EVENT, action=AlertAction.ALERT, severity=Severity.WARNING,

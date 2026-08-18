@@ -79,10 +79,14 @@ def _render_trade_entry(payload: TradeEntryPayload) -> str:
         else:
             expert_note = "Stock is in good mood, showing positive action."
 
+    from utils.sector_cache import get_sector
+    sector = get_sector(f"{sym}.NS")
+    sector_str = f"[{sector}] " if sector and sector != "Unknown" else ""
+
     if is_buy:
-        msg = f"Keep eyes on {sym} CMP {entry:,.1f} 👀\nSupport {stop:,.1f} Upside {target:,.1f}\n\n{expert_note}"
+        msg = f"Keep eyes on {sector_str}{sym} CMP {entry:,.1f} 👀\nSupport {stop:,.1f} Upside {target:,.1f}\n\n{expert_note}"
     else:
-        msg = f"Watch {sym} (Short) CMP {entry:,.1f} 📉\nResistance {stop:,.1f} Downside {target:,.1f}\n\n{expert_note}"
+        msg = f"Watch {sector_str}{sym} (Short) CMP {entry:,.1f} 📉\nResistance {stop:,.1f} Downside {target:,.1f}\n\n{expert_note}"
         
     return msg
 
@@ -122,13 +126,17 @@ def _render_shortlist(payload: ShortlistPayload) -> str:
     if not expert_note:
         expert_note = "Sector inflow positive, tracking this closely."
 
+    from utils.sector_cache import get_sector
+    sector = get_sector(f"{sym}.NS")
+    sector_str = f"[{sector}] " if sector and sector != "Unknown" else ""
+
     msg_lines = []
     if entry:
-        msg_lines.append(f"{sym} CMP {entry:,.1f} {emoji}")
+        msg_lines.append(f"{sector_str}{sym} CMP {entry:,.1f} {emoji}")
         if stop:
             msg_lines.append(f"Support {stop:,.1f}")
     else:
-        msg_lines.append(f"Keep eyes on {sym} {emoji}")
+        msg_lines.append(f"Keep eyes on {sector_str}{sym} {emoji}")
     
     msg_lines.append(f"\n{expert_note[:200]}")
     
