@@ -20,7 +20,7 @@ from integrations.alerts import (
     publish,
 )
 from integrations.alerts.reports import build_weekly_pdf
-from integrations.alerts.templates import render
+from integrations.alerts.templates import render_async
 from tests.test_alert_router import assert_balanced_html, assert_no_markdown_leakage
 
 _METRICS = {

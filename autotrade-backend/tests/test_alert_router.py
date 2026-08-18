@@ -66,7 +66,7 @@ from integrations.alerts import (
     publish,
 )
 from integrations.alerts.dedup import shortlist_gate, shortlist_would_alert
-from integrations.alerts.templates import render
+from integrations.alerts.templates import render_async
 
 
 class _FakeDecision:
