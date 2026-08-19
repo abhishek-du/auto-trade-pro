@@ -146,7 +146,12 @@ function PaperPortfolioPanel() {
   const realised   = Number(p.realised_pnl ?? 0)
   const unrealised = positions.reduce((s, x) => s + (x.unrealised_pnl ?? 0), 0) || Number(p.unrealised_pnl ?? 0)
   const totalPnl   = realised + unrealised
-  const start      = Number(p.start_capital ?? 2000000)
+  // No hardcoded fallback: start_capital comes from the API (settings.AGENT_EQUITY),
+  // and a stale literal here silently computes ROI against the wrong base — it
+  // still said 20,00,000 after the capital reset to ₹5L on 2026-08-19, which
+  // would have shown -75% ROI on an untouched book. If the field is missing,
+  // show no ROI rather than a confidently wrong one.
+  const start      = Number(p.start_capital ?? 0)
   const roi        = start > 0 ? ((equity - start) / start) * 100 : 0
   const fmt = (n) => formatINR(n ?? 0)
 

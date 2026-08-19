@@ -697,7 +697,7 @@ export default function PipelineFlow() {
               Hard caps: 5% of equity per position, 20% minimum cash buffer (≤80% of equity ever deployed), and a timeframe-agnostic MIN_STOP_DISTANCE_PCT floor (2026-07-27) — any tier's stop must clear ≥1.5% of entry or the next tier is tried, so a mis-scaled ATR (e.g. from 1-minute candles) can never produce a whipsaw-guaranteed stop.
             </p>
             <p className="flex items-center gap-1.5"><ChevronRight size={11} className="text-emerald-400 shrink-0" />
-              Wallet balance is DB-configurable (RuntimeConfig.paper_trading_balance) — ₹20L is the current default, not a hardcoded constant.
+              Wallet balance is DB-configurable (RuntimeConfig.paper_trading_balance) — ₹5L is the current default, not a hardcoded constant.
             </p>
           </div>
         </Node>

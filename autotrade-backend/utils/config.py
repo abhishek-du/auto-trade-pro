@@ -283,7 +283,12 @@ class Settings(BaseSettings):
     # ── AI Trading Agent (Varsity-grounded) ──────────────────────────────────
     AGENT_ENABLED:              bool  = True
     AGENT_PAPER_MODE:           bool  = True
-    AGENT_EQUITY:               float = 2_500_000.0
+    # Base for ALL position sizing: the trade_simulator hard guard, F&O margin
+    # blocking and AGENT_MAX_POSITION_WEIGHT all multiply against this. Must
+    # track the wallet — leaving it at ₹20L against a ₹5L wallet on 2026-08-19
+    # would have let the guard pass a 5% position of ₹1L, i.e. 20% of the real
+    # book. Aligned to ₹5L with the capital reset.
+    AGENT_EQUITY:               float = 500_000.0
 
     # Allow SELL (short) signals from the Hub 7-factor score.
     # NSE rule: equity short-selling is intraday-only (MIS product).
@@ -572,9 +577,12 @@ class Settings(BaseSettings):
     INTRADAY_FNO_LOTS:             int   = 1          # lots per NIFTY/BANKNIFTY option trade
 
     # ── Paper trading parameters ──────────────────────────────────────────────
-    # Default ₹25,00,000 — matches AGENT_EQUITY so the simulator wallet and the
-    # AI Trading Agent equity start from the same base.
-    PAPER_TRADING_BALANCE: float = 2_500_000.0
+    # Matches AGENT_EQUITY so the simulator wallet and the AI Trading Agent
+    # equity start from the same base.
+    # Fallback only — runtime_settings.paper_trading_balance in the DB wins,
+    # and .env overrides this default. Aligned to ₹5L on 2026-08-19 so a fresh
+    # DB starts at the same capital as the live one instead of ₹25L.
+    PAPER_TRADING_BALANCE: float = 500_000.0
     # Late-entry gate (2026-07-22 post-mortem, news_discovery_engine.py::
     # _execute_news_trade): skip a news-triggered entry if price already moved
     # more than this % in the trade's own direction over the prior ~30min —
@@ -594,7 +602,10 @@ class Settings(BaseSettings):
     NEWS_MAX_MULTISESSION_MOVE_PCT: float = 5.0
     NEWS_MULTISESSION_LOOKBACK_DAYS: int = 3
     MAX_RISK_PER_TRADE: float = 0.02       # legacy flat risk (now superseded by conviction band)
-    MAX_OPEN_POSITIONS: int = 500          # SAFETY CEILING (bug guard against a runaway loop) —
+    # Scaled 500 -> 125 on 2026-08-19 with the ₹20L -> ₹5L capital reset, to
+    # keep the runaway-loop ceiling at the same multiple of the real book.
+    # Still NOT the binding limit: MAX_CONCURRENT_POSITIONS (10) is.
+    MAX_OPEN_POSITIONS: int = 125          # SAFETY CEILING (bug guard against a runaway loop) —
                                             # NOT a real capital limiter; MAX_PORTFOLIO_RISK/
                                             # MIN_CASH_BUFFER below do that job. Raised from 25
                                             # (2026-07-29, user request) since the count ceiling
@@ -635,8 +646,12 @@ class Settings(BaseSettings):
     # from 25 on 2026-07-29 because the COUNT ceiling — not capital — was
     # rejecting trades. This is a different constraint with a different job:
     # diversification. Set it to 0 to disable.
-    MAX_CONCURRENT_POSITIONS:  int   = 40
-    MAX_POSITIONS_PER_SECTOR:  int   = 8      # ~20% of a full 40-position book
+    #
+    # Scaled down 40 -> 10 on 2026-08-19 alongside the capital reset from
+    # ₹20L to ₹5L. At ₹5L a 40-position book averages ~₹12.5k per name, where
+    # brokerage and slippage eat the edge before the thesis can play out.
+    MAX_CONCURRENT_POSITIONS:  int   = 10
+    MAX_POSITIONS_PER_SECTOR:  int   = 2      # ~20% of a full 10-position book
     MAX_SECTOR_CAPITAL_PCT:    float = 0.20   # ≤20% of equity deployed into one sector
 
     # No single strategy may become the whole book while its edge is unproven
