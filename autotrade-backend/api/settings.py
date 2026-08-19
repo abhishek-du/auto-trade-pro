@@ -32,7 +32,10 @@ class RuntimeSettingsOut(BaseModel):
     indian_market_max_risk:  float
     indian_intraday_sl_pct:  float
     enable_fii_dii_analysis: bool
-    enable_options_chain:    bool
+    # enable_options_chain removed 2026-08-19: an F&O leftover. It was still
+    # REQUIRED here but RuntimeConfig.to_dict() never supplied it (and it is not
+    # in _KNOWN_KEYS), so GET /api/v1/settings/ returned 500 on every call since
+    # the F&O removal in 91457d7 -- the Settings page was simply broken.
     enable_india_vix:        bool
     enable_mutual_funds:     bool
     enable_ml_predictions:   bool
@@ -60,7 +63,6 @@ class SettingsPatch(BaseModel):
     indian_market_max_risk:  float | None = None
     indian_intraday_sl_pct:  float | None = None
     enable_fii_dii_analysis: bool  | None = None
-    enable_options_chain:    bool  | None = None
     enable_india_vix:        bool  | None = None
     enable_mutual_funds:     bool  | None = None
     enable_ml_predictions:   bool  | None = None
