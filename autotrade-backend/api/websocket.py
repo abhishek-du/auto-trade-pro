@@ -4,13 +4,15 @@ import asyncio
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import Depends, APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 
 from db.database import AsyncSessionLocal
 from db.models import SimulationLog
 from utils.config import settings
 from utils.logger import logger
+
+from api.auth import require_ws_auth   # D4: WS streams require admin JWT
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -61,8 +63,12 @@ async def broadcast_trade_event(event: str, symbol: str, data: dict):
 # ── /ws/portfolio — wallet snapshot every 10 s ───────────────────────────────
 
 @router.websocket("/portfolio")
-async def ws_portfolio(ws: WebSocket):
+async def ws_portfolio(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams wallet balance, equity, unrealised PnL, and open-position count every 10 s."""
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await broadcaster.connect("portfolio", ws)
     try:
         while True:
@@ -91,8 +97,12 @@ async def ws_portfolio(ws: WebSocket):
 # ── /ws/trades — trade open/close events ─────────────────────────────────────
 
 @router.websocket("/trades")
-async def ws_trades(ws: WebSocket):
+async def ws_trades(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams TRADE_OPENED / TRADE_CLOSED events from the simulation log."""
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await broadcaster.connect("trades", ws)
     _TRADE_EVENTS = {"TRADE_OPENED", "TRADE_CLOSED", "TRADE_STOPPED"}
     last_id = 0
@@ -134,8 +144,12 @@ async def ws_trades(ws: WebSocket):
 # ── /ws/prices — latest prices every 5 s ─────────────────────────────────────
 
 @router.websocket("/prices")
-async def ws_prices(ws: WebSocket):
+async def ws_prices(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams latest price for every watchlist symbol every 5 s."""
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await broadcaster.connect("prices", ws)
     all_symbols = (settings.forex_symbols + settings.stock_symbols)[:15]
 
@@ -162,9 +176,13 @@ async def ws_prices(ws: WebSocket):
 # ── /ws/logs — real-time simulation log tail ──────────────────────────────────
 
 @router.websocket("/logs")
-async def ws_logs(ws: WebSocket):
+async def ws_logs(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams SimulationLog entries as they arrive (tail -f style).
     Sends the 10 most recent entries first, then polls for new ones every second."""
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await broadcaster.connect("logs", ws)
     last_id = 0
 
@@ -297,13 +315,17 @@ async def broadcast_agent_event(event_type: str, payload: dict):
 # ── /ws/candles/{symbol} — real-time candle updates ───────────────────────────
 
 @router.websocket("/candles/{symbol}")
-async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h"):
+async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h", _ws_user: str | None = Depends(require_ws_auth)):
     """Streams the latest candle bar for a symbol every 15 s.
 
     On connect: sends last 5 candles as an 'init' message.
     Then every 15 s: fetches the latest bar and sends a 'candle_update' message.
     Falls back to DB polling if live fetch fails.
     """
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await ws.accept()
 
     from api.india import TIMEFRAME_CONFIG, _normalize_symbol, _ts_to_unix
@@ -406,8 +428,12 @@ async def ws_candles(ws: WebSocket, symbol: str, timeframe: str = "1h"):
 
 
 @router.websocket("/live-prices")
-async def live_prices_ws(websocket: WebSocket):
+async def live_prices_ws(websocket: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams live NSE prices to the Live Market page."""
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await live_price_manager.connect(websocket)
     try:
         while True:
@@ -421,7 +447,7 @@ async def live_prices_ws(websocket: WebSocket):
 
 
 @router.websocket("/positions-pnl")
-async def ws_positions_pnl(ws: WebSocket):
+async def ws_positions_pnl(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)):
     """Streams live P&L patches for all open positions every 500 ms.
 
     Reads directly from PRICE_CACHE (populated by KiteTicker on_ticks) so
@@ -432,6 +458,10 @@ async def ws_positions_pnl(ws: WebSocket):
         "positions": [{ "id": "paper_123", "current_price": 8.51,
                         "unrealised_pnl": 305.73, "unrealised_pct": 0.79 }] }
     """
+    # D4: require a valid admin JWT before streaming. require_ws_auth
+    # closes the socket (1008) itself on failure, so just return.
+    if _ws_user is None:
+        return
     await ws.accept()
     try:
         last_pos_refresh = 0.0

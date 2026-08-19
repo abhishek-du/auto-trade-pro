@@ -247,6 +247,7 @@ async def route_decision(
     session:      AsyncSession,
     position_size: dict | None = None,
     source:       str = "signal_engine",
+    product:      str = "CNC",
 ) -> RoutingResult:
     """Route a trading signal to paper or live execution.
 
@@ -305,13 +306,23 @@ async def route_decision(
         try:
             from engine.zerodha_executor import place_real_order
             qty = int(position_size.get("units", 1)) if position_size else 1
+            # D2 (audit 2026-08-19): signal_id= and confidence= were passed
+            # here but place_real_order() accepts neither (its keyword-only
+            # params are signal, order_type, product, exchange, variety, price,
+            # trigger_price, tag). Every live order therefore raised TypeError,
+            # which the broad `except Exception` below swallowed and reported as
+            # a generic RoutingOutcome.ERROR -- indistinguishable from a broker
+            # outage. Nothing is lost by dropping them: `conf` is already logged
+            # below, and place_real_order derives its own ATP_{id} tag from
+            # signal.id. tests/test_live_order_path.py pins this against the
+            # real signature so it cannot drift again.
             result = await place_real_order(
                 symbol=signal.symbol,
                 transaction_type=signal.action,
                 quantity=qty,
                 session=session,
-                signal_id=str(getattr(signal, "id", "")),
-                confidence=conf,
+                signal=signal,
+                product=product,
             )
             order_id = (result or {}).get("order_id")
             outcome = (
@@ -340,7 +351,7 @@ async def route_decision(
         from paper_trading.trade_simulator import open_paper_trade
         if position_size is None:
             position_size = {"units": 1, "usd_value": getattr(signal, "entry_price", 0) * 1}
-        trade = await open_paper_trade(signal, position_size, session)
+        trade = await open_paper_trade(signal, position_size, session, product=product)
         order_id = f"PAPER-{trade.id}" if trade else None
         logger.info(
             f"[decision_router] PAPER {signal.symbol} {signal.action} "
@@ -798,7 +809,7 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
                 f"Halving BUY quantity from {old_units} to {new_units} to manage risk."
             )
 
-    result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy)
+    result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy, product=intent.product)
     await _log_intent_audit(intent, auth.mode, result, session)
     return result
 

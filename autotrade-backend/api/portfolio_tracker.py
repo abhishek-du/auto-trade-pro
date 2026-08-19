@@ -23,6 +23,7 @@ from engine.portfolio_service import (
     search_stocks_live,
     sell_holding,
 )
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Portfolio Tracker"])
 
@@ -75,7 +76,7 @@ async def list_portfolios(db: AsyncSession = Depends(get_db)):
     return out
 
 
-@router.post("/", status_code=201)
+@router.post("/", status_code=201, dependencies=[Depends(require_auth)])
 async def create_portfolio(body: CreatePortfolioRequest, db: AsyncSession = Depends(get_db)):
     portfolio = TrackerPortfolio(name=body.name, description=body.description)
     db.add(portfolio)
@@ -93,7 +94,7 @@ async def get_portfolio(portfolio_id: str, db: AsyncSession = Depends(get_db)):
     return data
 
 
-@router.put("/{portfolio_id}")
+@router.put("/{portfolio_id}", dependencies=[Depends(require_auth)])
 async def update_portfolio(
     portfolio_id: str,
     body: UpdatePortfolioRequest,
@@ -114,7 +115,7 @@ async def update_portfolio(
     return _portfolio_to_dict(portfolio)
 
 
-@router.delete("/{portfolio_id}", status_code=204)
+@router.delete("/{portfolio_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_portfolio(portfolio_id: str, db: AsyncSession = Depends(get_db)):
     res = await db.execute(
         select(TrackerPortfolio).where(TrackerPortfolio.id == portfolio_id)
@@ -138,7 +139,7 @@ async def list_holdings(portfolio_id: str, db: AsyncSession = Depends(get_db)):
     return [_holding_to_dict(h) for h in res.scalars().all()]
 
 
-@router.post("/{portfolio_id}/holdings", status_code=201)
+@router.post("/{portfolio_id}/holdings", status_code=201, dependencies=[Depends(require_auth)])
 async def add_holding(
     portfolio_id: str,
     body: AddHoldingRequest,
@@ -160,7 +161,7 @@ async def add_holding(
     )
 
 
-@router.delete("/{portfolio_id}/holdings/{holding_id}", status_code=204)
+@router.delete("/{portfolio_id}/holdings/{holding_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_holding(
     portfolio_id: str,
     holding_id: str,
@@ -179,7 +180,7 @@ async def delete_holding(
     await db.commit()
 
 
-@router.post("/{portfolio_id}/holdings/{holding_id}/sell")
+@router.post("/{portfolio_id}/holdings/{holding_id}/sell", dependencies=[Depends(require_auth)])
 async def sell(
     portfolio_id: str,
     holding_id: str,
@@ -213,7 +214,7 @@ async def list_transactions(
     return [_tx_to_dict(tx) for tx in res.scalars().all()]
 
 
-@router.delete("/{portfolio_id}/transactions/{tx_id}", status_code=204)
+@router.delete("/{portfolio_id}/transactions/{tx_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_transaction(
     portfolio_id: str,
     tx_id: str,
@@ -247,7 +248,7 @@ async def get_tax_summary(portfolio_id: str, db: AsyncSession = Depends(get_db))
 
 # ── Zerodha holdings sync into tracker (unifies real Demat + manual entries) ──
 
-@router.post("/sync-zerodha")
+@router.post("/sync-zerodha", dependencies=[Depends(require_auth)])
 async def sync_zerodha_holdings(db: AsyncSession = Depends(get_db)):
     """Mirror live Zerodha Demat holdings into a TrackerPortfolio named 'Zerodha Demat'.
 
@@ -263,7 +264,7 @@ async def sync_zerodha_holdings(db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, detail=result["error"])
     return result
 
-@router.post("/sync-upstox")
+@router.post("/sync-upstox", dependencies=[Depends(require_auth)])
 async def sync_upstox_holdings(db: AsyncSession = Depends(get_db)):
     """Mirror live Upstox Demat holdings into a TrackerPortfolio named 'Upstox Demat'."""
     from crawler.upstox_data import get_holdings

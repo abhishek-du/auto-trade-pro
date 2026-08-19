@@ -22,7 +22,7 @@ Cross-check (Zerodha primary, Upstox validation):
 """
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import Depends, APIRouter
 from fastapi.responses import RedirectResponse, HTMLResponse
 
 from crawler.upstox_auth import get_upstox_status, refresh_upstox_token_with_retry
@@ -36,13 +36,14 @@ from crawler.upstox_data import (
 )
 from utils.config import settings
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["upstox"])
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-@router.post("/auto-login", summary="Trigger Upstox Auto-Login via TOTP")
+@router.post("/auto-login", summary="Trigger Upstox Auto-Login via TOTP", dependencies=[Depends(require_auth)])
 async def upstox_auto_login():
     from fastapi import HTTPException
     ok = await refresh_upstox_token_with_retry()

@@ -44,7 +44,9 @@ def get_live_tick(symbol: str) -> dict | None:
     tick = LIVE_TICKS.get(token)
     if tick:
         import time
-        tick["_age_seconds"] = time.time() - tick.get("_ts", time.time())
+        # D3: default 0 (not now()) so a tick with no _ts reads as
+        # infinitely stale rather than perfectly fresh.
+        tick["_age_seconds"] = time.time() - tick.get("_ts", 0)
     return tick
 
 
@@ -156,6 +158,11 @@ def on_ticks(ws, ticks: list[dict]) -> None:
             "change": round(change, 2),
             "change_pct": round(change_pct, 2),
             "data_source": "kite_ws",
+            # D3 (audit 2026-08-19): LIVE_TICKS[token] gets a _ts above, but the
+            # PRICE_CACHE mirror never did -- so live_prices.get_price()'s 30s
+            # freshness guard defaulted to now() and always passed, reporting a
+            # days-old price as age_seconds: 0.0.
+            "_ts": time.time(),
         })
         PRICE_CACHE[sym] = existing
 

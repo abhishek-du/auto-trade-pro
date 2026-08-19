@@ -17,8 +17,8 @@ ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/watchmedo
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
-StandardOutput=append:/tmp/celery_worker.log
-StandardError=append:/tmp/celery_worker.log
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/celery-worker.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/celery-worker.err
 
 [Install]
 WantedBy=default.target

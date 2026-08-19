@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -70,6 +70,44 @@ async def require_auth(
     email or raises 401. The SPA already attaches the token to every request.
     """
     return _verify_token(credentials)
+
+
+async def require_ws_auth(
+    websocket: WebSocket,
+    token: str | None = Query(default=None),
+) -> str | None:
+    """WebSocket equivalent of `require_auth` (audit D4).
+
+    `Depends(require_auth)` CANNOT be used on a WebSocket route: FastAPI's
+    HTTPBearer.__call__ is annotated `request: Request`, and a WebSocket is a
+    sibling of Request (both subclass HTTPConnection), so the value is never
+    injected and the handshake dies with
+    `TypeError: HTTPBearer.__call__() missing 1 required positional argument`
+    rather than a clean 401. Verified against fastapi 0.136.3.
+
+    Browsers also cannot set an Authorization header on `new WebSocket()`, so
+    the token arrives as a query parameter — the SPA appends it from
+    localStorage (see autotrade-frontend/src/hooks/useWebSocket.js).
+
+    On failure we close with 1008 (policy violation) BEFORE accept() and return
+    None; the route must then return immediately without accepting.
+
+    Note the trade-off accepted here: a query-string token can land in access
+    logs. Same-origin only (Vite proxies /ws), and the alternative — leaving
+    portfolio and trade streams fully public — is worse.
+    """
+    if not token:
+        await websocket.close(code=1008, reason="Not authenticated")
+        return None
+    try:
+        payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        return payload["sub"]
+    except jwt.ExpiredSignatureError:
+        await websocket.close(code=1008, reason="Token expired")
+        return None
+    except jwt.PyJWTError:
+        await websocket.close(code=1008, reason="Invalid token")
+        return None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────

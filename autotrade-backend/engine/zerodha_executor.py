@@ -415,6 +415,49 @@ async def place_real_order(
     # Rule 10 — tag
     sig_id = getattr(signal, "id", None) if signal else None
     final_tag = tag or (f"ATP_{sig_id}" if sig_id else "ATP_manual")
+    # Kite truncates the tag field at 20 chars; keep it stable AND unique.
+    final_tag = final_tag[:20]
+
+    # Rule 11 — idempotency (audit D6) ────────────────────────────────────────
+    # There was no duplicate-order guard: no client order id, no pre-flight
+    # check against the book, no dedupe on our own tag. `task_acks_late=True`
+    # (tasks/celery_app.py) means a worker killed mid-task WILL redeliver, and a
+    # redelivery here placed a second real order. Check the live order book for
+    # our tag first and return the existing order instead of doubling up.
+    #
+    # Fails OPEN deliberately: if we cannot read the book we still place, since
+    # refusing to trade on a transient read failure is its own risk. The 3s
+    # abort window below is the remaining human backstop.
+    if final_tag != "ATP_manual":
+        try:
+            existing = await kite.get_orders()
+            for o in existing or []:
+                if o.get("tag") != final_tag:
+                    continue
+                # A rejected/cancelled order is not a duplicate — it is a retry
+                # opportunity. Only a live or completed one blocks.
+                status = str(o.get("status") or "").upper()
+                if status in {"REJECTED", "CANCELLED"}:
+                    continue
+                logger.warning(
+                    f"[zerodha_executor] IDEMPOTENCY: order tagged {final_tag} already "
+                    f"exists (order_id={o.get('order_id')}, status={status}) — "
+                    f"returning it instead of placing a duplicate"
+                )
+                return {
+                    "order_id":  o.get("order_id"),
+                    "symbol":    bare,
+                    "qty":       quantity,
+                    "price":     lim_price,
+                    "value":     float(lim_price or 0.0) * int(quantity),
+                    "tag":       final_tag,
+                    "duplicate": True,
+                }
+        except Exception as exc:
+            logger.warning(
+                f"[zerodha_executor] idempotency pre-check failed for {final_tag} "
+                f"({type(exc).__name__}: {exc}) — proceeding with placement"
+            )
 
     # Rule 7 — abort window
     await _abort_window(transaction_type, quantity, bare, lim_price)

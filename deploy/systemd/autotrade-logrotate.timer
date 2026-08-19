@@ -1,0 +1,12 @@
+[Unit]
+Description=AutoTrade Pro — daily log rotation (03:15 IST)
+
+[Timer]
+# 21:45 UTC = 03:15 IST, i.e. after the NSE session and before the 03:00-03:45
+# UTC batch of daily beat jobs starts writing volume.
+OnCalendar=*-*-* 21:45:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

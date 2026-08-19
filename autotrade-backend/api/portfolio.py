@@ -18,6 +18,7 @@ from paper_trading.position_tracker import PositionTracker
 from paper_trading.simulation_logger import SimLogger
 from paper_trading.virtual_wallet import VirtualWallet
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Portfolio"])
 
@@ -319,6 +320,7 @@ async def get_capital_model(
 @router.put(
     "/capital-model/policy",
     summary="Update portfolio policy (position caps, risk tolerance)",
+    dependencies=[Depends(require_auth)],
 )
 async def update_portfolio_policy(
     risk_tolerance:           str   = Query("MODERATE"),
@@ -354,6 +356,7 @@ async def update_portfolio_policy(
     "/reset",
     response_model=WalletSummary,
     summary="Reset virtual wallet to starting balance",
+    dependencies=[Depends(require_auth)],
 )
 async def reset_portfolio(
     confirm: bool = Query(False, description="Must be true to proceed"),
@@ -373,6 +376,7 @@ async def reset_portfolio(
 @router.post(
     "/reconcile",
     summary="Close stale agent trades and re-sync wallet to ₹5L unified capital pool",
+    dependencies=[Depends(require_auth)],
 )
 async def reconcile_capital(
     confirm: bool = Query(False),

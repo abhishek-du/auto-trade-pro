@@ -10,6 +10,7 @@ from db.database import get_db
 from db.models import PaperTrade, TradeDirection, TradeStatus
 from paper_trading.position_tracker import PositionTracker
 from paper_trading.trade_simulator import TradeSimulator
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Trades"])
 
@@ -139,6 +140,7 @@ async def get_trade(trade_id: int, db: AsyncSession = Depends(get_db)):
     "/{trade_id}/close",
     response_model=PaperTradeOut,
     summary="Manually close an open trade",
+    dependencies=[Depends(require_auth)],
 )
 async def close_trade(
     trade_id: int,

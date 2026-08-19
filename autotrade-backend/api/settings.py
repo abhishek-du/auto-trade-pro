@@ -93,6 +93,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     "/",
     response_model=RuntimeSettingsOut,
     summary="Partially update runtime settings — only provided keys are changed",
+    dependencies=[Depends(require_auth)],
 )
 async def patch_settings(
     payload: SettingsPatch,
@@ -117,6 +118,7 @@ async def patch_settings(
 @router.delete(
     "/{key}",
     summary="Reset a single setting to its .env / config.py default",
+    dependencies=[Depends(require_auth)],
 )
 async def reset_setting(key: str, db: AsyncSession = Depends(get_db)):
     if key not in _KNOWN_KEYS:

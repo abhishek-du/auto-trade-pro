@@ -523,7 +523,7 @@ def _get_token(symbol: str) -> int | None:
 
 # ── 1. Live prices (LTP) ──────────────────────────────────────────────────────
 
-async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
+async def get_live_prices(symbols: list[str], *, exit_bucket: bool = False) -> dict[str, dict]:
     """Fetch last traded price for a list of .NS symbols via Kite LTP endpoint.
 
     Returns {symbol: {price, last_price, change, change_pct}}.
@@ -534,6 +534,11 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
     With NSE_TOKENS hydrated to ~9,800 symbols post-startup, a one-shot
     call now overflows immediately — chunking keeps each request well
     under the cap.
+
+    exit_bucket (D6): route these reads to the RESERVED Kite exit quota
+    instead of the shared quote quota. Set it on the stop-loss/exit
+    paths only, so a universe scan or a dashboard burst can never make
+    an exit check queue behind them.
     """
     kite = get_kite_client()
     if not kite.access_token or not _kite_quotes_available():
@@ -552,7 +557,7 @@ async def get_live_prices(symbols: list[str]) -> dict[str, dict]:
     for i in range(0, len(instruments), _CHUNK):
         chunk = instruments[i:i + _CHUNK]
         try:
-            raw: dict = await kite.get_ltp(chunk)
+            raw: dict = await kite.get_ltp(chunk, exit_bucket=exit_bucket)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
                 _handle_market_data_403("LTP/quote")

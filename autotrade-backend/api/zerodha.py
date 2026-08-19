@@ -329,7 +329,7 @@ async def get_margins():
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@router.post("/logout")
+@router.post("/logout", dependencies=[Depends(require_auth)])
 async def logout():
     """Invalidate the Kite session and clear the stored access token."""
     kite = get_kite_client()
@@ -464,7 +464,7 @@ async def place_order(
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@router.delete("/orders/{order_id}")
+@router.delete("/orders/{order_id}", dependencies=[Depends(require_auth)])
 async def cancel_order(order_id: str):
     """Cancel a pending order."""
     kite = get_kite_client()
@@ -1230,7 +1230,7 @@ async def get_order_by_id(order_id: str):
         raise _err(502, exc)
 
 
-@router.put("/orders/{order_id}")
+@router.put("/orders/{order_id}", dependencies=[Depends(require_auth)])
 async def modify_order_endpoint(order_id: str, body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1257,7 +1257,7 @@ async def get_trades_for_order(order_id: str):
 
 # ── Positions convert ────────────────────────────────────────────────────────
 
-@router.post("/positions/convert")
+@router.post("/positions/convert", dependencies=[Depends(require_auth)])
 async def convert_position_endpoint(body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1278,7 +1278,7 @@ async def convert_position_endpoint(body: dict):
         raise _err(502, exc)
 
 
-@router.post("/sync")
+@router.post("/sync", dependencies=[Depends(require_auth)])
 async def sync_real_holdings_endpoint(db: AsyncSession = Depends(get_db)):
     """Force a holdings + positions sync from Kite into the DB."""
     _need_connection()
@@ -1318,7 +1318,7 @@ async def get_gtt_one(trigger_id: int):
         raise _err(502, exc)
 
 
-@router.post("/gtt/single")
+@router.post("/gtt/single", dependencies=[Depends(require_auth)])
 async def place_gtt_single_endpoint(body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1340,7 +1340,7 @@ async def place_gtt_single_endpoint(body: dict):
         raise _err(502, exc)
 
 
-@router.post("/gtt/oco")
+@router.post("/gtt/oco", dependencies=[Depends(require_auth)])
 async def place_gtt_oco_endpoint(body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1363,7 +1363,7 @@ async def place_gtt_oco_endpoint(body: dict):
         raise _err(502, exc)
 
 
-@router.post("/gtt/bracket")
+@router.post("/gtt/bracket", dependencies=[Depends(require_auth)])
 async def place_gtt_bracket_endpoint(body: dict, db: AsyncSession = Depends(get_db)):
     """Buy + OCO (SL + Target) bracket — full real-money flow."""
     _need_connection()
@@ -1385,7 +1385,7 @@ async def place_gtt_bracket_endpoint(body: dict, db: AsyncSession = Depends(get_
         raise _err(502, exc)
 
 
-@router.put("/gtt/{trigger_id}")
+@router.put("/gtt/{trigger_id}", dependencies=[Depends(require_auth)])
 async def modify_gtt_endpoint(trigger_id: int, body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1406,7 +1406,7 @@ async def modify_gtt_endpoint(trigger_id: int, body: dict):
         raise _err(502, exc)
 
 
-@router.delete("/gtt/{trigger_id}")
+@router.delete("/gtt/{trigger_id}", dependencies=[Depends(require_auth)])
 async def delete_gtt_endpoint(trigger_id: int):
     _need_connection()
     try:
@@ -1499,7 +1499,7 @@ async def historical_endpoint(
         raise _err(502, exc)
 
 
-@router.post("/historical/sync")
+@router.post("/historical/sync", dependencies=[Depends(require_auth)])
 async def historical_sync_endpoint(
     body: dict | None = None,
     db: AsyncSession = Depends(get_db),
@@ -1527,7 +1527,7 @@ async def historical_sync_endpoint(
 
 # ── Margins preview ──────────────────────────────────────────────────────────
 
-@router.post("/margins/preview")
+@router.post("/margins/preview", dependencies=[Depends(require_auth)])
 async def margins_preview(body: dict):
     _need_connection()
     try:
@@ -1544,7 +1544,7 @@ async def margins_preview(body: dict):
         raise _err(502, exc)
 
 
-@router.post("/margins/basket")
+@router.post("/margins/basket", dependencies=[Depends(require_auth)])
 async def margins_basket(body: dict):
     _need_connection()
     try:
@@ -1556,7 +1556,7 @@ async def margins_basket(body: dict):
         raise _err(502, exc)
 
 
-@router.post("/charges/preview")
+@router.post("/charges/preview", dependencies=[Depends(require_auth)])
 async def charges_preview(body: dict):
     _need_connection()
     try:
@@ -1568,7 +1568,7 @@ async def charges_preview(body: dict):
 
 # ── Ticker control ───────────────────────────────────────────────────────────
 
-@router.post("/ticker/start")
+@router.post("/ticker/start", dependencies=[Depends(require_auth)])
 async def ticker_start():
     _need_connection()
     try:
@@ -1581,7 +1581,7 @@ async def ticker_start():
         raise _err(502, exc)
 
 
-@router.post("/ticker/stop")
+@router.post("/ticker/stop", dependencies=[Depends(require_auth)])
 async def ticker_stop():
     try:
         from crawler.zerodha_ticker import stop_kite_ticker
@@ -1636,7 +1636,7 @@ async def mf_order_one(order_id: str):
         raise _err(502, exc)
 
 
-@router.post("/mf/orders")
+@router.post("/mf/orders", dependencies=[Depends(require_auth)])
 async def mf_place_order_endpoint(body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1656,7 +1656,7 @@ async def mf_place_order_endpoint(body: dict):
         raise _err(502, exc)
 
 
-@router.delete("/mf/orders/{order_id}")
+@router.delete("/mf/orders/{order_id}", dependencies=[Depends(require_auth)])
 async def mf_cancel_order(order_id: str):
     _need_connection()
     try:
@@ -1696,7 +1696,7 @@ async def mf_sip_one(sip_id: str):
         raise _err(502, exc)
 
 
-@router.post("/mf/sips")
+@router.post("/mf/sips", dependencies=[Depends(require_auth)])
 async def mf_place_sip(body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1717,7 +1717,7 @@ async def mf_place_sip(body: dict):
         raise _err(502, exc)
 
 
-@router.put("/mf/sips/{sip_id}")
+@router.put("/mf/sips/{sip_id}", dependencies=[Depends(require_auth)])
 async def mf_modify_sip(sip_id: str, body: dict):
     _need_connection()
     if settings.ZERODHA_PAPER_MODE:
@@ -1737,7 +1737,7 @@ async def mf_modify_sip(sip_id: str, body: dict):
         raise _err(502, exc)
 
 
-@router.delete("/mf/sips/{sip_id}")
+@router.delete("/mf/sips/{sip_id}", dependencies=[Depends(require_auth)])
 async def mf_delete_sip(sip_id: str):
     _need_connection()
     try:
@@ -1759,7 +1759,7 @@ async def alerts_list():
         return {"alerts": [], "error": str(exc)}
 
 
-@router.post("/alerts")
+@router.post("/alerts", dependencies=[Depends(require_auth)])
 async def alerts_create(body: dict):
     _need_connection()
     try:
@@ -1769,7 +1769,7 @@ async def alerts_create(body: dict):
         raise _err(502, exc)
 
 
-@router.put("/alerts/{alert_id}")
+@router.put("/alerts/{alert_id}", dependencies=[Depends(require_auth)])
 async def alerts_modify(alert_id: str, body: dict):
     _need_connection()
     try:
@@ -1779,7 +1779,7 @@ async def alerts_modify(alert_id: str, body: dict):
         raise _err(502, exc)
 
 
-@router.delete("/alerts/{alert_id}")
+@router.delete("/alerts/{alert_id}", dependencies=[Depends(require_auth)])
 async def alerts_delete(alert_id: str):
     _need_connection()
     try:

@@ -878,14 +878,41 @@ def _nan_bundle() -> IndicatorSignals:
 
 # ── Core computation ──────────────────────────────────────────────────────────
 
-def compute_indicators(df: pd.DataFrame) -> IndicatorSignals:
+def compute_indicators(
+    df: pd.DataFrame,
+    *,
+    exclude_forming_bar: bool = False,
+) -> IndicatorSignals:
     """Compute all indicators from an OHLCV DataFrame.
 
     Expects columns: open, high, low, close, volume (case-insensitive).
     Returns _nan_bundle() when fewer than 5 rows are supplied.
+
+    exclude_forming_bar (D5, audit 2026-08-19)
+        Drop the LAST row before computing anything.
+
+        Every indicator here is read off ``close[-1]``, and no caller truncates,
+        so during a live session an intraday run over ``AGENT_TIMEFRAME="1d"``
+        candles scores a partially-formed daily bar: RSI/MACD/BB/EMA/ADX/
+        Supertrend all incorporate a bar that has not printed yet, and
+        ``_momentum_breakout_score`` divides an under-counted ``volume[-1]`` by
+        a 20-bar mean that includes it. The value you trade on is therefore not
+        the value that bar finally prints, which is what makes a backtest over
+        closed bars disagree with production.
+
+        Pass True whenever the last row may still be forming (i.e. any
+        in-session call). Defaults to False so existing call sites keep their
+        current behaviour; opt in deliberately.
     """
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
+
+    if exclude_forming_bar:
+        # Guard the degenerate case: dropping the only bar would hand the
+        # indicators an empty frame.
+        if len(df) <= 1:
+            return _nan_bundle()
+        df = df.iloc[:-1]
 
     if len(df) < 5:
         return _nan_bundle()

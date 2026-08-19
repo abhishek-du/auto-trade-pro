@@ -9,6 +9,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { formatINR, formatVolume } from '../../utils/indianFormat'
+import { withWsToken } from '../../utils/wsAuth';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']
 const TF_LABEL   = { '1m': '1M', '5m': '5M', '15m': '15M', '1h': '1H', '1d': '1D' }
@@ -599,7 +600,7 @@ export default function CandlestickChart({
     }
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const sym   = encodeURIComponent(symbol)
-    const ws    = new WebSocket(`${proto}//${window.location.host}/ws/candles/${sym}?timeframe=${tf}`)
+    const ws    = new WebSocket(withWsToken(`${proto}//${window.location.host}/ws/candles/${sym}?timeframe=${tf}`))
     wsRef.current = ws
 
     let pollId = null

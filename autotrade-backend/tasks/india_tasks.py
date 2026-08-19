@@ -556,20 +556,30 @@ async def _india_trade_loop():
             logger.warning("[india_trade_loop] SHOCK COOLDOWN active — exits done, no new entries")
             return
 
-        # ── News-Only Target Architecture (Phase 1) — RE-ENABLED 2026-07-24 ───
+        # ── News-Only Target Architecture (Phase 1) — RE-BLOCKED 2026-08-19 ──
         # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: this is the "main
         # equity/short loop" — a technical-only BUY/SELL loop with no news
-        # catalyst requirement. Was hard-blocked from originating trades under
-        # the News-Only architecture; re-enabled by explicit user instruction
-        # after the news-driven path (news_discovery_engine.py) went ~2 days
-        # without a single trade due to a separate Mantle/Bedrock LLM
-        # reliability issue (empty content on ~80% of candidate evaluations,
-        # see utils/llm.py::call_mantle_chat). Exit/risk management above
-        # (Step 1 auto-close, dynamic SL/TP, circuit breaker) already ran
-        # unconditionally either way. The other two News-Only hard-blocks in
-        # this file (_intraday_entry_task, _open_index_option_mis) were left
-        # untouched — only this loop was asked to be re-enabled.
-        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = False
+        # catalyst requirement.
+        #
+        # History: hard-blocked under the News-Only architecture, then set to
+        # False on 2026-07-24 by explicit user instruction after the news-driven
+        # path (news_discovery_engine.py) went ~2 days without a single trade
+        # during the Bedrock LLM outage (empty content on ~80% of candidate
+        # evaluations). That outage was resolved 2026-08-17, so the
+        # justification no longer held — audit finding D1
+        # (docs/DEEP_AUDIT_2026-08-19.md) flagged that the contract was
+        # consequently unenforced on this loop, and that P&L attribution was
+        # pooling news-driven and technical trades. Restored to True.
+        #
+        # Note this is belt-and-braces: engine/decision_router.py's
+        # _TECHNICAL_TRADE_ORIGINATION_BLOCKED rejects any TECHNICAL-family
+        # intent anyway. Blocking here as well avoids burning a full LLM
+        # reasoning gate + pre-trade research + risk validation per candidate
+        # every 60s on candidates that can never execute.
+        #
+        # Exit/risk management above (Step 1 auto-close, dynamic SL/TP, circuit
+        # breaker) runs unconditionally either way and is unaffected.
+        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
         if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window:
             logger.info(
                 "[india_trade_loop] new-entry origination disabled — News-Only architecture "
@@ -1361,7 +1371,7 @@ async def _fast_sl_check() -> None:
         if symbols:
             try:
                 from crawler.zerodha_market import get_live_prices
-                quotes = await get_live_prices(symbols)
+                quotes = await get_live_prices(symbols, exit_bucket=True)   # D6: reserved exit quota
                 for sym, q in (quotes or {}).items():
                     px = q.get("price") or q.get("last_price")
                     if px and px > 0:

@@ -17,8 +17,8 @@ ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/watchmedo
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
-StandardOutput=append:/tmp/news-engine.log
-StandardError=append:/tmp/news-engine.log
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/news-engine.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/news-engine.err
 
 [Install]
 WantedBy=default.target

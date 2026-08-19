@@ -1,0 +1,35 @@
+# AutoTrade Pro — systemd stdout/stderr capture rotation.
+#
+# The four services write via `StandardOutput=append:` to
+# /home/cis/windows/auto-trade-pro/logs/. Those files were previously in /tmp
+# and never rotated — celery_worker.log reached 2.6 GB (audit D11-p).
+#
+# `copytruncate` is required: systemd holds the fd open with append:, so a
+# plain rename would leave the service writing to the rotated inode.
+#
+# NOTE: the app's OWN loguru log (logs/autotrade_{date}.log) already rotates
+# daily with 30-day retention via utils/logger.py — it is deliberately excluded
+# here so the two mechanisms don't fight.
+#
+# Install as a --user timer (no root needed):
+#   systemctl --user enable --now autotrade-logrotate.timer
+# Or system-wide:
+#   sudo cp deploy/logrotate/autotrade /etc/logrotate.d/autotrade
+
+/home/cis/windows/auto-trade-pro/logs/uvicorn.log
+/home/cis/windows/auto-trade-pro/logs/uvicorn.err
+/home/cis/windows/auto-trade-pro/logs/celery-worker.log
+/home/cis/windows/auto-trade-pro/logs/celery-worker.err
+/home/cis/windows/auto-trade-pro/logs/celery-beat.log
+/home/cis/windows/auto-trade-pro/logs/celery-beat.err
+/home/cis/windows/auto-trade-pro/logs/news-engine.log
+/home/cis/windows/auto-trade-pro/logs/news-engine.err
+{
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

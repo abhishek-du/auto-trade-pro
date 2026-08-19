@@ -122,32 +122,17 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(day_of_week="saturday", hour=5, minute=30),
     },
 
-    # Every 15 min during NSE hours: NIFTY + BANKNIFTY options chain
-    "india-options-every-15min": {
-        "task":     "tasks.india_options_analysis",
-        "schedule": 900,
-        "options":  {"countdown": 10},
-    },
-
-    # 2×/day during NSE hours (05:30 UTC = 11:00 IST, 09:30 UTC = 15:00 IST):
-    # per-stock options enrichment so the hub scores each F&O stock on its own
-    # PCR/IV instead of the index-wide NIFTY fallback. Gated by ENABLE_HUB_OPTIONS.
-    "india-equity-options-enrich": {
-        "task":     "tasks.india_equity_options_enrich",
-        "schedule": crontab(hour="5,9", minute=30, day_of_week="1-5"),
-        "options":  {"countdown": 15},
-    },
+    # NOTE (D9, audit 2026-08-19): three F&O beat entries were removed here —
+    # india-options-every-15min, india-equity-options-enrich and
+    # fno-expiry-sweep-daily. Their tasks were deleted with the F&O subsystem in
+    # 91457d7 but the schedule was not updated, so beat kept enqueueing them and
+    # the worker raised NotRegistered on every tick. tests/test_beat_schedule.py
+    # now asserts every scheduled task name resolves in the Celery registry.
 
     # Daily 14:30 UTC = 8:00 PM IST: AMFI NAV bulk fetch (publishes after 7 PM IST)
     "india-mf-nav-daily": {
         "task":     "tasks.india_mutual_fund_nav",
         "schedule": crontab(hour=14, minute=30),
-    },
-
-    # Daily 10:15 UTC = 3:45 PM IST (after NSE close): settle expired F&O positions
-    "fno-expiry-sweep-daily": {
-        "task":     "tasks.fno_expiry_sweep",
-        "schedule": crontab(hour=10, minute=15, day_of_week="1-5"),
     },
 
     # Weekly Sunday 18:30 UTC: fundamental data refresh (PE, ROE, promoter holding…)
@@ -314,7 +299,12 @@ celery_app.conf.beat_schedule = {
     # Daily 03:35 UTC (09:05 IST): detect stock splits/bonus issues for open positions.
     # Runs just after first 1m candle lands; adjusts units + entry/stop/target + fires news alert.
     "corporate-action-check-daily": {
-        "task":     "tasks.india_tasks.corporate_action_check",
+        # D9-b (found 2026-08-19 by tests/test_beat_schedule.py): this named
+        # "tasks.india_tasks.corporate_action_check", but the task registers as
+        # "tasks.corporate_action_check" (india_tasks.py:1711). The name never
+        # resolved, so beat raised NotRegistered daily and split/bonus detection
+        # -- which adjusts position units and entry/stop/target -- never ran.
+        "task":     "tasks.corporate_action_check",
         "schedule": crontab(hour=3, minute=35),
         "options":  {"expires": 300},
     },

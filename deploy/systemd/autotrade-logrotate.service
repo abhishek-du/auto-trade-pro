@@ -1,0 +1,11 @@
+[Unit]
+Description=AutoTrade Pro — rotate service stdout/stderr logs
+Documentation=file:///home/cis/windows/auto-trade-pro/deploy/logrotate/autotrade
+
+[Service]
+Type=oneshot
+# --state keeps logrotate's bookkeeping in the user's own tree; the default
+# /var/lib/logrotate/status is not writable by an unprivileged user unit.
+ExecStart=/usr/sbin/logrotate \
+    --state /home/cis/windows/auto-trade-pro/logs/.logrotate.state \
+    /home/cis/windows/auto-trade-pro/deploy/logrotate/autotrade

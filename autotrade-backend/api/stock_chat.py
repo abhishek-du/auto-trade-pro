@@ -15,6 +15,7 @@ from engine.stock_context_builder import resolve_symbol, build_stock_context, SY
 from crawler.live_prices import PRICE_CACHE
 from sqlalchemy import text
 from utils.llm import call_llm_chat, call_llm_chat_stream, get_last_reasoning, log_llm_reasoning
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["chat"])
 
@@ -33,7 +34,7 @@ class ChatRequest(BaseModel):
 
 # ── POST /message ─────────────────────────────────────────────────────────────
 
-@router.post("/message")
+@router.post("/message", dependencies=[Depends(require_auth)])
 async def chat_message(
     req: ChatRequest,
     session: AsyncSession = Depends(get_db),
@@ -62,7 +63,7 @@ async def chat_message(
 
 # ── POST /stream — SSE streaming endpoint ────────────────────────────────────
 
-@router.post("/stream")
+@router.post("/stream", dependencies=[Depends(require_auth)])
 async def chat_stream(
     req: ChatRequest,
     session: AsyncSession = Depends(get_db),

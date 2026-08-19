@@ -15,36 +15,43 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from engine.fundamental_analyzer import fetch_fundamentals_screener, fetch_fundamentals_yfinance
+from engine.fundamental_analyzer import fetch_fundamentals_screener, fetch_fundamentals_upstox
 
 
-class TestYfinanceRateLimitMarker:
-    def test_rate_limit_exception_returns_typed_marker(self):
-        mock_ticker = MagicMock()
-        type(mock_ticker).info = property(lambda self: (_ for _ in ()).throw(
-            Exception("YFRateLimitError: Too Many Requests. Rate limited. Try after a while.")
-        ))
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = fetch_fundamentals_yfinance("TESTCO.NS")
-        assert result == {"_error": "rate_limited"}
+class TestUpstoxFailureMarker:
+    """The yfinance fetcher these tests originally targeted was replaced by the
+    Upstox Fundamentals API, so `fetch_fundamentals_yfinance` no longer exists
+    and this file failed at import (audit D12). The *contract* under test is
+    unchanged and still worth locking in: a failure must return a typed
+    `_error` marker rather than a bare {} that looks like genuine absence."""
 
-    def test_generic_exception_returns_fetch_failed_marker(self):
-        mock_ticker = MagicMock()
-        type(mock_ticker).info = property(lambda self: (_ for _ in ()).throw(
-            ConnectionError("connection reset by peer")
-        ))
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = fetch_fundamentals_yfinance("TESTCO.NS")
+    @pytest.mark.asyncio
+    async def test_upstream_exception_returns_fetch_failed_marker(self):
+        with patch("crawler.upstox_data.get_key_ratios",
+                   AsyncMock(side_effect=ConnectionError("connection reset by peer"))), \
+             patch("crawler.upstox_data.get_shareholding", AsyncMock(return_value=[])), \
+             patch("crawler.upstox_data.get_company_profile", AsyncMock(return_value={})):
+            result = await fetch_fundamentals_upstox("TESTCO.NS")
         assert result["_error"] == "fetch_failed"
         assert "connection reset" in result["_reason"]
 
-    def test_success_returns_real_data_no_error_marker(self):
-        mock_ticker = MagicMock()
-        mock_ticker.info = {"trailingPE": 25.5, "longName": "Test Co"}
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = fetch_fundamentals_yfinance("TESTCO.NS")
+    @pytest.mark.asyncio
+    async def test_success_returns_real_data_no_error_marker(self):
+        with patch("crawler.upstox_data.get_key_ratios",
+                   AsyncMock(return_value=[{"name": "P/E", "company_value": "25.5"}])), \
+             patch("crawler.upstox_data.get_shareholding", AsyncMock(return_value=[])), \
+             patch("crawler.upstox_data.get_company_profile",
+                   AsyncMock(return_value={"company_profile": "Test Co"})):
+            result = await fetch_fundamentals_upstox("TESTCO.NS")
         assert result["pe_ratio"] == 25.5
         assert "_error" not in result
+
+    def test_removed_yfinance_fetcher_stays_removed(self):
+        # Guards the exact regression that broke this file: a caller (or test)
+        # referencing the deleted symbol. engine/fundamental_analyzer.py:690 was
+        # still calling it, raising NameError into a debug-level swallow.
+        import engine.fundamental_analyzer as fa
+        assert not hasattr(fa, "fetch_fundamentals_yfinance")
 
 
 class TestScreenerRateLimitMarker:

@@ -717,7 +717,7 @@ async def compute_live_pnl(
     if eq_syms:
         try:
             from crawler.zerodha_market import get_live_prices
-            quotes = await get_live_prices(eq_syms)
+            quotes = await get_live_prices(eq_syms, exit_bucket=True)   # D6: reserved exit quota
             for sym, q in (quotes or {}).items():
                 px = q.get("price") or q.get("last_price")
                 if px and px > 0:
@@ -835,7 +835,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
     if eq_syms:
         try:
             from crawler.zerodha_market import get_live_prices
-            quotes = await get_live_prices(eq_syms)
+            quotes = await get_live_prices(eq_syms, exit_bucket=True)   # D6: reserved exit quota
             for sym, q in (quotes or {}).items():
                 px = q.get("price") or q.get("last_price")
                 if px and px > 0:

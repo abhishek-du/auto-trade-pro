@@ -267,6 +267,18 @@ class Settings(BaseSettings):
     ZERODHA_ACCESS_TOKEN:  str  = ""
     ZERODHA_REQUEST_TOKEN: str  = ""
     ZERODHA_REDIRECT_URL:  str  = "http://localhost:8000/api/v1/zerodha/callback"
+    # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
+    # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.
+    # Before this there was no limiter at all while five producers hit /quote
+    # concurrently from separate processes. See crawler/zerodha_kite_limiter.py.
+    # KITE_EXIT_RPS is a RESERVED bucket for stop-loss/exit price reads so a
+    # quote flood can never delay an exit — do not merge it into KITE_QUOTE_RPS.
+    KITE_LIMITER_ENABLED:  bool  = True
+    KITE_QUOTE_RPS:        int   = 1
+    KITE_ORDER_RPS:        int   = 10
+    KITE_EXIT_RPS:         int   = 1
+    KITE_LIMITER_MAX_WAIT: float = 5.0   # then fail open rather than wedge
+
     ZERODHA_ENABLED:       bool = False
     ZERODHA_PAPER_MODE:    bool = True
     ZERODHA_USER_ID:       str  = ""

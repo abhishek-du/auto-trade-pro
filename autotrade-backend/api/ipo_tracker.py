@@ -21,6 +21,7 @@ from crawler.ipo_crawler import (
 from engine.ipo_analyzer import analyze_ipo, generate_ipo_analysis
 from utils.config import settings
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["ipo"])
 
@@ -151,7 +152,7 @@ async def get_subscription(slug: str):
 
 # ── POST /refresh  — force cache refresh ─────────────────────────────────────
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_auth)])
 async def force_refresh():
     await refresh_ipo_cache()
     return {

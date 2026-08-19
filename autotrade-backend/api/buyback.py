@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db as get_async_db
 from db.models import BuybackOffer
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["buyback"])
 
@@ -142,7 +143,7 @@ def _apply_price(b, price: float) -> None:
     b.last_refreshed = datetime.utcnow()
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_auth)])
 async def refresh_buybacks(db: AsyncSession = Depends(get_async_db)):
     """Scrape NSE for current buyback data and upsert into DB."""
     # Expire closed offers first

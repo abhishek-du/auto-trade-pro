@@ -23,6 +23,7 @@ from db.models import KiteSession, PortfolioHolding
 from services.kite_service import KiteService
 from utils.config import settings
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Kite Portfolio"])
 
@@ -245,7 +246,7 @@ async def get_holdings(db: AsyncSession = Depends(get_db)):
 
 # ── 5. Manual Holdings Add/Update ─────────────────────────────────────────────
 
-@router.post("/holdings/manual")
+@router.post("/holdings/manual", dependencies=[Depends(require_auth)])
 async def add_manual_holding(
     body: dict,
     db: AsyncSession = Depends(get_db),
@@ -301,7 +302,7 @@ async def add_manual_holding(
 
 # ── 6. Sync ───────────────────────────────────────────────────────────────────
 
-@router.post("/sync")
+@router.post("/sync", dependencies=[Depends(require_auth)])
 async def sync_holdings(db: AsyncSession = Depends(get_db)):
     """Immediately re-fetch holdings from Kite and update the DB.
 
@@ -335,7 +336,7 @@ async def sync_holdings(db: AsyncSession = Depends(get_db)):
 
 # ── 7. Disconnect ─────────────────────────────────────────────────────────────
 
-@router.post("/disconnect")
+@router.post("/disconnect", dependencies=[Depends(require_auth)])
 async def disconnect(db: AsyncSession = Depends(get_db)):
     """Deactivate the current Kite session."""
     await KiteService.disconnect(db)

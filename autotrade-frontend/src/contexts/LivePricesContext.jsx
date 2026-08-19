@@ -7,13 +7,14 @@
  */
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { getLivePrices, getMarketSummary, getTopMovers } from '../api/client';
+import { withWsToken } from '../utils/wsAuth';
 
 const RECONNECT_MS  = 5_000;
 const REST_POLL_MS  = 30_000;
 
 function wsUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws/live-prices`;
+  return withWsToken(`${proto}//${window.location.host}/ws/live-prices`);
 }
 
 const LivePricesContext = createContext({

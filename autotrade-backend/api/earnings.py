@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import EarningsCallSummary
 from crawler.earnings_crawler import get_all_transcripts
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Earnings"])
 
@@ -175,7 +176,7 @@ async def get_recent_earnings(
 
 # ── POST /earnings/{symbol}/refresh ──────────────────────────────────────────
 
-@router.post("/refresh/{symbol}")
+@router.post("/refresh/{symbol}", dependencies=[Depends(require_auth)])
 async def refresh_earnings(
     symbol: str,
     quarter: Optional[str] = Query(None),

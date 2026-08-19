@@ -17,6 +17,7 @@ from db.models import MutualFundNAV, UserMutualFund, UserSIP
 from engine.mutual_fund_analyzer import fetch_and_save_nav, project_sip
 from utils.llm import quick_analysis
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["MF Tracker"])
 
@@ -157,7 +158,7 @@ async def list_user_funds(db: AsyncSession = Depends(get_db)):
     return result
 
 
-@router.post("/funds", status_code=201)
+@router.post("/funds", status_code=201, dependencies=[Depends(require_auth)])
 async def add_user_fund(body: AddFundRequest, db: AsyncSession = Depends(get_db)):
     existing = (await db.execute(
         select(UserMutualFund).where(UserMutualFund.scheme_code == body.scheme_code)
@@ -189,7 +190,7 @@ async def add_user_fund(body: AddFundRequest, db: AsyncSession = Depends(get_db)
     return {"id": fund.id, "scheme_code": fund.scheme_code, "scheme_name": fund.scheme_name, "category": fund.category}
 
 
-@router.delete("/funds/{fund_id}", status_code=204)
+@router.delete("/funds/{fund_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def remove_user_fund(fund_id: str, db: AsyncSession = Depends(get_db)):
     fund = (await db.execute(
         select(UserMutualFund).where(UserMutualFund.id == fund_id)
@@ -200,7 +201,7 @@ async def remove_user_fund(fund_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
-@router.post("/funds/{fund_id}/refresh")
+@router.post("/funds/{fund_id}/refresh", dependencies=[Depends(require_auth)])
 async def refresh_fund_nav(fund_id: str, db: AsyncSession = Depends(get_db)):
     """Manually refresh NAV for a tracked fund."""
     fund = (await db.execute(
@@ -250,7 +251,7 @@ async def list_sips(db: AsyncSession = Depends(get_db)):
     return result
 
 
-@router.post("/sips", status_code=201)
+@router.post("/sips", status_code=201, dependencies=[Depends(require_auth)])
 async def add_sip(body: AddSIPRequest, db: AsyncSession = Depends(get_db)):
     fund = (await db.execute(
         select(UserMutualFund).where(UserMutualFund.id == body.fund_id)
@@ -273,7 +274,7 @@ async def add_sip(body: AddSIPRequest, db: AsyncSession = Depends(get_db)):
     return {"id": sip.id, "scheme_code": sip.scheme_code, "monthly_amount": sip.monthly_amount, "status": sip.status}
 
 
-@router.patch("/sips/{sip_id}")
+@router.patch("/sips/{sip_id}", dependencies=[Depends(require_auth)])
 async def update_sip(sip_id: str, body: UpdateSIPRequest, db: AsyncSession = Depends(get_db)):
     sip = (await db.execute(
         select(UserSIP).where(UserSIP.id == sip_id)
@@ -294,7 +295,7 @@ async def update_sip(sip_id: str, body: UpdateSIPRequest, db: AsyncSession = Dep
     return {"id": sip.id, "status": sip.status, "monthly_amount": sip.monthly_amount}
 
 
-@router.delete("/sips/{sip_id}", status_code=204)
+@router.delete("/sips/{sip_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_sip(sip_id: str, db: AsyncSession = Depends(get_db)):
     sip = (await db.execute(
         select(UserSIP).where(UserSIP.id == sip_id)

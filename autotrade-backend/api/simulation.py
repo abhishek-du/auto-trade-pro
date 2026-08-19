@@ -16,6 +16,7 @@ from db.models import SimulationLog
 from paper_trading.simulation_logger import SimLogger
 from paper_trading.virtual_wallet import VirtualWallet
 from utils.config import settings
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Simulation"])
 
@@ -173,6 +174,7 @@ async def should_go_live(db: AsyncSession = Depends(get_db)):
 @router.post(
     "/pause",
     summary="Pause the automated paper-trading loop",
+    dependencies=[Depends(require_auth)],
 )
 async def pause_simulation():
     """Sets an in-memory flag that prevents new Celery beat tasks from opening trades."""
@@ -184,6 +186,7 @@ async def pause_simulation():
 @router.post(
     "/resume",
     summary="Resume the automated paper-trading loop",
+    dependencies=[Depends(require_auth)],
 )
 async def resume_simulation():
     global _paused
