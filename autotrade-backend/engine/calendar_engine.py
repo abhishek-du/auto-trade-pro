@@ -921,7 +921,7 @@ def get_events_by_date(events: list[MarketEvent]) -> dict[str, list]:
 
 
 def _event_to_dict(ev: MarketEvent) -> dict:
-    return {
+    out = {
         "id":             ev.id,
         "event_type":     ev.event_type,
         "title":          ev.title,
@@ -937,3 +937,23 @@ def _event_to_dict(ev: MarketEvent) -> dict:
         "metadata":       ev.event_metadata,
         "is_confirmed":   ev.is_confirmed,
     }
+
+    # Board-meeting sub-type (2026-08-19). Every "Financial Results" filing was
+    # labelled EARNINGS / importance=HIGH alike, but across 1,783 live filings
+    # that one label covers a fresh quarterly result (99.2%), a months-late old
+    # quarter (0.6%) and a restatement of numbers already published (0.3%) —
+    # the last of which moves price in the OPPOSITE direction from a beat.
+    # NSE already ships the distinction in the filing's own text, so this is
+    # pure derivation, computed on read rather than stored.
+    if ev.event_type == "EARNINGS" and isinstance(ev.event_metadata, dict):
+        try:
+            from engine.board_meeting_classifier import classify_board_meeting
+            out["board_meeting"] = classify_board_meeting(
+                ev.event_metadata.get("bm_desc"),
+                ev.event_metadata.get("purpose"),
+                ev.event_date,
+            ).to_dict()
+        except Exception as exc:   # never let enrichment break the calendar
+            logger.debug(f"[calendar] sub-type classification skipped: {exc}")
+
+    return out
