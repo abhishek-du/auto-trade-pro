@@ -657,6 +657,12 @@ class Settings(BaseSettings):
     # symbols clear MIN_ANALYSTS), so this deliberately shrinks the universe.
     # Set to False to restore the old permissive behaviour.
     ENABLE_PRE_EVENT_MARKET_EXPECTATION_GATE: bool = True
+
+    # Tier 2 macro-risk overlay on the market regime (2026-08-18). Lets macro
+    # news that has not yet reached price lower the regime composite. Can only
+    # ever ADD caution — see engine/macro_context.py. Set False to fall back to
+    # the pure price/breadth/VIX regime.
+    ENABLE_MACRO_REGIME_OVERLAY: bool = True
     CONSENSUS_MIN_ANALYSTS: int = 3        # below this it isn't a "consensus"
     CONSENSUS_CACHE_TTL:    int = 86_400   # estimates move slowly; stay off the rate limiter
 

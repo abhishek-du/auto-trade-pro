@@ -30,6 +30,7 @@ from typing import Optional
 
 import pandas as pd
 
+from utils.config import settings
 from utils.logger import logger
 
 
@@ -75,6 +76,7 @@ def classify_regime(
     closes:     pd.Series,
     breadth_pct: Optional[float] = None,   # % hub stocks above 50d proxy (0-100)
     vix:        Optional[float] = None,    # India VIX current level
+    macro_penalty: float = 0.0,            # Tier 2 macro-risk overlay, >= 0
 ) -> RegimeResult:
     """Classify the current market regime from Nifty close prices + breadth + VIX.
 
@@ -82,8 +84,22 @@ def classify_regime(
         closes: Nifty/NIFTYBEES daily close prices, oldest → newest, length >= 210.
         breadth_pct: today's market breadth (% of hub stocks above 50d proxy).
         vix: current India VIX level.
+        macro_penalty: points to subtract from the composite for macro risk
+            (engine/macro_context.py). Must be >= 0 — see below.
 
     Returns RegimeResult with state, size multiplier, and signal breakdown.
+
+    On the macro overlay (2026-08-18)
+    ---------------------------------
+    All five signals below are derived from PAST PRICE. A geopolitical shock is
+    exactly the thing price has not absorbed yet, so the engine was structurally
+    blind to it — which is how it read VIX 11.39 as "LOW" on 18-Aug while Brent
+    was above $91 on a Hormuz naval blockade.
+
+    The overlay only ever SUBTRACTS. Bullish macro cannot raise the composite,
+    by design: the gap being closed is invisible risk, not missed upside, and
+    the price signals already read bullish structure well. An overlay that could
+    upgrade would just be a new way to argue the engine into a trade.
     """
     n = len(closes)
     if n < 60:
@@ -151,6 +167,14 @@ def classify_regime(
         0.10 * vix_score          # fear premium
     )
 
+    # ── Macro risk overlay (Tier 2, 2026-08-18) ───────────────────────────────
+    # Clamped and one-directional. abs() rather than trusting the caller: a
+    # negative value here would UPGRADE the regime, which is the one thing this
+    # overlay must never be able to do.
+    composite_pre_macro = composite
+    _macro_pen = min(abs(float(macro_penalty or 0.0)), 15.0)
+    composite -= _macro_pen
+
     # ── State classification ───────────────────────────────────────────────────
     if composite >= 40:
         state = STRONG_BULL
@@ -207,6 +231,8 @@ def classify_regime(
         "breadth_score": round(breadth_score, 1),
         "vix":           vix,
         "vix_score":     round(vix_score, 1),
+        "macro_penalty": round(_macro_pen, 1),
+        "composite_pre_macro": round(composite_pre_macro, 1),
     }
 
     return RegimeResult(
@@ -271,8 +297,26 @@ async def get_market_regime(
             except Exception:
                 pass
 
-        result = classify_regime(closes, breadth_pct=breadth_pct, vix=vix)
-        
+        # Tier 2 macro overlay (2026-08-18). Best-effort: if macro context is
+        # unavailable the penalty is 0.0 and this behaves exactly as it did
+        # before the overlay existed.
+        macro_penalty = 0.0
+        if getattr(settings, "ENABLE_MACRO_REGIME_OVERLAY", True):
+            try:
+                from engine.macro_context import get_macro_context
+                _mctx = await get_macro_context(session)
+                macro_penalty = _mctx.regime_penalty
+                if macro_penalty > 0:
+                    logger.info(
+                        f"[regime] macro overlay -{macro_penalty:.1f} pts "
+                        f"({_mctx.risk_level}, {len(_mctx.themes)} theme(s)): {_mctx.narrative}"
+                    )
+            except Exception as exc:
+                logger.debug(f"[regime] macro overlay unavailable: {exc}")
+
+        result = classify_regime(closes, breadth_pct=breadth_pct, vix=vix,
+                                 macro_penalty=macro_penalty)
+
         # LLM Dynamic Regime Adjustment (Strategy #3)
         global _LLM_REGIME_CACHE
         if "_LLM_REGIME_CACHE" not in globals():
