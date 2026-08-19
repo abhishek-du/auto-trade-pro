@@ -30,9 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from crawler.fii_dii_crawler import calculate_fii_dii_score
 from crawler.india_price_feed import is_nse_market_open
 from crawler.news_crawler import get_market_sentiment
-from crawler.options_chain import calculate_options_score
 from crawler.price_feed import get_latest_candles
-from db.models import FIIDIIFlow, OptionsChainSnapshot
+from db.models import FIIDIIFlow
 from engine.candlestick import detect_patterns, get_pattern_summary
 from engine.india_specific import (
     calculate_india_vix_score,
@@ -51,34 +50,9 @@ _BUY_THRESHOLD:    float = 25.0
 _SELL_THRESHOLD:   float = -25.0
 _MAX_PATTERN_SCORE: float = 9.0   # mirrors signal_generator normalisation ceiling
 
-# yfinance ticker → NSE options chain symbol name
-_OPTIONS_SYMBOL_MAP: dict[str, str] = {
-    "^NSEI":    "NIFTY",
-    "^NSEBANK": "BANKNIFTY",
-}
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
-
-async def _fetch_latest_options_snapshot(
-    options_symbol: str,
-    session: AsyncSession,
-    bar_date: datetime | None = None,
-) -> OptionsChainSnapshot | None:
-    """Return most recent OptionsChainSnapshot for NIFTY or BANKNIFTY.
-
-    When bar_date is given, only snapshots on or before that date are returned.
-    """
-    q = (
-        select(OptionsChainSnapshot)
-        .where(OptionsChainSnapshot.symbol == options_symbol)
-        .order_by(desc(OptionsChainSnapshot.snapshot_at))
-        .limit(1)
-    )
-    if bar_date is not None:
-        q = q.where(OptionsChainSnapshot.snapshot_at <= bar_date)
-    return (await session.execute(q)).scalars().first()
-
 
 async def _fetch_latest_fii_net(
     session: AsyncSession,
@@ -100,7 +74,6 @@ def _build_india_reasoning(
     vix_score:       float,
     sector_score:    float,
     rbi_modifier:    float,
-    snapshot:        OptionsChainSnapshot | None,
 ) -> list[str]:
     """Build plain-English reasoning bullet points for an India signal."""
     points: list[str] = []
@@ -158,26 +131,6 @@ def _build_india_reasoning(
         points.append(
             "Ichimoku: price below cloud, Tenkan below Kijun — strong downtrend confirmed"
         )
-
-    # ── PCR / options chain (index symbols only) ──────────────────────────────
-    if snapshot:
-        pcr = snapshot.pcr
-        if pcr > 1.5:
-            points.append(
-                f"PCR: {pcr:.2f} — extreme put buying = contrarian BUY signal"
-            )
-        elif pcr > 1.2:
-            points.append(
-                f"PCR: {pcr:.2f} — bearish sentiment = contrarian BUY signal"
-            )
-        elif pcr < 0.5:
-            points.append(
-                f"PCR: {pcr:.2f} — extreme call buying = contrarian SELL signal"
-            )
-        elif pcr < 0.8:
-            points.append(
-                f"PCR: {pcr:.2f} — bullish sentiment = contrarian SELL signal"
-            )
 
     # ── RBI proximity ─────────────────────────────────────────────────────────
     if rbi_modifier == -10.0:
@@ -310,23 +263,6 @@ async def generate_india_signal(
 
     rbi_modifier = get_rbi_event_proximity_score()
 
-    # Options chain PCR — only for Nifty / BankNifty index symbols
-    snapshot: OptionsChainSnapshot | None = None
-    pcr_score = 0.0
-    options_symbol = _OPTIONS_SYMBOL_MAP.get(symbol)
-    if options_symbol:
-        try:
-            snapshot = await _fetch_latest_options_snapshot(options_symbol, session, bar_date=bar_date)
-            if snapshot:
-                current_price = float(candles_df["close"].iloc[-1])
-                pcr_score = calculate_options_score(
-                    snapshot.pcr, snapshot.max_pain, current_price
-                )
-        except Exception as exc:
-            logger.warning(
-                f"generate_india_signal: options score failed for {symbol}: {exc}"
-            )
-
     # Raw FII net for reasoning text
     fii_net_buy = 0.0
     try:
@@ -335,8 +271,9 @@ async def generate_india_signal(
         pass
 
     # ── Step 3: Weighted final score ──────────────────────────────────────────
-    # For index symbols, PCR replaces sector rotation (no SECTOR_MAP entry)
-    rotation_contrib = (pcr_score if options_symbol else sector_score) * 0.10
+    # Sector rotation only — the PCR branch went with the F&O teardown
+    # (2026-08-19); this is an equity-only system now.
+    rotation_contrib = sector_score * 0.10
 
     final_score = (
         pattern_score              * 0.20
@@ -380,7 +317,7 @@ async def generate_india_signal(
     reasoning = _build_india_reasoning(
         symbol, indicators, pattern_summary,
         fii_net_buy, vix_score, sector_score,
-        rbi_modifier, snapshot,
+        rbi_modifier,
     )
 
     logger.info(

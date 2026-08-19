@@ -1,4 +1,4 @@
-"""Indian Market API — signals, FII/DII, options, VIX, MF, fundamentals, seed.
+"""Indian Market API — signals, FII/DII, VIX, MF, fundamentals, seed.
 
 Registered at /api/v1/india in main.py.
 All endpoints are read-only except POST /seed and POST trigger endpoints.
@@ -34,8 +34,6 @@ from api.schemas import (
     MutualFundListOut,
     MutualFundNAVOut,
     MutualFundWithSignalOut,
-    OptionsChainDetailOut,
-    OptionsSnapshotOut,
     SectorPerfItem,
     SectorPerfOut,
     SectorRotationOut,
@@ -51,7 +49,6 @@ from api.schemas import (
 from crawler.fii_dii_crawler import fetch_fii_dii_data, save_fii_dii_to_db
 from crawler.india_price_feed import fetch_india_vix, fetch_nse_candles, is_nse_market_open
 from crawler.price_feed import save_candles_to_db
-from crawler.options_chain import run_options_analysis
 from db.database import get_db
 from db.models import (
     Candle,
@@ -59,7 +56,6 @@ from db.models import (
     FundamentalData,
     MarketShortlist,
     MutualFundNAV,
-    OptionsChainSnapshot,
     Signal,
     SimulationLog,
     UserWatchlist,
@@ -551,15 +547,6 @@ async def _get_candle_return_30d(
     return round((end - start) / start * 100, 2)
 
 
-def _options_score_from_pcr(pcr: float | None) -> float | None:
-    if pcr is None:
-        return None
-    if pcr > 1.5: return  8.0
-    if pcr > 1.2: return  5.0
-    if pcr > 0.8: return  0.0
-    if pcr > 0.5: return -5.0
-    return -8.0
-
 
 # ── Serialisers ───────────────────────────────────────────────────────────────
 
@@ -592,20 +579,6 @@ def _fii_out(f: FIIDIIFlow) -> FIIDIIFlowOut:
     )
 
 
-def _options_out(o: OptionsChainSnapshot) -> OptionsSnapshotOut:
-    return OptionsSnapshotOut(
-        id=o.id,
-        symbol=o.symbol,
-        expiry_date=o.expiry_date,
-        atm_strike=o.atm_strike,
-        pcr=o.pcr,
-        max_pain=o.max_pain,
-        total_call_oi=o.total_call_oi,
-        total_put_oi=o.total_put_oi,
-        support_levels=o.support_levels,
-        resistance_levels=o.resistance_levels,
-        snapshot_at=o.snapshot_at,
-    )
 
 
 def _mf_nav_out(r: MutualFundNAV) -> MutualFundNAVOut:
@@ -831,133 +804,6 @@ async def fetch_fii_dii_now(db: AsyncSession = Depends(get_db)):
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. OPTIONS CHAIN
-# ═════════════════════════════════════════════════════════════════════════════
-
-@router.get(
-    "/options-chain-index/{symbol}",
-    response_model=OptionsChainDetailOut,
-    summary="Options chain snapshot for NIFTY or BANKNIFTY",
-)
-async def get_options_chain_detail(
-    symbol: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Returns PCR, max pain, support/resistance levels, and options score.
-    Triggers a fresh fetch automatically if no DB snapshot exists.
-    chain_data is populated when per-strike data is available.
-    """
-    sym = symbol.upper()
-    if sym not in ("NIFTY", "BANKNIFTY"):
-        raise HTTPException(status_code=400, detail="symbol must be NIFTY or BANKNIFTY")
-
-    # Prefer the most recent snapshot that has real data (pcr > 0 and atm_strike > 0).
-    # NSE returns {} after market hours; the crawler now skips saving those, but
-    # any zero-snapshots already in the DB need to be skipped here too.
-    snap = (await db.execute(
-        select(OptionsChainSnapshot)
-        .where(
-            OptionsChainSnapshot.symbol == sym,
-            OptionsChainSnapshot.pcr > 0,
-            OptionsChainSnapshot.atm_strike > 0,
-        )
-        .order_by(desc(OptionsChainSnapshot.snapshot_at))
-        .limit(1)
-    )).scalar_one_or_none()
-
-    if snap is None:
-        return OptionsChainDetailOut(
-            spot_price=None,
-            expiry_date=None,
-            pcr=None,
-            max_pain=None,
-            support_levels=[],
-            resistance_levels=[],
-            options_score=None,
-            chain_data=[],
-        )
-
-    return OptionsChainDetailOut(
-        spot_price=snap.atm_strike,         # ATM strike is the closest proxy for spot
-        expiry_date=snap.expiry_date,
-        pcr=snap.pcr,
-        max_pain=snap.max_pain,
-        support_levels=snap.support_levels or [],
-        resistance_levels=snap.resistance_levels or [],
-        options_score=_options_score_from_pcr(snap.pcr),
-        chain_data=[],                       # per-strike rows not stored in DB
-    )
-
-
-@router.get(
-    "/options/{symbol}",
-    response_model=list[OptionsSnapshotOut],
-    summary="Latest options chain snapshots for NIFTY or BANKNIFTY (DB list)",
-)
-async def get_options_snapshot(
-    symbol: str,
-    limit: int = Query(default=5, ge=1, le=20),
-    db: AsyncSession = Depends(get_db),
-):
-    sym    = symbol.upper()
-    result = await db.execute(
-        select(OptionsChainSnapshot)
-        .where(OptionsChainSnapshot.symbol == sym)
-        .order_by(desc(OptionsChainSnapshot.snapshot_at))
-        .limit(limit)
-    )
-    rows = result.scalars().all()
-    if not rows:
-        raise HTTPException(status_code=404, detail=f"No options snapshots for {sym}")
-    return [_options_out(r) for r in rows]
-
-
-@router.post(
-    "/options/{symbol}/trigger",
-    response_model=OptionsSnapshotOut,
-    summary="Fetch a fresh NSE options chain snapshot and persist",
-)
-async def trigger_options_fetch(symbol: str, db: AsyncSession = Depends(get_db)):
-    sym = symbol.upper()
-    if sym not in ("NIFTY", "BANKNIFTY"):
-        raise HTTPException(status_code=400, detail="symbol must be NIFTY or BANKNIFTY")
-    try:
-        await run_options_analysis(db)
-        await db.commit()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Options fetch failed: {exc}")
-    row = (await db.execute(
-        select(OptionsChainSnapshot)
-        .where(OptionsChainSnapshot.symbol == sym)
-        .order_by(desc(OptionsChainSnapshot.snapshot_at))
-        .limit(1)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=502, detail=f"No snapshot found for {sym} after fetch")
-    return _options_out(row)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 4. INDIA VIX
-# ═════════════════════════════════════════════════════════════════════════════
-
-@router.get(
-    "/vix",
-    response_model=VIXScoreOut,
-    summary="Current India VIX and contrarian sentiment score",
-)
-async def get_india_vix(db: AsyncSession = Depends(get_db)):
-    loop = asyncio.get_event_loop()
-    vix: float | None = None
-    try:
-        vix = await loop.run_in_executor(None, fetch_india_vix)
-    except Exception as exc:
-        logger.warning(f"VIX fetch failed: {exc}")
-    score = await calculate_india_vix_score(db)
-    return VIXScoreOut(vix=vix, score=score, label=_vix_label(vix))
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# 5. MUTUAL FUNDS
 # ═════════════════════════════════════════════════════════════════════════════
 
 @router.get(
@@ -1288,158 +1134,6 @@ async def get_financials(symbol: str):
 
 
 @router.get(
-    "/options-research/{symbol}",
-    summary="Agent-driven options/F&O research via Tavily — discovers best sources dynamically",
-)
-async def get_options_research(symbol: str):
-    """Let the agent search the open web for options chain data, PCR, max pain, IV.
-
-    No hardcoded data source — Tavily finds the best available pages on the web
-    (NSE, broker portals, financial media, options analytics sites) and the LLM
-    synthesizes a 2-3 sentence F&O insight. Results vary by what's currently
-    published online.
-    """
-    sym = symbol.upper().replace(".NS", "").replace(".BO", "")
-    ns_sym = sym + ".NS"
-    from engine.tavily_enricher import research_options_chain
-    try:
-        data = await research_options_chain(ns_sym)
-        return {"symbol": sym, **data}
-    except Exception as exc:
-        logger.warning(f"[options_research] {sym}: {exc}")
-        raise HTTPException(status_code=503, detail=str(exc))
-
-
-@router.get(
-    "/fno-status/{symbol}",
-    summary="Authoritative F&O eligibility from the NFO instrument master (not a market-cap guess)",
-)
-async def get_fno_status(symbol: str, db: AsyncSession = Depends(get_db)):
-    """Whether a symbol is genuinely in the NSE F&O segment.
-
-    Source of truth is the synced KiteInstrument NFO master — NOT a market-cap
-    heuristic (many ₹5,000 Cr+ stocks are not F&O). Also reports whether the hub
-    has recent per-stock options data for it.
-
-    Returns is_fno=None when the NFO master is empty (F&O sync disabled), so the
-    caller can fall back to its own heuristic rather than show a false negative.
-    """
-    from datetime import datetime, timedelta
-    from db.models import KiteInstrument, OptionContractSnapshot
-
-    bare = symbol.upper().replace(".NS", "").replace(".BO", "").strip()
-
-    master_n = (await db.execute(
-        select(func.count()).select_from(KiteInstrument).where(
-            KiteInstrument.exchange == "NFO",
-            KiteInstrument.instrument_type.in_(("CE", "PE")),
-        )
-    )).scalar() or 0
-    if master_n == 0:
-        return {"symbol": bare, "is_fno": None, "has_options_data": False,
-                "source": "master_unavailable"}
-
-    is_fno = (await db.execute(
-        select(func.count()).select_from(KiteInstrument).where(
-            KiteInstrument.exchange == "NFO",
-            KiteInstrument.name == bare,
-            KiteInstrument.instrument_type.in_(("CE", "PE")),
-        )
-    )).scalar() > 0
-
-    has_data = False
-    if is_fno:
-        cutoff = datetime.utcnow() - timedelta(days=2)
-        has_data = (await db.execute(
-            select(func.count()).select_from(OptionContractSnapshot).where(
-                OptionContractSnapshot.underlying == bare,
-                OptionContractSnapshot.snapshot_at >= cutoff,
-            )
-        )).scalar() > 0
-
-    return {"symbol": bare, "is_fno": is_fno, "has_options_data": has_data,
-            "source": "nfo_master"}
-
-
-@router.get(
-    "/options-chain/{symbol}",
-    summary="Live per-stock option chain via Kite — reliable PCR/max-pain/IV (also feeds the hub)",
-)
-async def get_options_chain(symbol: str, db: AsyncSession = Depends(get_db)):
-    """On-demand near-ATM option chain for an F&O stock, sourced from Kite.
-
-    Unlike /options-research (flaky Tavily web search), this reads the real chain
-    from the broker. Persists OptionsChainSnapshot + OptionContractSnapshot best-
-    effort so the hub's per-stock options factor picks it up for this symbol too.
-    """
-    from crawler.zerodha_client import get_kite_client
-    from crawler.equity_options import _build_chain_via_kite, _bare
-    from crawler.options_chain import (
-        calculate_max_pain, get_support_resistance_from_oi, compute_and_persist_greeks,
-    )
-    from db.models import KiteInstrument, OptionsChainSnapshot
-
-    bare = _bare(symbol)
-    is_fno = (await db.execute(
-        select(func.count()).select_from(KiteInstrument).where(
-            KiteInstrument.exchange == "NFO",
-            KiteInstrument.name == bare,
-            KiteInstrument.instrument_type.in_(("CE", "PE")),
-        )
-    )).scalar() > 0
-    if not is_fno:
-        return {"symbol": bare, "is_fno": False, "available": False}
-
-    kite = get_kite_client()
-    if not kite.access_token:
-        raise HTTPException(status_code=503, detail="Kite token unavailable — cannot fetch live chain")
-    try:
-        d = await kite.get_ltp([f"NSE:{bare}"])
-        spot = float((d.get(f"NSE:{bare}") or {}).get("last_price") or 0.0)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"spot fetch failed: {exc}")
-
-    chain = await _build_chain_via_kite(bare, spot, db, strike_window=settings.HUB_OPTIONS_STRIKE_WINDOW)
-    if not chain or not chain["options_data"]:
-        return {"symbol": bare, "is_fno": True, "available": False}
-
-    od = chain["options_data"]
-    call_oi, put_oi = chain["total_call_oi"], chain["total_put_oi"]
-    pcr = round(put_oi / call_oi, 3) if call_oi > 0 else 0.0
-    max_pain = calculate_max_pain(od, spot)
-    levels = get_support_resistance_from_oi(od, spot)
-    atm_strike = min((r["strike_price"] for r in od if r["strike_price"]),
-                     key=lambda k: abs(k - spot), default=spot)
-
-    atm_iv = None
-    try:
-        db.add(OptionsChainSnapshot(
-            symbol=bare, expiry_date=chain["expiry_date"], atm_strike=atm_strike,
-            pcr=pcr, max_pain=max_pain, total_call_oi=call_oi, total_put_oi=put_oi,
-            support_levels=levels["support"], resistance_levels=levels["resistance"],
-        ))
-        atm_iv = await compute_and_persist_greeks(bare, chain, db)
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        logger.debug(f"[options-chain] {bare} persist failed: {exc}")
-
-    calls = sorted((r for r in od if r["call_oi"] > 0), key=lambda r: r["call_oi"], reverse=True)[:3]
-    puts = sorted((r for r in od if r["put_oi"] > 0), key=lambda r: r["put_oi"], reverse=True)[:3]
-    key_strikes = ([{"type": "CALL", "strike": r["strike_price"]} for r in calls]
-                   + [{"type": "PUT", "strike": r["strike_price"]} for r in puts])
-
-    return {
-        "symbol": bare, "is_fno": True, "available": True, "source": "kite",
-        "spot": spot, "expiry_date": str(chain["expiry_date"]),
-        "pcr": pcr, "max_pain": max_pain,
-        "iv": round(atm_iv * 100, 1) if atm_iv else None,
-        "support": levels["support"], "resistance": levels["resistance"],
-        "key_strikes": key_strikes,
-    }
-
-
-@router.get(
     "/screener-deep/{symbol}",
     summary="Full Screener.in data: quarterly P&L, balance sheet, cash flow, shareholding, pros/cons",
 )
@@ -1711,7 +1405,7 @@ async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
 @router.post(
     "/seed",
     response_model=SeedResultOut,
-    summary="Seed all Indian market data: candles → FII/DII → options → signals",
+    summary="Seed all Indian market data: candles → FII/DII → signals",
 )
 async def seed_india_data(
     db:    AsyncSession = Depends(get_db),
@@ -1720,7 +1414,6 @@ async def seed_india_data(
     """Runs a full data refresh in sequence:
     1. Fetch OHLCV candles for all NSE symbols via yfinance.
     2. Fetch latest FII/DII flow data from NSE.
-    3. Fetch NIFTY + BANKNIFTY options chain snapshots.
     4. Run the full India confluence signal scan.
 
     Pass ?force=true to run the signal scan even when NSE is closed (useful for testing).
@@ -1755,13 +1448,6 @@ async def seed_india_data(
         await db.commit()
     except Exception as exc:
         logger.warning(f"[seed] FII/DII error: {exc}")
-
-    # ── 3. Options chain ──────────────────────────────────────────────────────
-    try:
-        await run_options_analysis(db)
-        await db.commit()
-    except Exception as exc:
-        logger.warning(f"[seed] options error: {exc}")
 
     # ── 4. Signals — always run when force=True; uses whatever candles are in DB ─
     signals: list = []
@@ -2758,322 +2444,6 @@ async def trigger_market_scanner(db: AsyncSession = Depends(get_db)):
 # F&O — chain with Greeks, IV-rank, and derivative positions (Phase 7)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/fno/chain/{underlying}", summary="Latest option chain with IV + Greeks")
-async def get_fno_chain(underlying: str, db: AsyncSession = Depends(get_db)):
-    """Per-strike chain (IV, delta, gamma, theta, vega, OI) for an underlying.
-
-    Reads the most recent OptionContractSnapshot batch. Empty until the options
-    task has run with ENABLE_FNO=true.
-    """
-    from db.models import OptionContractSnapshot
-    from sqlalchemy import func as _f
-
-    und = underlying.upper().replace(".NS", "")
-    last_at = (await db.execute(
-        select(_f.max(OptionContractSnapshot.snapshot_at))
-        .where(OptionContractSnapshot.underlying == und)
-    )).scalar()
-    if last_at is None:
-        return {"underlying": und, "strikes": [], "snapshot_at": None}
-
-    rows = (await db.execute(
-        select(OptionContractSnapshot).where(
-            OptionContractSnapshot.underlying == und,
-            OptionContractSnapshot.snapshot_at == last_at,
-        ).order_by(OptionContractSnapshot.strike)
-    )).scalars().all()
-
-    # Merge CE/PE per strike into one row.
-    by_strike: dict[float, dict] = {}
-    spot = rows[0].spot if rows else 0.0
-    for r in rows:
-        s = by_strike.setdefault(r.strike, {"strike": r.strike})
-        side = "ce" if r.option_type == "CE" else "pe"
-        s[f"{side}_ltp"]   = r.ltp
-        s[f"{side}_oi"]    = r.oi
-        s[f"{side}_iv"]    = round(r.iv, 4) if r.iv else None
-        s[f"{side}_delta"] = r.delta
-        s[f"{side}_theta"] = r.theta
-        s[f"{side}_vega"]  = r.vega
-
-    atm_strike = min(by_strike.keys(), key=lambda k: abs(k - spot)) if by_strike and spot else None
-    return {
-        "underlying":  und,
-        "spot":        spot,
-        "atm_strike":  atm_strike,
-        "expiry":      rows[0].expiry_date.isoformat() if rows else None,
-        "snapshot_at": last_at.isoformat(),
-        "strikes":     [by_strike[k] for k in sorted(by_strike)],
-    }
-
-
-@router.get("/fno/iv-rank/{underlying}", summary="ATM IV + IV-rank from history")
-async def get_fno_iv_rank(underlying: str, db: AsyncSession = Depends(get_db)):
-    from db.models import IVHistory
-    und = underlying.upper().replace(".NS", "")
-    hist = (await db.execute(
-        select(IVHistory.trade_date, IVHistory.atm_iv)
-        .where(IVHistory.underlying == und)
-        .order_by(IVHistory.trade_date)
-    )).all()
-    if not hist:
-        return {"underlying": und, "atm_iv": None, "iv_rank": None, "history": []}
-    ivs = [float(h.atm_iv) for h in hist]
-    cur = ivs[-1]
-    lo, hi = min(ivs), max(ivs)
-    rank = round(100 * (cur - lo) / (hi - lo), 1) if hi > lo else 50.0
-    return {
-        "underlying": und, "atm_iv": round(cur, 4), "iv_rank": rank,
-        "history": [{"date": h.trade_date.isoformat(), "iv": round(float(h.atm_iv), 4)} for h in hist],
-    }
-
-
-_spread_margin_cache: dict[str, tuple[float, float]] = {}  # key → (margin, ts)
-_SPREAD_MARGIN_TTL = 20.0  # seconds
-
-
-async def _zerodha_basket_margin(orders: list[dict]) -> float:
-    """Call Zerodha basket_order_margins; returns initial.total or 0.0 on failure."""
-    try:
-        from crawler.zerodha_ticker import CONNECTED
-        from utils.config import settings as _s
-        if not (CONNECTED or _s.ZERODHA_ACCESS_TOKEN):
-            return 0.0
-        from crawler.zerodha_kite_lib import get_basket_margins
-        basket = await asyncio.to_thread(get_basket_margins, orders, False)
-        return float((basket.get("initial") or {}).get("total", 0))
-    except Exception:
-        return 0.0
-
-
-@router.get("/fno/positions", summary="Open F&O derivative positions (options + futures)")
-async def get_fno_positions(db: AsyncSession = Depends(get_db)):
-    """Open option/future positions with live premium + P&L for the F&O dashboard."""
-    from db.models import OpenPosition
-    from engine.fno.selection import current_option_premium, option_pnl
-    from engine.fno.futures import current_future_price, future_pnl
-
-    rows = (await db.execute(
-        select(OpenPosition).where(OpenPosition.instrument_type.in_(["CE", "PE", "FUTURE"]))
-    )).scalars().all()
-
-    from db.models import OptionContractSnapshot
-    from sqlalchemy import desc as _desc
-    import datetime as _dt
-
-    from engine.fno.selection import _spread_margin_approx
-
-    # Pre-index rows for spread detection: (underlying, expiry, option_type) → directions present
-    spread_keys: dict[tuple, set[str]] = {}
-    for p in rows:
-        if p.instrument_type in ("CE", "PE"):
-            key = (p.underlying_symbol, p.expiry_date, p.option_type)
-            dir_val = p.direction.value if hasattr(p.direction, "value") else p.direction
-            spread_keys.setdefault(key, set()).add(dir_val.upper())
-
-    out = []
-    total_pnl = 0.0
-    total_margin = 0.0
-    for pos in rows:
-        if pos.instrument_type == "FUTURE":
-            cur = await current_future_price(pos, db)
-            pnl, pct = future_pnl(pos, cur) if cur else (0.0, 0.0)
-        else:
-            cur = await current_option_premium(pos, db)
-            pnl, pct = option_pnl(pos, cur) if cur else (0.0, 0.0)
-
-        lots = int(pos.size_units / pos.lot_size) if pos.lot_size else None
-        qty = pos.size_units
-        entry = pos.entry_price
-        dte = (pos.expiry_date - _dt.date.today()).days if pos.expiry_date else None
-
-        # Greeks + IV + underlying spot from the latest snapshot for this strike.
-        greeks = {}
-        spot = None
-        if pos.instrument_type in ("CE", "PE"):
-            g = (await db.execute(
-                select(OptionContractSnapshot).where(
-                    OptionContractSnapshot.underlying == pos.underlying_symbol,
-                    OptionContractSnapshot.strike == pos.strike_price,
-                    OptionContractSnapshot.option_type == pos.option_type,
-                ).order_by(_desc(OptionContractSnapshot.snapshot_at)).limit(1)
-            )).scalar_one_or_none()
-            if g:
-                spot = g.spot
-                greeks = {
-                    "iv":    round(g.iv * 100, 1) if g.iv else None,   # %
-                    "delta": g.delta, "gamma": g.gamma,
-                    "theta": g.theta, "vega": g.vega,
-                }
-
-        # Compute live margin (replaces stale stored value).
-        dir_val = pos.direction.value if hasattr(pos.direction, "value") else pos.direction
-        live_margin = float(pos.margin_blocked or 0.0)
-        if pos.instrument_type in ("CE", "PE") and lots and pos.lot_size:
-            key = (pos.underlying_symbol, pos.expiry_date, pos.option_type)
-            dirs = spread_keys.get(key, set())
-            is_spread_buy = dir_val.upper() == "BUY" and "SELL" in dirs
-            is_spread_sell = dir_val.upper() == "SELL" and "BUY" in dirs
-            if is_spread_buy:
-                # BUY leg: try Zerodha basket API (cached 20s), fall back to formula
-                cache_key = f"{pos.underlying_symbol}|{pos.expiry_date}|{pos.option_type}"
-                cached = _spread_margin_cache.get(cache_key)
-                if cached and (_time.time() - cached[1]) < _SPREAD_MARGIN_TTL:
-                    live_margin = cached[0]
-                else:
-                    # Find the matching SELL leg's symbol
-                    sell_sym = next(
-                        (p.symbol for p in rows
-                         if p.underlying_symbol == pos.underlying_symbol
-                         and p.expiry_date == pos.expiry_date
-                         and p.option_type == pos.option_type
-                         and (p.direction.value if hasattr(p.direction, "value") else p.direction).upper() == "SELL"),
-                        None
-                    )
-                    buy_sym = pos.symbol.replace(".NS", "")
-                    sell_sym_bare = (sell_sym or "").replace(".NS", "")
-                    api_margin = 0.0
-                    if sell_sym_bare:
-                        orders = [
-                            {"exchange": "NFO", "tradingsymbol": buy_sym,
-                             "transaction_type": "BUY", "variety": "regular",
-                             "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
-                            {"exchange": "NFO", "tradingsymbol": sell_sym_bare,
-                             "transaction_type": "SELL", "variety": "regular",
-                             "product": "NRML", "order_type": "MARKET", "quantity": int(qty)},
-                        ]
-                        api_margin = await _zerodha_basket_margin(orders)
-                    if api_margin > 0:
-                        live_margin = api_margin
-                    elif spot:
-                        live_margin = _spread_margin_approx(
-                            cur or entry, qty, spot, pos.lot_size, lots
-                        )
-                    _spread_margin_cache[cache_key] = (live_margin, _time.time())
-            elif is_spread_sell:
-                # SELL leg margin is captured in the BUY leg
-                live_margin = 0.0
-            elif dir_val.upper() == "BUY":
-                # Standalone long option: max loss = premium paid
-                live_margin = round((cur or entry) * qty, 2)
-
-        total_pnl += pnl
-        total_margin += live_margin
-
-        # Derived analytics.
-        premium_paid = round((entry or 0) * (qty or 0), 2)
-        cur_value    = round((cur or entry or 0) * (qty or 0), 2)
-        breakeven = None
-        moneyness = None
-        if pos.instrument_type == "CE" and pos.strike_price:
-            breakeven = round(pos.strike_price + entry, 2)
-            if spot: moneyness = "ITM" if spot > pos.strike_price else "OTM" if spot < pos.strike_price else "ATM"
-        elif pos.instrument_type == "PE" and pos.strike_price:
-            breakeven = round(pos.strike_price - entry, 2)
-            if spot: moneyness = "ITM" if spot < pos.strike_price else "OTM" if spot > pos.strike_price else "ATM"
-
-        out.append({
-            "symbol":          pos.symbol,
-            "instrument_type": pos.instrument_type,
-            "underlying":      pos.underlying_symbol,
-            "strike":          pos.strike_price,
-            "option_type":     pos.option_type,
-            "expiry":          pos.expiry_date.isoformat() if pos.expiry_date else None,
-            "dte":             dte,
-            "direction":       dir_val,
-            "lots":            lots,
-            "lot_size":        pos.lot_size,
-            "qty":             qty,
-            "entry":           entry,
-            "current":         cur,
-            "pnl":             pnl,
-            "pnl_pct":         pct,
-            "margin":          round(live_margin, 2),
-            "stop_loss":       pos.stop_loss,
-            "take_profit":     pos.take_profit,
-            "premium_paid":    premium_paid,
-            "current_value":   cur_value,
-            "max_loss":        premium_paid if pos.instrument_type in ("CE", "PE") else None,
-            "breakeven":       breakeven,
-            "moneyness":       moneyness,
-            "spot":            spot,
-            "greeks":          greeks,
-            "opened_at":       pos.opened_at.isoformat() if pos.opened_at else None,
-            "last_updated":    pos.last_updated.isoformat() if pos.last_updated else None,
-        })
-    return {
-        "positions":    out,
-        "count":        len(out),
-        "total_pnl":    round(total_pnl, 2),
-        "total_margin": round(total_margin, 2),
-    }
-
-
-@router.get("/fno/history", summary="Closed F&O derivative trades (options + futures)")
-async def get_fno_history(
-    limit: int = 50,
-    db: AsyncSession = Depends(get_db),
-):
-    """Closed/stopped option & future trades for the F&O page's history section."""
-    from db.models import PaperTrade, TradeStatus
-
-    rows = (await db.execute(
-        select(PaperTrade)
-        .where(
-            PaperTrade.instrument_type.in_(["CE", "PE", "FUTURE"]),
-            PaperTrade.status.in_([TradeStatus.CLOSED, TradeStatus.STOPPED]),
-        )
-        .order_by(PaperTrade.closed_at.desc())
-        .limit(limit)
-    )).scalars().all()
-
-    out = []
-    for t in rows:
-        dir_val = t.direction.value if hasattr(t.direction, "value") else t.direction
-        qty = t.size_units
-        entry = t.entry_price
-        exit_p = t.exit_price
-        premium_paid = round((entry or 0) * (qty or 0), 2)
-        breakeven = None
-        if t.instrument_type == "CE" and t.strike_price:
-            breakeven = round(t.strike_price + entry, 2)
-        elif t.instrument_type == "PE" and t.strike_price:
-            breakeven = round(t.strike_price - entry, 2)
-
-        out.append({
-            "symbol":          t.symbol,
-            "instrument_type": t.instrument_type,
-            "underlying":      t.underlying_symbol,
-            "strike":          t.strike_price,
-            "option_type":     t.option_type,
-            "expiry":          t.expiry_date.isoformat() if t.expiry_date else None,
-            "direction":       dir_val,
-            "lots":            int(qty / t.lot_size) if t.lot_size else None,
-            "lot_size":        t.lot_size,
-            "qty":             qty,
-            "entry":           entry,
-            "exit":            exit_p,
-            "pnl":             t.pnl,
-            "pnl_pct":         t.pnl_percent,
-            "premium_paid":    premium_paid,
-            "max_loss":        premium_paid if t.instrument_type in ("CE", "PE") else None,
-            "breakeven":       breakeven,
-            "status":          t.status.value if hasattr(t.status, "value") else t.status,
-            "exit_reason":     t.exit_reason,
-            "holding_hours":   t.holding_hours,
-            "opened_at":       t.opened_at.isoformat() if t.opened_at else None,
-            "closed_at":       t.closed_at.isoformat() if t.closed_at else None,
-        })
-
-    wins = sum(1 for t in out if (t["pnl"] or 0) > 0)
-    return {
-        "trades":     out,
-        "count":      len(out),
-        "total_pnl":  round(sum(t["pnl"] or 0 for t in out), 2),
-        "win_rate":   round(wins / len(out) * 100, 1) if out else None,
-    }
-
-
 @router.get("/regime", summary="Current 5-state market regime (STRONG_BULL … STRONG_BEAR)")
 async def get_market_regime_api(db: AsyncSession = Depends(get_db)):
     """Returns the live market regime state, confidence, and contributing signals."""
@@ -3091,148 +2461,6 @@ async def get_market_regime_api(db: AsyncSession = Depends(get_db)):
     except Exception as exc:
         return {"state": "UNKNOWN", "confidence": 0.0, "error": str(exc)[:200]}
 
-
-@router.get("/fno/signals", summary="F&O Buy-CE/Buy-PE signals + predictions per index")
-async def get_fno_signals(db: AsyncSession = Depends(get_db)):
-    """Directional option signals for the F&O index universe.
-
-    Per index: trend direction, confidence, PCR/Max-Pain positioning, IV-rank,
-    the option the agent would buy, and a plain-English recommendation.
-    """
-    from engine.fno.selection import fno_signal_preview
-    out = []
-    for under in settings.fno_index_symbols:
-        try:
-            sig = await fno_signal_preview(under, db)
-            if sig:
-                out.append(sig)
-        except Exception as exc:
-            out.append({"underlying": under, "error": str(exc)[:120]})
-    return {"signals": out, "count": len(out)}
-
-
-@router.get("/fno/analysis/{underlying}", summary="Full F&O analysis: signal + sentiment + AI + news")
-async def get_fno_analysis(underlying: str, db: AsyncSession = Depends(get_db)):
-    """One-call deep analysis for an index: directional signal, market sentiment
-    (VIX, breadth, FII/DII, PCR), an AI-written commentary, and relevant news.
-    """
-    from engine.fno.selection import fno_signal_preview
-    from crawler.live_prices import get_market_summary, PRICE_CACHE
-    from db.models import NewsItem, FIIDIIFlow
-    from sqlalchemy import desc as _desc
-
-    und = underlying.upper().replace(".NS", "")
-
-    # 1. Signal (direction, suggestion, PCR, max-pain, IV-rank)
-    try:
-        signal = await fno_signal_preview(und, db)
-    except Exception as exc:
-        signal = {"underlying": und, "error": str(exc)[:120]}
-
-    # 2. Market sentiment bundle — VIX (live fetch) + breadth (cache)
-    vix = None
-    try:
-        from crawler.india_price_feed import fetch_india_vix
-        vix = await asyncio.get_event_loop().run_in_executor(None, fetch_india_vix)
-        vix = round(float(vix), 2) if vix else None
-    except Exception:
-        vix = None
-    vix_regime = None
-    if vix is not None and vix > 0:
-        vix_regime = "CALM" if vix < 13 else "ELEVATED" if vix < 18 else "FEARFUL"
-
-    advances = declines = None
-    breadth_mood = "NEUTRAL"
-    try:
-        from crawler.market_breadth import get_breadth_cache
-        nse = (get_breadth_cache() or {}).get("nse", {})
-        advances = nse.get("advances"); declines = nse.get("declines")
-        breadth_mood = nse.get("market_mood") or (
-            "BULLISH" if (advances or 0) > (declines or 0) * 1.2 else
-            "BEARISH" if (declines or 0) > (advances or 0) * 1.2 else "NEUTRAL"
-        )
-    except Exception:
-        pass
-
-    # FII/DII latest
-    fii_dii = None
-    try:
-        row = (await db.execute(select(FIIDIIFlow).order_by(_desc(FIIDIIFlow.date)).limit(1))).scalar_one_or_none()
-        if row:
-            fii_dii = {
-                "date": row.date.isoformat() if row.date else None,
-                "fii_net": getattr(row, "fii_net_buy", None),
-                "dii_net": getattr(row, "dii_net_buy", None),
-            }
-    except Exception:
-        pass
-
-    sentiment = {
-        "india_vix": vix, "vix_regime": vix_regime,
-        "advances": advances, "declines": declines, "breadth_mood": breadth_mood,
-        "pcr": signal.get("pcr") if isinstance(signal, dict) else None,
-        "pcr_bias": signal.get("pcr_bias") if isinstance(signal, dict) else None,
-        "max_pain": signal.get("max_pain") if isinstance(signal, dict) else None,
-        "iv_rank": signal.get("iv_rank") if isinstance(signal, dict) else None,
-        "fii_dii": fii_dii,
-    }
-
-    # 3. Relevant news (market-wide + any mentioning the index)
-    news_rows = (await db.execute(
-        select(NewsItem).order_by(_desc(NewsItem.crawled_at)).limit(40)
-    )).scalars().all()
-    news = []
-    for n in news_rows:
-        tickers = n.tickers_affected or []
-        relevant = (und in [str(t).upper() for t in tickers]) or len(news) < 12
-        if relevant:
-            news.append({
-                "headline": n.headline, "source": n.source, "url": n.url,
-                "sentiment": n.sentiment, "score": round(n.score or 0.0, 3),
-                "published_at": n.published_at.isoformat() if n.published_at else None,
-            })
-        if len(news) >= 12:
-            break
-    pos = sum(1 for x in news if x["sentiment"] == "positive")
-    neg = sum(1 for x in news if x["sentiment"] == "negative")
-    news_mood = "POSITIVE" if pos > neg else "NEGATIVE" if neg > pos else "MIXED"
-
-    # 4. AI commentary (LLM) — concise, grounded in the numbers above
-    ai_text = None
-    try:
-        # User-facing → Mantle (AWS Bedrock gpt-oss-120b), the sole LLM provider.
-        from utils.llm import call_llm_chat
-        sug = (signal.get("suggestion") or {}) if isinstance(signal, dict) else {}
-        prompt = (
-            f"You are an Indian F&O desk analyst. In 4-5 sentences, give a clear trading view on {und}.\n"
-            f"Data: spot={signal.get('spot')}, direction={signal.get('direction')}, "
-            f"confidence={signal.get('confidence')}, PCR={sentiment['pcr']} ({sentiment['pcr_bias']}), "
-            f"max_pain={sentiment['max_pain']}, IV_rank={sentiment['iv_rank']}, "
-            f"India_VIX={vix} ({vix_regime}), market_breadth={breadth_mood} "
-            f"(adv {advances}/dec {declines}), news_mood={news_mood}.\n"
-            f"Suggested trade: {sug.get('action')} {sug.get('strike')} @ {sug.get('premium')}.\n"
-            f"Cover: bias, what the options data implies, key risk, and whether the suggested trade makes sense. "
-            f"Be specific and decisive. No disclaimers."
-        )
-        ai_text = await asyncio.wait_for(
-            call_llm_chat(
-                [{"role": "user", "content": prompt}],
-                max_tokens=300, temperature=0.4,
-            ),
-            timeout=20.0,   # never hang the request
-        )
-    except (asyncio.TimeoutError, Exception):
-        ai_text = None
-
-    return {
-        "underlying": und,
-        "signal": signal,
-        "sentiment": sentiment,
-        "ai_analysis": ai_text,
-        "news": news,
-        "news_mood": news_mood,
-        "generated_at": __import__("datetime").datetime.utcnow().isoformat(),
-    }
 
 @router.get("/key-ratios/{symbol}", summary="Key financial ratios from Upstox")
 async def get_key_ratios_api(symbol: str):

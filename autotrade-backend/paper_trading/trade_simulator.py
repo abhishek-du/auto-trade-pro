@@ -728,22 +728,14 @@ async def compute_live_pnl(
     out: dict[int, tuple[float, float, float]] = {}
     for p in positions:
         cur = None
-        itype = getattr(p, "instrument_type", "EQUITY")
         try:
-            if itype in ("CE", "PE"):
-                from engine.fno.selection import current_option_premium
-                cur = await current_option_premium(p, session)
-            elif itype == "FUTURE":
-                from engine.fno.futures import current_future_price
-                cur = await current_future_price(p, session)
-            else:
-                cur = live_px.get(p.symbol)
-                if cur is None:
-                    # Freshest candle across ALL timeframes (small/SME stocks often
-                    # have fresh 1m but no 1h — a '1h'-only read froze the price).
-                    from crawler.price_feed import get_freshest_candle
-                    _cl, _ = await get_freshest_candle(p.symbol, session)
-                    cur = _cl
+            cur = live_px.get(p.symbol)
+            if cur is None:
+                # Freshest candle across ALL timeframes (small/SME stocks often
+                # have fresh 1m but no 1h — a '1h'-only read froze the price).
+                from crawler.price_feed import get_freshest_candle
+                _cl, _ = await get_freshest_candle(p.symbol, session)
+                cur = _cl
         except Exception as exc:
             logger.debug(f"compute_live_pnl: price failed for {p.symbol}: {exc}")
 
@@ -870,68 +862,6 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         _sector_moods = {}
 
     for pos in positions:
-        # ── F&O positions: mark to live option/future price (not candles) ──────
-        if getattr(pos, "instrument_type", "EQUITY") in ("CE", "PE", "FUTURE"):
-            cur = None
-            try:
-                if pos.instrument_type == "FUTURE":
-                    from engine.fno.futures import current_future_price, future_pnl
-                    cur = await current_future_price(pos, session)
-                    if cur:
-                        pos.current_price = cur
-                        pos.unrealised_pnl, pos.unrealised_pct = future_pnl(pos, cur)
-                else:
-                    from engine.fno.selection import current_option_premium, option_pnl
-                    cur = await current_option_premium(pos, session)
-                    if cur:
-                        pos.current_price = cur
-                        pos.unrealised_pnl, pos.unrealised_pct = option_pnl(pos, cur)
-                if not cur:
-                    # All 4 price-lookup tiers (WS cache, Kite LTP, latest
-                    # snapshot, Black-Scholes reprice) failed — current_price
-                    # stays frozen at its last value (entry price on a brand
-                    # new position). Log so a stuck ₹0.00 P&L is diagnosable
-                    # instead of silently looking like a genuinely flat market.
-                    logger.warning(
-                        f"update_positions: no live price for {pos.symbol} "
-                        f"({pos.instrument_type}) — current_price frozen at "
-                        f"₹{pos.current_price} (entry ₹{pos.entry_price})"
-                    )
-            except Exception as exc:
-                logger.debug(f"update_positions: F&O mark failed for {pos.symbol}: {exc}")
-
-            # ── F&O stop-loss / take-profit ─────────────────────────────────
-            # This engine only ever holds long options/futures (BUY) — SL
-            # below entry, TP above. Found 2026-07-07 investigating a NIFTY
-            # option stuck at a fake ₹0.00 P&L: this branch always
-            # `continue`d right after marking to market, before ever
-            # reaching the equity SL/TP check below — so F&O positions were
-            # priced correctly for display but had NO stop-loss/take-profit
-            # enforcement at all. One position ran 26% past its 2.5% SL
-            # untouched. Long-only, so no short-side branch needed here.
-            if cur:
-                is_buy = pos.direction == TradeDirection.BUY
-                hit_sl = bool(pos.stop_loss) and (cur <= pos.stop_loss if is_buy else cur >= pos.stop_loss)
-                hit_tp = bool(pos.take_profit) and (cur >= pos.take_profit if is_buy else cur <= pos.take_profit)
-                if hit_sl or hit_tp:
-                    reason = "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
-                    try:
-                        async with session.begin_nested():
-                            closed_trade = await close_paper_trade(pos, cur, reason, session)
-                        auto_closed.append({
-                            "trade_id":    closed_trade.id,
-                            "symbol":      closed_trade.symbol,
-                            "reason":      reason,
-                            "exit_price":  cur,
-                            "pnl":         closed_trade.pnl,
-                            "entry_price": closed_trade.entry_price,
-                            "size_units":  closed_trade.size_units,
-                            "direction":   pos.direction.value,
-                        })
-                    except Exception as exc:
-                        logger.warning(f"update_positions: {pos.symbol} F&O SL/TP close failed: {exc}")
-            continue
-
         # Prefer the LIVE Kite price. If the batched LTP call missed this
         # symbol, try ONE direct Zerodha fetch for it before ever trusting our
         # own DB's Candle table — that table is only as fresh as its last sync

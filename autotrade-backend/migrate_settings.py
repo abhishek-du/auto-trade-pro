@@ -82,7 +82,6 @@ def _build_defaults(json_overrides: dict) -> dict:
         "indian_market_max_risk":  float(settings.INDIAN_MARKET_MAX_RISK),
         "indian_intraday_sl_pct":  float(settings.INDIAN_INTRADAY_SL_PCT),
         "enable_fii_dii_analysis": bool(settings.ENABLE_FII_DII_ANALYSIS),
-        "enable_options_chain":    bool(settings.ENABLE_OPTIONS_CHAIN),
         "enable_india_vix":        bool(settings.ENABLE_INDIA_VIX),
         "enable_mutual_funds":     bool(settings.ENABLE_MUTUAL_FUNDS),
         "enable_ml_predictions":   bool(settings.ENABLE_ML_PREDICTIONS),

@@ -51,7 +51,6 @@ _KNOWN_KEYS: dict[str, type] = {
     "indian_intraday_sl_pct": float,
     # Feature flags
     "enable_fii_dii_analysis": bool,
-    "enable_options_chain":    bool,
     "enable_india_vix":        bool,
     "enable_mutual_funds":     bool,
     "enable_ml_predictions":   bool,
@@ -211,10 +210,6 @@ class RuntimeConfig:
         return bool(self._get("enable_fii_dii_analysis", settings.ENABLE_FII_DII_ANALYSIS))
 
     @property
-    def enable_options_chain(self) -> bool:
-        return bool(self._get("enable_options_chain", settings.ENABLE_OPTIONS_CHAIN))
-
-    @property
     def enable_india_vix(self) -> bool:
         return bool(self._get("enable_india_vix", settings.ENABLE_INDIA_VIX))
 
@@ -297,7 +292,6 @@ class RuntimeConfig:
             "max_portfolio_risk":      self.max_portfolio_risk,
             "min_cash_buffer":         self.min_cash_buffer,
             "enable_fii_dii_analysis": self.enable_fii_dii_analysis,
-            "enable_options_chain":    self.enable_options_chain,
             "enable_india_vix":        self.enable_india_vix,
             "enable_mutual_funds":     self.enable_mutual_funds,
             "enable_ml_predictions":   self.enable_ml_predictions,

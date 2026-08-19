@@ -60,7 +60,6 @@ import Simulation       from './pages/Simulation';
 import Settings         from './pages/Settings';
 import IndiaMarket      from './pages/IndiaMarket';
 import IndiaSignals     from './pages/IndiaSignals';
-import FnO              from './pages/FnO';
 import MutualFunds      from './pages/MutualFunds';
 import IndiaFundamentals from './pages/IndiaFundamentals';
 import Backtest          from './pages/Backtest';
@@ -85,7 +84,6 @@ import IntelligenceDashboard from './pages/IntelligenceDashboard';
 import AgentLog          from './pages/AgentLog';
 import MarketScanner     from './pages/MarketScanner';
 import PipelineFlow      from './pages/PipelineFlow';
-import FnOPipelineFlow   from './pages/FnOPipelineFlow';
 import StockDetail        from './pages/StockDetail';
 import FundDetail            from './pages/FundDetail';
 import PortfolioAnalytics   from './pages/PortfolioAnalytics';
@@ -152,8 +150,6 @@ function AppShell() {
               <Route path="/settings"      element={<Settings />}          />
               <Route path="/india"         element={<IndiaMarket />}       />
               <Route path="/india/signals" element={<IndiaSignals />}      />
-              <Route path="/fno"           element={<FnO />}               />
-              <Route path="/fno-pipeline"  element={<FnOPipelineFlow />}   />
               <Route path="/mutual-funds"  element={<MutualFunds />}       />
               <Route path="/fundamentals"  element={<IndiaFundamentals />} />
               <Route path="/backtest"      element={<Backtest />}          />

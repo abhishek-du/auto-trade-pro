@@ -148,19 +148,6 @@ class TestTechnicalHardBlock:
             result = await authorize_trade_intent(intent, make_session(canonical))
         assert result.outcome == RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN
 
-    @pytest.mark.asyncio
-    async def test_fno_strategy_family_not_hard_blocked(self):
-        # The hard-block is specific to TECHNICAL -- FNO must not be caught
-        # by the same net (it has its own separate gating elsewhere).
-        intent = make_intent(
-            strategy_family=StrategyFamily.FNO, instrument_type="FUTURE",
-            event_directness=EventDirectness.NOT_APPLICABLE, event_id=None, evidence_ids=[],
-        )
-        with _patch_resolve_mode():
-            result = await authorize_trade_intent(intent, make_session())
-        assert result.outcome != RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN
-
-
 # ── 2. NO EVENT -> NO TRADE ────────────────────────────────────────────────────
 
 class TestNoEventNoTrade:
@@ -188,21 +175,6 @@ class TestNoEventNoTrade:
             result = await authorize_trade_intent(intent, make_session(canonical_event=None))
         assert result.approved is False
         assert result.outcome == RoutingOutcome.BLOCKED_NO_EVENT
-
-    @pytest.mark.asyncio
-    async def test_technical_and_fno_intents_skip_event_check(self):
-        # _verify_canonical_event() short-circuits True for non-EVENT_DRIVEN
-        # families -- confirmed directly since TECHNICAL is blocked earlier
-        # for a DIFFERENT reason (see TestTechnicalHardBlock); here we prove
-        # FNO with no event_id at all does not hit BLOCKED_NO_EVENT.
-        intent = make_intent(
-            strategy_family=StrategyFamily.FNO, instrument_type="FUTURE",
-            event_directness=EventDirectness.NOT_APPLICABLE, event_id=None, evidence_ids=[],
-        )
-        with _patch_resolve_mode():
-            result = await authorize_trade_intent(intent, make_session())
-        assert result.outcome != RoutingOutcome.BLOCKED_NO_EVENT
-
 
 # ── 3. Materiality floor + evidence drift ─────────────────────────────────────
 
@@ -522,18 +494,6 @@ class TestMarketHoursGate:
             result = await authorize_trade_intent(intent, make_session(canonical))
         assert result.outcome != RoutingOutcome.BLOCKED_MARKET_CLOSED
 
-    @pytest.mark.asyncio
-    async def test_does_not_apply_to_non_equity_instrument_types(self):
-        # F&O / other instrument types have their own hours logic elsewhere;
-        # this gate only checks EQUITY intents.
-        intent = make_intent(strategy_family=StrategyFamily.FNO, instrument_type="FUTURE",
-                              event_id=None, evidence_ids=[])
-        with _patch_resolve_mode(), \
-             patch("crawler.india_price_feed.is_nse_market_open", return_value=False):
-            result = await authorize_trade_intent(intent, make_session())
-        assert result.outcome != RoutingOutcome.BLOCKED_MARKET_CLOSED
-
-
 # ── 8. Sector-mood entry gate (2026-08-04) ────────────────────────────────────
 # HONASA.NS: entered while NSE-wide breadth was already STRONGLY_BEARISH (the
 # existing check only halved size), then auto-closed 27 seconds later by the
@@ -545,7 +505,7 @@ class TestMarketHoursGate:
 
 def _fno_snap_none_session(canonical=None) -> AsyncMock:
     """Like make_session(), but also wires session.execute().scalar_one_or_none()
-    to None so execute_trade_intent()'s F&O/OptionsChainSnapshot block
+    to None so execute_trade_intent()'s sizing block
     (which runs before the sector-mood check) is a clean no-op."""
     session = make_session(canonical)
     exec_result = MagicMock()

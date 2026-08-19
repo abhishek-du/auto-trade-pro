@@ -42,7 +42,6 @@ _shortlist_alerts_this_cycle: int = 0  # reset at the start of each run_agent_cy
 _portfolio: AgentPortfolioContext | None = None
 _portfolio_hydrated: bool = False
 
-
 async def _yfinance_last_price(symbol: str) -> float | None:
     """Process-independent yfinance last price for the live-entry snap.
 
@@ -52,7 +51,6 @@ async def _yfinance_last_price(symbol: str) -> float | None:
     from crawler.live_prices import yfinance_ltp_batch
     return (await yfinance_ltp_batch([symbol])).get(symbol)
 
-
 def _get_portfolio() -> AgentPortfolioContext:
     global _portfolio
     if _portfolio is None:
@@ -61,7 +59,6 @@ def _get_portfolio() -> AgentPortfolioContext:
             cash=settings.AGENT_EQUITY,
         )
     return _portfolio
-
 
 async def _hydrate_portfolio_from_db(
     portfolio: AgentPortfolioContext,
@@ -125,7 +122,6 @@ async def _hydrate_portfolio_from_db(
 
     _portfolio_hydrated = True
 
-
 def _is_market_hours() -> bool:
     # B15 fix: NSE hours are IST. Using the server-local clock traded at the
     # wrong hours on any non-IST host. Anchor to the configured IST timezone.
@@ -135,10 +131,8 @@ def _is_market_hours() -> bool:
     end_h,   end_m   = map(int, settings.AGENT_SESSION_END.split(":"))
     return dtime(start_h, start_m) <= now <= dtime(end_h, end_m)
 
-
 def _is_trading_day() -> bool:
     return datetime.now().weekday() < 5  # Mon-Fri
-
 
 def _is_mis_squareoff_window() -> bool:
     """True from MIS_SQUAREOFF_TIME until session end (3:15–3:30 PM IST by default).
@@ -152,7 +146,6 @@ def _is_mis_squareoff_window() -> bool:
     end_h, end_m = map(int, settings.AGENT_SESSION_END.split(":"))
     return dtime(sq_h, sq_m) <= now <= dtime(end_h, end_m)
 
-
 async def _get_breadth_pct(session: AsyncSession) -> float | None:
     """Return the latest market breadth % (hub stocks above 50d proxy) or None."""
     try:
@@ -164,7 +157,6 @@ async def _get_breadth_pct(session: AsyncSession) -> float | None:
         return float(row[0]) if row else None
     except Exception:
         return None
-
 
 async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     """Top-level entry point called by the Celery task.
@@ -248,7 +240,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
                 "paper_mode":      settings.AGENT_PAPER_MODE,
                 "symbols_scanned": 0,
                 "decisions":       0,
-                "fno_opened":      0,
+
                 "skipped":         0,
                 "portfolio": {
                     "equity":         portfolio.equity,
@@ -283,7 +275,7 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
             "paper_mode":      settings.AGENT_PAPER_MODE,
             "symbols_scanned": 0,
             "decisions":       0,
-            "fno_opened":      0,
+
             "skipped":         0,
             "regime_mode":     regime_mode,
             "portfolio": {
@@ -350,47 +342,8 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
     else:
         skipped = len(universe)
 
-    # ── F&O spread SL/TP monitor (runs before opening new positions) ─────────
-    if getattr(settings, "ENABLE_OPTIONS", False):
-        try:
-            from engine.fno.selection import monitor_spread_exits
-            closed_spreads = await monitor_spread_exits(session)
-            if closed_spreads:
-                logger.info(f"[agent] spread monitor closed {len(closed_spreads)} spread(s)")
-        except Exception as exc:
-            logger.warning(f"[agent] spread monitor failed: {exc}")
-
-    # ── F&O passes (additive; gated by ENABLE_OPTIONS / ENABLE_FUTURES) ───────
-    # Also new-entry-only — same entries_allowed gate as the equity scan above.
-    fno_opened: list[dict] = []
-    if entries_allowed and getattr(settings, "ENABLE_OPTIONS", False):
-        try:
-            from engine.fno.selection import evaluate_index_options
-            fno_opened += await evaluate_index_options(session, portfolio.equity)
-        except Exception as exc:
-            logger.warning(f"[agent] F&O option pass failed: {exc}")
-    if entries_allowed and getattr(settings, "ENABLE_FUTURES", False):
-        try:
-            from engine.fno.futures import evaluate_index_futures
-            fno_opened += await evaluate_index_futures(session, portfolio.equity)
-        except Exception as exc:
-            logger.warning(f"[agent] F&O futures pass failed: {exc}")
-    if entries_allowed and getattr(settings, "FNO_HEDGE_ENABLED", False):
-        try:
-            from engine.fno.selection import evaluate_portfolio_hedge
-            hedge = await evaluate_portfolio_hedge(session, portfolio.equity)
-            if hedge:
-                fno_opened.append(hedge)
-        except Exception as exc:
-            logger.warning(f"[agent] F&O hedge pass failed: {exc}")
-    if entries_allowed and getattr(settings, "FNO_VOL_ENABLED", False):
-        try:
-            from engine.fno.strategies_vol import evaluate_volatility
-            fno_opened += await evaluate_volatility(session, portfolio.equity)
-        except Exception as exc:
-            logger.warning(f"[agent] F&O volatility pass failed: {exc}")
-    if fno_opened:
-        logger.info(f"[agent] F&O passes opened {len(fno_opened)} derivative position(s)")
+    # F&O passes (spread monitor, index options, futures, hedge, volatility)
+    # were removed on 2026-08-19 — this is an equity-only system now.
 
     return {
         "status":           "ok",
@@ -402,7 +355,6 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
         "regime_signals":   market_regime.signals,
         "symbols_scanned":  len(universe),
         "decisions":        len(results),
-        "fno_opened":       len(fno_opened),
         "skipped":          skipped,
         "portfolio": {
             "equity":             portfolio.equity,
@@ -413,7 +365,6 @@ async def run_agent_cycle(session: AsyncSession, force: bool = False) -> dict:
         },
         "decisions_data": results,
     }
-
 
 async def _process_symbol(
     symbol: str,
@@ -995,7 +946,6 @@ async def _process_symbol(
 
     return decision.to_dict()
 
-
 async def _send_shortlist_alert(
     candidate,
     df: "pd.DataFrame | None",
@@ -1089,7 +1039,6 @@ async def _send_shortlist_alert(
     except Exception as exc:
         logger.warning(f"[agent/shortlist] Telegram send failed for {bare}: {exc}")
 
-
 async def _build_scan_universe(session: AsyncSession) -> list[str]:
     """Return the agent's scan universe.
 
@@ -1155,7 +1104,6 @@ async def _build_scan_universe(session: AsyncSession) -> list[str]:
 
     return universe[:150]
 
-
 async def _fetch_hub_scores(universe: list[str], session: AsyncSession) -> dict[str, dict]:
     """Fetch hub composite scores + signals for all universe symbols in one query."""
     from db.models import MarketShortlist
@@ -1186,7 +1134,6 @@ async def _fetch_hub_scores(universe: list[str], session: AsyncSession) -> dict[
     except Exception as exc:
         logger.warning(f"[agent] hub score prefetch failed: {exc}")
         return {}
-
 
 async def _log_skipped_decision(
     symbol: str,
@@ -1229,7 +1176,6 @@ async def _log_skipped_decision(
         await session.commit()
     except Exception as exc:
         logger.debug(f"[agent] skip log failed: {exc}")
-
 
 def eod_reconcile() -> None:
     """Reset daily counters at EOD."""

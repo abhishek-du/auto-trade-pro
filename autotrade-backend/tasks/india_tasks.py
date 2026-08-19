@@ -4,7 +4,6 @@ from utils.logger import logger
 # Task schedule (all times UTC — Celery runs in UTC):
 #   india_price_scan         — every 30 s  (NSE hours only)
 #   india_fii_dii_fetch      — daily 13:00 (18:30 IST)
-#   india_options_analysis   — every 15 min (NSE hours only)
 #   india_mutual_fund_nav    — daily 14:30 (20:00 IST, after AMFI publishes)
 #   india_fundamental_update — Sunday 18:30 UTC (weekly)
 #   india_trade_loop         — every 60 s  (NSE hours + 30 min)
@@ -189,102 +188,6 @@ def india_fii_dii_fetch():
     """Fetch and persist daily FII/DII flow data from NSE. Daily at 6:30 PM IST."""
     logger.info("[india_fii_dii] Starting")
     _run_async(_india_fii_dii_fetch())
-
-
-# ── 3. india_options_analysis — every 15 min ─────────────────────────────────
-
-async def _india_options_analysis():
-    import datetime as _dt
-    import pytz as _pytz
-    from crawler.india_price_feed import is_nse_market_open
-    from crawler.options_chain import run_options_analysis
-    from tasks._db import celery_session
-
-    # Allow a 15-minute post-close buffer (15:30–15:45 IST) so the agent
-    # always has fresh option premiums for the EOD intraday squareoff window.
-    _ist = _pytz.timezone("Asia/Kolkata")
-    _now_ist = _dt.datetime.now(_ist).time()
-    _in_buffer = _now_ist < _dt.time(15, 45)
-    if not is_nse_market_open() and not _in_buffer:
-        logger.info("[india_options] NSE closed and outside buffer window — skipping")
-        return
-
-    async with celery_session() as session:
-        results = await run_options_analysis(session)
-        await session.commit()
-
-    for sym, res in results.items():
-        if "error" in res:
-            logger.warning(f"[india_options] {sym}: {res['error']}")
-        else:
-            logger.info(
-                f"[india_options] {sym}  "
-                f"pcr={res.get('pcr', '?')}  "
-                f"max_pain={res.get('max_pain', '?')}  "
-                f"score={res.get('options_score', '?')}"
-            )
-
-
-@celery_app.task(name="tasks.india_options_analysis")
-def india_options_analysis():
-    """Fetch NIFTY + BANKNIFTY options chains and persist snapshots. Every 15 min."""
-    logger.info("[india_options] Starting")
-    _run_async(_india_options_analysis())
-
-
-# ── 3a. india_equity_options_enrich — 2×/day (per-stock hub options) ──────────
-
-async def _india_equity_options_enrich():
-    from crawler.india_price_feed import is_nse_market_open
-    from crawler.equity_options import enrich_equity_options
-    from engine.hub_universe import get_hub_universe
-    from tasks._db import celery_session
-
-    if not is_nse_market_open():
-        logger.info("[hub_options] NSE closed — skipping")
-        return {"status": "market_closed"}
-
-    async with celery_session() as session:
-        symbols = await get_hub_universe(session)
-        result = await enrich_equity_options(session, symbols)
-        await session.commit()
-
-    logger.info(
-        f"[hub_options] done: enriched={result.get('enriched')} "
-        f"targets={result.get('targets')} status={result.get('status')}"
-    )
-    return result
-
-
-@celery_app.task(name="tasks.india_equity_options_enrich")
-def india_equity_options_enrich():
-    """Per-stock options enrichment for the hub (F&O ∩ hub universe). 2×/day."""
-    from utils.config import settings
-    if not getattr(settings, "ENABLE_HUB_OPTIONS", False):
-        return {"status": "disabled"}
-    logger.info("[hub_options] Starting equity options enrichment")
-    return _run_async(_india_equity_options_enrich())
-
-
-# ── 3b. fno_expiry_sweep — daily after close (settle expired F&O) ────────────
-
-async def _fno_expiry_sweep():
-    from engine.fno.expiry import settle_expired_positions
-    from tasks._db import celery_session
-    async with celery_session() as session:
-        settled = await settle_expired_positions(session)
-    logger.info(f"[fno_expiry] settled {len(settled)} expired F&O position(s)")
-    return {"settled": len(settled)}
-
-
-@celery_app.task(name="tasks.fno_expiry_sweep")
-def fno_expiry_sweep():
-    """Cash-settle + close any F&O paper position at/after its expiry. Daily."""
-    from utils.config import settings
-    if not getattr(settings, "ENABLE_FNO", False):
-        return {"status": "disabled"}
-    logger.info("[fno_expiry] Starting expiry sweep")
-    return _run_async(_fno_expiry_sweep())
 
 
 # ── 3c. breakout_discovery — every 5 min during NSE hours ────────────────────
@@ -1390,40 +1293,6 @@ async def _india_trade_loop():
 
         logger.info(f"[india_trade_loop] opened {opened} new position(s) this cycle")
 
-        # ── Step 8b: F&O index option evaluation (additive pass) ─────────────
-        # Runs AFTER the equity pass so the wallet balance is already reduced
-        # by any equity positions opened above. Gated by ENABLE_OPTIONS flag.
-        # Only executes during NSE hours — evaluate_index_options() itself is
-        # a no-op when ENABLE_FNO/ENABLE_OPTIONS are False.
-        fno_opened: list[dict] = []
-        if getattr(settings, "ENABLE_OPTIONS", False):
-            try:
-                from engine.fno.selection import evaluate_index_options
-                # Refresh balance after equity trades
-                _wallet_now = await VirtualWallet.get_summary(session)
-                fno_opened = await evaluate_index_options(session, _wallet_now["balance"])
-                if fno_opened:
-                    logger.info(
-                        f"[india_trade_loop] F&O: opened {len(fno_opened)} index option "
-                        f"position(s): "
-                        + ", ".join(f"{t['tradingsymbol']} ({t['direction']})" for t in fno_opened)
-                    )
-                    # Telegram alert for each option opened
-                    from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
-                    for t in fno_opened:
-                        await publish(AlertEvent(
-                            category=AlertCategory.FNO_SIGNAL, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
-                            symbol=t.get("tradingsymbol"), trade_id=t.get("trade_id"),
-                            payload=RawTextPayload(text=(
-                                f"📊 <b>F&O Option Opened</b>\n"
-                                f"<code>{t['tradingsymbol']}</code>\n"
-                                f"Direction: {t['direction']} | Premium: ₹{t.get('premium', 0):.2f} "
-                                f"| Lots: {t.get('lots', 1)} | Score: {t.get('score', 0):+.0f}"
-                            )),
-                        ))
-            except Exception as exc:
-                logger.warning(f"[india_trade_loop] F&O option pass failed: {exc}")
-
         # Step 9: persist daily performance snapshot
         await VirtualWallet.take_daily_snapshot(session)
         final = await VirtualWallet.get_summary(session)
@@ -1432,7 +1301,7 @@ async def _india_trade_loop():
             f"balance=₹{final['balance']:.0f}  "
             f"equity=₹{final['equity']:.0f}  "
             f"roi={final['roi_percent']:+.2f}%  "
-            f"open={len(open_positions)}  fno={len(fno_opened)}"
+            f"open={len(open_positions)}"
         )
         await session.commit()
 
@@ -1783,9 +1652,10 @@ async def _market_news_alert() -> None:
             cap = int(settings.NEWS_ALERT_MAX_PER_CYCLE)
             lines = ["⚡ Breaking Market News ⚡\n"]
             for r in hits[:cap]:
-                lines.append(f"📌 {r.headline[:150]}\n👀 Keep eyes on this.\n")
+                lines.append(f"📌 {r.headline[:150]}\n")
             if len(hits) > cap:
-                lines.append(f"…and {len(hits) - cap} more.")
+                lines.append(f"…and {len(hits) - cap} more.\n")
+            lines.append("👀 Keep eyes on these.")
             from integrations.alerts import publish, AlertEvent, AlertCategory, AlertAction, Severity, RawTextPayload
             await publish(AlertEvent(
                 category=AlertCategory.NEWS_EVENT, action=AlertAction.ALERT, severity=Severity.WARNING,
@@ -1837,7 +1707,7 @@ def corporate_action_check():
 # ── 7. Intraday MIS burst: morning entry + EOD squareoff ─────────────────────
 #
 # Goals:
-#   ① Generate 3-5 trades/day (equity MIS + optionally 1 NIFTY/BANKNIFTY option)
+#   ① Generate 3-5 trades/day (equity MIS)
 #   ② Test agent decision quality on intraday timeframe
 #   ③ Keep positions separate from the positional CNC book (own budget + own limit)
 #
@@ -1854,7 +1724,6 @@ async def _intraday_entry_task():
       4. Concurrent Tavily web research + LLM veto for all candidates
       5. Veto failed symbols; log rejection reason
       6. Place surviving signals as MIS trades
-      7. Optionally add 1 NIFTY/BN option trade (if ENABLE_FNO=True)
       8. Telegram summary with all 7-factor subscores + entry/SL/TP
     """
     # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────────
@@ -2203,19 +2072,6 @@ async def _intraday_entry_task():
             except Exception as exc:
                 logger.warning(f"[intraday_entry] {sig.symbol} open failed: {exc}")
 
-        # ── Step 6: 1 NIFTY/BN option trade (if F&O gating is ON) ────────────
-        sl_pct = float(getattr(_cfg, "INTRADAY_SL_PCT", 0.005))
-        tp_pct = float(getattr(_cfg, "INTRADAY_TP_PCT", 0.010))
-        if getattr(_cfg, "ENABLE_FNO", False) and getattr(_cfg, "ENABLE_OPTIONS", False):
-            try:
-                syms_placed = [d["symbol"] for d in opened_details]
-                placed = await _open_index_option_mis(session, balance, sl_pct, tp_pct, syms_placed)
-                if placed:
-                    opened += 1
-                    opened_details.append({"symbol": syms_placed[-1], "price": 0, "sl": 0, "tp": 0, "score": 0, "units": 75})
-            except Exception as exc:
-                logger.debug(f"[intraday_entry] index option skipped: {exc}")
-
         await VirtualWallet.take_daily_snapshot(session)
         await session.commit()
 
@@ -2244,124 +2100,6 @@ async def _intraday_entry_task():
                 category=AlertCategory.TRADE, action=AlertAction.ENTRY, severity=Severity.SUCCESS,
                 payload=RawTextPayload(text="\n".join(lines)),
             ))
-
-
-async def _open_index_option_mis(
-    session, balance: float, sl_pct: float, tp_pct: float, opened_syms: list
-) -> bool:
-    """Buy 1 lot NIFTY ATM CE or PE as MIS based on Hub macro direction.
-
-    Returns True if a trade was placed, False otherwise.
-    """
-    # ── HARD BLOCK — News-Only Target Architecture (Phase 1) ─────────────────
-    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: "Independent NIFTY
-    # option scalp" — a market-wide macro-score-only direction bet, no news
-    # event. FORBIDDEN. This function's only caller (_intraday_entry_task) is
-    # already hard-blocked above; blocked here too, directly, for defense in
-    # depth in case a future caller is added without checking this contract.
-    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
-    if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
-        logger.info("[intraday_entry] NIFTY option scalp disabled — News-Only architecture hard-block")
-        return False
-
-    import dataclasses
-    from sqlalchemy import select, func as _func
-    from db.models import MasterIntelligenceScore
-    from engine.fno.expiry import _spot_for
-    from engine.fno.selection import select_index_option, open_option_paper_trade
-    from utils.config import settings
-
-    # Determine market direction from Hub scores (use latest batch, up to 2 h old)
-    _latest_subq = (
-        select(_func.max(MasterIntelligenceScore.scored_at))
-        .where(MasterIntelligenceScore.symbol.like("%.NS"))
-        .scalar_subquery()
-    )
-    agg = (await session.execute(
-        select(_func.avg(MasterIntelligenceScore.master_score).label("avg_score"))
-        .where(MasterIntelligenceScore.scored_at >= _latest_subq - datetime.timedelta(hours=2))
-    )).one()
-    avg_score = float(agg.avg_score or 0)
-    # Interim safety raise (2026-07-20 execution-authority audit): this was the
-    # weakest of ~5 independent confidence floors in the codebase (10, vs.
-    # equity's 30 / F&O spreads' 55) and is what let a "Hub avg +13" NIFTY CE
-    # buy through on 2026-07-20. This instrument is CE/PE, so it can't yet
-    # route through the central gate (execute_trade_intent() is EQUITY-only
-    # pending Phase 2c) — raising the floor here is the interim fix until that
-    # migration lands.
-    _min_score = float(getattr(settings, "NIFTY_MIS_OPTION_MIN_SCORE", 30.0))
-    if abs(avg_score) < _min_score:
-        return False   # market too ambiguous for directional option
-
-    direction = "BUY" if avg_score > 0 else "SELL"   # select_index_option: BUY->CE, SELL->PE
-
-    spot = await _spot_for("NIFTY", session)
-    if not spot:
-        return False
-
-    # Reuse the same contract-resolution (Kite master -> live snapshot
-    # fallback) used by the main F&O system, instead of a bespoke raw query.
-    #
-    # A prior version of this function built a plain TradingSignal here with
-    # a hardcoded symbol="NIFTY.NS" — ignoring the real option contract
-    # symbol it had just computed one line above — and never set
-    # instrument_type/underlying_symbol/strike_price/option_type/expiry_date
-    # at all (TradingSignal has no such fields). The resulting OpenPosition
-    # looked like a plain equity called "NIFTY.NS", which no live-price feed
-    # can ever resolve (it isn't a real tradable instrument) — so
-    # current_price stayed frozen at entry_price forever, showing a
-    # permanent ₹0.00 P&L no matter how the real option premium moved.
-    # Found + fixed 2026-07-07 investigating exactly that symptom live.
-    spec = await select_index_option("NIFTY", direction, spot, balance, session)
-    if spec is None:
-        return False
-
-    # This entry path is a lightweight 1-lot intraday scalp with a tighter
-    # premium stop/target than the main F&O system's 50%/100% swing —
-    # override sizing and levels accordingly.
-    qty      = spec.lot_size
-    notional = round(qty * spec.premium, 2)
-    if notional > balance * 0.5:
-        return False   # option too expensive relative to remaining cash
-    spec = dataclasses.replace(
-        spec,
-        lots=1,
-        qty=qty,
-        notional=notional,
-        stop=round(spec.premium * (1 - sl_pct * 5), 2),
-        target=round(spec.premium * (1 + tp_pct * 5), 2),
-    )
-
-    from engine.decision_router import TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, authorize_trade_intent
-    _intent = TradeIntent(
-        strategy="NIFTY_MIS_OPTION", symbol=spec.tradingsymbol, action=direction, instrument_type=spec.option_type,
-        entry_price=spec.premium, stop_loss=spec.stop, take_profit=spec.target,
-        confidence=abs(avg_score), confidence_source=ConfidenceSource.CALCULATED,
-        strategy_family=StrategyFamily.FNO,
-        event_directness=EventDirectness.NOT_APPLICABLE,
-    )
-    _auth = await authorize_trade_intent(_intent, session)
-    if not _auth.approved:
-        logger.info(f"[intraday_entry] NIFTY option gate blocked: {_auth.reason}")
-        return False
-
-    trade = await open_option_paper_trade(
-        spec, session, confidence=abs(avg_score),
-        ai_reason=(
-            f"Trade levels [intraday-fno]: SL ₹{spec.stop} · T1 ₹{spec.target} | "
-            f"NIFTY {spec.option_type} {int(spec.strike)} exp {spec.expiry} · "
-            f"Hub avg {avg_score:+.0f} · 1 lot MIS"
-        ),
-        product="MIS",
-    )
-    if trade is None:
-        return False
-    opened_syms.append(f"NIFTY-{spec.option_type}")
-    logger.info(
-        f"[intraday_entry] ✓ MIS {spec.option_type} {spec.tradingsymbol} "
-        f"@₹{spec.premium:.2f} (1 lot)"
-    )
-    return True
 
 
 async def _intraday_squareoff_task():
@@ -4267,8 +4005,6 @@ async def _compute_pre_event_trade_levels(symbol: str, action: str, entry_price:
     from crawler.price_feed import get_latest_candles
     from engine.indicators import compute_indicators
     from engine.risk_manager import compute_trade_levels
-    from sqlalchemy import select
-    from db.models import OptionsChainSnapshot
 
     sig_ind = None
     try:
@@ -4284,29 +4020,6 @@ async def _compute_pre_event_trade_levels(symbol: str, action: str, entry_price:
 
     lv = compute_trade_levels(action, entry_price, sig=sig_ind)
     take_profit = lv["target_1"]
-
-    # ── Options Max-Pain / OI Resistance Adjustment (AI Predict smart sizing) ──
-    if action == "BUY":
-        try:
-            stmt = select(OptionsChainSnapshot).where(
-                OptionsChainSnapshot.symbol == symbol
-            ).order_by(OptionsChainSnapshot.snapshot_at.desc()).limit(1)
-            opt_snap = (await session.execute(stmt)).scalar_one_or_none()
-
-            if opt_snap and opt_snap.resistance_levels:
-                resistances_above = [r for r in opt_snap.resistance_levels if r > entry_price]
-                if resistances_above:
-                    nearest_res = min(resistances_above)
-                    if nearest_res < take_profit:
-                        old_tp = take_profit
-                        # Cap it 0.2% below the option strike to front-run call writers
-                        take_profit = nearest_res * 0.998
-                        logger.info(
-                            f"[pre_event_gap] {symbol}: TP reduced from ₹{old_tp:.2f} to ₹{take_profit:.2f} "
-                            f"due to Call OI resistance at ₹{nearest_res}"
-                        )
-        except Exception as exc:
-            logger.debug(f"[pre_event_gap] {symbol}: Options data adjustment failed: {exc}")
 
     return {
         "stop_loss": round(lv["stop_loss"], 2),

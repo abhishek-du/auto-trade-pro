@@ -121,7 +121,6 @@ class Settings(BaseSettings):
     IST_TIMEZONE: str = "Asia/Kolkata"
 
     ENABLE_FII_DII_ANALYSIS: bool = True
-    ENABLE_OPTIONS_CHAIN: bool = True
     ENABLE_INDIA_VIX: bool = True
     ENABLE_MUTUAL_FUNDS: bool = True
     ENABLE_ML_PREDICTIONS: bool = False
@@ -301,53 +300,10 @@ class Settings(BaseSettings):
     SHORT_HUB_SELL_NIFTY_GATE:  bool  = True   # block Hub SELL when Nifty > EMA50
     SHORT_MAX_VIX:              float = 28.0   # block ALL shorts when panic (VIX > 28)
 
-    # ── Futures & Options (F&O) ───────────────────────────────────────────────
-    # Master kill-switches. ENABLE_FNO gates NFO instrument sync + analytics.
-    # ENABLE_OPTIONS / ENABLE_FUTURES gate the agent actually paper-trading them.
-    ENABLE_FNO:                 bool  = False
-    ENABLE_OPTIONS:             bool  = False
-    ENABLE_FUTURES:             bool  = False
-    # Index underlyings the F&O engine analyses/trades (comma-separated).
-    FNO_INDEX_UNIVERSE:         str   = "NIFTY,BANKNIFTY,FINNIFTY"
-    # Annualised risk-free rate for Black-Scholes Greeks/IV (India ~6.5%).
+    # Annualised risk-free rate (India ~6.5%). Originally added for Black-Scholes
+    # Greeks, but engine/agent/performance_engine.py uses it for Sharpe/Treynor/
+    # Jensen — so it survives the 2026-08-19 F&O teardown.
     RISK_FREE_RATE:             float = 0.065
-    # Preferred days-to-expiry when selecting a contract for a directional signal.
-    FNO_DEFAULT_DTE:            int   = 21
-    # Lot cap per single trade (sanity ceiling on paper sizing).
-    FNO_MAX_LOTS_PER_TRADE:     int   = 10
-    # Standard NSE index lot sizes. Used in PAPER mode so the agent can build
-    # contracts from the live NSE chain WITHOUT the Kite instrument master
-    # (which needs the broker login). "SYM:lot,SYM:lot". NSE periodically
-    # revises these as index levels move — cross-checked 2026-07-07 against
-    # NSE circular FAOP70616 (effective Jan 2026 series) and our own live
-    # kite_instruments feed: NIFTY was stale at 75 (now 65), BANKNIFTY was
-    # stale at 35 (now 30), FINNIFTY was stale at 65 (now 60, per our own
-    # Kite feed). MIDCPNIFTY (120) and SENSEX (20) were already correct.
-    FNO_INDEX_LOT_SIZES:        str   = "NIFTY:65,BANKNIFTY:30,FINNIFTY:60,MIDCPNIFTY:120,SENSEX:20"
-    # Approximate paper-margin model (NOT exchange-exact SPAN). Used in Phase 4.
-    FNO_SPAN_PCT_INDEX:         float = 0.12   # SPAN ≈ 12% of notional for index
-    FNO_EXPOSURE_PCT:           float = 0.03   # +3% exposure margin
-    FNO_MARGIN_BUFFER:          float = 0.20   # +20% safety buffer on blocked margin
-    # Portfolio hedging: buy index PUTs when the market turns bearish to protect
-    # the equity book. Sized to a fraction of open equity exposure.
-    FNO_HEDGE_ENABLED:          bool  = False
-    FNO_HEDGE_RATIO:            float = 0.50   # hedge 50% of open equity notional
-    # Volatility strategies (long straddle when IV-Rank is low). Defined-risk.
-    FNO_VOL_ENABLED:            bool  = False
-
-    # Per-stock options enrichment for the Master Intelligence Hub. When ON, a
-    # 2×/day Celery job fetches equity option chains (via Kite quote) for the
-    # F&O-eligible subset of the hub universe and persists OptionContractSnapshot
-    # + IVHistory so the hub's options factor uses each stock's OWN PCR/IV-skew
-    # instead of falling back to the index-wide NIFTY PCR. Also forces the NFO
-    # instrument master to sync (needed to resolve strikes) even if ENABLE_FNO
-    # is off. Independent of ENABLE_FNO (which gates agent F&O trading).
-    ENABLE_HUB_OPTIONS:         bool  = False
-    # Max F&O underlyings enriched per run (∩ hub universe, capped for rate limit).
-    HUB_OPTIONS_MAX_SYMBOLS:    int   = 200
-    # Strikes kept each side of ATM (bounds quote size; near-ATM PCR is cleaner
-    # than full-chain PCR where far-OTM OI is stale).
-    HUB_OPTIONS_STRIKE_WINDOW:  int   = 12
 
     # ── Pre-Event Expectation Gap strategy (parallel to News Strategy) ─────────
     # Independent, scheduled-event-anticipation strategy (engine/pre_event_expectation_gap/).
@@ -574,7 +530,6 @@ class Settings(BaseSettings):
     INTRADAY_SL_PCT:               float = 0.005      # 0.5% stop-loss (tight intraday)
     INTRADAY_TP_PCT:               float = 0.010      # 1.0% take-profit (quick scalp)
     INTRADAY_CONFIDENCE_MIN:       float = 40.0       # min Hub score for intraday entry
-    INTRADAY_FNO_LOTS:             int   = 1          # lots per NIFTY/BANKNIFTY option trade
 
     # ── Paper trading parameters ──────────────────────────────────────────────
     # Matches AGENT_EQUITY so the simulator wallet and the AI Trading Agent
@@ -807,24 +762,6 @@ class Settings(BaseSettings):
     @property
     def forex_symbols(self) -> list[str]:
         return [s.strip() for s in self.WATCHLIST_FOREX.split(",") if s.strip()]
-
-    @property
-    def fno_index_symbols(self) -> list[str]:
-        """Index underlyings the F&O engine analyses/trades (e.g. NIFTY, BANKNIFTY)."""
-        return [s.strip().upper() for s in self.FNO_INDEX_UNIVERSE.split(",") if s.strip()]
-
-    @property
-    def fno_lot_sizes(self) -> dict[str, int]:
-        """Map of index underlying → standard lot size (paper-mode fallback)."""
-        out: dict[str, int] = {}
-        for pair in self.FNO_INDEX_LOT_SIZES.split(","):
-            if ":" in pair:
-                sym, lot = pair.split(":", 1)
-                try:
-                    out[sym.strip().upper()] = int(lot)
-                except ValueError:
-                    continue
-        return out
 
     @property
     def stock_symbols(self) -> list[str]:

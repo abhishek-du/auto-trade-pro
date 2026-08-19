@@ -461,71 +461,6 @@ function RealUpstoxAccountPanel() {
   )
 }
 
-/* Paper F&O positions — index options & futures the agent holds. */
-function FnOPositionsPanel() {
-  const [data, setData] = useState(null)
-  useEffect(() => {
-    const load = () => apiFetch('/api/v1/india/fno/positions').then(setData).catch(() => {})
-    load()
-    const id = setInterval(load, 10000)
-    return () => clearInterval(id)
-  }, [])
-
-  if (!data) return null
-  const fmt = (n) => formatINR(n ?? 0)
-
-  return (
-    <div className="glass-panel border border-border rounded-xl p-4 space-y-3">
-      <div className="flex items-center gap-2 flex-wrap">
-        <Zap size={15} className="text-cyan" />
-        <h3 className="text-slate-100 font-semibold text-sm">F&O Positions (Index)</h3>
-        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 uppercase">Paper</span>
-        <Link to="/fno" className="text-xs text-accent hover:text-accent/80 inline-flex items-center gap-1 ml-auto">
-          Open F&O <ExternalLink size={11} />
-        </Link>
-      </div>
-
-      {data.count > 0 ? (
-        <>
-          <div className="flex items-center gap-4 text-xs">
-            <span className="text-muted">Margin: <span className="text-slate-300">{fmt(data.total_margin)}</span></span>
-            <span className={data.total_pnl >= 0 ? 'text-profit font-semibold' : 'text-loss font-semibold'}>
-              {data.total_pnl >= 0 ? '+' : ''}{fmt(data.total_pnl)} P&amp;L
-            </span>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead><tr className="text-muted uppercase tracking-wider border-b border-border">
-                {['Contract', 'Lots', 'Entry', 'Current', 'P&L', 'Expiry'].map((h) => <th key={h} className="text-left px-2 py-1.5 font-semibold whitespace-nowrap">{h}</th>)}
-              </tr></thead>
-              <tbody>
-                {data.positions.map((p, i) => {
-                  const gain = (p.pnl ?? 0) >= 0
-                  const label = p.instrument_type === 'FUTURE'
-                    ? `${p.underlying} FUT`
-                    : `${p.underlying} ${Number(p.strike ?? 0).toFixed(0)} ${p.option_type}`
-                  return (
-                    <tr key={i} className="border-b border-border/40">
-                      <td className="px-2 py-1.5 text-slate-200 font-medium">{label}</td>
-                      <td className="px-2 py-1.5 tabular-nums text-slate-300">{p.lots}</td>
-                      <td className="px-2 py-1.5 tabular-nums text-slate-400">{Number(p.entry ?? 0).toFixed(2)}</td>
-                      <td className="px-2 py-1.5 tabular-nums text-slate-100">{Number(p.current ?? 0).toFixed(2)}</td>
-                      <td className={`px-2 py-1.5 tabular-nums font-semibold ${gain ? 'text-profit' : 'text-loss'}`}>{gain ? '+' : ''}{fmt(p.pnl)} <span className="text-[10px] opacity-70">({Number(p.pnl_pct ?? 0).toFixed(1)}%)</span></td>
-                      <td className="px-2 py-1.5 text-muted">{p.expiry?.slice(5)}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : (
-        <p className="text-xs text-muted">No open F&O positions. The agent opens index options (NIFTY/BANKNIFTY) when its signal triggers.</p>
-      )}
-    </div>
-  )
-}
-
 function TaxQuickView({ portfolioId }) {
   const [status,  setStatus]  = useState(null)
   const [loading, setLoading] = useState(true)
@@ -954,7 +889,6 @@ export default function PortfolioTracker() {
           <PaperPortfolioPanel />
 
           {/* F&O index positions (paper) */}
-          <FnOPositionsPanel />
 
           {/* Real Zerodha account — wallet balance + mutual funds */}
           <RealZerodhaAccountPanel />

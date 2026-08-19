@@ -1,7 +1,7 @@
 """Master Intelligence Hub — unifies every data source into one decision layer.
 
 Reads from existing caches/tables (FII/DII, VIX, breadth, sectors, news,
-earnings, options, fundamentals, portfolio doctor) and produces a single
+earnings, fundamentals, portfolio doctor) and produces a single
 ranked score per NSE symbol each cycle. Writes nothing new at the data layer —
 it calls existing engine/crawler functions.
 
@@ -114,40 +114,6 @@ class EarningsContext:
 
 
 @dataclass
-class OptionsContext:
-    nifty_pcr:      float = 1.0
-    nifty_max_pain: float = 0.0
-    nifty_bias:     int = 0
-    bank_nifty_pcr: float = 1.0
-    # Per-symbol option analytics (keyed by bare symbol, e.g. "RELIANCE").
-    # Populated for any underlying with OptionContractSnapshot/IVHistory data —
-    # indices always, single stocks when ENABLE_FNO. Empty → fall back to index.
-    symbol_pcr:     dict = field(default_factory=dict)   # bare → PCR
-    symbol_iv_rank: dict = field(default_factory=dict)   # bare → 0..100
-    symbol_skew:    dict = field(default_factory=dict)   # bare → PE_IV - CE_IV (atm), pts
-    symbol_bias:    dict = field(default_factory=dict)   # bare → -1/0/+1
-
-    def score_for(self, bare: str) -> tuple[float, dict]:
-        """Symbol-aware options score (≈[-20,+20]) + detail dict.
-
-        Uses this symbol's own PCR/skew when available, else the index-wide
-        nifty bias as a light market-level nudge (legacy behaviour).
-        """
-        if bare in self.symbol_bias:
-            base = self.symbol_bias[bare] * 15
-            skew = max(-5.0, min(5.0, self.symbol_skew.get(bare, 0.0) * 100))  # IV pts → score
-            score = max(-20.0, min(20.0, base + skew))
-            return score, {
-                "source":  "symbol",
-                "pcr":     round(self.symbol_pcr.get(bare, 0.0), 2),
-                "iv_rank": round(self.symbol_iv_rank.get(bare, 0.0), 1),
-                "skew":    round(self.symbol_skew.get(bare, 0.0), 4),
-                "bias":    self.symbol_bias[bare],
-            }
-        return float(self.nifty_bias * 15), {"source": "index", "nifty_bias": self.nifty_bias}
-
-
-@dataclass
 class PortfolioContext:
     equity:              float = 0.0
     cash:                float = 0.0
@@ -192,7 +158,6 @@ class MasterContext:
     sectors:   SectorContext
     news:      NewsContext
     earnings:  EarningsContext
-    options:   OptionsContext
     portfolio: PortfolioContext
     events:    EventContext    = field(default_factory=EventContext)
     mf_flows:  MFFlowContext   = field(default_factory=MFFlowContext)
@@ -462,106 +427,6 @@ async def build_earnings_context(session: AsyncSession) -> EarningsContext:
     return EarningsContext(tones_by_symbol=tones, recent_summaries=recent)
 
 
-async def build_options_context(session: AsyncSession) -> OptionsContext:
-    from db.models import OptionsChainSnapshot
-
-    def _bias_from_pcr(pcr: float) -> int:
-        # High PCR (>1.3) = heavy puts = contrarian-bullish/fear; low (0.7-1.3 band) = neutral.
-        # pcr <= 0 means no/garbage snapshot → neutral, not a signal.
-        if pcr <= 0:    return 0
-        if pcr >= 1.3:  return 1
-        if pcr <= 0.7:  return -1
-        return 0
-
-    async def _latest(sym: str):
-        return (await session.execute(
-            select(OptionsChainSnapshot)
-            .where(OptionsChainSnapshot.symbol == sym)
-            .order_by(desc(OptionsChainSnapshot.snapshot_at)).limit(1)
-        )).scalar_one_or_none()
-
-    nifty = await _latest("NIFTY")
-    bank  = await _latest("BANKNIFTY")
-
-    n_pcr = float(nifty.pcr) if nifty else 1.0
-    n_mp  = float(nifty.max_pain) if nifty else 0.0
-    b_pcr = float(bank.pcr) if bank else 1.0
-
-    octx = OptionsContext(
-        nifty_pcr=round(n_pcr, 2), nifty_max_pain=n_mp,
-        nifty_bias=_bias_from_pcr(n_pcr), bank_nifty_pcr=round(b_pcr, 2),
-    )
-
-    # Per-symbol analytics from OptionContractSnapshot + IVHistory (Phase 2).
-    # Best-effort: any failure leaves the maps empty → index-wide fallback.
-    try:
-        await _populate_symbol_options(octx, _bias_from_pcr, session)
-    except Exception as exc:
-        logger.debug(f"[hub/options] per-symbol enrichment skipped: {exc}")
-
-    return octx
-
-
-async def _populate_symbol_options(octx: "OptionsContext", bias_fn, session: AsyncSession) -> None:
-    """Fill per-symbol PCR / IV-rank / skew / bias from the F&O analytics tables."""
-    from db.models import OptionContractSnapshot, IVHistory
-    from sqlalchemy import func as _f
-
-    # Underlyings with a recent per-strike snapshot (last 2 days).
-    cutoff = datetime.utcnow() - timedelta(days=2)
-    unders = (await session.execute(
-        select(OptionContractSnapshot.underlying)
-        .where(OptionContractSnapshot.snapshot_at >= cutoff)
-        .distinct()
-    )).scalars().all()
-    if not unders:
-        return
-
-    for under in unders:
-        bare = under.replace(".NS", "").upper()
-        # Latest snapshot batch for this underlying = max snapshot_at.
-        last_at = (await session.execute(
-            select(_f.max(OptionContractSnapshot.snapshot_at))
-            .where(OptionContractSnapshot.underlying == under)
-        )).scalar()
-        if last_at is None:
-            continue
-        rows = (await session.execute(
-            select(OptionContractSnapshot).where(
-                OptionContractSnapshot.underlying == under,
-                OptionContractSnapshot.snapshot_at == last_at,
-            )
-        )).scalars().all()
-        if not rows:
-            continue
-
-        call_oi = sum(r.oi for r in rows if r.option_type == "CE")
-        put_oi  = sum(r.oi for r in rows if r.option_type == "PE")
-        pcr = round(put_oi / call_oi, 3) if call_oi > 0 else 0.0
-
-        # ATM skew = PE_IV - CE_IV at the strike nearest spot.
-        spot = rows[0].spot or 0.0
-        atm = min({r.strike for r in rows}, key=lambda k: abs(k - spot), default=0.0)
-        ce_iv = next((r.iv for r in rows if r.strike == atm and r.option_type == "CE" and r.iv), None)
-        pe_iv = next((r.iv for r in rows if r.strike == atm and r.option_type == "PE" and r.iv), None)
-        skew = round((pe_iv - ce_iv), 4) if (ce_iv and pe_iv) else 0.0
-        atm_iv = round(((ce_iv or 0) + (pe_iv or 0)) / (int(bool(ce_iv)) + int(bool(pe_iv)) or 1), 4)
-
-        # IV rank over trailing IVHistory (need ≥5 points to be meaningful).
-        hist = (await session.execute(
-            select(IVHistory.atm_iv).where(IVHistory.underlying == under)
-        )).scalars().all()
-        iv_rank = 50.0
-        if len(hist) >= 5 and atm_iv > 0:
-            lo, hi = min(hist), max(hist)
-            iv_rank = round(100 * (atm_iv - lo) / (hi - lo), 1) if hi > lo else 50.0
-
-        octx.symbol_pcr[bare]     = pcr
-        octx.symbol_iv_rank[bare] = iv_rank
-        octx.symbol_skew[bare]    = skew
-        octx.symbol_bias[bare]    = bias_fn(pcr)
-
-
 async def build_portfolio_context(agent_portfolio, session: AsyncSession) -> PortfolioContext:
     from db.models import PortfolioDiagnosis
 
@@ -751,7 +616,6 @@ async def build_master_context(
     macro     = await build_macro_context(session)
     news      = await build_news_context(session)
     earnings  = await build_earnings_context(session)
-    options   = await build_options_context(session)
     portfolio = await build_portfolio_context(agent_portfolio, session)
     events    = await build_event_context(session)
     mf_flows  = await build_mf_flow_context(session)
@@ -793,7 +657,7 @@ async def build_master_context(
     now = datetime.utcnow().isoformat()
     ctx = MasterContext(
         built_at=now, bar_time=now, macro=macro, sectors=sectors,
-        news=news, earnings=earnings, options=options, portfolio=portfolio,
+        news=news, earnings=earnings, portfolio=portfolio,
         events=events, mf_flows=mf_flows,
         fundamentals_by_symbol=fundamentals_by_symbol,
         growth_by_symbol=growth_by_symbol,
@@ -1147,7 +1011,10 @@ def _score_symbol_sync(
 
     # 7. Options (5%) — symbol-aware when this name has its own F&O analytics
     # (PCR/IV-rank/skew); otherwise falls back to the index-wide nifty bias.
-    options_score, _options_detail = ctx.options.score_for(bare)
+    # F&O removed 2026-08-19. The MasterIntelligenceScore.options_score
+    # column and the API field are kept (always 0.0) so the schema and
+    # response shape stay stable; every weight referencing it is 0.0.
+    options_score, _options_detail = 0.0, {"source": "removed"}
 
     # Renormalize: factors with no real data get 0 weight so missing factors
     # don't dilute the ones that have a genuine signal.
@@ -1202,11 +1069,15 @@ def _score_symbol_sync(
         )
 
         # 3. Intraday Momentum
-        id_w = {"tech": 0.50, "volume": 0.25, "options": 0.15, "news": 0.05, "macro": 0.05, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        # options weight (0.15) removed 2026-08-19 with the F&O teardown and
+        # redistributed PROPORTIONALLY across the surviving factors, so their
+        # relative importance is unchanged (0.50/0.25/0.05/0.05 summed to 0.85;
+        # each is divided by 0.85). Leaving it in place would have spent 15% of
+        # the intraday score on a factor whose data source no longer exists.
+        id_w = {"tech": 0.59, "volume": 0.29, "news": 0.06, "macro": 0.06, "options": 0.0, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
         intraday_score = (
             technical_score * id_w["tech"] +
             vol_score * id_w["volume"] +
-            options_score * id_w["options"] +
             news_score * id_w["news"] +
             macro_score * id_w["macro"]
         )
@@ -1256,11 +1127,15 @@ def _score_symbol_sync(
         # Intraday / Non-swing branch fallback
         volume_surge = getattr(signals, "volume_surge", 0.0) or 0.0
         vol_score = min(100.0, max(-100.0, (volume_surge - 1.0) * 30.0)) if volume_surge > 0 else 0.0
-        id_w = {"tech": 0.50, "volume": 0.25, "options": 0.15, "news": 0.05, "macro": 0.05, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
+        # options weight (0.15) removed 2026-08-19 with the F&O teardown and
+        # redistributed PROPORTIONALLY across the surviving factors, so their
+        # relative importance is unchanged (0.50/0.25/0.05/0.05 summed to 0.85;
+        # each is divided by 0.85). Leaving it in place would have spent 15% of
+        # the intraday score on a factor whose data source no longer exists.
+        id_w = {"tech": 0.59, "volume": 0.29, "news": 0.06, "macro": 0.06, "options": 0.0, "sector": 0.0, "fundamentals": 0.0, "earnings": 0.0}
         intraday_score = (
             technical_score * id_w["tech"] +
             vol_score * id_w["volume"] +
-            options_score * id_w["options"] +
             news_score * id_w["news"] +
             macro_score * id_w["macro"]
         )

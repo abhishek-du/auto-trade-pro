@@ -28,8 +28,6 @@ export const SECTIONS = [
       { to: '/discover/scanner', label: 'Market Scanner', Icon: Zap },
       { to: '/india',            label: 'India Overview', Icon: Globe },
       { to: '/india/signals',    label: 'NSE Signals',    Icon: Target },
-      { to: '/fno',              label: 'Futures & Options', Icon: Layers },
-      { to: '/fno-pipeline',    label: 'F&O Pipeline',      Icon: GitBranch },
       { to: '/fundamentals',     label: 'Screener',       Icon: LineChart },
       { to: '/sector-heatmap',   label: 'Sector Heatmap', Icon: LayoutGrid, badge: 'sectorHeatmap' },
       { to: '/mutual-funds',     label: 'Mutual Funds',   Icon: Wallet },

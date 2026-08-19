@@ -2030,10 +2030,6 @@ class TestRunAgentCycleGates:
             ms.AGENT_MIS_SQUAREOFF_TIME = "15:15"
             ms.AGENT_EQUITY       = 2_000_000.0
             ms.AGENT_MAX_POSITIONS = 15
-            ms.ENABLE_OPTIONS     = False
-            ms.ENABLE_FUTURES     = False
-            ms.FNO_HEDGE_ENABLED  = False
-            ms.FNO_VOL_ENABLED    = False
             ms.nse_symbols        = []
             ms.telegram_available = False
             ms.IST_TIMEZONE       = "Asia/Kolkata"
