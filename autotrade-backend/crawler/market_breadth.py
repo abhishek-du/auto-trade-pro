@@ -32,9 +32,13 @@ _NSE_HOME = "https://www.nseindia.com"
 _ADV_DEC_URL = "https://www.nseindia.com/api/allIndices"
 _GAINERS_URL = "https://www.nseindia.com/api/live-analysis-variations?index=gainers"
 _LOSERS_URL  = "https://www.nseindia.com/api/live-analysis-variations?index=loosers"
-_ACTIVE_URL  = "https://www.nseindia.com/api/live-analysis-variations?index=active"
-_52H_URL     = "https://www.nseindia.com/api/live-analysis-variations?index=new52weekhigh"
-_52L_URL     = "https://www.nseindia.com/api/live-analysis-variations?index=new52weeklow"
+# NSE retired index=active / new52weekhigh / new52weeklow on the variations
+# endpoint — they now return {"data": "Missing index or key."} with HTTP 200, so
+# the failure was invisible and these three lists were silently always empty.
+# Verified live 2026-08-20; these are the current endpoints.
+_ACTIVE_URL  = "https://www.nseindia.com/api/live-analysis-most-active-securities?index=volume"
+_52H_URL     = "https://www.nseindia.com/api/live-analysis-data-52weekhighstock"
+_52L_URL     = "https://www.nseindia.com/api/live-analysis-data-52weeklowstock"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,36 +58,114 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+def _rows_or_none(val: Any) -> list[dict] | None:
+    """A list of dict rows, or None. Guards the 'list of lists' trap."""
+    if isinstance(val, list) and val and isinstance(val[0], dict):
+        return val
+    return None
+
+
 def _parse_variation_list(payload: Any) -> list[dict]:
-    """Normalise NSE live-analysis-variations response to a flat list."""
+    """Normalise an NSE live-analysis-variations response to a flat list of rows.
+
+    NSE nests the rows one level down, per index section:
+
+        {"legends": [["NIFTY","NIFTY 50"], ...],          <- list OF LISTS
+         "NIFTY":    {"data": [ {...}, ... ], "timestamp": ...},
+         "allSec":   {"data": [ {...}, ... ], "timestamp": ...},
+         "BANKNIFTY": {...}, "FOSec": {...}, ...}
+
+    There is no top-level "data" key, so the old "try any list-valued key"
+    fallback matched **"legends"** — whose elements are lists, not dicts. Every
+    row then hit `row.get(...)` and raised
+    `'list' object has no attribute 'get'`, ~28 times per 15 minutes, leaving
+    gainers/losers/52-week movers permanently empty.
+
+    Prefer `allSec` (market-wide, which is what "top gainers/losers" means for
+    breadth), then the broad indices, then any section that actually holds dict
+    rows. Every candidate is validated as a list OF DICTS before being returned,
+    so a future shape change degrades to an empty list instead of an exception.
+    """
     if isinstance(payload, list):
-        return payload
-    if isinstance(payload, dict):
-        for key in ("data", "gainers", "loosers", "active", "HIGH", "LOW"):
-            val = payload.get(key)
-            if isinstance(val, list):
-                return val
-        # Try any list-valued key
-        for val in payload.values():
-            if isinstance(val, list) and val:
-                return val
+        return _rows_or_none(payload) or []
+
+    if not isinstance(payload, dict):
+        return []
+
+    # Flat shapes (older API / other endpoints).
+    for key in ("data", "gainers", "loosers", "active", "HIGH", "LOW"):
+        rows = _rows_or_none(payload.get(key))
+        if rows is not None:
+            return rows
+
+    # Nested per-section shape, broadest section first.
+    for key in ("allSec", "NIFTY", "BANKNIFTY", "NIFTYNEXT50", "FOSec",
+                "SecGtr20", "SecLwr20"):
+        section = payload.get(key)
+        if isinstance(section, dict):
+            rows = _rows_or_none(section.get("data"))
+            if rows is not None:
+                return rows
+
+    # Last resort: any section dict, or any list that really holds dict rows.
+    for val in payload.values():
+        if isinstance(val, dict):
+            rows = _rows_or_none(val.get("data"))
+            if rows is not None:
+                return rows
+    for val in payload.values():
+        rows = _rows_or_none(val)
+        if rows is not None:
+            return rows
     return []
 
 
 def _map_variation_row(row: dict) -> dict:
-    """Map a raw NSE live-analysis row to our canonical stock dict."""
+    """Map a raw NSE live-analysis row to our canonical stock dict.
+
+    NSE uses snake_case here (`open_price`, `prev_price`, `trade_quantity`),
+    not the camelCase of its other endpoints. Only `symbol`, `ltp` and
+    `perChange` matched the old mapping, so open/high/low/prev_close/change/
+    volume silently came back as 0.0 even once the rows parsed. Both spellings
+    are accepted so this keeps working if NSE reverts.
+
+    `change` is computed rather than read: NSE's `net_price` carries the PERCENT
+    change (20 for a 105 -> 126 move), not the 21 absolute difference, so
+    trusting it would put a percentage in a rupee field.
+    """
     sym = row.get("symbol") or row.get("Symbol") or ""
+    meta = row.get("meta")
+
+    # Three NSE endpoints feed this, each with its own spelling:
+    #   variations          -> ltp, open_price, prev_price, trade_quantity
+    #   most-active         -> lastPrice, open, previousClose, totalTradedVolume
+    #   52-week high/low    -> ltp, prevClose, comapnyName  (NSE's own typo)
+    ltp = _safe_float(row.get("ltp") or row.get("LTP") or row.get("lastPrice"))
+    prev_close = _safe_float(
+        row.get("prev_price") or row.get("previousPrice")
+        or row.get("previousClose") or row.get("prevClose")
+    )
+    change = round(ltp - prev_close, 2) if (ltp and prev_close) else 0.0
+    name = sym
+    if isinstance(meta, dict):
+        name = meta.get("companyName", sym)
+    elif row.get("comapnyName") or row.get("companyName"):
+        name = row.get("comapnyName") or row.get("companyName")
+
     return {
         "symbol":     sym,
-        "name":       row.get("meta", {}).get("companyName", sym) if isinstance(row.get("meta"), dict) else sym,
-        "ltp":        _safe_float(row.get("ltp") or row.get("LTP")),
-        "open":       _safe_float(row.get("openPrice") or row.get("open")),
-        "high":       _safe_float(row.get("highPrice") or row.get("high")),
-        "low":        _safe_float(row.get("lowPrice")  or row.get("low")),
-        "prev_close": _safe_float(row.get("previousPrice") or row.get("prevClose")),
-        "change":     _safe_float(row.get("netPrice")   or row.get("change")),
-        "change_pct": _safe_float(row.get("perChange")  or row.get("pChange")),
-        "volume":     int(_safe_float(row.get("tradedQuantity") or row.get("totalTradedVolume") or 0)),
+        "name":       name,
+        "ltp":        ltp,
+        "open":       _safe_float(row.get("open_price") or row.get("openPrice") or row.get("open")),
+        "high":       _safe_float(row.get("high_price") or row.get("highPrice") or row.get("high") or row.get("yearHigh")),
+        "low":        _safe_float(row.get("low_price")  or row.get("lowPrice")  or row.get("low")  or row.get("yearLow")),
+        "prev_close": prev_close,
+        "change":     change,
+        "change_pct": _safe_float(row.get("perChange") or row.get("pChange")),
+        "volume":     int(_safe_float(
+            row.get("trade_quantity") or row.get("tradedQuantity")
+            or row.get("totalTradedVolume") or 0
+        )),
     }
 
 
