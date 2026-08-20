@@ -317,6 +317,13 @@ class Settings(BaseSettings):
     # keywords defaulted to BUY and then contradicted their own classification.
     # Flag exists so the old behaviour can be restored without a deploy.
     NEWS_SIDE_FROM_CLASSIFIER:    bool  = True
+    # Kill switch for news-driven SHORTS specifically. EQUITY_SHORT_ENABLED is
+    # only read by hub_short/exhaustion_short and never covered the news paths,
+    # so before this there was no way to stop a news short except reverting the
+    # P0 fix -- which would reintroduce the side bug. Enforced in
+    # decision_router's short guard; RuntimeConfig("news_short_enabled")
+    # overrides it across processes with no restart.
+    NEWS_SHORT_ENABLED:           bool  = True
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
     NEWS_SECTOR_MIN_SCORE:        float = 0.7

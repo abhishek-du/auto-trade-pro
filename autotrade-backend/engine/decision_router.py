@@ -52,6 +52,7 @@ class RoutingOutcome(str, Enum):
     BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
     BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
     BLOCKED_TECHNICAL_ORIGIN     = "BLOCKED_TECHNICAL_ORIGIN"      # News-Only hard-block: TECHNICAL may not originate trades (2026-07-21)
+    BLOCKED_SHORT                = "BLOCKED_SHORT"                 # short leg refused: VIX panic, or shorting switched off (2026-08-20)
     BLOCKED_MARKET_CLOSED        = "BLOCKED_MARKET_CLOSED"         # NSE not open for trading (2026-07-27)
     WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
@@ -575,6 +576,65 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
         logger.warning(f"[execution_gate] BLOCKED (market closed) {intent.symbol} strategy={intent.strategy}")
         await _log_intent_audit(intent, mode, result, session)
         return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+    # ── Short-leg guards (2026-08-20) ────────────────────────────────────────
+    # Context: until the P0 side fix (68d6dc3) the news paths could not produce
+    # a SELL at all -- the side came from a keyword guess that defaulted to BUY,
+    # so every bearish headline contradicted its own classification and was
+    # dropped. Not one short reached this gate in the 2026-08-20 session. From
+    # the next session they can, which makes two gaps worth closing first:
+    #
+    #   1. `SHORT_MAX_VIX` existed in config with the comment "block ALL shorts
+    #      when panic (VIX > 28)" and was read by NOTHING -- 0 references
+    #      outside utils/config.py. A documented safety control that does not
+    #      exist is worse than none, because it gets relied on. Now enforced.
+    #
+    #   2. `EQUITY_SHORT_ENABLED` is only consulted by hub_short.py and
+    #      exhaustion_short.py. The news paths never looked at it, so there was
+    #      no way to stop news-driven shorts short of reverting the P0 fix --
+    #      which would reintroduce the bug. NEWS_SHORT_ENABLED closes that,
+    #      backed by RuntimeConfig so it kills across processes with no restart.
+    #
+    # Placed here, after market hours and before everything else, because this
+    # is the single gate every originator funnels through. Exits are unaffected:
+    # they close OpenPosition rows directly and never build a TradeIntent.
+    if str(getattr(intent, "action", "")).upper() == "SELL":
+        _short_block = None
+
+        # (a) panic gate — applies to EVERY family, not just news.
+        _max_vix = float(getattr(settings, "SHORT_MAX_VIX", 0) or 0)
+        if _max_vix > 0:
+            try:
+                from crawler.live_prices import PRICE_CACHE
+                _vix = float((PRICE_CACHE.get("^INDIAVIX") or {}).get("price") or 0)
+            except Exception:
+                _vix = 0.0
+            # Fails OPEN on a missing reading: a stale cache must not silently
+            # ban shorting for the day. A real panic shows up in the cache.
+            if _vix > _max_vix:
+                _short_block = f"India VIX {_vix:.1f} > {_max_vix:.1f} — shorts blocked (panic guard)"
+
+        # (b) news-path short switch — .env default with a RuntimeConfig override.
+        if _short_block is None and intent.strategy_family in (
+            StrategyFamily.EVENT_DRIVEN, StrategyFamily.DIRECT_NEWS
+        ):
+            _news_short = bool(getattr(settings, "NEWS_SHORT_ENABLED", True))
+            try:
+                from utils.runtime_config import RuntimeConfig as _RC2
+                _cfg2 = await _RC2.load(session)
+                _news_short = bool(_cfg2._get("news_short_enabled", _news_short))
+            except Exception as _e2:
+                logger.debug(f"[execution_gate] news_short flag unreadable ({_e2}) — using .env")
+            if not _news_short:
+                _short_block = "news-driven shorts are switched off (NEWS_SHORT_ENABLED=false)"
+
+        if _short_block:
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_SHORT, mode=mode,
+                                   reason=_short_block, metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (short) {intent.symbol} — {_short_block}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=_short_block,
+                                       outcome=result.outcome)
 
     # ── News-Only architecture hard-block (2026-07-21) ─────────────────────────
     # User-directed strategic pivot: "Make the system pure News-Only. Hard-block

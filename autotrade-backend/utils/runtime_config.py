@@ -81,6 +81,7 @@ _KNOWN_KEYS: dict[str, type] = {
     # Path F kill switch — DB-backed so it crosses the process boundary.
     "tactical_execution_enabled": bool,
     "technical_origination_blocked": bool,
+    "news_short_enabled":            bool,
     # ── Strategy execution toggles (admin UI, 2026-08-20) ─────────────────────
     # One switch per origination path. DB-backed so a toggle takes effect in
     # every process without a restart. All default to True: a missing row means
