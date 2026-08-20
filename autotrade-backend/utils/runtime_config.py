@@ -77,6 +77,8 @@ _KNOWN_KEYS: dict[str, type] = {
     "intraday_enabled":        bool,
     # Global fail-safe: blocks all new entries across all strategies.
     "trading_halted":          bool,
+    # Path F kill switch — DB-backed so it crosses the process boundary.
+    "tactical_execution_enabled": bool,
     # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
     # entries are blocked after a shock FLATTEN. Cleared automatically once past.
     "shock_cooldown_until":    str,
@@ -267,6 +269,17 @@ class RuntimeConfig:
         return bool(self._get("trading_halted", getattr(settings, "TRADING_HALTED", False)))
 
     @property
+    def tactical_execution_enabled(self) -> bool:
+        """Path F execution master switch. Falls back to the .env default.
+
+        DB-backed on purpose: flipping this halts the tactical pipeline in every
+        process immediately, with no restart. settings.AGENT_ENABLED does not —
+        that was audit finding D4.
+        """
+        return bool(self._get("tactical_execution_enabled",
+                              getattr(settings, "TACTICAL_EXECUTION_ENABLED", False)))
+
+    @property
     def shock_cooldown_active(self) -> bool:
         """True while a market-shock FLATTEN cooldown is still in effect."""
         raw = self._get("shock_cooldown_until", "")
@@ -306,4 +319,5 @@ class RuntimeConfig:
             "scanner_enabled":             self.scanner_enabled,
             "intraday_enabled":            self.intraday_enabled,
             "trading_halted":              self.trading_halted,
+            "tactical_execution_enabled":  self.tactical_execution_enabled,
         }

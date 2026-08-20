@@ -280,6 +280,7 @@ if intent.strategy_family == StrategyFamily.EVENT_DRIVEN:
 | `intelligence_hub.py` (`MasterIntelligenceScore`) | Feeds trade-triggering thresholds directly (§4-9 above) | **CONTEXT/VALIDATION ONLY** — see §7 |
 | Technical indicators / `compute_trade_levels` | Already filter-only for News Direct | **FILTER ONLY**, universally — never a trigger, for any strategy |
 | `validate_signal` / `RiskManagerAgent` / `check_drawdown_breakers` | Fragmented, strategy-dependent | **UNIFIED, MANDATORY** for every `TradeIntent` regardless of family |
+| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. |
 | Central Execution Gate | Gate for 11/12 paths | **THE ONLY DOOR** — target is 1/1, not 11/12 |
 
 **FORBIDDEN, precisely defined:** the component must not call `open_paper_trade`, `open_option_paper_trade`, `open_spread_paper_trade`, `open_future_paper_trade`, `open_iron_condor_paper_trade`, `AgentExecutionManager.execute`, or `place_real_order`, directly or indirectly, under any code path, regardless of feature flags. A feature-flagged-off strategy that still contains a live call to one of these functions is not "safely disabled" — it is disabled *by configuration*, which is reversible by anyone who flips the flag without knowing this contract exists. Genuine disabling means the call site itself is gone or hard-blocked at the function entry (see §8's two-phase process).
@@ -370,6 +371,51 @@ intent = TradeIntent(
 ```
 
 ---
+
+
+---
+
+### §10a — Amendment: TACTICAL origination (2026-08-20)
+
+**This clause narrows §1 line 49, §6 line 281 and §10's forbidden pattern.**
+Read them together; where they conflict for `StrategyFamily.TACTICAL`, this
+clause governs.
+
+Until this date the contract permitted **no** event-less automatic originator.
+Path F (intraday momentum, mean reversion) originates from technical conditions
+with no `CausalEvent`, so it ran shadow-only — generating, scoring and sizing
+signals into `tactical_signals` while containing no execution code path at all.
+
+Effective 2026-08-20, `StrategyFamily.TACTICAL` **may originate trades**, on all
+of the following conditions. They are cumulative; failing any one revokes the
+permission:
+
+1. **Off by default.** `TACTICAL_EXECUTION_ENABLED=False` in `.env`, with a
+   DB-backed `RuntimeConfig("tactical_execution_enabled")` kill switch that
+   halts every process without a restart.
+2. **Paper only.** `TACTICAL_LIVE_TRADING=False`. The execution gate blocks
+   `TradeMode.LIVE` for this family regardless of `PAPER_MODE`.
+3. **Its own risk bucket**, because it has no event materiality to act as a
+   brake: **2% of capital per day, 0.5% per trade**, enforced per trading day in
+   Redis and **failing closed** if Redis is unreadable.
+4. **Same central gate.** A TACTICAL intent passes the identical market-hours,
+   confidence-provenance and 12-check `validate_signal` path as every other
+   family. Its bucket is an *additional* cap, never a replacement.
+5. **Minimum 7 days in paper** with execution enabled before live is even
+   discussed.
+6. **This clause must be amended again before live**, in a reviewed commit.
+
+**What is still forbidden, unchanged:** every other event-less originator.
+`TECHNICAL` remains hard-blocked (`_TECHNICAL_TRADE_ORIGINATION_BLOCKED = True`).
+§2 line 162 still governs — `strategy_family` is a label a caller sets, not
+proof — so relabelling a technical scan as TACTICAL to reach the gate is a
+violation of this clause, not a use of it. TACTICAL is permitted because of the
+constraints above, not because of its name.
+
+*Amended 2026-08-20 by Claude Opus 5, at the repository owner's explicit
+instruction, in the same commit that added `StrategyFamily.TACTICAL` and wired
+`engine/tactical_executor.py` to the gate. `tests/test_tactical_execution_gate.py`
+asserts this document and the code cannot silently drift apart.*
 
 ## 11. What This Contract Deliberately Does Not Decide Yet
 

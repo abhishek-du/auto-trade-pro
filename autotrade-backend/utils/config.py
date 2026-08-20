@@ -272,10 +272,11 @@ class Settings(BaseSettings):
     # It runs in SHADOW mode: signals are scored, sized and written to
     # tactical_signals, but nothing is executed — Path F has no execution code
     # path at all. See engine/tactical_executor.py and README_TACTICAL.md.
-    # TACTICAL_EXECUTION_MODE only accepts "shadow" in Phase 1; anything else
-    # raises, rather than silently shadow-running when execution was expected.
+    # Phase 2: execution is governed by TACTICAL_EXECUTION_ENABLED below.
+    # OFF by default; see the contract amendment.
     TACTICAL_PIPELINE_ENABLED:    bool  = True
-    TACTICAL_EXECUTION_MODE:      str   = "shadow"
+    # TACTICAL_EXECUTION_MODE retired in Phase 2 — superseded by
+    # TACTICAL_EXECUTION_ENABLED below (two flags could contradict).
     TACTICAL_CAPITAL:             float = 500_000.0
     TACTICAL_MAX_TOTAL_RISK:      float = 0.02    # 2% of capital, whole bucket
     TACTICAL_MAX_PER_TRADE_RISK:  float = 0.005   # 0.5% per trade
@@ -293,6 +294,15 @@ class Settings(BaseSettings):
     TACTICAL_FAST_CANDLE_ENABLED:      bool = True
     TACTICAL_FAST_CANDLE_INTERVAL_SEC: int  = 5     # sampling cadence
     TACTICAL_FAST_CANDLE_MAX_AGE_MIN:  int  = 2     # freshness bar for the fast path
+    # ── Phase 2 execution (2026-08-20) ───────────────────────────────────────
+    # OFF by default. Path F may originate trades only because §6/§10 of
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md were amended in the same
+    # commit that enabled it. Overridable at runtime via RuntimeConfig
+    # ("tactical_execution_enabled"), which is DB-backed and therefore an
+    # instant cross-process kill switch — no restart, and visible to the Celery
+    # worker (unlike settings.AGENT_ENABLED, audit D4).
+    TACTICAL_EXECUTION_ENABLED:   bool = False
+    TACTICAL_LIVE_TRADING:        bool = False   # paper only until it has a record
 
     # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
     # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.

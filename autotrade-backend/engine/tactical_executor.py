@@ -1,27 +1,28 @@
 """Path F — orchestrator.
 
-SHADOW MODE — READ THIS BEFORE ADDING AN IMPORT
-==============================================
-This module deliberately contains **no path to execution**. It does not import
-`execute_trade_intent`, `open_paper_trade`, `place_real_order`, or
-`StrategyFamily`, and it must not — not even behind a feature flag.
+EXECUTION IS DISABLED BY DEFAULT
+================================
+Path F originates trades from technical conditions with no news event. Until
+2026-08-20 the contract forbade that outright (§1 line 49, §6 line 281,
+§10 line 347) and this module deliberately contained no execution path at all.
 
-That is not caution for its own sake. `docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md`
-§6 defines a FORBIDDEN component as one that calls those functions *"directly or
-indirectly, under any code path, **regardless of feature flags**"*, and states
-that a flag-disabled strategy still containing a live call is not safely
-disabled — it is "disabled by configuration, which is reversible by anyone who
-flips the flag without knowing this contract exists."
+Phase 2 changed that DELIBERATELY, in one commit that also amended
+docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6 and §10. If you are reading
+this and the contract does not list TACTICAL as an allowed originator, the code
+and the contract have drifted and the code is wrong.
 
-Path F originates from technical conditions with no news event, which the
-contract forbids (§1 line 49, §6 line 281, §10 line 347). Shadow mode is how
-Path F earns its evidence without violating that: it produces exactly the
-signals it would trade, sizes them exactly as it would, records both — and
-stops. `tests/test_tactical_shadow_mode.py` enforces the no-execution property
-by AST-scanning this package, so it cannot regress silently.
+To enable execution:
+  1. Risk bucket + cooldown must be Redis-backed .......... done (26d1651)
+  2. F1 fast candles must be working ..................... done (e14e3ba)
+  3. StrategyFamily.TACTICAL + contract amendment ........ done (this commit)
+  4. Set TACTICAL_EXECUTION_ENABLED=True in .env
+     OR flip RuntimeConfig("tactical_execution_enabled") for an instant,
+     cross-process switch that needs no restart.
 
-Wiring execution is Phase 2, and lands together with a written amendment to §6
-and §10. Until then, every row this writes has `executed=False`.
+Three independent brakes remain even with the flag on:
+  * PAPER_MODE=True         — no real money
+  * TACTICAL_LIVE_TRADING=False — the gate blocks LIVE for this family
+  * the Redis risk bucket   — 2%/day, 0.5%/trade, fails closed
 
 The pipeline
 ------------
@@ -70,6 +71,17 @@ def _cfg(name: str, default):
     return getattr(settings, name, default)
 
 
+def _execution_enabled() -> bool:
+    """Static .env view of the master switch.
+
+    The authoritative, restart-free check is the RuntimeConfig lookup inside
+    decision_router's TACTICAL branch — this only decides whether we bother
+    building an intent at all. Both must be on for a trade to happen, so a
+    stale .env cannot force execution past a runtime kill switch.
+    """
+    return bool(_cfg("TACTICAL_EXECUTION_ENABLED", False))
+
+
 @dataclass
 class ScanResult:
     sub_pipeline: str
@@ -97,15 +109,11 @@ class TacticalExecutor:
 
     def __init__(self, risk: TacticalRiskManager | None = None) -> None:
         self.risk = risk or TacticalRiskManager()
-        self.mode = str(_cfg("TACTICAL_EXECUTION_MODE", "shadow")).lower()
-        if self.mode != "shadow":
-            # Fail loudly rather than silently shadow-running when someone
-            # expects execution — Phase 1 simply has no execution path.
-            raise NotImplementedError(
-                f"TACTICAL_EXECUTION_MODE={self.mode!r} is not implemented. "
-                "Phase 1 is shadow-only; execution wiring is Phase 2 and lands "
-                "with the contract amendment."
-            )
+        # Phase 2 retired TACTICAL_EXECUTION_MODE in favour of a single switch.
+        # Two overlapping flags (MODE="shadow" while ENABLED=True) could only
+        # ever contradict each other, and the ambiguity would be resolved at
+        # runtime by whichever check happened to run first.
+        self.mode = "execute" if _execution_enabled() else "shadow"
 
     # ── entry points ─────────────────────────────────────────────────────────
 
@@ -274,6 +282,79 @@ class TacticalExecutor:
 
         return out
 
+    async def _execute(
+        self, signal: Signal, composite: float, sizing, session: AsyncSession
+    ) -> tuple[bool, str | None, str | None, str]:
+        """Offer one approved signal to the central execution gate.
+
+        Returns (executed, order_ref, routing_outcome, note). Never raises — a
+        routing failure must not abort the rest of the cycle or lose the audit
+        row for the signals already collected.
+
+        Imports are local and deliberate: at module scope they would make this
+        file reference execution symbols unconditionally, and the point of the
+        guard is that a disabled pipeline never touches them.
+        """
+        try:
+            from engine.decision_router import (
+                ConfidenceSource,
+                EventDirectness,
+                RoutingOutcome,
+                StrategyFamily,
+                TradeIntent,
+                execute_trade_intent,
+            )
+        except Exception as exc:
+            return False, None, None, f"router import failed: {exc}"
+
+        try:
+            intent = TradeIntent(
+                strategy=f"TACTICAL_{signal.strategy_name}",
+                symbol=signal.symbol,
+                action=signal.side,
+                instrument_type="EQUITY",
+                entry_price=signal.entry_price,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.target,
+                # The composite score IS the confidence, and it is genuinely
+                # computed — the gate rejects anything not marked CALCULATED,
+                # and a hardcoded number would be a lie in the audit trail.
+                confidence=float(composite),
+                confidence_source=ConfidenceSource.CALCULATED,
+                strategy_family=StrategyFamily.TACTICAL,
+                # No event to be direct or second-order about.
+                event_directness=EventDirectness.NOT_APPLICABLE,
+                # Pass our own sizing through so the gate does not re-derive a
+                # size that ignores the tactical bucket.
+                position_size_hint={
+                    "units": sizing.quantity,
+                    "usd_value": sizing.notional,
+                },
+                product="MIS" if signal.sub_pipeline == "F1" else "CNC",
+            )
+        except Exception as exc:
+            return False, None, None, f"intent build failed: {exc}"
+
+        try:
+            outcome = await execute_trade_intent(intent, session)
+        except Exception as exc:
+            logger.error(f"[TACTICAL] routing error for {signal.symbol}: {exc}")
+            return False, None, None, f"routing error: {exc}"
+
+        ok = outcome.outcome in (RoutingOutcome.EXECUTED_PAPER, RoutingOutcome.EXECUTED_LIVE)
+        if ok:
+            logger.info(
+                f"[TACTICAL] EXECUTED {signal.symbol} {signal.side} qty={sizing.quantity} "
+                f"strategy={signal.strategy_name} outcome={outcome.outcome.value} "
+                f"order={outcome.order_id}"
+            )
+        else:
+            logger.info(
+                f"[TACTICAL] REJECTED {signal.symbol} {signal.side} "
+                f"outcome={outcome.outcome.value} reason={outcome.reason}"
+            )
+        return ok, outcome.order_id, outcome.outcome.value, outcome.reason or ""
+
     async def _persist(
         self,
         signal: Signal,
@@ -307,9 +388,36 @@ class TacticalExecutor:
         if not would_trade:
             result.skipped += 1
 
-        # Shadow mode: the reason column always records the shadow notice, so a
-        # row can never be misread as "this executed".
-        reason_text = SHADOW_REASON if would_trade else f"{SHADOW_REASON} | blocked: {'; '.join(reasons)}"
+        # ── Execution (Phase 2) ─────────────────────────────────────────────
+        # Only a signal that cleared EVERY local check is offered to the central
+        # gate, which then applies the same market-hours / confidence-provenance
+        # / 12-check risk validation every other family gets. Path F's own risk
+        # bucket is an ADDITIONAL cap, not a replacement for that.
+        executed = False
+        executed_at = None
+        order_ref = None
+        routing_outcome = None
+        exec_note = ""
+
+        if would_trade and _execution_enabled():
+            executed, order_ref, routing_outcome, exec_note = await self._execute(
+                signal, composite, sizing, session
+            )
+            if not executed:
+                result.skipped += 1
+                reasons.append(exec_note)
+            else:
+                executed_at = datetime.now()
+
+        # The reason column must never let a row be misread. In shadow mode it
+        # carries the shadow notice; with execution on it carries the router's
+        # verdict instead.
+        if not _execution_enabled():
+            reason_text = SHADOW_REASON if would_trade else f"{SHADOW_REASON} | blocked: {'; '.join(reasons)}"
+        elif executed:
+            reason_text = f"executed via central gate ({routing_outcome})"
+        else:
+            reason_text = f"not executed | {'; '.join(reasons) or exec_note}"
 
         session.add(
             TacticalSignal(
@@ -325,7 +433,10 @@ class TacticalExecutor:
                 ml_prob=ml_prob,
                 quantity=sizing.quantity if sizing.approved else 0,
                 risk_amount=sizing.risk_amount,
-                executed=False,          # invariant in Phase 1
+                executed=executed,
+                executed_at=executed_at,
+                order_ref=order_ref,
+                routing_outcome=routing_outcome,
                 reason=reason_text,
                 meta_json={
                     "meta": signal.meta,

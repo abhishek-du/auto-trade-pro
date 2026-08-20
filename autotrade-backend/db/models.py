@@ -1750,6 +1750,12 @@ class TacticalSignal(Base):
     reason:        Mapped[str | None] = mapped_column(Text, nullable=True)
     meta_json:     Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    # Phase 2 (2026-08-20): execution audit trail. Null while the pipeline runs
+    # with TACTICAL_EXECUTION_ENABLED=False, so a null here is meaningful —
+    # it says "never reached the router", not "router said no".
+    executed_at:   Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    order_ref:     Mapped[str | None] = mapped_column(String(40), nullable=True)
+    routing_outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return (

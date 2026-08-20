@@ -121,6 +121,23 @@ class StrategyFamily(str, Enum):
     # resolvable event_id, so the invariant holds without this family-
     # specific router check.
     DIRECT_NEWS  = "DIRECT_NEWS"
+    # TACTICAL (Phase 2, 2026-08-20): the Path F tactical pipeline — intraday
+    # momentum and mean reversion originating from technical conditions with no
+    # news event.
+    #
+    # This is a DELIBERATE, CONTRACT-AMENDING addition, not an oversight. Until
+    # today the contract permitted no event-less automatic originator at all
+    # (§1 line 49, §6 line 281, §10 line 347). Path F ran shadow-only for
+    # exactly that reason. §6 and §10 of
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md were amended in the same
+    # commit that added this member — if you are reading this and the contract
+    # does NOT list TACTICAL, the two have drifted and the code is wrong.
+    #
+    # Unlike PRE_EVENT and DIRECT_NEWS, TACTICAL is not event-anchored, so it
+    # carries its own risk bucket (2% of capital/day, 0.5% per trade, enforced
+    # in Redis by engine/tactical_risk.py) rather than relying on event
+    # materiality as its brake.
+    TACTICAL     = "TACTICAL"
 
 
 @dataclass
@@ -608,6 +625,46 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
             result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
                                     metadata={"strategy": intent.strategy})
             logger.warning(f"[execution_gate] BLOCKED (pre-event live gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+    if intent.strategy_family == StrategyFamily.TACTICAL:
+        # Explicit branch rather than relying on "nothing blocks it".
+        #
+        # Every family check in this function is an `==` test against one
+        # member, so a new enum member is ALLOWED BY DEFAULT — adding
+        # StrategyFamily.TACTICAL alone was already enough to make it execute.
+        # That is too quiet for a family the contract forbade until today, so
+        # the authority is stated here where a reader looking for "can TACTICAL
+        # trade?" will actually find it.
+        #
+        # The enabled flag is read from RuntimeConfig (DB-backed) with the .env
+        # value as the fallback, so it doubles as an instant cross-process kill
+        # switch: no restart, and unlike settings.AGENT_ENABLED (audit D4) it is
+        # actually visible to the Celery worker.
+        _tactical_on = settings.TACTICAL_EXECUTION_ENABLED
+        try:
+            from utils.runtime_config import RuntimeConfig
+            _cfg = await RuntimeConfig.load(session)
+            _tactical_on = bool(getattr(_cfg, "tactical_execution_enabled", _tactical_on))
+        except Exception as exc:
+            logger.debug(f"[execution_gate] tactical runtime flag unreadable ({exc}) — using .env")
+
+        if not _tactical_on:
+            reason = "Tactical execution disabled (TACTICAL_EXECUTION_ENABLED=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_DISABLED, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.info(f"[execution_gate] BLOCKED (tactical master switch) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+        if mode == TradeMode.LIVE and not settings.TACTICAL_LIVE_TRADING:
+            # Paper is the only sanctioned mode for Path F until it has a track
+            # record — see the contract amendment's 7-day condition.
+            reason = "Tactical live trading disabled (TACTICAL_LIVE_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (tactical live gate) {intent.symbol} strategy={intent.strategy}")
             await _log_intent_audit(intent, mode, result, session)
             return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
