@@ -286,6 +286,13 @@ class Settings(BaseSettings):
     TACTICAL_MIN_COMPOSITE_SCORE: float = 50.0
     TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 15
     TACTICAL_TOP_N:               int   = 5
+    # Fast candle lane (audit blocker 3). Builds 1m bars from the live tick
+    # stream so F1 stops computing indicators on 20-40 minute old DB bars.
+    # Runs in the uvicorn process (where LIVE_TICKS lives) and publishes to
+    # Redis for the Celery worker to read.
+    TACTICAL_FAST_CANDLE_ENABLED:      bool = True
+    TACTICAL_FAST_CANDLE_INTERVAL_SEC: int  = 5     # sampling cadence
+    TACTICAL_FAST_CANDLE_MAX_AGE_MIN:  int  = 2     # freshness bar for the fast path
 
     # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
     # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.

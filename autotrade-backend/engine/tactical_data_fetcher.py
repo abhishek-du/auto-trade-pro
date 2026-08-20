@@ -25,6 +25,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.price_feed import get_latest_candles
+from utils import config as settings_mod_pkg
+from utils.config import settings as settings_mod
 from db.models import HubUniverse
 from utils.logger import logger
 
@@ -154,6 +156,30 @@ async def get_candles_df(
         return None
 
     if not rows or len(rows) < 5:
+        rows = []
+
+    # ── Fast lane: splice in tick-built bars before judging freshness ────────
+    # Order matters. The DB's newest 1m bar can be 20-40 minutes old, so if the
+    # staleness check ran first it would reject the frame and the fast bars
+    # would never get a chance to rescue it — which is exactly the state the
+    # audit found F1 in. Merge first, then judge the merged frame.
+    fast_used = False
+    if (
+        timeframe == "1m"
+        and before is None
+        and bool(getattr(settings_mod, "TACTICAL_FAST_CANDLE_ENABLED", True))
+    ):
+        db_df = _rows_to_df(rows) if rows else None
+        merged = await _merge_fast_candles(symbol, db_df)
+        if merged is not None and len(merged) >= 5:
+            newest = merged["timestamp"].max()
+            age_min = (datetime.utcnow() - pd.Timestamp(newest).to_pydatetime()).total_seconds() / 60.0
+            fast_limit = float(getattr(settings_mod, "TACTICAL_FAST_CANDLE_MAX_AGE_MIN", 2))
+            if age_min <= max(fast_limit, MAX_BAR_AGE_MIN.get("1m", 30)):
+                return merged
+            fast_used = True
+
+    if not rows:
         return None
 
     # Fail CLOSED on a stale feed (same posture as the D3 price fix).
@@ -182,9 +208,17 @@ async def get_candles_df(
                 )
                 return None
 
-    # get_latest_candles returns NEWEST-first; indicators need oldest-first.
+    return _rows_to_df(rows)
+
+
+def _rows_to_df(rows) -> pd.DataFrame:
+    """ORM rows (NEWEST-first, as get_latest_candles returns them) -> oldest-first frame.
+
+    The reversal happens here and nowhere else; every indicator in the codebase
+    expects oldest-first, and getting it backwards silently inverts every trend.
+    """
     rows = list(reversed(rows))
-    df = pd.DataFrame(
+    return pd.DataFrame(
         {
             "open": [r.open for r in rows],
             "high": [r.high for r in rows],
@@ -194,7 +228,48 @@ async def get_candles_df(
             "timestamp": [r.timestamp for r in rows],
         }
     )
-    return df
+
+
+async def _merge_fast_candles(symbol: str, df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Append tick-built 1m bars that the DB has not caught up to yet.
+
+    The DB path lags 15-40 minutes, so the recent bars are MISSING, not merely
+    stale — replacing only the last row would not close that. This concatenates
+    every fast bar newer than the DB's newest, deduplicated on timestamp with
+    the DB winning (it is the authoritative aggregate; the fast bar is a
+    5-second-sampled approximation, see crawler/live_candle_builder.py).
+    """
+    from crawler.live_candle_builder import read_fast_candles
+
+    fast = await read_fast_candles(symbol)
+    if not fast:
+        return df
+
+    fdf = pd.DataFrame(fast)
+    if fdf.empty or "timestamp" not in fdf:
+        return df
+    fdf["timestamp"] = pd.to_datetime(fdf["timestamp"])
+    fdf = fdf[["open", "high", "low", "close", "volume", "timestamp"]]
+
+    if df is None or df.empty:
+        return fdf.sort_values("timestamp").reset_index(drop=True)
+
+    newest_db = pd.to_datetime(df["timestamp"]).max()
+    fresh = fdf[fdf["timestamp"] > newest_db]
+    if fresh.empty:
+        return df
+
+    merged = pd.concat([df, fresh], ignore_index=True)
+    merged["timestamp"] = pd.to_datetime(merged["timestamp"])
+    merged = (
+        merged.drop_duplicates(subset="timestamp", keep="first")   # DB wins
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    logger.debug(
+        f"[tactical] {symbol}: merged {len(fresh)} fast bar(s) onto {len(df)} DB bars"
+    )
+    return merged
 
 
 async def get_live_price(symbol: str) -> float | None:
