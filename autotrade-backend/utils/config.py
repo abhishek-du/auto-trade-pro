@@ -267,6 +267,26 @@ class Settings(BaseSettings):
     ZERODHA_ACCESS_TOKEN:  str  = ""
     ZERODHA_REQUEST_TOKEN: str  = ""
     ZERODHA_REDIRECT_URL:  str  = "http://localhost:8000/api/v1/zerodha/callback"
+    # ── Path F — Tactical pipeline (shadow mode) ──────────────────────────────
+    # An independent technical-signal pipeline (ORB/VWAP/pivots/mean-reversion).
+    # It runs in SHADOW mode: signals are scored, sized and written to
+    # tactical_signals, but nothing is executed — Path F has no execution code
+    # path at all. See engine/tactical_executor.py and README_TACTICAL.md.
+    # TACTICAL_EXECUTION_MODE only accepts "shadow" in Phase 1; anything else
+    # raises, rather than silently shadow-running when execution was expected.
+    TACTICAL_PIPELINE_ENABLED:    bool  = True
+    TACTICAL_EXECUTION_MODE:      str   = "shadow"
+    TACTICAL_CAPITAL:             float = 500_000.0
+    TACTICAL_MAX_TOTAL_RISK:      float = 0.02    # 2% of capital, whole bucket
+    TACTICAL_MAX_PER_TRADE_RISK:  float = 0.005   # 0.5% per trade
+    TACTICAL_VIX_THRESHOLD:       float = 25.0
+    TACTICAL_VIX_SIZE_SCALE:      float = 0.5     # halve size above the threshold
+    TACTICAL_F1_UNIVERSE_SIZE:    int   = 50      # top-N by hub_universe turnover rank
+    TACTICAL_F4_UNIVERSE_SIZE:    int   = 150     # 5m data covers ~1,250 symbols
+    TACTICAL_MIN_COMPOSITE_SCORE: float = 50.0
+    TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 15
+    TACTICAL_TOP_N:               int   = 5
+
     # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
     # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.
     # Before this there was no limiter at all while five producers hit /quote

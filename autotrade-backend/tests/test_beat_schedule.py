@@ -30,9 +30,13 @@ class TestBeatSchedule:
     def test_every_scheduled_task_is_registered(self):
         """The general form of D9 — no beat entry may name a task that
         does not exist, whatever it is called."""
-        import tasks.india_tasks  # noqa: F401  — registers the bulk of the tasks
-        import tasks.market_scan, tasks.market_scanner, tasks.news_scan  # noqa: F401
-        import tasks.narrative_scan, tasks.price_cache, tasks.pre_diagnose  # noqa: F401
+        # Import whatever celery_app declares in `include`, rather than a
+        # hardcoded list — otherwise adding a task module (e.g. Path F's
+        # tactical tasks) makes this test fail for the wrong reason.
+        import importlib
+
+        for module in celery_app.conf.include or ():
+            importlib.import_module(module)
 
         registered = set(celery_app.tasks)
         missing = {

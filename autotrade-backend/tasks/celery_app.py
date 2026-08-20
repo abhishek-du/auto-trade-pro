@@ -37,6 +37,7 @@ celery_app = Celery(
         "tasks.india_tasks",
         "tasks.market_scanner",
         "tasks.pre_diagnose",
+        "tasks.tactical_tasks",
     ],
 )
 
@@ -120,6 +121,20 @@ celery_app.conf.beat_schedule = {
     "weekend-reflection-loop": {
         "task":     "tasks.india_weekend_reflection",
         "schedule": crontab(day_of_week="saturday", hour=5, minute=30),
+    },
+
+    # ── Path F · Tactical pipeline (SHADOW MODE — opens no positions) ────────
+    # hour="3-10" UTC == 09:15-15:30 IST. Celery runs on timezone=UTC, so an
+    # IST-looking hour range here would fire in the evening and never during
+    # the session.
+    # F1 every minute on 1m candles; F4 every 5 min on 5m candles.
+    "tactical-intraday-1min": {
+        "task":     "tasks.tactical_tasks.run_tactical_intraday",
+        "schedule": crontab(minute="*", hour="3-10", day_of_week="1-5"),
+    },
+    "tactical-meanrev-5min": {
+        "task":     "tasks.tactical_tasks.run_tactical_mean_reversion",
+        "schedule": crontab(minute="*/5", hour="3-10", day_of_week="1-5"),
     },
 
     # NOTE (D9, audit 2026-08-19): three F&O beat entries were removed here —
