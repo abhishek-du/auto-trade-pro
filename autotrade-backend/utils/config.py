@@ -288,6 +288,23 @@ class Settings(BaseSettings):
     # engine out of a 16% sector move. MIN_TICKERS is 2, not the 3 originally
     # proposed, because MEASURED extraction on those stories produced at most 2
     # tickers per headline -- a 3 floor fires on none of them.
+    # ── News-Only architecture switches (owner decision 2026-08-20) ──────────
+    # Both were HARDCODED True since the News-Only pivot and are now flags, so
+    # they can be re-blocked without a deploy. Contract SS10b records the change.
+    #
+    # Defaults stay True -- a fresh checkout is still News-Only. The paper run
+    # enables them in .env.
+    #
+    # CONSEQUENCE, stated plainly: with these False, `NO EVENT -> NO TRADE` no
+    # longer holds for StrategyFamily.TECHNICAL. Those trades carry no canonical
+    # event and no per-family daily risk bucket -- only validate_signal's 12
+    # checks, market hours, MAX_PORTFOLIO_RISK and MAX_OPEN_POSITIONS.
+    TECHNICAL_ORIGINATION_BLOCKED: bool = True
+    NEWS_ONLY_BLOCKS_HUB_ENTRIES:  bool = True
+    # Shortlist size feeding india_trade_loop. Was 100; raised on 2026-08-20 now
+    # that TECHNICAL intents can actually execute (at 100 with the block on, the
+    # extra scanning was pure CPU cost for zero trades).
+    MARKET_SCANNER_TOP_N:          int  = 500
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
     NEWS_SECTOR_MIN_SCORE:        float = 0.7

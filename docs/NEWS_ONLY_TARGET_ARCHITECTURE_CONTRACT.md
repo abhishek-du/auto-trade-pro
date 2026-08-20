@@ -467,6 +467,57 @@ instruction, in the same commit that added `StrategyFamily.TACTICAL` and wired
 `engine/tactical_executor.py` to the gate. `tests/test_tactical_execution_gate.py`
 asserts this document and the code cannot silently drift apart.*
 
+### §10b — Amendment: TECHNICAL origination re-enabled (2026-08-20)
+
+**This amendment reverses the central premise of this document.** §1, §5, §6 and
+§10 were written to make technical origination impossible; §10b makes it
+possible again. Where they conflict for `StrategyFamily.TECHNICAL`, this clause
+governs. Nothing here is a loophole in the earlier text — it is a deliberate
+replacement of it, made by the repository owner on 2026-08-20.
+
+**What changed.** Two hardcoded constants became settings, both still defaulting
+to `True` so a fresh checkout stays News-Only:
+
+| Flag | Was | `.env` now | Effect when `False` |
+|---|---|---|---|
+| `TECHNICAL_ORIGINATION_BLOCKED` | hardcoded `True` (`decision_router.py`) | `false` | a `TECHNICAL` intent reaches `route_decision` |
+| `NEWS_ONLY_BLOCKS_HUB_ENTRIES` | hardcoded `True` (`india_tasks.py` ×2) | `false` | `india_trade_loop` and `intraday_entry` originate again |
+
+`MARKET_SCANNER_TOP_N` was raised 100 → 500 at the same time. That was pointless
+while the blocks were on — the extra scanning produced intents that were all
+rejected — and is only defensible now that they execute.
+
+**What this costs, stated plainly.** `_verify_canonical_event` short-circuits
+for every non-`EVENT_DRIVEN` family, so **`NO EVENT → NO TRADE` no longer holds
+for `TECHNICAL`.** The global invariant in §5 is now false as written. A
+TECHNICAL trade traces to no `CausalEvent.id`, and performance data will pool
+news-driven and technical trades unless queries separate them by
+`strategy_family`.
+
+`TECHNICAL` also has **no per-family daily risk bucket**, unlike `TACTICAL`'s 2%
+/ 0.5% in §10a condition 3. It is therefore the *least* constrained originator
+in the system, not the most. What still applies to it:
+
+- NSE market-hours gate
+- confidence provenance (`CALCULATED` only)
+- the 12-check `validate_signal`, including R:R ≥ 2.0 and the 5% notional cap
+- `MAX_PORTFOLIO_RISK` 15% and `MAX_OPEN_POSITIONS` 125
+- `PAPER_MODE=true` — paper only
+
+**Reversibility.** Both flags are readable from `.env` *and* from
+`RuntimeConfig("technical_origination_blocked")`, which re-blocks every process
+instantly with no restart — the property `api/agent.py`'s in-process kill switch
+lacks (audit D4).
+
+**Why the paper run must be read differently now.** The Path F evaluation was
+scoped to measure `TACTICAL`. With TECHNICAL also live, the book contains two
+un-separated populations. Any P&L review must group by `strategy_family` or it
+measures nothing about either.
+
+*Amended 2026-08-20 by Claude Opus 5 at the repository owner's explicit and
+repeated instruction. The engineering advice on record was that this widens the
+least-constrained path in the system; the decision to proceed is the owner's.*
+
 ## 11. What This Contract Deliberately Does Not Decide Yet
 
 - The exact numeric weights/formula for §4b's four factors — flagged as new work, not specified here, since specifying it without building `causal_relationship_strength`/`company_exposure` first would be premature.

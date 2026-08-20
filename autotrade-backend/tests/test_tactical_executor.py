@@ -125,7 +125,7 @@ class TestScanPersistsSignals:
         with patch("engine.tactical_executor.in_entry_window", return_value=True), \
              patch("engine.tactical_executor.get_market_context",
                    AsyncMock(return_value=MarketContext())), \
-             patch("engine.tactical_executor.get_universe", AsyncMock(return_value=[])):
+             patch("engine.tactical_executor.get_f1_universe", AsyncMock(return_value=[])):
             out = await TacticalExecutor().run_intraday_scan(_session())
         assert out["reason"] == "empty universe"
 

@@ -79,6 +79,7 @@ _KNOWN_KEYS: dict[str, type] = {
     "trading_halted":          bool,
     # Path F kill switch — DB-backed so it crosses the process boundary.
     "tactical_execution_enabled": bool,
+    "technical_origination_blocked": bool,
     # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
     # entries are blocked after a shock FLATTEN. Cleared automatically once past.
     "shock_cooldown_until":    str,
@@ -279,6 +280,17 @@ class RuntimeConfig:
         return bool(self._get("tactical_execution_enabled",
                               getattr(settings, "TACTICAL_EXECUTION_ENABLED", False)))
 
+
+    @property
+    def technical_origination_blocked(self) -> bool:
+        """Cross-process kill switch for TECHNICAL origination (contract SS10b).
+
+        Defaults to the .env value, so leaving this unset in the DB keeps
+        whatever the deployment chose. Setting it True in RuntimeConfig
+        re-blocks every process instantly, without a restart.
+        """
+        return bool(self._get("technical_origination_blocked",
+                              getattr(settings, "TECHNICAL_ORIGINATION_BLOCKED", True)))
     @property
     def shock_cooldown_active(self) -> bool:
         """True while a market-shock FLATTEN cooldown is still in effect."""
@@ -320,4 +332,5 @@ class RuntimeConfig:
             "intraday_enabled":            self.intraday_enabled,
             "trading_halted":              self.trading_halted,
             "tactical_execution_enabled":  self.tactical_execution_enabled,
+            "technical_origination_blocked": self.technical_origination_blocked,
         }

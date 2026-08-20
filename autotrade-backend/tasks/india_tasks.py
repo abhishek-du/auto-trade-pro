@@ -579,7 +579,10 @@ async def _india_trade_loop():
         #
         # Exit/risk management above (Step 1 auto-close, dynamic SL/TP, circuit
         # breaker) runs unconditionally either way and is unaffected.
-        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+        # Owner decision 2026-08-20 (contract SS10b): hub entries re-enabled.
+        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
+            getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
+        )
         if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window:
             logger.info(
                 "[india_trade_loop] new-entry origination disabled — News-Only architecture "
@@ -1744,7 +1747,9 @@ async def _intraday_entry_task():
     # run_master_intelligence_cycle). FORBIDDEN in full under the News-Only
     # architecture. Hardcoded, not a settings flag, so it can't be silently
     # re-enabled by flipping an unrelated config value.
-    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
+        getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
+    )
     if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
         logger.info(
             "[intraday_entry] disabled — News-Only architecture hard-block "

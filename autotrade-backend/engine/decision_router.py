@@ -600,7 +600,29 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     # SL/TP placement, position sizing, risk validation, and market context for
     # EVENT_DRIVEN candidates. It may no longer independently create, authorize,
     # or execute a trade of its own.
-    _TECHNICAL_TRADE_ORIGINATION_BLOCKED = True
+    # UNBLOCKED 2026-08-20 by owner decision; see contract SS10b.
+    # Was hardcoded True since the News-Only pivot. Now a setting so it can be
+    # re-blocked instantly without a deploy, and so a RuntimeConfig kill switch
+    # can reach it across processes.
+    #
+    # WHAT THIS COSTS: a TECHNICAL intent has NO canonical-event requirement --
+    # _verify_canonical_event short-circuits for every non-EVENT_DRIVEN family --
+    # so `NO EVENT -> NO TRADE` no longer holds for this family. It also has NO
+    # per-family daily risk bucket, unlike TACTICAL's 2%/day. What still applies:
+    # market hours, confidence provenance, the 12-check validate_signal (R:R 2.0,
+    # 5% notional cap), MAX_PORTFOLIO_RISK 15% and MAX_OPEN_POSITIONS 125.
+    _TECHNICAL_TRADE_ORIGINATION_BLOCKED = bool(
+        getattr(settings, "TECHNICAL_ORIGINATION_BLOCKED", True)
+    )
+    try:
+        from utils.runtime_config import RuntimeConfig as _RC
+        _rc = await _RC.load(session)
+        _TECHNICAL_TRADE_ORIGINATION_BLOCKED = bool(
+            getattr(_rc, "technical_origination_blocked",
+                    _TECHNICAL_TRADE_ORIGINATION_BLOCKED)
+        )
+    except Exception as _exc:
+        logger.debug(f"[execution_gate] technical runtime flag unreadable ({_exc}) — using .env")
     if _TECHNICAL_TRADE_ORIGINATION_BLOCKED and intent.strategy_family == StrategyFamily.TECHNICAL:
         reason = (
             "TECHNICAL strategy_family trade origination is hard-blocked — the system is "
