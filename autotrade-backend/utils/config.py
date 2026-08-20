@@ -310,6 +310,13 @@ class Settings(BaseSettings):
     # that TECHNICAL intents can actually execute (at 100 with the block on, the
     # extra scanning was pure CPU cost for zero trades).
     MARKET_SCANNER_TOP_N:          int  = 500
+    # P0 fix 2026-08-20: derive the news trade side from the LLM classification
+    # instead of the keyword heuristic. Measured: the two disagreed on 106 of 428
+    # Direct-News evaluations (24.8%) in one session, and ZERO SELL trades ever
+    # reached the execution gate because bearish headlines without one of four
+    # keywords defaulted to BUY and then contradicted their own classification.
+    # Flag exists so the old behaviour can be restored without a deploy.
+    NEWS_SIDE_FROM_CLASSIFIER:    bool  = True
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
     NEWS_SECTOR_MIN_SCORE:        float = 0.7

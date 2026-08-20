@@ -1140,6 +1140,46 @@ async def process_ticker(ticker, side, headline, summary):
         logger.info(f"[news_engine] {ticker}: no canonical event — skipping (no LLM call)")
         return False
 
+    # ── P0 (2026-08-20): trust the CLASSIFIER for direction, not the keyword guess ──
+    #
+    # `side` arrives here from a crude keyword heuristic. There are three such
+    # sites and they all default to BUY:
+    #   :1395  side = "SELL" if any(w in headline for w in
+    #                              ['plunge','crash','loss','down']) else "BUY"
+    #   :1470  same shape against _ANNOUNCEMENT_BEARISH_KEYWORDS
+    #   :947   ditto
+    # Meanwhile `_build_evidence` has just produced a real LLM classification.
+    # The two disagreed on 106 of 428 Direct-News evaluations on 2026-08-20
+    # (24.8%), and `direct_news_strategy:198` fails closed on disagreement — so
+    # a quarter of all classified news was discarded, and NOT ONE SELL ever
+    # reached the execution gate: every bearish headline without one of those
+    # four words defaulted to BUY and then contradicted its own classification.
+    #
+    # Correcting it HERE rather than at the three call sites fixes all of them at
+    # once, and does it after the classification exists — which is the only point
+    # where the true direction is actually known.
+    #
+    # `cand` and `dec` were built with the stale side, so both are re-pointed;
+    # `dec.action` is what the LLM debate argues for and what the executed intent
+    # inherits, so leaving it stale would ask the LLM to defend the wrong trade.
+    #
+    # NEUTRAL/unknown classifications are left alone: there is no direction to
+    # take, and the downstream gate will reject them anyway.
+    from utils.config import settings as _cfg_mod   # module-scope import is local-only here
+
+    if bool(getattr(_cfg_mod, "NEWS_SIDE_FROM_CLASSIFIER", True)):
+        _dir = (getattr(cand.evidence, "direction", "") or "").upper()
+        if _dir in ("BULLISH", "BEARISH"):
+            _correct = "BUY" if _dir == "BULLISH" else "SELL"
+            if _correct != side:
+                logger.info(
+                    f"[news_engine] {ticker}: side corrected {side} -> {_correct} "
+                    f"(classifier says {_dir}; keyword heuristic was wrong)"
+                )
+                side = _correct
+                cand.side = _correct
+                dec.action = _correct
+
     # Direct News strategy (2026-07-27) — fires on the SAME classified evidence,
     # completely independent of the LLM debate below. Never blocks on it, never
     # blocked by it; any failure here is swallowed internally and can't affect
