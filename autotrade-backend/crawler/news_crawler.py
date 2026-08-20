@@ -23,6 +23,7 @@ from functools import lru_cache
 
 import httpx
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import NewsItem
@@ -1538,22 +1539,58 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
     # ── Persist to DB ─────────────────────────────────────────────────────────
     total_saved = 0
+    _dupes_skipped = 0          # suppressed by uq_news_items_headline_day
     broadcast_payloads: list[dict] = []
     for _p in prepared:
         item, sent = _p["item"], _p["sent"]
         tickers, metadata_dict = _p["tickers"], _p["metadata"]
 
-        row = NewsItem(
-            headline=item["headline"],
-            source=item["source"],
-            url=item.get("url"),
-            sentiment=sent["sentiment"],
-            score=sent["score"],
-            tickers_affected=tickers or None,
-            news_metadata=metadata_dict,
-            published_at=item.get("published_at"),
+        # INSERT ... ON CONFLICT DO NOTHING instead of an ORM add (2026-08-20).
+        #
+        # WHY: 82% of one day's news_items rows were redundant -- 2,371 rows for
+        # 418 unique headlines. Feeds re-serve the same story every crawl cycle
+        # and `seen_urls` only dedups WITHIN a single run, so every cycle
+        # re-inserted the lot. Downstream STALE checks caught it (212 rejections
+        # in one session) but only after the LLM budget and log volume were
+        # already spent.
+        #
+        # The guarantee now lives in the DB: partial unique index
+        # `uq_news_items_headline_day` on (md5(headline), COALESCE(published_at,
+        # crawled_at)::date). Two deliberate details:
+        #   - md5(headline), not headline: btree caps a key near 2704 bytes and
+        #     headlines are TEXT (819 chars seen). Hashing removes that cliff.
+        #   - COALESCE(..., crawled_at): published_at is NULLABLE (820 NULLs in
+        #     history) and Postgres treats NULLs as distinct, so keying on it
+        #     alone would let exactly those rows keep duplicating.
+        # The index is PARTIAL (crawled_at >= 2026-08-21) so it constrains new
+        # rows only -- 14,105 historical duplicates are left untouched, and 685
+        # of them are referenced by causal_events.news_id under an ON DELETE NO
+        # ACTION foreign key, so deleting them would have failed outright.
+        #
+        # Bare on_conflict_do_nothing() (no index inference) is used on purpose:
+        # inferring a PARTIAL expression index requires restating the exact
+        # predicate, which silently stops matching the day the index changes.
+        stmt = (
+            pg_insert(NewsItem.__table__)
+            .values(
+                headline=item["headline"],
+                source=item["source"],
+                url=item.get("url"),
+                sentiment=sent["sentiment"],
+                score=sent["score"],
+                tickers_affected=tickers or None,
+                news_metadata=metadata_dict,
+                published_at=item.get("published_at"),
+            )
+            .on_conflict_do_nothing()
+            .returning(NewsItem.__table__.c.id)
         )
-        session.add(row)
+        _inserted_id = (await session.execute(stmt)).scalar()
+        if _inserted_id is None:
+            # Already stored this cycle/day -- skip the WS broadcast too, or the
+            # UI would show the same headline again on every crawl.
+            _dupes_skipped += 1
+            continue
         total_saved += 1
         # Payload mirrors NewsItemOut so the WS listener can drop straight
         # into the same React state shape that GET /api/v1/news/ returns.
@@ -1581,6 +1618,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # independent of whether downstream trade evaluation succeeds, and this way
     # a failure in that tail can no longer roll back the whole crawl's news.
     await session.commit()
+
+    if _dupes_skipped:
+        logger.info(
+            f"[news] dedup: {_dupes_skipped} duplicate headline(s) suppressed at insert, "
+            f"{total_saved} new row(s) stored"
+        )
 
     # ── Strategy #5: Event-Driven Arbitrage (News Flash) ──────────────────────
     try:
