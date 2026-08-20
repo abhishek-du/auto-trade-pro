@@ -518,6 +518,52 @@ measures nothing about either.
 repeated instruction. The engineering advice on record was that this widens the
 least-constrained path in the system; the decision to proceed is the owner's.*
 
+### §10c — Amendment: TACTICAL daily risk bucket disabled (2026-08-20)
+
+§10a condition 3 made "its own risk bucket — **2% of capital per day, 0.5% per
+trade**, enforced per trading day in Redis and failing closed" a **cumulative
+condition** of TACTICAL being permitted to originate at all. The owner has
+disabled that bucket. **Condition 3 is therefore revoked, not merely retuned**,
+and this clause records what replaces it: nothing.
+
+| | §10a as written | Now |
+|---|---|---|
+| Daily tactical risk cap | 2% of capital (₹10,000) | **none** |
+| Per-trade sizing basis | 0.5% (₹2,500) | 0.5% — retained, see below |
+| Flag | — | `TACTICAL_RISK_BUCKET_ENABLED=false` (code default `true`) |
+
+**Per-trade risk is retained because it is not a cap.** `TACTICAL_MAX_PER_TRADE_RISK`
+is the *sizing basis* — `quantity = (capital × 0.5%) / stop_distance`. Removing
+it would not loosen a limit; it would leave the pipeline with no way to compute
+a position size at all. It therefore stays.
+
+**What still constrains the tactical path:**
+
+- `MAX_PORTFOLIO_RISK` — 15% of equity summed across all open positions
+- `MAX_OPEN_POSITIONS` — 125 (a runaway-loop guard, not a capital limiter)
+- the 10% per-position notional cap from §10a condition 4
+- the 3-consecutive-stop cooldown — now the **only loss-reactive control** in
+  the path
+
+**What no longer constrains it:** the number of trades per day, and the total
+risk committed per day. Both are unbounded until the portfolio-level cap binds.
+
+Risk is still written to Redis under `tactical:risk:{date}` when the cap is off,
+so the daily summary keeps reporting what was committed and re-enabling the cap
+does not start from a blank slate.
+
+**Consequence for the paper run.** §10a condition 5 requires 7 paper days before
+live is discussed. That evaluation was designed around a bounded-risk system. A
+run with no daily cap measures a different system than the one §10a describes,
+so its P&L cannot by itself support a live decision — the cap would have to be
+restored and re-measured first.
+
+*Amended 2026-08-20 by Claude Opus 5 at the repository owner's explicit
+instruction, after the owner was shown that this revokes §10a condition 3 and
+was offered two bounded alternatives (₹25,000/day and ₹50,000/day). The
+engineering advice on record was to keep a bounded cap; the decision to remove
+it is the owner's.*
+
 ## 11. What This Contract Deliberately Does Not Decide Yet
 
 - The exact numeric weights/formula for §4b's four factors — flagged as new work, not specified here, since specifying it without building `causal_relationship_strength`/`company_exposure` first would be premature.

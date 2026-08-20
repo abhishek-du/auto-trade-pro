@@ -78,6 +78,10 @@ class TacticalRiskManager:
     def __init__(self, capital: float | None = None) -> None:
         self.capital = float(capital if capital is not None else _cfg("TACTICAL_CAPITAL", 500_000.0))
         self.max_total_risk = float(_cfg("TACTICAL_MAX_TOTAL_RISK", 0.02))
+        # False => no daily cap at all (contract SS10c). The budget value above
+        # is still computed and reported so the summary keeps showing what the
+        # day would have consumed against the old 2% line.
+        self.bucket_enabled = bool(_cfg("TACTICAL_RISK_BUCKET_ENABLED", True))
         self.max_per_trade_risk = float(_cfg("TACTICAL_MAX_PER_TRADE_RISK", 0.005))
         self.vix_threshold = float(_cfg("TACTICAL_VIX_THRESHOLD", 25.0))
         self.vix_scale = float(_cfg("TACTICAL_VIX_SIZE_SCALE", 0.5))
@@ -247,14 +251,31 @@ class TacticalRiskManager:
 
         actual_risk = quantity * risk_per_unit
 
-        remaining = max(0.0, self.total_risk_budget - already_committed)
-        if actual_risk > remaining:
-            return SizingDecision(
-                False, 0, actual_risk,
-                f"would exceed tactical bucket: {actual_risk:.0f} > "
-                f"{remaining:.0f} remaining of {self.total_risk_budget:.0f} "
-                f"(committed today: {already_committed:.0f})",
-            )
+        # ── daily bucket ─────────────────────────────────────────────────────
+        # DISABLED by owner decision 2026-08-20 (contract SS10c). This was the
+        # PRIMARY brake on Path F and the stated basis for SS10a condition 3,
+        # which is why turning it off required amending the contract rather than
+        # editing a number.
+        #
+        # With this off, nothing caps how much risk the tactical pipeline
+        # commits in a day. The only remaining limits are portfolio-level and
+        # per-position: MAX_PORTFOLIO_RISK (15% of equity across all open
+        # positions), MAX_OPEN_POSITIONS (125), and the 10% notional cap above.
+        # The 3-consecutive-stop cooldown still applies and is now the only
+        # loss-reactive control in the path.
+        #
+        # Risk is still COMMITTED to Redis when enabled=False, so the daily
+        # total stays observable in the summary and re-enabling the cap does not
+        # start from a blank slate.
+        if self.bucket_enabled:
+            remaining = max(0.0, self.total_risk_budget - already_committed)
+            if actual_risk > remaining:
+                return SizingDecision(
+                    False, 0, actual_risk,
+                    f"would exceed tactical bucket: {actual_risk:.0f} > "
+                    f"{remaining:.0f} remaining of {self.total_risk_budget:.0f} "
+                    f"(committed today: {already_committed:.0f})",
+                )
 
         return SizingDecision(
             True, quantity, actual_risk, "approved",

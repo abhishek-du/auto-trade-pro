@@ -112,7 +112,15 @@ class TestSizing:
         assert wild == int(calm * 0.5)
 
 
+@patch("utils.config.settings.TACTICAL_RISK_BUCKET_ENABLED", True)
 class TestBucketPersistsAcrossCycles:
+    """These prove the daily cap genuinely caps WHEN ENABLED.
+
+    The cap is off in .env for the current run (contract SS10c), so each test
+    pins the flag True rather than inheriting the deployment's value -- exactly
+    the behaviour a later re-enable depends on. The OFF direction is covered by
+    TestDailyBucketCanBeDisabled below.
+    """
     """The regression the audit demanded. Each block = a separate Celery run."""
 
     @pytest.mark.asyncio
@@ -342,3 +350,52 @@ class TestRiskRewardFloor:
         reward = abs(sig.take_profit - sig.entry_price)
         floor = settings.TACTICAL_MIN_RISK_REWARD
         assert ((reward / risk) >= floor - 1e-9) is expected
+
+
+class TestDailyBucketCanBeDisabled:
+    """Contract §10c — the daily cap is off for the current run.
+
+    These pin BOTH directions: that disabling really removes the cap, and that
+    the code default still has it, so a fresh checkout keeps the brake.
+    """
+
+    def test_code_default_keeps_the_bucket(self):
+        from utils.config import Settings
+
+        assert Settings.model_fields["TACTICAL_RISK_BUCKET_ENABLED"].default is True
+
+    @pytest.mark.asyncio
+    async def test_bucket_blocks_when_enabled(self, fake_redis):
+        await fake_redis.incrbyfloat(risk_key(), 9_800.0)   # nearly spent
+        with patch("utils.config.settings.TACTICAL_RISK_BUCKET_ENABLED", True):
+            d = await TacticalRiskManager(capital=500_000.0).size(_sig())
+        assert not d.approved and "exceed tactical bucket" in d.reason
+
+    @pytest.mark.asyncio
+    async def test_no_cap_when_disabled(self, fake_redis):
+        """The same over-budget state must now size normally."""
+        await fake_redis.incrbyfloat(risk_key(), 9_800.0)
+        with patch("utils.config.settings.TACTICAL_RISK_BUCKET_ENABLED", False):
+            d = await TacticalRiskManager(capital=500_000.0).size(_sig())
+        assert d.approved and d.quantity > 0
+
+    @pytest.mark.asyncio
+    async def test_risk_is_still_recorded_when_disabled(self, fake_redis):
+        """Observability must survive: the summary and any later re-enable both
+        depend on the Redis total continuing to accumulate."""
+        with patch("utils.config.settings.TACTICAL_RISK_BUCKET_ENABLED", False):
+            rm = TacticalRiskManager(capital=500_000.0)
+            d = await rm.size(_sig())
+            await rm.commit(d)
+        assert float(fake_redis.store[risk_key()]) > 0
+
+    @pytest.mark.asyncio
+    async def test_cooldown_still_applies_when_bucket_is_off(self, fake_redis):
+        """The 3-stop cooldown is the ONLY loss-reactive control left, so it
+        must not have been disabled along with the cap."""
+        # The key stores the unix time the pause ENDS, not a count of stops.
+        import time as _t
+        await fake_redis.set(cooldown_key(), str(int(_t.time()) + 3600))
+        with patch("utils.config.settings.TACTICAL_RISK_BUCKET_ENABLED", False):
+            d = await TacticalRiskManager(capital=500_000.0).size(_sig())
+        assert not d.approved and "cooldown" in d.reason.lower()

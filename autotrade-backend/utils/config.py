@@ -278,6 +278,11 @@ class Settings(BaseSettings):
     # TACTICAL_EXECUTION_MODE retired in Phase 2 — superseded by
     # TACTICAL_EXECUTION_ENABLED below (two flags could contradict).
     TACTICAL_CAPITAL:             float = 500_000.0
+    # Daily bucket ON/OFF (contract SS10c, owner decision 2026-08-20).
+    # Default True -- a fresh checkout keeps the brake. Set false in .env for
+    # the current run. When False the daily cap does not apply AT ALL; risk is
+    # still recorded to Redis so the daily total stays observable.
+    TACTICAL_RISK_BUCKET_ENABLED: bool = True
     TACTICAL_MAX_TOTAL_RISK:      float = 0.02    # 2% of capital, whole bucket
     TACTICAL_MAX_PER_TRADE_RISK:  float = 0.005   # 0.5% per trade
     TACTICAL_VIX_THRESHOLD:       float = 25.0
