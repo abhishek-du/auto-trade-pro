@@ -260,6 +260,39 @@ point at tasks deleted with F&O and raise `NotRegistered` on every tick.
 
 ---
 
+## 5b. Strategy execution toggles (admin UI)
+
+Six DB-backed switches, one per origination path, at **`/settings` → Strategy
+Execution**. Stored in `RuntimeConfig`, so a change takes effect in every
+process at its next decision — **no restart**.
+
+| UI name | Path | Gates |
+|---|---|---|
+| `master_intelligence` | A | scoring + 2 discretionary exits (**does not originate trades**) |
+| `india_trade_loop` | B | entries only — exits keep running |
+| `news_engine` | C | execution only — news is still crawled and classified |
+| `pre_event_gap` | D | the whole task |
+| `direct_news` | E | `maybe_direct_trade` |
+| `tactical` | F | execution only — signals are still scored and persisted |
+
+```
+GET  /api/v1/settings/strategies          # anonymous, read-only
+POST /api/v1/settings/strategies          # JWT required; {"flags":{"tactical":false}}
+```
+
+- **Fail-open**: a missing row or an unreachable DB reads as *enabled*. These
+  are enable switches — a database blip must not silently halt trading. This is
+  the opposite posture to `tactical_risk`, which fails closed because its flag
+  caps risk.
+- **Exits are never gated.** `fast_sl_check` (5s) carries no toggle, so open
+  positions still exit on SL/TP with every strategy off.
+- Checked alongside the existing `.env` flags (`TACTICAL_EXECUTION_ENABLED`,
+  `PRE_EVENT_GAP_ENABLED`, `DIRECT_NEWS_ENABLED`), which remain the deploy-time
+  defaults — the toggle is the operator's runtime override, not a replacement.
+- `paper_trades.strategy_family` records which path opened each trade, so P&L
+  can be grouped by strategy. The older `source`/`strategy_name` pair was
+  free-text and inconsistent.
+
 ## 6. Paper mode
 
 Default and safe. `PAPER_MODE=true`, `ZERODHA_ENABLED=false`,

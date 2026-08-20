@@ -373,6 +373,17 @@ async def _execute_news_trade(
     trust `evidence` (a caller-provided DecisionEvidence snapshot, used only
     for audit-log convenience) as the authority.
     """
+
+    # Admin toggle. Placed HERE, not around the discovery loop, so news is still
+    # crawled, classified and persisted while execution is off -- disabling the
+    # strategy must not create a gap in the event history that later analysis
+    # would read as "no news happened".
+    from utils.runtime_config import strategy_enabled
+
+    if not await strategy_enabled("news_engine"):
+        logger.info(f"[news_trade] {ticker}: skipped — news engine disabled by strategy toggle")
+        return False
+
     from crawler.market_snapshot import get_market_snapshot
     from engine.decision_router import (
         TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome,

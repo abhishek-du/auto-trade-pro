@@ -162,7 +162,14 @@ async def get_paper_trades(
             # strategy originated the trade, e.g. "AI Predict" for the
             # Pre-Event Expectation Gap strategy. None for ordinary News/Hub
             # trades (PaperTrade.source is nullable and only set for PRE_EVENT).
-            "strategy_source":  getattr(r, "source", None),
+            # Prefer the structured family (added 2026-08-20) and fall back to
+            # the older free-text pair. `source` was only ever set for PRE_EVENT
+            # and was inconsistent elsewhere ('Direct News' vs 'DIRECT_NEWS' vs
+            # NULL), so it could not be grouped on; strategy_family can.
+            "strategy_source":  (getattr(r, "strategy_family", None)
+                                 or getattr(r, "source", None)
+                                 or getattr(r, "strategy_name", None)),
+            "strategy_family":  getattr(r, "strategy_family", None),
             # ── F&O fields so the UI can show strike / type / expiry / premium ──
             "instrument_type":  getattr(r, "instrument_type", "EQUITY"),
             "underlying_symbol": getattr(r, "underlying_symbol", None),

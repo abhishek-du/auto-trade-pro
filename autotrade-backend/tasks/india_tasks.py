@@ -477,6 +477,11 @@ async def _phase9_market_context(session) -> dict:
 async def _india_trade_loop():
     from sqlalchemy import select
 
+    # Admin toggle (Path B). Gates ENTRIES only -- the exit/risk-management work
+    # further down (auto-close, dynamic SL/TP, drawdown breakers) is what keeps
+    # open positions safe and must run regardless, which is why this is checked
+    # at the entry branch rather than returning here. See _entries_enabled below.
+
     from db.models import OpenPosition
     from engine.llm_explainer import (
         format_paper_trade_notification,
@@ -583,7 +588,16 @@ async def _india_trade_loop():
         _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
             getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
         )
-        if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window:
+        # Admin toggle (Path B). Gates ENTRIES only: everything above this point
+        # -- auto-close, dynamic SL/TP, the drawdown circuit breaker -- has
+        # already run and keeps running when the strategy is switched off.
+        # Disabling a strategy must never strand an open position.
+        from utils.runtime_config import strategy_enabled
+
+        _strategy_on = await strategy_enabled("india_trade_loop", session)
+        if not _strategy_on:
+            logger.info("[india_trade_loop] new entries disabled by strategy toggle — exits still ran")
+        if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window or not _strategy_on:
             logger.info(
                 "[india_trade_loop] new-entry origination disabled — News-Only architecture "
                 "hard-block and/or past 15:20 IST — exits done, no new entries"
@@ -2844,6 +2858,25 @@ def run_master_intelligence_cycle():
     drive the agent on top opportunities, score MFs, log the cycle."""
     import pandas as pd
 
+    from utils.runtime_config import strategy_enabled
+
+    # Admin toggle (Path A).
+    #
+    # NOTE what this switch actually controls. Path A no longer ORIGINATES
+    # trades -- that inline loop was removed 2026-07-21 (Phase 3C Phase B).
+    # What it still does is score the universe into market_shortlist and run
+    # two exit paths: executor.check_and_close_positions() and the
+    # sector-STRONGLY_BEARISH sweep. Turning it off therefore stops SCORING
+    # (which starves Path B of candidates) and stops those two discretionary
+    # exits.
+    #
+    # Stop-losses are NOT affected: fast_sl_check runs every 5s on its own beat
+    # entry and is deliberately not gated by any strategy toggle, so an open
+    # position still exits on SL/TP with every strategy switched off.
+    if not _run_async(strategy_enabled("master_intelligence")):
+        logger.info("[hub] master intelligence cycle skipped — disabled by strategy toggle")
+        return {"status": "disabled_by_toggle"}
+
     async def _run():
         from datetime import datetime
         from db.database import get_db
@@ -4195,6 +4228,13 @@ def run_pre_event_gap_scan(self, min_days_until: int = 1, max_days_until: int = 
     the central execution gate with source='AI Predict' attribution.
     """
     from utils.config import settings
+    from utils.runtime_config import strategy_enabled
+
+    # Admin toggle, checked alongside the .env flag. Sync task body, so the
+    # async check is driven through the same _run_async helper the task uses.
+    if not _run_async(strategy_enabled("pre_event_gap")):
+        logger.info("[pre_event_gap] task skipped — disabled by strategy toggle")
+        return
     if not settings.PRE_EVENT_GAP_ENABLED:
         logger.debug("[pre_event_gap] task skipped — PRE_EVENT_GAP_ENABLED is False")
         return

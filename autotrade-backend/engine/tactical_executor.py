@@ -302,6 +302,15 @@ class TacticalExecutor:
         file reference execution symbols unconditionally, and the point of the
         guard is that a disabled pipeline never touches them.
         """
+        # Admin toggle (Path F), checked alongside TACTICAL_EXECUTION_ENABLED.
+        # Signals are still scanned, scored and PERSISTED when this is off --
+        # only execution stops -- so the tactical_signals audit trail stays
+        # continuous and a later review can see what the pipeline would have done.
+        from utils.runtime_config import strategy_enabled
+
+        if not await strategy_enabled("tactical", session):
+            return False, None, None, "tactical strategy disabled by toggle"
+
         try:
             from engine.decision_router import (
                 ConfidenceSource,

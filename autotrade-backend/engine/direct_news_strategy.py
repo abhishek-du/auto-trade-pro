@@ -170,6 +170,14 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
     can never take down news processing for the primary News strategy.
     """
     try:
+        # Admin toggle (RuntimeConfig, cross-process, no restart). Checked
+        # ALONGSIDE the .env flag, not instead of it: the .env flag stays the
+        # deploy-time default and this is the operator's runtime override.
+        from utils.runtime_config import strategy_enabled
+
+        if not await strategy_enabled("direct_news"):
+            logger.info("[direct_news] disabled by strategy toggle")
+            return False
         if not getattr(settings, "DIRECT_NEWS_ENABLED", False):
             return False
         if event_id is None or evidence is None:

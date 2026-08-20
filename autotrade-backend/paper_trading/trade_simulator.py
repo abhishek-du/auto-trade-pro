@@ -383,6 +383,10 @@ async def open_paper_trade(
         opened_at=now,
         # Attribution
         strategy_name=(_strategy[:40] if _strategy else None),
+        # _intent_to_signal attaches this as a plain string; a signal that never
+        # passed through the router has none, which is correctly stored as NULL
+        # rather than guessed at.
+        strategy_family=(str(getattr(signal, "strategy_family", None) or "")[:20] or None),
         source=(getattr(signal, "source", None) or ("AI Predict" if _strategy == "PRE_EVENT_EXPECTATION_GAP" else None)),
         regime_at_entry=(_regime_entr[:20] if _regime_entr else None),
         entry_reason=_entry_rsn,

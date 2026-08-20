@@ -94,6 +94,10 @@ async def init_db() -> None:
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS upper_circuit_days INTEGER DEFAULT 0",
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
         "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+        # create_all() never ALTERs an existing table, so a new column on a live
+        # table has to come through here (the repo's established dual path, D10).
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_family VARCHAR(20)",
+        "CREATE INDEX IF NOT EXISTS ix_paper_trades_strategy_family ON paper_trades (strategy_family)",
         "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         *[

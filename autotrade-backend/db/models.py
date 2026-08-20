@@ -109,6 +109,12 @@ class PaperTrade(Base):
     # Entry snapshot — populated when the trade opens
     product:            Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     strategy_name:      Mapped[str | None]   = mapped_column(String(40),  nullable=True)
+    # Which origination path opened this trade (StrategyFamily.value): TECHNICAL,
+    # EVENT_DRIVEN, DIRECT_NEWS, PRE_EVENT, TACTICAL. Added 2026-08-20 -- before
+    # it, attribution relied on the free-text `strategy_name`/`source` pair,
+    # which was inconsistent ('Direct News' vs 'DIRECT_NEWS' vs NULL) and could
+    # not be grouped on. Any P&L review that mixes strategies needs this.
+    strategy_family:    Mapped[str | None]   = mapped_column(String(20),  nullable=True, index=True)
     # High-level strategy SOURCE label for attribution (added 2026-07-24 for the
     # parallel Pre-Event Expectation Gap strategy). NULL for every pre-existing
     # row and for the News Strategy (interpreted as "AI"); the new strategy sets
