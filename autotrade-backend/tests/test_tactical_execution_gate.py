@@ -31,17 +31,40 @@ CONTRACT = REPO.parent / "docs" / "NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md"
 class TestOffByDefault:
 
     def test_execution_flag_defaults_false(self):
-        from utils.config import settings
-        assert settings.TACTICAL_EXECUTION_ENABLED is False
+        """The CODE default must stay False — what a fresh checkout does.
+
+        Deliberately asserts the pydantic field default, NOT
+        `settings.TACTICAL_EXECUTION_ENABLED`, because that reflects `.env`:
+        the flag was enabled there on 2026-08-20 for the paper run. Asserting
+        the runtime value would have forced whoever started that run to either
+        delete this test or weaken it, and the guarantee §10a condition 1
+        actually makes is about the default, not the deployment.
+        """
+        from utils.config import Settings
+
+        assert Settings.model_fields["TACTICAL_EXECUTION_ENABLED"].default is False
 
     def test_live_trading_flag_defaults_false(self):
-        """Paper only until Path F has a track record."""
-        from utils.config import settings
-        assert settings.TACTICAL_LIVE_TRADING is False
+        """Paper only until Path F has a track record.
+
+        This one checks BOTH the code default and the live runtime value: no
+        deployment may ever turn it on without amending §10a first, so unlike
+        the execution flag there is no legitimate `.env` override to tolerate.
+        """
+        from utils.config import Settings, settings
+
+        assert Settings.model_fields["TACTICAL_LIVE_TRADING"].default is False
+        assert settings.TACTICAL_LIVE_TRADING is False, (
+            "TACTICAL_LIVE_TRADING is enabled in the running config — §10a "
+            "condition 2 forbids this until the contract is amended"
+        )
 
     def test_executor_reports_shadow_when_disabled(self):
+        """Patched explicitly — `.env` currently enables execution."""
         from engine.tactical_executor import TacticalExecutor
-        assert TacticalExecutor().mode == "shadow"
+
+        with patch("utils.config.settings.TACTICAL_EXECUTION_ENABLED", False):
+            assert TacticalExecutor().mode == "shadow"
 
     def test_executor_reports_execute_when_enabled(self):
         from engine.tactical_executor import TacticalExecutor

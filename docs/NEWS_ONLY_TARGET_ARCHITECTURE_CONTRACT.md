@@ -280,7 +280,7 @@ if intent.strategy_family == StrategyFamily.EVENT_DRIVEN:
 | `intelligence_hub.py` (`MasterIntelligenceScore`) | Feeds trade-triggering thresholds directly (§4-9 above) | **CONTEXT/VALIDATION ONLY** — see §7 |
 | Technical indicators / `compute_trade_levels` | Already filter-only for News Direct | **FILTER ONLY**, universally — never a trigger, for any strategy |
 | `validate_signal` / `RiskManagerAgent` / `check_drawdown_breakers` | Fragmented, strategy-dependent | **UNIFIED, MANDATORY** for every `TradeIntent` regardless of family |
-| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. Runs a **1.5** minimum reward:risk and a **10%** per-position notional cap in place of the global 2.0 / 5% — both relaxations, both justified and bounded by the daily bucket in §10a condition 4. |
+| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. Runs a **1.2** minimum reward:risk and a **10%** per-position notional cap in place of the global 2.0 / 5% — both relaxations, both justified and bounded by the daily bucket in §10a condition 4. |
 | Central Execution Gate | Gate for 11/12 paths | **THE ONLY DOOR** — target is 1/1, not 11/12 |
 
 **FORBIDDEN, precisely defined:** the component must not call `open_paper_trade`, `open_option_paper_trade`, `open_spread_paper_trade`, `open_future_paper_trade`, `open_iron_condor_paper_trade`, `AgentExecutionManager.execute`, or `place_real_order`, directly or indirectly, under any code path, regardless of feature flags. A feature-flagged-off strategy that still contains a live call to one of these functions is not "safely disabled" — it is disabled *by configuration*, which is reversible by anyone who flips the flag without knowing this contract exists. Genuine disabling means the call site itself is gone or hard-blocked at the function entry (see §8's two-phase process).
@@ -408,7 +408,7 @@ permission:
 
 | Parameter | News families | `TACTICAL` | Where |
 |---|---|---|---|
-| Minimum reward:risk | **2.0** | **1.5** | `risk_manager.validate_signal` check 4 |
+| Minimum reward:risk | **2.0** | **1.2** | `risk_manager.validate_signal` check 4 |
 | Per-position notional cap | **5%** (`AGENT_MAX_POSITION_WEIGHT`) | **10%** (`TACTICAL_MAX_POSITION_NOTIONAL_PCT`) | `risk_manager.max_position_weight_for`, consulted by check 5, `calculate_position_size`, and the `trade_simulator` hard guard |
 | Daily risk bucket | *(none — event materiality is the brake)* | **2% / day, 0.5% / trade** | `engine/tactical_risk.py`, Redis, fails closed |
 
@@ -417,12 +417,29 @@ permission:
    longer strictly true and the text is corrected here rather than left to
    drift.** The rationale, recorded so a later reviewer can judge it:
 
-   - *R:R 1.5* — the blanket 2.0 rejected 79.8% of tactical signals
+   - *R:R 1.2* — the blanket 2.0 admitted only 20.2% of tactical signals
      (`PIVOT_BREAKOUT` 0/137). Intraday stop/target geometry is built from
      structural levels (ORB range, VWAP band, pivots) that sit far closer to
      entry than an event-driven target, so 2:1 is unreachable by construction,
-     not by weak setups. 1.5 still requires positive expectancy above a 40% win
-     rate.
+     not by weak setups. Measured on 530 live shadow signals:
+
+     | Floor | Signals admitted | VWAP | PIVOT_BREAKOUT |
+     |---|---|---|---|
+     | 2.0 | 107 (20.2%) | 17 (9.4%) | 0 (0.0%) |
+     | 1.5 | 144 (27.2%) | 23 (12.7%) | 6 (4.4%) |
+     | **1.2** | **189 (35.7%)** | **45 (24.9%)** | **14 (10.2%)** |
+
+     Set to 1.2 by owner decision on 2026-08-20 to admit VWAP and
+     PIVOT_BREAKOUT, which together are 60% of signal volume (318/530) and core
+     to the pipeline's design.
+
+     **Two facts recorded here so they are not lost:** (a) even at 1.2 those two
+     rules remain 81% excluded (59 of 318 admitted) — their median R:R is 0.83
+     and 0.42 respectively, so no defensible floor admits most of them; the
+     honest fix is their target geometry, not the gate. (b) The break-even win
+     rate rises from 40.0% at 1.5 to **45.5% at 1.2, before NSE costs**. This
+     floor buys throughput with expectancy headroom, and the paper run exists
+     to establish whether the realised win rate clears it.
    - *Notional 10%* — those same tight stops make risk-based sizing ask for a
      large share count against a small per-share risk. Under the 5% cap the
      **notional** bound, not the risk bound, decided nearly every tactical size,

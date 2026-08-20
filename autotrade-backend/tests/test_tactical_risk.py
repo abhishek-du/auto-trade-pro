@@ -296,3 +296,49 @@ class TestNotionalCap:
         d = await TacticalRiskManager(capital=500_000.0).size(_sig(entry=100.0, stop=60.0, target=220.0))
         assert d.approved and d.quantity == 62
         assert d.risk_amount == pytest.approx(2480.0)   # full risk budget, untrimmed
+
+
+class TestRiskRewardFloor:
+    """The TACTICAL R:R floor is a calibrated number, not an incidental default.
+
+    It was moved 2.0 -> 1.5 -> 1.2 on 2026-08-20 against measured throughput.
+    If someone changes it again, these tests should make them justify it and
+    update §10a of the contract in the same commit.
+    """
+
+    def test_tactical_floor_is_1_2_and_news_floor_is_untouched(self):
+        from utils.config import settings
+
+        assert settings.TACTICAL_MIN_RISK_REWARD == pytest.approx(1.2)
+        # The whole point of a family-specific floor is that news paths do NOT
+        # move. A change here is a contract violation, not a tuning decision.
+        assert settings.MIN_RISK_REWARD == pytest.approx(2.0)
+
+    def test_contract_records_the_same_floor(self):
+        """Code and §10a must not drift apart on this number."""
+        from pathlib import Path
+
+        contract = (Path(__file__).resolve().parents[2] / "docs"
+                    / "NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md")
+        assert contract.exists(), f"contract not found at {contract}"
+        text = contract.read_text(encoding="utf-8")
+        assert "| Minimum reward:risk | **2.0** | **1.2** |" in text, (
+            "§10a condition 4 does not record the 1.2 TACTICAL floor — update "
+            "the contract in the same commit that changed the setting"
+        )
+
+    @pytest.mark.parametrize("rr,expected", [(1.1, False), (1.2, True), (2.5, True)])
+    def test_floor_admits_and_rejects_around_1_2(self, rr, expected):
+        """A signal is judged on reward/risk, so build one with an exact ratio."""
+        from types import SimpleNamespace
+
+        from utils.config import settings
+
+        entry, stop = 100.0, 98.0            # risk = 2.0 per share
+        target = entry + 2.0 * rr
+        sig = SimpleNamespace(strategy_family="TACTICAL", entry_price=entry,
+                              stop_loss=stop, take_profit=target)
+        risk = abs(sig.entry_price - sig.stop_loss)
+        reward = abs(sig.take_profit - sig.entry_price)
+        floor = settings.TACTICAL_MIN_RISK_REWARD
+        assert ((reward / risk) >= floor - 1e-9) is expected

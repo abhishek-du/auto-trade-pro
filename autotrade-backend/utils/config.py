@@ -303,11 +303,17 @@ class Settings(BaseSettings):
     # worker (unlike settings.AGENT_ENABLED, audit D4).
     TACTICAL_EXECUTION_ENABLED:   bool = False
     TACTICAL_LIVE_TRADING:        bool = False   # paper only until it has a record
-    # Family-specific R:R floor. The global MIN_RISK_REWARD (2.0) rejected 79%
-    # of tactical signals — PIVOT_BREAKOUT 0/130 — because intraday stop/target
-    # geometry cannot reach 2:1. 1.5 keeps a positive expectancy requirement
-    # while letting the pipeline actually trade.
-    TACTICAL_MIN_RISK_REWARD:     float = 1.5
+    # Family-specific R:R floor. The global MIN_RISK_REWARD (2.0) admitted only
+    # 20.2% of tactical signals (PIVOT_BREAKOUT 0/137) because intraday
+    # stop/target geometry is built from structural levels that sit close to
+    # entry, so 2:1 is unreachable by construction. Lowered 2.0 -> 1.5 -> 1.2
+    # (owner decision 2026-08-20) to admit VWAP and PIVOT_BREAKOUT, which are
+    # 60% of signal volume and core to the pipeline's design.
+    # Measured on 530 live shadow signals: 2.0 -> 20.2%, 1.5 -> 27.2%,
+    # 1.2 -> 35.7%.
+    # NOTE the expectancy cost: break-even win rate rises from 40.0% at 1.5 to
+    # 45.5% at 1.2, BEFORE NSE costs. The 2%/day risk bucket is the brake.
+    TACTICAL_MIN_RISK_REWARD:     float = 1.2
     # Notional cap for one tactical position, as a fraction of capital.
     # This OVERRIDES the global AGENT_MAX_POSITION_WEIGHT (5%) for TACTICAL
     # only — see engine.risk_manager.max_position_weight_for, which all three

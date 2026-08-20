@@ -468,7 +468,7 @@ async def validate_signal(
     # positive expectancy. Every other family is unchanged.
     _family = getattr(signal, "strategy_family", None)
     if _family == "TACTICAL":
-        min_rr = float(getattr(settings, "TACTICAL_MIN_RISK_REWARD", 1.5))
+        min_rr = float(getattr(settings, "TACTICAL_MIN_RISK_REWARD", 1.2))
 
     final_target = getattr(signal, "target_2", 0.0) or signal.take_profit
     risk   = abs(signal.entry_price - signal.stop_loss)
