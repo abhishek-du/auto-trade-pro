@@ -364,5 +364,110 @@ def oversold_rebound(
     return [sig] if sig.is_sane() else []
 
 
+def volume_breakout_5m(
+    symbol: str, df_5m: pd.DataFrame, live_price: float, *, now: datetime | None = None
+) -> list[Signal]:
+    """5m breakout: price clears the 20-bar high on >=1.5x average volume.
+
+    Added 2026-08-20. F4 was mean-reversion only, so a sector trending hard all
+    session (the sugar complex on 19-20 Aug) produced no F4 signal at all: fades
+    require an overbought RSI *against* the move, which never triggered.
+
+    The 20-bar low is the stop rather than a fixed percentage because it is the
+    level that actually invalidates a breakout. That makes risk-per-share
+    variable, so `TacticalRiskManager` decides size -- do not add a percentage
+    stop here to make the R:R look tidier.
+    """
+    d = closed(df_5m)
+    if len(d) < 25 or live_price <= 0:
+        return []
+
+    prior = d.iloc[:-1]                      # exclude the bar that just closed
+    hi20 = float(prior["high"].tail(20).max())
+    lo20 = float(prior["low"].tail(20).min())
+    if not (hi20 > 0 and lo20 > 0) or live_price <= hi20:
+        return []
+
+    vol = prior["volume"].tail(20)
+    avg_vol = float(vol.mean())
+    last_vol = float(d["volume"].iloc[-1])
+    if avg_vol <= 0 or last_vol < 1.5 * avg_vol:
+        return []
+
+    if lo20 >= live_price:                   # stop must sit below entry
+        return []
+
+    now = now or datetime.now()
+    rvol = last_vol / avg_vol
+    conf = _conf(55.0, min(15.0, (rvol - 1.5) * 6.0),
+                 min(10.0, (live_price / hi20 - 1.0) * 500.0))
+    # Target is 2% per the brief, but never inside the stop distance -- a 2%
+    # target on a 6% stop is a losing proposition by construction.
+    target = max(live_price * 1.02, live_price + (live_price - lo20) * 1.2)
+    sig = Signal(symbol, "BUY", live_price, lo20, target, conf,
+                 "VOLUME_BREAKOUT", now, "F4",
+                 {"hi20": round(hi20, 2), "rvol": round(rvol, 2)})
+    return [sig] if sig.is_sane() else []
+
+
+def vwap_crossover_5m(
+    symbol: str, df_5m: pd.DataFrame, live_price: float, *, now: datetime | None = None
+) -> list[Signal]:
+    """5m VWAP reclaim: two consecutive closes above VWAP with RVOL > 1.5.
+
+    Two bars, not one, because a single close above VWAP is noise at the 5m
+    scale -- price crosses and re-crosses repeatedly in a chop. Requiring the
+    prior bar to have closed above too is what makes this a trend read rather
+    than a tick.
+
+    VWAP is computed here from the session's own bars rather than taken from
+    `IndicatorSignals.vwap`, so the anchor is unambiguous: the rule needs VWAP
+    as of the PREVIOUS bar to judge that bar's close, which the aggregate
+    indicator does not expose.
+    """
+    d = closed(df_5m)
+    if len(d) < 6 or live_price <= 0:
+        return []
+
+    tp = (d["high"] + d["low"] + d["close"]) / 3.0
+    cum_v = d["volume"].cumsum()
+    cum_pv = (tp * d["volume"]).cumsum()
+    if float(cum_v.iloc[-1]) <= 0:
+        return []
+    vwap_series = cum_pv / cum_v.replace(0, np.nan)
+
+    vwap_now = float(vwap_series.iloc[-1])
+    vwap_prev = float(vwap_series.iloc[-2])
+    if not (vwap_now > 0 and vwap_prev > 0):
+        return []
+
+    # Two consecutive closes above VWAP, and price still above it now.
+    if float(d["close"].iloc[-1]) <= vwap_now:
+        return []
+    if float(d["close"].iloc[-2]) <= vwap_prev:
+        return []
+    if live_price <= vwap_now:
+        return []
+
+    vol = d["volume"].tail(20)
+    avg_vol = float(vol.mean())
+    if avg_vol <= 0 or float(d["volume"].iloc[-1]) < 1.5 * avg_vol:
+        return []
+
+    now = now or datetime.now()
+    rvol = float(d["volume"].iloc[-1]) / avg_vol
+    prem = live_price / vwap_now - 1.0
+    conf = _conf(52.0, min(14.0, (rvol - 1.5) * 6.0), min(12.0, prem * 400.0))
+    # Stop below VWAP (the level being defended), target above -- but both
+    # anchored so they stay on the correct side of a price that has already run.
+    stop = min(vwap_now * 0.995, live_price * 0.995)
+    target = max(vwap_now * 1.015, live_price * 1.005)
+    sig = Signal(symbol, "BUY", live_price, stop, target, conf,
+                 "VWAP_CROSSOVER", now, "F4",
+                 {"vwap": round(vwap_now, 2), "rvol": round(rvol, 2),
+                  "premium_pct": round(prem * 100, 2)})
+    return [sig] if sig.is_sane() else []
+
+
 F1_RULES = ("ORB", "VWAP", "GAP_AND_GO", "PIVOT_BOUNCE", "PIVOT_BREAKOUT", "SCALP")
-F4_RULES = ("OVERBOUGHT_FADE", "OVERSOLD_REBOUND")
+F4_RULES = ("OVERBOUGHT_FADE", "OVERSOLD_REBOUND", "VOLUME_BREAKOUT", "VWAP_CROSSOVER")

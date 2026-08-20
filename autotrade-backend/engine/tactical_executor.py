@@ -48,6 +48,7 @@ from engine.tactical_data_fetcher import (
     get_market_context,
     get_prices_batch,
     get_symbols_with_timeframe,
+    get_f1_universe,
     get_universe,
     in_entry_window,
     orb_window,
@@ -150,7 +151,9 @@ class TacticalExecutor:
             ctx = await get_market_context()
 
             if pipeline == "F1":
-                universe = await get_universe(session, int(_cfg("TACTICAL_F1_UNIVERSE_SIZE", 50)))
+                # Dynamic liquidity filter, not a fixed top-N (2026-08-20).
+                # See get_f1_universe for the coverage/latency measurements.
+                universe = await get_f1_universe(session)
             else:
                 universe = await get_symbols_with_timeframe(
                     session, "5m", int(_cfg("TACTICAL_F4_UNIVERSE_SIZE", 150))
@@ -270,6 +273,10 @@ class TacticalExecutor:
                     result.scanned += 1
                     out += rules.overbought_fade(symbol, df_5m, price)
                     out += rules.oversold_rebound(symbol, df_5m, price)
+                    # Trend rules added 2026-08-20: F4 was fade-only, so a
+                    # sector trending hard all session produced nothing here.
+                    out += rules.volume_breakout_5m(symbol, df_5m, price)
+                    out += rules.vwap_crossover_5m(symbol, df_5m, price)
 
             except SoftTimeLimitExceeded:
                 raise

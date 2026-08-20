@@ -393,3 +393,124 @@ async def get_symbols_with_timeframe(
     except Exception as exc:
         logger.warning(f"[tactical] {timeframe} universe fetch failed: {exc}")
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F1 universe — dynamic liquidity filter (replaces the fixed top-50)
+# ─────────────────────────────────────────────────────────────────────────────
+
+F1_UNIVERSE_CACHE_KEY = "tactical:f1_universe"
+F1_UNIVERSE_TTL_SEC = 600          # the inputs change daily; 10 min is ample
+
+
+async def get_f1_universe(session: AsyncSession) -> list[str]:
+    """Every liquid NSE symbol F1 should scan, newest liquidity data first.
+
+    WHY THIS REPLACED `get_universe(session, 50)`
+    ---------------------------------------------
+    On the 2026-08-20 session F1 scanned the 50 highest-turnover names and was
+    blind to 201 of the 206 stocks that actually moved, including all 14 sugar
+    names (best turnover rank: BALRAMCHIN at 436). A momentum pipeline's edge is
+    breadth; a top-50 slice sees only what is already crowded.
+
+    FILTER
+    ------
+    `turnover_cr >= TACTICAL_F1_MIN_TURNOVER_CR` (average daily turnover, so
+    size can actually be traded) and last daily close
+    `>= TACTICAL_F1_MIN_PRICE`, ordered by turnover, capped at
+    `TACTICAL_F1_MAX_SYMBOLS`.
+
+    KNOWN LIMIT, recorded so nobody re-discovers it: the turnover floor reads
+    the **average**, not today's. Names whose turnover only spikes on the day of
+    the move are excluded no matter how large the cap — on 2026-08-20 that was
+    UTTAMSUGAR (3.71cr), PONNIERODE (1.67cr) and UGARSUGAR (1.30cr). Reaching
+    them needs a floor near 1.3, which is ~2,510 symbols and ~50s of scan, i.e.
+    the whole soft-limit budget. The floor is the constraint there, not the cap.
+
+    PERFORMANCE
+    -----------
+    The price lookup uses `LEFT JOIN LATERAL ... LIMIT 1`, which rides
+    `ix_candles_symbol_timeframe`: measured **1.66s** for 1,500 symbols versus
+    **32s** for the obvious `DISTINCT ON (symbol)` over the 5.9M-row daily
+    table. Do not "simplify" it back to DISTINCT ON. The result is then cached
+    in Redis for 10 minutes, because F1 runs every 60s and this input changes
+    once a day.
+
+    Fails SOFT: any error falls back to the legacy top-N-by-rank slice, so a
+    Redis or query problem degrades the scan rather than emptying it.
+    """
+    from sqlalchemy import text
+
+    from utils.config import settings as _s
+
+    min_to = float(getattr(_s, "TACTICAL_F1_MIN_TURNOVER_CR", 5.0))
+    min_px = float(getattr(_s, "TACTICAL_F1_MIN_PRICE", 20.0))
+    cap = int(getattr(_s, "TACTICAL_F1_MAX_SYMBOLS", 500))
+
+    # ── cache ────────────────────────────────────────────────────────────────
+    cache_key = f"{F1_UNIVERSE_CACHE_KEY}:{min_to}:{min_px}:{cap}"
+    try:
+        from utils.cache import get_redis
+
+        cached = await get_redis().get(cache_key)
+        if cached:
+            import json
+
+            syms = json.loads(cached)
+            if syms:
+                return syms
+    except Exception as exc:
+        logger.debug(f"[tactical] F1 universe cache read failed: {exc}")
+
+    # ── compute ──────────────────────────────────────────────────────────────
+    try:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT h.symbol, l.close
+                    FROM hub_universe h
+                    LEFT JOIN LATERAL (
+                        SELECT close FROM candles c
+                        WHERE c.symbol = h.symbol AND c.timeframe = '1d'
+                        ORDER BY c.timestamp DESC LIMIT 1
+                    ) l ON TRUE
+                    WHERE h.rank > 0 AND h.turnover_cr >= :min_to
+                    ORDER BY h.turnover_cr DESC
+                    LIMIT :cap
+                    """
+                ),
+                {"min_to": min_to, "cap": cap},
+            )
+        ).fetchall()
+    except Exception as exc:
+        logger.warning(f"[tactical] F1 dynamic universe query failed ({exc}) — falling back")
+        return await get_universe(session, int(getattr(_s, "TACTICAL_F1_UNIVERSE_SIZE", 50)))
+
+    # A symbol with no daily bar keeps its place: we cannot prove it is cheap,
+    # and dropping it would silently shrink the universe when the daily backfill
+    # lags. The turnover floor is the real tradeability gate.
+    out = [r[0] for r in rows if r[0] and (r[1] is None or float(r[1]) >= min_px)]
+
+    if not out:
+        logger.warning(
+            f"[tactical] F1 dynamic universe empty (turnover>={min_to}cr, price>={min_px}) "
+            f"— falling back to top-N by rank"
+        )
+        return await get_universe(session, int(getattr(_s, "TACTICAL_F1_UNIVERSE_SIZE", 50)))
+
+    try:
+        import json
+
+        from utils.cache import get_redis
+
+        await get_redis().set(cache_key, json.dumps(out), ex=F1_UNIVERSE_TTL_SEC)
+    except Exception as exc:
+        logger.debug(f"[tactical] F1 universe cache write failed: {exc}")
+
+    logger.info(
+        f"[tactical] F1 universe: {len(out)} symbols "
+        f"(turnover>={min_to}cr, price>=Rs {min_px:.0f}, cap {cap}; "
+        f"{len(rows) - len(out)} dropped on price)"
+    )
+    return out

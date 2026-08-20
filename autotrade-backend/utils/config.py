@@ -282,7 +282,29 @@ class Settings(BaseSettings):
     TACTICAL_MAX_PER_TRADE_RISK:  float = 0.005   # 0.5% per trade
     TACTICAL_VIX_THRESHOLD:       float = 25.0
     TACTICAL_VIX_SIZE_SCALE:      float = 0.5     # halve size above the threshold
-    TACTICAL_F1_UNIVERSE_SIZE:    int   = 50      # top-N by hub_universe turnover rank
+    # ── Sector-level news fallback (2026-08-20) ──────────────────────────────
+    # classify_event() is single-company shaped and returned None for all five
+    # sugar/ethanol headlines on 19-20 Aug, so NO EVENT -> NO TRADE kept the
+    # engine out of a 16% sector move. MIN_TICKERS is 2, not the 3 originally
+    # proposed, because MEASURED extraction on those stories produced at most 2
+    # tickers per headline -- a 3 floor fires on none of them.
+    NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
+    NEWS_SECTOR_MIN_TICKERS:      int   = 2
+    NEWS_SECTOR_MIN_SCORE:        float = 0.7
+    TACTICAL_F1_MIN_TURNOVER_CR:  float = 5.0     # Minimum ₹5 crore daily turnover
+    TACTICAL_F1_MIN_PRICE:        float = 20.0    # Minimum ₹20 share price
+    # Owner decision 2026-08-20: 1500, i.e. effectively no cap -- the >=5cr
+    # floor itself yields only 1,536 symbols. Measured ~31s of scan at that size
+    # against a 50s soft limit / 55s beat expiry.
+    # COVERAGE vs the 2026-08-20 movers (206 qualifiers, 14 sugar names):
+    #   top 50 by rank (old)   ->   5/206 movers,  0/14 sugar
+    #   >=5cr cap  500         ->  62/206 movers,  2/14 sugar
+    #   >=5cr cap 1500         -> ~171/206 movers, 11/14 sugar
+    # The remaining 3 sugar names average under 5cr (UTTAMSUGAR 3.71,
+    # PONNIERODE 1.67, UGARSUGAR 1.30) and are excluded by the FLOOR, not the
+    # cap -- no cap value reaches them. Lowering the floor to ~1.3 would mean
+    # ~2,510 symbols and ~50s, i.e. the entire budget.
+    TACTICAL_F1_MAX_SYMBOLS:      int   = 1500
     TACTICAL_F4_UNIVERSE_SIZE:    int   = 150     # 5m data covers ~1,250 symbols
     TACTICAL_MIN_COMPOSITE_SCORE: float = 50.0
     TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 15

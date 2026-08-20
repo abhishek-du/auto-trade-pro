@@ -268,11 +268,13 @@ async def lifespan(app: FastAPI):
                 if _t.monotonic() - last_universe_refresh > 300:
                     try:
                         from db.database import AsyncSessionLocal
-                        from engine.tactical_data_fetcher import get_universe
+                        from engine.tactical_data_fetcher import get_f1_universe
                         async with AsyncSessionLocal() as _s:
-                            universe = await get_universe(
-                                _s, int(getattr(settings, "TACTICAL_F1_UNIVERSE_SIZE", 50))
-                            )
+                            # Same universe F1 scans, so every symbol it looks at
+                            # can have a fresh tick-built bar. Symbols with no live
+                            # tick are skipped by sample_once, so an unsubscribed
+                            # name costs nothing here.
+                            universe = await get_f1_universe(_s)
                         last_universe_refresh = _t.monotonic()
                     except Exception as exc:
                         logger.debug(f"[fast_candle] universe refresh failed: {exc}")

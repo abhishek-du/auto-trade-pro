@@ -264,3 +264,68 @@ def validate_evidence_consistency(
             )
 
     return EvidenceConsistencyResult(True, False, [], evidence.confidence, "consistent")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sector-level fallback (2026-08-20)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY: on 19-20 Aug 2026 the crawler ingested five sugar/ethanol headlines with
+# tickers correctly extracted and sentiment up to 0.89, and `classify_event`
+# returned None for every one of them -- so zero CausalEvents were created and,
+# under NO EVENT -> NO TRADE, the news engine could not act while the sector
+# rallied up to 16%. The classifier is built around single-company events
+# (earnings, orders, M&A); a story about a whole sector matches no category.
+#
+# WHY NOT THE OBVIOUS DESIGN: the brief specified "look up each ticker's sector,
+# fire if they all match". Measured, that is unsafe here -- `NSE_SECTOR_MAP` has
+# 59 entries, `india_specific.SECTOR_MAP` has 18, `market_shortlist.sector` is
+# empty for 193 of 206 symbols, and NONE of them contain a single sugar name.
+# Every unmapped ticker resolves to "Other", so "all the same sector" would be
+# TRUE for any three unrelated unmapped companies. That would mint spurious
+# sector events -- and a CausalEvent is what AUTHORISES a trade.
+#
+# So the theme is read from the HEADLINE, which is the one place the sector is
+# actually stated, and the check FAILS CLOSED: no recognised theme, no event.
+
+SECTOR_THEME_KEYWORDS: dict[str, str] = {
+    "sugar": "Sugar", "ethanol": "Sugar", "sugarcane": "Sugar", "cane": "Sugar",
+    "bank": "Banking", "banking": "Banking", "lender": "Banking", "nbfc": "Banking",
+    "it stocks": "IT", "software": "IT", "tech stocks": "IT",
+    "pharma": "Pharma", "drugmaker": "Pharma", "api": "Pharma",
+    "fmcg": "FMCG", "consumer goods": "FMCG",
+    "auto": "Auto", "automobile": "Auto", "carmaker": "Auto", "two-wheeler": "Auto",
+    "metal": "Metals", "steel": "Metals", "aluminium": "Metals", "zinc": "Metals",
+    "oil": "Energy", "gas": "Energy", "power": "Energy", "refiner": "Energy",
+    "cement": "Cement",
+    "realty": "Realty", "real estate": "Realty", "housing": "Realty",
+    "textile": "Textiles", "fertiliser": "Fertilisers", "fertilizer": "Fertilisers",
+    "airline": "Aviation", "aviation": "Aviation",
+    "defence": "Defence", "shipping": "Shipping", "paper": "Paper",
+    "tyre": "Tyres", "chemical": "Chemicals", "specialty chemical": "Chemicals",
+}
+
+# Plural/collective cues. A sector story says "sugar STOCKS rally", not
+# "Balrampur Chini rallies" -- requiring one of these keeps single-company news
+# out of the sector path even when the company happens to be in a themed industry.
+_COLLECTIVE_CUES = ("stocks", "shares", "sector", "counters", "names", "pack",
+                    "index", "companies", "mills", "makers", "firms")
+
+
+def detect_sector_theme(headline: str) -> str | None:
+    """The sector a headline is about, or None if it is not a sector story.
+
+    Requires BOTH a sector keyword and a collective cue, so
+    "Sugar stocks rally 14%" matches and "Balrampur Chini Q1 profit up" does not.
+    Returns None on anything ambiguous -- the caller must treat None as
+    "create no event".
+    """
+    if not headline:
+        return None
+    low = headline.lower()
+    if not any(cue in low for cue in _COLLECTIVE_CUES):
+        return None
+    for kw, sector in SECTOR_THEME_KEYWORDS.items():
+        if kw in low:
+            return sector
+    return None
