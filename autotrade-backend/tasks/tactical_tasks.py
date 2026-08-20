@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 
 from tasks.celery_app import celery_app
+from utils.config import settings
 from utils.logger import logger
 
 _LOCK_TTL = 65  # > time_limit (60s) so a killed task's lock still expires
@@ -91,3 +92,92 @@ def run_tactical_mean_reversion() -> dict:
         return await TacticalExecutor().run_mean_reversion_scan()
 
     return _run_guarded("tactical_mean_reversion:running", _scan)
+
+
+@celery_app.task(
+    name="tasks.tactical_tasks.tactical_daily_summary",
+    soft_time_limit=110,
+    time_limit=120,
+)
+def tactical_daily_summary() -> dict:
+    """One end-of-day line-item summary of the Path F paper run.
+
+    Runs at 15:35 IST (10:05 UTC) — five minutes after the NSE close, so the
+    5s `fast_sl_check` loop has settled the day's exits before we count wins.
+
+    Reads the day the *bucket* is keyed on rather than "yesterday/today" logic:
+    `tactical_risk.risk_key()` uses `date.today()`, so a summary that computed
+    its own date differently would silently report a different day's bucket.
+    """
+
+    async def _summary() -> dict:
+        from datetime import date
+
+        from sqlalchemy import text
+
+        from db.database import AsyncSessionLocal
+        from engine.tactical_risk import cooldown_key, risk_key
+        from utils.cache import get_redis
+
+        today = date.today()
+
+        risk_used = 0.0
+        cooldowns = None
+        try:
+            r = get_redis()
+            risk_used = float(await r.get(risk_key(today)) or 0.0)
+            cooldowns = await r.get(cooldown_key(today))
+        except Exception as exc:                     # Redis is not load-bearing here
+            logger.warning(f"[tactical.summary] bucket unreadable: {exc}")
+
+        async with AsyncSessionLocal() as ses:
+            sig = (await ses.execute(text("""
+                SELECT COUNT(*)                                  AS generated,
+                       COUNT(*) FILTER (WHERE executed)          AS executed
+                FROM tactical_signals
+                WHERE created_at::date = :d
+            """), {"d": today})).fetchone()
+
+            # route_decision(source=intent.strategy) writes "TACTICAL_<rule>" into
+            # paper_trades.source (verified, not assumed). Close column is closed_at.
+            pnl = (await ses.execute(text("""
+                SELECT COUNT(*)                                          AS closed,
+                       COUNT(*) FILTER (WHERE pnl > 0)                   AS wins,
+                       COUNT(*) FILTER (WHERE pnl <= 0)                  AS losses,
+                       COALESCE(SUM(pnl), 0)                             AS realised
+                FROM paper_trades
+                WHERE (source LIKE 'TACTICAL%' OR strategy_name LIKE 'TACTICAL%')
+                  AND status = 'CLOSED' AND closed_at::date = :d
+            """), {"d": today})).fetchone()
+
+            open_n = (await ses.execute(text("""
+                SELECT COUNT(*) FROM paper_trades
+                WHERE (source LIKE 'TACTICAL%' OR strategy_name LIKE 'TACTICAL%') AND status = 'OPEN'
+            """))).scalar()
+
+        budget = float(getattr(settings, "TACTICAL_CAPITAL", 500_000.0)) * \
+            float(getattr(settings, "TACTICAL_MAX_TOTAL_RISK", 0.02))
+
+        out = {
+            "date": today.isoformat(),
+            "signals_generated": sig.generated, "signals_executed": sig.executed,
+            "trades_closed": pnl.closed, "wins": pnl.wins, "losses": pnl.losses,
+            "realised_pnl": round(float(pnl.realised), 2),
+            "open_positions": open_n,
+            "risk_used": round(risk_used, 2), "risk_budget": round(budget, 2),
+            "cooldown_symbols": cooldowns,
+        }
+
+        win_rate = (pnl.wins / pnl.closed * 100.0) if pnl.closed else 0.0
+        logger.info(
+            f"[TACTICAL] DAILY SUMMARY {out['date']} | "
+            f"signals {out['signals_generated']} generated, {out['signals_executed']} executed | "
+            f"closed {out['trades_closed']} (W{out['wins']}/L{out['losses']}, "
+            f"{win_rate:.0f}% win) | realised Rs {out['realised_pnl']:,.2f} | "
+            f"open {out['open_positions']} | "
+            f"risk Rs {out['risk_used']:,.0f}/{out['risk_budget']:,.0f} "
+            f"({(risk_used / budget * 100.0) if budget else 0:.0f}% of bucket)"
+        )
+        return out
+
+    return _run_guarded("tactical_daily_summary:running", _summary)

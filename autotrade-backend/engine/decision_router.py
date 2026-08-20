@@ -389,9 +389,13 @@ async def route_decision(
 
 
 def _intent_to_signal(intent: TradeIntent) -> Any:
+    # NOTE: the returned TradingSignal carries `strategy_family` as an attached
+    # attribute (set at the end of this function). validate_signal() is
+    # otherwise family-blind — it receives a TradingSignal, not a TradeIntent —
+    # and needs the family to apply the TACTICAL-specific R:R floor.
     """Build a TradingSignal from a TradeIntent for route_decision()/validate_signal()."""
     from engine.signal_generator import TradingSignal
-    return TradingSignal(
+    _sig = TradingSignal(
         symbol=intent.symbol, timeframe="event", action=intent.action,
         confidence=intent.confidence, entry_price=intent.entry_price,
         stop_loss=intent.stop_loss, take_profit=intent.take_profit,
@@ -408,6 +412,13 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
             "Direct News" if intent.strategy == "DIRECT_NEWS" else None
         ),
     )
+    # Family is not a TradingSignal field; attach it so the risk gate can
+    # apply per-family policy without threading the intent all the way down.
+    try:
+        _sig.strategy_family = intent.strategy_family.value
+    except Exception:
+        pass
+    return _sig
 
 
 @dataclass

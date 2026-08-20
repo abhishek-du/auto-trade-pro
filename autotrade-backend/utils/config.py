@@ -303,6 +303,16 @@ class Settings(BaseSettings):
     # worker (unlike settings.AGENT_ENABLED, audit D4).
     TACTICAL_EXECUTION_ENABLED:   bool = False
     TACTICAL_LIVE_TRADING:        bool = False   # paper only until it has a record
+    # Family-specific R:R floor. The global MIN_RISK_REWARD (2.0) rejected 79%
+    # of tactical signals — PIVOT_BREAKOUT 0/130 — because intraday stop/target
+    # geometry cannot reach 2:1. 1.5 keeps a positive expectancy requirement
+    # while letting the pipeline actually trade.
+    TACTICAL_MIN_RISK_REWARD:     float = 1.5
+    # Notional cap for one tactical position, as a fraction of capital.
+    # This OVERRIDES the global AGENT_MAX_POSITION_WEIGHT (5%) for TACTICAL
+    # only — see engine.risk_manager.max_position_weight_for, which all three
+    # cap sites now consult. News families are unaffected.
+    TACTICAL_MAX_POSITION_NOTIONAL_PCT: float = 0.10
 
     # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
     # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.

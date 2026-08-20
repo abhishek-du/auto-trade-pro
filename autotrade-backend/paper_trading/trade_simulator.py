@@ -259,7 +259,12 @@ async def open_paper_trade(
     # This gate catches bugs in ANY caller (india_trade_loop, agent_loop,
     # paper_trade_loop, manual trigger). No trade touches the DB without passing.
     _guard_equity = float(getattr(settings, "AGENT_EQUITY", 2_000_000))
-    _guard_max_w  = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    # Family-aware: TACTICAL carries its own 10% cap (see
+    # engine.risk_manager.max_position_weight_for). Imported locally because
+    # engine.decision_router imports this module, so a top-level import back
+    # into engine.risk_manager would close a cycle.
+    from engine.risk_manager import max_position_weight_for
+    _guard_max_w  = max_position_weight_for(signal)
     _guard_max_notional = _guard_equity * _guard_max_w
     usd_value_check = position_size.get("usd_value", 0)
     if usd_value_check > _guard_max_notional * 1.10:

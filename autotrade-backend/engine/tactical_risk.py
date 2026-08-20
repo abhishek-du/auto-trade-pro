@@ -217,6 +217,34 @@ class TacticalRiskManager:
             quantity = int(quantity * self.vix_scale)
 
         quantity = max(1, quantity)
+
+        # ── Notional cap ────────────────────────────────────────────────────
+        # Risk-based sizing alone is not enough: a tight stop buys an enormous
+        # position for the same rupee risk. Observed 2026-08-20 — GROWW.NS had a
+        # Rs 5.50 stop, so the 0.5% risk budget bought 1,644 shares = Rs 328,422
+        # notional, caught only by the trade_simulator hard guard. That guard is
+        # meant to be the last line of defence, not the only one.
+        #
+        # The FULL 10% applies -- not min(10%, global 5%). All three downstream
+        # cap sites became family-aware on 2026-08-20, so a 10% tactical size
+        # now clears them instead of being rejected by check 5 or raising inside
+        # the trade_simulator hard guard.
+        effective_pct = float(_cfg("TACTICAL_MAX_POSITION_NOTIONAL_PCT", 0.10))
+        max_notional = self.capital * effective_pct
+        if signal.entry_price > 0 and quantity * signal.entry_price > max_notional:
+            capped = int(max_notional // signal.entry_price)
+            if capped < 1:
+                return SizingDecision(
+                    False, 0, 0.0,
+                    f"one share ({signal.entry_price:.0f}) exceeds the notional cap "
+                    f"({max_notional:.0f} = {effective_pct:.0%} of {self.capital:.0f})",
+                )
+            logger.debug(
+                f"[tactical_risk] {signal.symbol}: notional cap trimmed {quantity} -> "
+                f"{capped} shares (cap {max_notional:.0f})"
+            )
+            quantity = capped
+
         actual_risk = quantity * risk_per_unit
 
         remaining = max(0.0, self.total_risk_budget - already_committed)

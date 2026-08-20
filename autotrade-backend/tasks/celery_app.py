@@ -144,6 +144,15 @@ celery_app.conf.beat_schedule = {
         "options":  {"expires": 280},     # < the 300s cadence
     },
 
+    # End-of-day Path F summary. 10:05 UTC = 15:35 IST, five minutes after the
+    # NSE close so the 5s fast_sl_check loop has settled the day's exits before
+    # wins are counted. Daily job, so the auto-loop's 3600s expires is correct
+    # here and is deliberately not overridden.
+    "tactical-daily-summary": {
+        "task":     "tasks.tactical_tasks.tactical_daily_summary",
+        "schedule": crontab(minute="5", hour="10", day_of_week="1-5"),
+    },
+
     # NOTE (D9, audit 2026-08-19): three F&O beat entries were removed here —
     # india-options-every-15min, india-equity-options-enrich and
     # fno-expiry-sweep-daily. Their tasks were deleted with the F&O subsystem in

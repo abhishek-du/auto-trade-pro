@@ -280,7 +280,7 @@ if intent.strategy_family == StrategyFamily.EVENT_DRIVEN:
 | `intelligence_hub.py` (`MasterIntelligenceScore`) | Feeds trade-triggering thresholds directly (§4-9 above) | **CONTEXT/VALIDATION ONLY** — see §7 |
 | Technical indicators / `compute_trade_levels` | Already filter-only for News Direct | **FILTER ONLY**, universally — never a trigger, for any strategy |
 | `validate_signal` / `RiskManagerAgent` / `check_drawdown_breakers` | Fragmented, strategy-dependent | **UNIFIED, MANDATORY** for every `TradeIntent` regardless of family |
-| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. |
+| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. Runs a **1.5** minimum reward:risk and a **10%** per-position notional cap in place of the global 2.0 / 5% — both relaxations, both justified and bounded by the daily bucket in §10a condition 4. |
 | Central Execution Gate | Gate for 11/12 paths | **THE ONLY DOOR** — target is 1/1, not 11/12 |
 
 **FORBIDDEN, precisely defined:** the component must not call `open_paper_trade`, `open_option_paper_trade`, `open_spread_paper_trade`, `open_future_paper_trade`, `open_iron_condor_paper_trade`, `AgentExecutionManager.execute`, or `place_real_order`, directly or indirectly, under any code path, regardless of feature flags. A feature-flagged-off strategy that still contains a live call to one of these functions is not "safely disabled" — it is disabled *by configuration*, which is reversible by anyone who flips the flag without knowing this contract exists. Genuine disabling means the call site itself is gone or hard-blocked at the function entry (see §8's two-phase process).
@@ -390,19 +390,52 @@ Effective 2026-08-20, `StrategyFamily.TACTICAL` **may originate trades**, on all
 of the following conditions. They are cumulative; failing any one revokes the
 permission:
 
-1. **Off by default.** `TACTICAL_EXECUTION_ENABLED=False` in `.env`, with a
-   DB-backed `RuntimeConfig("tactical_execution_enabled")` kill switch that
-   halts every process without a restart.
+1. **Off by default in code.** `TACTICAL_EXECUTION_ENABLED` defaults to
+   `False` in `utils/config.py`, with a DB-backed
+   `RuntimeConfig("tactical_execution_enabled")` kill switch that halts every
+   process without a restart. The default is what a fresh checkout does; an
+   operator enabling it in `.env` for a paper run does not change it.
+   *(Enabled in `.env` on 2026-08-20 for the paper run.)*
 2. **Paper only.** `TACTICAL_LIVE_TRADING=False`. The execution gate blocks
    `TradeMode.LIVE` for this family regardless of `PAPER_MODE`.
 3. **Its own risk bucket**, because it has no event materiality to act as a
    brake: **2% of capital per day, 0.5% per trade**, enforced per trading day in
    Redis and **failing closed** if Redis is unreadable.
-4. **Same central gate.** A TACTICAL intent passes the identical market-hours,
-   confidence-provenance and 12-check `validate_signal` path as every other
-   family. Its bucket is an *additional* cap, never a replacement.
-5. **Minimum 7 days in paper** with execution enabled before live is even
-   discussed.
+4. **Same central gate, two calibrated parameters.** A TACTICAL intent passes
+   the identical market-hours, confidence-provenance and 12-check
+   `validate_signal` path as every other family. **Two** of those checks read a
+   family-specific value; everything else is byte-identical:
+
+| Parameter | News families | `TACTICAL` | Where |
+|---|---|---|---|
+| Minimum reward:risk | **2.0** | **1.5** | `risk_manager.validate_signal` check 4 |
+| Per-position notional cap | **5%** (`AGENT_MAX_POSITION_WEIGHT`) | **10%** (`TACTICAL_MAX_POSITION_NOTIONAL_PCT`) | `risk_manager.max_position_weight_for`, consulted by check 5, `calculate_position_size`, and the `trade_simulator` hard guard |
+| Daily risk bucket | *(none — event materiality is the brake)* | **2% / day, 0.5% / trade** | `engine/tactical_risk.py`, Redis, fails closed |
+
+   **Both deviations are relaxations, and this clause previously said the
+   tactical bucket was "an additional cap, never a replacement." That is no
+   longer strictly true and the text is corrected here rather than left to
+   drift.** The rationale, recorded so a later reviewer can judge it:
+
+   - *R:R 1.5* — the blanket 2.0 rejected 79.8% of tactical signals
+     (`PIVOT_BREAKOUT` 0/137). Intraday stop/target geometry is built from
+     structural levels (ORB range, VWAP band, pivots) that sit far closer to
+     entry than an event-driven target, so 2:1 is unreachable by construction,
+     not by weak setups. 1.5 still requires positive expectancy above a 40% win
+     rate.
+   - *Notional 10%* — those same tight stops make risk-based sizing ask for a
+     large share count against a small per-share risk. Under the 5% cap the
+     **notional** bound, not the risk bound, decided nearly every tactical size,
+     cutting realised per-trade risk to ~0.1% and admitting ~20 trades/day into
+     a bucket dimensioned for 4. The 10% cap restores the 2% / 0.5% risk bucket
+     as the primary brake and leaves the notional cap to do only what it is for:
+     limiting concentration in a single tight-stop name.
+
+   The daily bucket is the compensating control for both, and it has no
+   counterpart in the news families.
+5. **Minimum 7 days of paper trading** with execution enabled before live is
+   even discussed. The *evaluation* date is the owner's to choose; this floor
+   governs only the live decision.
 6. **This clause must be amended again before live**, in a reviewed commit.
 
 **What is still forbidden, unchanged:** every other event-less originator.
