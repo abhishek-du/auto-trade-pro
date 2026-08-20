@@ -210,6 +210,34 @@ async def lifespan(app: FastAPI):
 
     _bg_tasks.append(_asyncio.create_task(_warmup_info_cache()))
 
+    # ── Ticker subscription reconcile ────────────────────────────────────────
+    # The KiteTicker lives in THIS process, but trades are opened by the news
+    # engine and the Celery worker — separate OS processes whose
+    # `subscribe_open_position()` call hits `_active_ws is None` and returns
+    # silently. A position opened elsewhere therefore never got subscribed, so
+    # Kite never pushed a tick for it and its price stayed frozen at the last
+    # cached value. (The live news path never called subscribe at all.)
+    #
+    # Reconciling against `open_positions` here makes the DB the source of
+    # truth, so it works regardless of which process opened the trade and
+    # self-heals after a reconnect. See
+    # crawler/zerodha_ticker.py::sync_open_position_subscriptions.
+    async def _ticker_subscription_loop():
+        await _asyncio.sleep(45)   # let the ticker connect and do its first subscribe
+        while not _stop_event.is_set():
+            try:
+                from crawler.zerodha_ticker import sync_open_position_subscriptions
+                await sync_open_position_subscriptions()
+            except Exception as exc:
+                logger.warning(f"[ticker_sync] reconcile failed: {exc}")
+            try:
+                await _asyncio.wait_for(_stop_event.wait(), timeout=30)
+                break
+            except _asyncio.TimeoutError:
+                pass
+
+    _bg_tasks.append(_asyncio.create_task(_ticker_subscription_loop()))
+
     # ── Kite WebSocket ticker ────────────────────────────────────────────────
     # Start whenever Zerodha is enabled + token is present — market-hours check
     # was removed so a mid-session backend restart auto-reconnects the feed.
