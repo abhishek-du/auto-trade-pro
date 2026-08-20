@@ -70,7 +70,8 @@ end
 return 1
 """
 
-_rate_limit_script = None       # async client script handle (module-cached)
+_rate_limit_script = None       # async script handle, valid only for _script_client
+_script_client = None           # the client _rate_limit_script was registered against
 _warned_once: set[str] = set()  # so a Redis outage logs once per bucket, not per call
 
 
@@ -125,8 +126,19 @@ async def acquire(bucket: Bucket = Bucket.QUOTE) -> None:
         from utils.cache import get_redis
 
         r = get_redis()
-        if _rate_limit_script is None:
+        # Re-register when the CLIENT changes, not just when the script is None.
+        # get_redis() returns a fresh client whenever the running event loop
+        # changes, and Celery prefork gives every task its own asyncio.run().
+        # Caching only the script kept a handle bound to the previous (now
+        # closed) loop's client, so every call after the first in a worker
+        # raised "Event loop is closed" and fell through to the fail-open
+        # branch -- observed live 2026-08-20, the limiter was silently not
+        # limiting. This is the same defect class the module docstring warns
+        # about, one level up: the script transitively holds the client.
+        global _script_client
+        if _rate_limit_script is None or _script_client is not r:
             _rate_limit_script = r.register_script(_RATE_LIMIT_LUA)
+            _script_client = r
 
         deadline = _time.monotonic() + _max_wait()
         while _time.monotonic() < deadline:

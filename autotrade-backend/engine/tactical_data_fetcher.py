@@ -111,6 +111,25 @@ def orb_window(when: datetime | None = None) -> tuple[datetime, datetime]:
     return _at(t, SESSION_OPEN), _at(t, ORB_END)
 
 
+# How stale the newest bar may be before we refuse the frame entirely, per
+# timeframe (minutes).
+#
+# Calibrated against measured behaviour, not the bar size: `kite_live_candles`
+# runs every 3 minutes but fetches thousands of symbols per run (soft limit
+# 1200s), so the newest 1m bar normally trails 15-20 minutes. A threshold at the
+# bar size would refuse a perfectly healthy feed.
+#
+# These are wide enough for that batch lag and still catch a dead feed by orders
+# of magnitude — the 5m outage found on 2026-08-20 was 1,277 minutes stale.
+#
+# CAVEAT worth remembering when reading shadow results: an F1 signal's
+# indicators can therefore be up to ~20 minutes old even when the feed is
+# "healthy". Entry price is live (market_snapshot), but RSI/VWAP/pivots are not.
+# That is a data-infrastructure limit, not something the rules can compensate
+# for, and it is a genuine weakness of intraday signals on this feed.
+MAX_BAR_AGE_MIN = {"1m": 30, "5m": 45, "15m": 90, "1h": 240, "1d": 5760}
+
+
 async def get_candles_df(
     symbol: str,
     timeframe: str,
@@ -118,6 +137,7 @@ async def get_candles_df(
     session: AsyncSession,
     *,
     before: datetime | None = None,
+    allow_stale: bool = False,
 ) -> pd.DataFrame | None:
     """Oldest-first OHLCV DataFrame, or None when there is not enough data.
 
@@ -135,6 +155,29 @@ async def get_candles_df(
 
     if not rows or len(rows) < 5:
         return None
+
+    # Fail CLOSED on a stale feed (same posture as the D3 price fix).
+    #
+    # Found live 2026-08-20: the 5m feed had been dead for ~21 hours while the
+    # 1m feed was healthy, and F4 happily produced 14 "oversold rebound" signals
+    # an hour by computing RSI and Bollinger bands on yesterday's bars and
+    # comparing them to today's live price. Those signals looked entirely
+    # confident and were meaningless. A pipeline that cannot tell stale data
+    # from fresh will always eventually trade on the stale kind.
+    #
+    # `before` is point-in-time replay, where old bars are the whole point, so
+    # the check is skipped there.
+    if before is None and not allow_stale:
+        newest = rows[0].timestamp          # newest-first
+        max_age = MAX_BAR_AGE_MIN.get(timeframe)
+        if newest is not None and max_age is not None:
+            age_min = (datetime.utcnow() - newest).total_seconds() / 60.0
+            if age_min > max_age:
+                logger.warning(
+                    f"[tactical] {symbol}/{timeframe}: newest bar is "
+                    f"{age_min:.0f} min old (max {max_age}) — refusing the frame"
+                )
+                return None
 
     # get_latest_candles returns NEWEST-first; indicators need oldest-first.
     rows = list(reversed(rows))

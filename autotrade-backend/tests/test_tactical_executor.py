@@ -158,3 +158,55 @@ class TestResilience:
 
         assert out["scanned"] == 1        # the good one still scanned
         assert out["persisted"] >= 1
+
+
+class TestStaleFeedIsRefused:
+    """Found live 2026-08-20: the 5m feed was ~21 hours dead while 1m was
+    healthy, and F4 produced 14 confident 'oversold rebound' signals an hour by
+    computing Bollinger bands on yesterday's bars against today's live price.
+    Fail closed instead — same posture as the D3 price fix."""
+
+    @pytest.mark.asyncio
+    async def test_stale_frame_is_refused(self):
+        from datetime import timedelta
+        from unittest.mock import MagicMock
+
+        from engine import tactical_data_fetcher as tdf
+
+        old = datetime.utcnow() - timedelta(hours=21)
+        rows = [MagicMock(timestamp=old - timedelta(minutes=i), open=1.0, high=1.0,
+                          low=1.0, close=1.0, volume=1.0) for i in range(30)]
+        with patch("engine.tactical_data_fetcher.get_latest_candles",
+                   AsyncMock(return_value=rows)):
+            assert await tdf.get_candles_df("X.NS", "5m", 30, MagicMock()) is None
+
+    @pytest.mark.asyncio
+    async def test_fresh_frame_is_accepted(self):
+        from datetime import timedelta
+        from unittest.mock import MagicMock
+
+        from engine import tactical_data_fetcher as tdf
+
+        now = datetime.utcnow()
+        rows = [MagicMock(timestamp=now - timedelta(minutes=i), open=1.0, high=1.0,
+                          low=1.0, close=1.0, volume=1.0) for i in range(30)]
+        with patch("engine.tactical_data_fetcher.get_latest_candles",
+                   AsyncMock(return_value=rows)):
+            df = await tdf.get_candles_df("X.NS", "5m", 30, MagicMock())
+        assert df is not None and len(df) == 30
+
+    @pytest.mark.asyncio
+    async def test_point_in_time_replay_still_allows_old_bars(self):
+        """`before=` is historical replay — old bars are the entire point."""
+        from datetime import timedelta
+        from unittest.mock import MagicMock
+
+        from engine import tactical_data_fetcher as tdf
+
+        old = datetime.utcnow() - timedelta(days=400)
+        rows = [MagicMock(timestamp=old - timedelta(minutes=i), open=1.0, high=1.0,
+                          low=1.0, close=1.0, volume=1.0) for i in range(30)]
+        with patch("engine.tactical_data_fetcher.get_latest_candles",
+                   AsyncMock(return_value=rows)):
+            df = await tdf.get_candles_df("X.NS", "5m", 30, MagicMock(), before=old)
+        assert df is not None, "point-in-time replay must not be blocked by the staleness guard"
