@@ -96,6 +96,18 @@ async def init_db() -> None:
         "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         # create_all() never ALTERs an existing table, so a new column on a live
         # table has to come through here (the repo's established dual path, D10).
+        # Sequence repair (2026-08-20). news_items_id_seq fell BEHIND MAX(id),
+        # so every INSERT asked for an id that already existed and died on the
+        # primary key. Ingestion stopped dead at 14:57 and stayed stopped for
+        # 5.5 hours while the crawler kept reporting "saved=N" -- the count is
+        # incremented before the commit, so the failure was invisible in logs.
+        # Only a row-count check against the DB revealed it.
+        #
+        # setval(..., false) so the NEXT id is exactly MAX(id)+1. Idempotent and
+        # cheap, so it runs every boot: a sequence can drift again after a
+        # restore, a manual insert with an explicit id, or a replication reseed,
+        # and this class of failure is silent every time.
+        "SELECT setval('news_items_id_seq', COALESCE((SELECT MAX(id) FROM news_items), 0) + 1, false)",
         # News dedup (2026-08-20). PARTIAL on purpose: 14,105 historical rows
         # are duplicates and 685 of them are referenced by causal_events.news_id
         # under an ON DELETE NO ACTION FK, so a full unique index could not be

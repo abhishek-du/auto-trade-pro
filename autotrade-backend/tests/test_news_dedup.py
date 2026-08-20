@@ -92,3 +92,20 @@ class TestIndexDefinition:
         assert "WHERE crawled_at >=" in ddl[i:i + 500], (
             "index is no longer partial — it would fail to build on this table"
         )
+
+
+class TestSequenceRepair:
+    """news_items_id_seq fell behind MAX(id) on 2026-08-20 and killed ingestion
+    for 5.5 hours, silently: the crawler reported saved=N because the counter is
+    incremented before the commit that then failed on the primary key."""
+
+    def test_boot_repairs_the_sequence(self):
+        ddl = (BACKEND / "db" / "database.py").read_text(encoding="utf-8")
+        assert "setval('news_items_id_seq'" in ddl
+
+    def test_repair_uses_false_so_next_id_is_max_plus_one(self):
+        """setval(..., true) would make the next id MAX(id)+2 and leave a gap
+        every boot; setval(..., false) yields exactly MAX(id)+1."""
+        ddl = (BACKEND / "db" / "database.py").read_text(encoding="utf-8")
+        i = ddl.index("setval('news_items_id_seq'")
+        assert ", false)" in ddl[i:i + 160]
