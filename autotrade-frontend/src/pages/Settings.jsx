@@ -338,57 +338,23 @@ function StrategyExecutionPanel() {
   );
 }
 
-// ── Strategy toggles (UI-only — not wired to the backend) ───────────────────
-// Every strategy path documented in /pipeline and /documentation, with its
-// real current status. Toggle state lives entirely in the browser
-// (localStorage) — flipping a switch here does not call any API and does
-// not change what the live agent actually does. See STORAGE_KEY below.
+// ── Supporting components (UI-only — not wired to the backend) ──────────────
+// The six ORIGINATION PATHS are controlled by StrategyExecutionPanel above,
+// which reads its state from the API and is therefore always accurate. This
+// list covers only the components that have no individual runtime switch.
+//
+// Deliberately does NOT repeat the six paths. It used to, and the copies drifted:
+// on 2026-08-20 this panel still showed Path A and Path B as "BLOCKED
+// (architecture)" a day after the block was lifted, listed four F&O strategies
+// as LIVE months after the subsystem was deleted in 91457d7, and never listed
+// Path F at all. Hardcoded status that duplicates backend state goes stale.
+//
+// Toggle state here lives entirely in the browser (localStorage) and changes
+// nothing about what the agent does.
 
 const STORAGE_KEY = 'prajna_strategy_toggles_v1';
 
 const STRATEGIES = [
-  {
-    id: 'news_strategy',
-    name: 'News Strategy (Event-Driven)',
-    desc: 'Clusters headlines into a canonical event, runs an LLM ReAct debate, trades on TAKE. The primary equity engine.',
-    status: 'LIVE',
-  },
-  {
-    id: 'pre_event_gap',
-    name: 'Pre-Event Expectation Gap',
-    desc: 'Nowcasts the likely surprise on scheduled corporate events (earnings, board meetings) 1–15 days out.',
-    status: 'LIVE',
-  },
-  {
-    id: 'direct_news',
-    name: 'Direct News',
-    desc: 'Trades directly off event classification — no LLM debate. Fires alongside News Strategy on the same event.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_options',
-    name: 'F&O — Option Buying',
-    desc: 'Options buying off the symbol-aware options factor.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_futures',
-    name: 'F&O — Futures',
-    desc: 'Futures execution with its own margin model.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_hedge',
-    name: 'F&O — Hedging',
-    desc: 'Protective hedge overlay on open positions.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_vol',
-    name: 'F&O — Volatility Strategies',
-    desc: 'Volatility-targeting option strategies (spreads/straddles).',
-    status: 'LIVE',
-  },
   {
     id: 'intraday_mis',
     name: 'Intraday MIS',
@@ -406,18 +372,6 @@ const STRATEGIES = [
     name: 'ML Direction Predictor',
     desc: 'Per-symbol LSTM 3-class (UP/DOWN/FLAT) prediction, ±15 nudge on the technical score.',
     status: 'LIVE',
-  },
-  {
-    id: 'master_intel_cycle',
-    name: 'Master Intelligence Cycle (Path A)',
-    desc: 'Pure technical scan. Hard-blocked from opening trades by the News-Only architecture decision — scores only, feeds context to the live paths.',
-    status: 'BLOCKED',
-  },
-  {
-    id: 'india_trade_loop',
-    name: 'India Trade Loop (Path B)',
-    desc: 'Same News-Only hard-block as Path A — runs for instrumentation only, never executes.',
-    status: 'BLOCKED',
   },
   {
     id: 'scan_paper_trader',
@@ -568,16 +522,16 @@ function StrategiesPanel() {
     <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
         <Layers size={16} className="text-purple-400" />
-        <h2 className="text-slate-200 font-semibold text-sm">Strategies</h2>
-        <span className="text-muted text-xs">— every strategy path present in the code</span>
+        <h2 className="text-slate-200 font-semibold text-sm">Supporting Components</h2>
+        <span className="text-muted text-xs">— no individual runtime switch</span>
       </div>
 
       <div className="flex items-start gap-2.5 mx-5 mt-4 bg-blue-500/10 border border-blue-500/25 rounded-lg px-3 py-2.5">
         <AlertTriangle size={13} className="text-blue-400 mt-0.5 shrink-0" />
         <p className="text-blue-300 text-[11px] leading-relaxed">
-          Reference list of every strategy path in the code. These switches are a
-          <strong> local display preference only</strong> and do not affect trading —
-          use <strong>Strategy Execution</strong> above to actually turn a strategy on or off.
+          Components that run alongside the six origination paths. These switches are a
+          <strong> local display preference only</strong> and do not affect trading.
+          The six paths themselves are controlled in <strong>Strategy Execution</strong> above.
         </p>
       </div>
 
