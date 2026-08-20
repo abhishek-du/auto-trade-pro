@@ -295,13 +295,13 @@ class TacticalExecutor:
         if veto.vetoed:
             reasons.append(f"llm veto: {veto.reason}")
 
-        sizing = self.risk.size(signal, ml_prob=ml_prob, vix=ctx.vix)
+        sizing = await self.risk.size(signal, ml_prob=ml_prob, vix=ctx.vix)
         if not sizing.approved:
             reasons.append(sizing.reason)
         elif not reasons:
             # Only book risk against the bucket when nothing else blocked it,
             # so the running total reflects trades that would actually be taken.
-            self.risk.commit(sizing)
+            await self.risk.commit(sizing)
 
         would_trade = not reasons
         if not would_trade:
