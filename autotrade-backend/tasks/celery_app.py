@@ -128,13 +128,20 @@ celery_app.conf.beat_schedule = {
     # IST-looking hour range here would fire in the evening and never during
     # the session.
     # F1 every minute on 1m candles; F4 every 5 min on 5m candles.
+    # Explicit `expires` — the auto-loop at the bottom of this file gives every
+    # CRONTAB entry 3600s, which is right for a daily job and badly wrong for a
+    # 1-minute one: observed live 2026-08-20, a brief backlog replayed ~4 stale
+    # F1 cycles inside one minute. A tactical scan is only meaningful for the
+    # bar it was scheduled for, so drop it rather than run it late.
     "tactical-intraday-1min": {
         "task":     "tasks.tactical_tasks.run_tactical_intraday",
         "schedule": crontab(minute="*", hour="3-10", day_of_week="1-5"),
+        "options":  {"expires": 55},      # < the 60s cadence
     },
     "tactical-meanrev-5min": {
         "task":     "tasks.tactical_tasks.run_tactical_mean_reversion",
         "schedule": crontab(minute="*/5", hour="3-10", day_of_week="1-5"),
+        "options":  {"expires": 280},     # < the 300s cadence
     },
 
     # NOTE (D9, audit 2026-08-19): three F&O beat entries were removed here —

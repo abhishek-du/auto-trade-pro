@@ -53,6 +53,44 @@ class TestBeatSchedule:
         """Guard against a bad edit deleting more than intended."""
         assert len(celery_app.conf.beat_schedule) > 40
 
+    def test_frequent_crontab_entries_do_not_inherit_the_1h_expiry(self):
+        """The auto-expires loop gives EVERY crontab entry 3600s, which is right
+        for a daily job and wrong for a sub-hourly one — a backlog then replays
+        stale cycles long after they mean anything. Observed live 2026-08-20:
+        ~4 stale 1-minute tactical scans ran inside one minute.
+
+        Any crontab entry that fires more often than hourly must declare its own
+        `expires` shorter than its cadence.
+        """
+        from celery.schedules import crontab
+
+        # Exempt: verified to self-gate and be idempotent, so a late run is
+        # harmless. kite_live_candles returns {"skipped": "outside_market_hours"}
+        # and its candle writes are upserts, unlike a tactical scan whose output
+        # is timestamped signals that would be attributed to the wrong minute.
+        EXEMPT = {"kite-live-1m-candles"}
+
+        offenders = []
+        for name, cfg in celery_app.conf.beat_schedule.items():
+            sch = cfg["schedule"]
+            if not isinstance(sch, crontab):
+                continue
+            minute = str(getattr(sch, "_orig_minute", "*"))
+            # "*" or any "*/n" step means it fires multiple times per hour.
+            fires_sub_hourly = minute == "*" or "/" in minute or "," in minute
+            if not fires_sub_hourly:
+                continue
+            expires = cfg.get("options", {}).get("expires")
+            if name in EXEMPT:
+                continue
+            if expires is None or expires >= 3600:
+                offenders.append(f"{name} (minute={minute!r}, expires={expires})")
+
+        assert not offenders, (
+            "sub-hourly crontab entries inheriting the 1h default expiry:\n  "
+            + "\n  ".join(offenders)
+        )
+
     def test_every_entry_has_an_expires(self):
         """celery_app applies expires programmatically; a queue backlog once
         reached 63k tasks without it."""
