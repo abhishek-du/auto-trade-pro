@@ -81,10 +81,12 @@ def predict_proba(signal: Signal, features: dict | None = None) -> float:
     if model is None:
         if not _warned:
             _warned = True
+            # loguru uses {}-style formatting, not %-style — the old form left
+            # literal "%s" / "%.2f" in the log line.
             logger.info(
-                "[tactical_ml] no model at %s — Layer 2 is a pass-through "
-                "(neutral %.2f); ranking falls back to the Layer-1 composite score",
-                MODEL_PATH, NEUTRAL_PROBABILITY,
+                f"[tactical_ml] no model at {MODEL_PATH} — Layer 2 is a pass-through "
+                f"(neutral {NEUTRAL_PROBABILITY:.2f}); ranking falls back to the "
+                f"Layer-1 composite score"
             )
         return NEUTRAL_PROBABILITY
 
