@@ -162,6 +162,14 @@ class TacticalExecutor:
                 return result
 
             signals = await self._collect(pipeline, universe, session, ctx, result)
+
+            # One aggregate line when the feed is unusable, instead of a
+            # per-symbol warning from the staleness guard.
+            if result.scanned == 0 and universe:
+                logger.warning(
+                    f"[tactical:{pipeline}] scanned 0 of {len(universe)} symbols — "
+                    f"no usable candles (feed stale or missing for this timeframe)"
+                )
             result.raw_signals = len(signals)
             if not signals:
                 result.reason = "no rule triggered"

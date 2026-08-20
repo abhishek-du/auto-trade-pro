@@ -949,6 +949,9 @@ async def run_india_price_crawl(
     # (max 15 concurrent threads) to avoid Celery SoftTimeLimit exceptions.
     counted: set[str] = set()
     sem = asyncio.Semaphore(15)
+    # Persist in batches rather than one all-or-nothing save at the end.
+    _FLUSH_EVERY = 5_000          # rows, ~ a couple of hundred symbols
+    saved = {"n": 0}
 
     async def _fetch_symbol(symbol: str):
         symbol_ok = False
@@ -992,8 +995,34 @@ async def run_india_price_crawl(
             if symbol_ok:
                 counted.add(symbol)
 
-    # Launch all symbols concurrently
-    await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
+        # Flush incrementally (2026-08-20). This used to accumulate every
+        # candle for all ~1,400 symbols and save ONCE after the gather, so a
+        # SoftTimeLimitExceeded anywhere in the fetch discarded the entire
+        # batch. That is exactly what had been happening: the crawl started but
+        # never once reached the save, and the 5m and 1h feeds were silently
+        # dead for over a day (0 rows written today vs 290k for 1m, which a
+        # different task writes) while candle_staleness_watchdog alarmed.
+        #
+        # Flushing in batches means a timeout costs at most the current batch,
+        # not the whole run.
+        if len(all_candles) >= _FLUSH_EVERY:
+            batch, all_candles[:] = list(all_candles), []
+            try:
+                saved["n"] += await save_candles_to_db(batch, session)
+            except Exception as exc:
+                logger.warning(f"[india_price] incremental flush failed: {exc}")
+
+    # Launch all symbols concurrently. Whatever has been fetched must be saved
+    # even if this raises (soft time limit, cancellation) — see the finally.
+    try:
+        await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
+    finally:
+        if all_candles:
+            try:
+                saved["n"] += await save_candles_to_db(list(all_candles), session)
+                all_candles.clear()
+            except Exception as exc:
+                logger.warning(f"[india_price] final flush failed: {exc}")
     total_symbols = len(counted)
 
     # Step 1b — refresh the regime's daily candles via Kite (fresh, not
@@ -1006,8 +1035,10 @@ async def run_india_price_crawl(
     # Step 3 — fetch India VIX (Kite-first, yfinance fallback)
     vix = await fetch_vix_kite_first()
 
-    # Step 4 — persist new candles to DB (chunked upsert, 3 000 rows per statement)
-    total_candles_saved = await save_candles_to_db(all_candles, session)
+    # Step 4 — persist any remainder (most rows were already flushed above)
+    if all_candles:
+        saved["n"] += await save_candles_to_db(all_candles, session)
+    total_candles_saved = saved["n"]
 
     result = {
         "total_symbols":       total_symbols,

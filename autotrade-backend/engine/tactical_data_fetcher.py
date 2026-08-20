@@ -173,7 +173,10 @@ async def get_candles_df(
         if newest is not None and max_age is not None:
             age_min = (datetime.utcnow() - newest).total_seconds() / 60.0
             if age_min > max_age:
-                logger.warning(
+                # DEBUG, not WARNING: a dead feed means EVERY symbol trips
+                # this, and warning per symbol produced 364 lines in 15 minutes.
+                # The executor emits one aggregate warning per cycle instead.
+                logger.debug(
                     f"[tactical] {symbol}/{timeframe}: newest bar is "
                     f"{age_min:.0f} min old (max {max_age}) — refusing the frame"
                 )
