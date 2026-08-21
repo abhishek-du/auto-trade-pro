@@ -64,8 +64,10 @@ def _run_guarded(lock_key: str, coro_factory) -> dict:
 
 @celery_app.task(
     name="tasks.tactical_tasks.run_tactical_intraday",
-    soft_time_limit=50,
-    time_limit=60,
+    # Raised from 50/60 on 2026-08-21: a ~1,480-symbol scan measures 130.6s
+    # under live load, so the old ceiling killed every run before it finished.
+    soft_time_limit=170,
+    time_limit=180,
 )
 def run_tactical_intraday() -> dict:
     """F1 — intraday momentum scan on 1-minute candles. Every minute."""

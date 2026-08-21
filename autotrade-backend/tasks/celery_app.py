@@ -133,10 +133,20 @@ celery_app.conf.beat_schedule = {
     # 1-minute one: observed live 2026-08-20, a brief backlog replayed ~4 stale
     # F1 cycles inside one minute. A tactical scan is only meaningful for the
     # bar it was scheduled for, so drop it rather than run it late.
-    "tactical-intraday-1min": {
+    # CADENCE WIDENED 1min -> 3min (2026-08-21, during live market hours).
+    # The universe went 50 -> ~1,480 symbols on 2026-08-20. That was estimated
+    # at ~31s from a component measurement (20ms/symbol) taken on an IDLE box
+    # after the close. MEASURED under real load with all four services running:
+    # 130.6s for 1,138 symbols (~115ms/symbol). Against soft_time_limit=50 and
+    # expires=55 the task could never run: beat enqueued it every minute, it
+    # expired before a slot freed, and an expired task logs NOTHING -- so Path F
+    # produced 0 signals for a whole session with no error anywhere.
+    # Breadth is the point of the wide universe, so the cadence gives way, not
+    # the coverage. 3 min still resolves intraday momentum.
+    "tactical-intraday-3min": {
         "task":     "tasks.tactical_tasks.run_tactical_intraday",
-        "schedule": crontab(minute="*", hour="3-10", day_of_week="1-5"),
-        "options":  {"expires": 55},      # < the 60s cadence
+        "schedule": crontab(minute="*/3", hour="3-10", day_of_week="1-5"),
+        "options":  {"expires": 175},     # < the 180s cadence
     },
     "tactical-meanrev-5min": {
         "task":     "tasks.tactical_tasks.run_tactical_mean_reversion",
