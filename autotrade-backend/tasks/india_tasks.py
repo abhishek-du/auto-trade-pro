@@ -3425,6 +3425,49 @@ async def _candle_staleness_watchdog():
     expired Kite token alike. Cooldown now lives in integrations/alerts/router.py's
     shared Redis dedup (OPERATIONS/ERROR default 1hr), not an in-process global."""
     from crawler.india_price_feed import is_nse_market_open
+    # ── Daily-coverage check (2026-08-21) ────────────────────────────────────
+    # Runs BEFORE the market-hours guard, because a daily-bar gap is only
+    # visible after the close and the 5m check below returns early when the
+    # market is shut.
+    #
+    # This watchdog only ever looked at `timeframe='5m'`. It therefore had no
+    # view of the daily feed at all, and a coverage collapse went unnoticed for
+    # two sessions: 7,066 symbols with a 1d bar on 19 Aug, 2,500 on the 20th,
+    # 4 on the 21st. Nothing alerted. It surfaced only because a trading rule
+    # read a two-day-old close and reported HSCL down 12.78% against a real
+    # -7.07%.
+    #
+    # Daily bars feed the 20-day RVOL baseline, the 20-day high, pivot levels
+    # and every day-move gate — a silent gap there quietly corrupts entry
+    # decisions rather than stopping them, which is the worse failure.
+    try:
+        from tasks._db import celery_session as _cs
+        from sqlalchemy import text as _txt
+
+        async with _cs() as _s2:
+            _cov = (await _s2.execute(_txt("""
+                SELECT
+                  (SELECT COUNT(DISTINCT symbol) FROM candles
+                     WHERE timeframe='1d' AND timestamp::date = (
+                       SELECT MAX(timestamp)::date FROM candles WHERE timeframe='1d')),
+                  (SELECT COUNT(DISTINCT symbol) FROM candles
+                     WHERE timeframe='1d'
+                       AND timestamp::date < (SELECT MAX(timestamp)::date FROM candles WHERE timeframe='1d')
+                       AND timestamp >= CURRENT_DATE - 7)
+            """))).fetchone()
+        _newest, _baseline = int(_cov[0] or 0), int(_cov[1] or 0)
+        from utils.config import settings as _cfg_s
+        _min_frac = float(getattr(_cfg_s, "DAILY_COVERAGE_MIN_FRAC", 0.5))
+        if _baseline > 100 and _newest < _baseline * _min_frac:
+            logger.error(
+                f"[watchdog] DAILY CANDLE COVERAGE COLLAPSE — newest 1d date has "
+                f"{_newest} symbols vs {_baseline} in the prior week "
+                f"({_newest / _baseline:.0%}). RVOL baselines, 20-day highs and "
+                f"day-move gates are all reading from this."
+            )
+    except Exception as _cov_exc:
+        logger.debug(f"[watchdog] daily-coverage check failed: {_cov_exc}")
+
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
 

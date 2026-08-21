@@ -330,6 +330,10 @@ class Settings(BaseSettings):
     # model is non-deterministic here, not systematically wrong. Only fires when
     # both reads are confident.
     EVENT_SENTIMENT_CONFLICT_MIN: float = 0.70
+    # Alert when the newest 1d date covers less than this fraction of the
+    # symbols the prior week carried. The watchdog only checked 5m, so a
+    # collapse from 7,066 -> 2,500 -> 4 symbols went unnoticed for two sessions.
+    DAILY_COVERAGE_MIN_FRAC:      float = 0.5
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
     NEWS_SECTOR_MIN_SCORE:        float = 0.7
