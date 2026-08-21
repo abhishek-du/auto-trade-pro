@@ -3916,6 +3916,13 @@ async def _backfill_hub_1d_candles():
             WHERE segment IN ('NSE', 'BSE') AND instrument_type = 'EQ'
               AND name != '' AND instrument_token > 0
               AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
+              -- Bonds/SDLs also appear with numeric-coded tradingsymbols that
+              -- the name filters above miss entirely: 708GJ31.BO, 765TN30.BO
+              -- and 786 others. Kite returns no daily candles for any of them,
+              -- so every one is a guaranteed empty fetch. Observed live
+              -- 2026-08-21: a 300-symbol chunk landed in this block and saved
+              -- 36 rows. No real NSE/BSE equity ticker starts with a digit.
+              AND tradingsymbol !~ '^[0-9]'
             ORDER BY tradingsymbol
         """))).all()
         _suffix = {"NSE": ".NS", "BSE": ".BO"}
@@ -3941,10 +3948,69 @@ async def _backfill_hub_1d_candles():
 
     # Only backfill symbols that are stale (no candle since yesterday)
     stale_symbols = [s for s in symbol_set if s not in fresh_set]
+
+    # ── Chunked + resumable (2026-08-21) ─────────────────────────────────────
+    # This task used to attempt the whole stale list in one run. Measured on
+    # 21 Aug: all_syms=10139, fresh=4, need_backfill=10138 -- and at the 0.35s
+    # spacing below that is ~59 minutes of pure sleep before any request
+    # overhead, against a 3600s soft limit. It died with SoftTimeLimitExceeded
+    # at exactly 60:00 having finished nothing, every day. Daily coverage
+    # decayed 7,066 -> 2,500 -> 4 symbols over three sessions while every
+    # service reported healthy, because a task that always dies at the limit
+    # looks identical to one that is merely slow.
+    #
+    # Two changes, together:
+    #   1. PRIORITISE the tradeable universe. Daily bars matter for symbols the
+    #      system can actually trade -- they feed the 20-day RVOL baseline, the
+    #      20-day high and the day-move gates. The long tail still gets done,
+    #      just after the names that matter.
+    #   2. Process a bounded CHUNK per run and remember the position in Redis,
+    #      so consecutive runs sweep the backlog instead of restarting it.
+    #
+    # The cursor is a symbol, not an index: the stale list is recomputed every
+    # run (symbols become fresh as they are filled), so an index would point at
+    # a different symbol each time and skip whole blocks.
+    from utils.config import settings as _bf_cfg
+
+    _chunk = int(getattr(_bf_cfg, "BACKFILL_1D_CHUNK", 300))
+    _progress_key = "backfill_hub_1d:cursor"
+
+    try:
+        from engine.tactical_data_fetcher import get_f1_universe
+        async with celery_session() as _s3:
+            _priority = {x for x in await get_f1_universe(_s3)}
+    except Exception as _pri_exc:
+        logger.debug(f"[backfill_hub_1d] priority universe unavailable: {_pri_exc}")
+        _priority = set()
+
+    # Tradeable names first, everything else after, each half in stable order.
+    stale_symbols = ([s for s in stale_symbols if s in _priority]
+                     + [s for s in stale_symbols if s not in _priority])
+
+    _cursor = None
+    try:
+        from utils.cache import get_redis
+        _cursor = await get_redis().get(_progress_key)
+    except Exception as _cur_exc:
+        logger.debug(f"[backfill_hub_1d] cursor read failed: {_cur_exc}")
+
+    _start = 0
+    if _cursor and _cursor in stale_symbols:
+        # Resume just AFTER the last symbol completed.
+        _start = stale_symbols.index(_cursor) + 1
+    _batch = stale_symbols[_start:_start + _chunk]
+    if not _batch and stale_symbols:
+        # Cursor ran off the end (or the list shrank) -- wrap to the front so a
+        # stale cursor can never wedge the sweep permanently.
+        _start, _batch = 0, stale_symbols[:_chunk]
+
     logger.info(
         f"[backfill_hub_1d] all_syms={len(symbol_set)}  fresh={len(fresh_set)}  "
-        f"need_backfill={len(stale_symbols)}"
+        f"need_backfill={len(stale_symbols)}  "
+        f"priority={len([s for s in stale_symbols if s in _priority])}  "
+        f"this_run={len(_batch)} (from index {_start})"
     )
+    stale_symbols = _batch
 
     saved_total = 0
     failed = 0
@@ -3978,8 +4044,16 @@ async def _backfill_hub_1d_candles():
             saved_total += r
         await _asyncio.sleep(_DELAY_SEC)
 
+    # Remember where this run stopped so the next one continues the sweep.
+    if stale_symbols:
+        try:
+            from utils.cache import get_redis
+            await get_redis().set(_progress_key, stale_symbols[-1], ex=86_400)
+        except Exception as _w_exc:
+            logger.debug(f"[backfill_hub_1d] cursor write failed: {_w_exc}")
+
     logger.info(
-        f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  stale={len(stale_symbols)}  "
+        f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  this_run={len(stale_symbols)}  "
         f"saved={saved_total}  failed={failed}"
     )
     return {

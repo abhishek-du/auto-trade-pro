@@ -333,6 +333,11 @@ class Settings(BaseSettings):
     # Alert when the newest 1d date covers less than this fraction of the
     # symbols the prior week carried. The watchdog only checked 5m, so a
     # collapse from 7,066 -> 2,500 -> 4 symbols went unnoticed for two sessions.
+    # Symbols per backfill_hub_1d run. At 0.35s Kite spacing, 300 is ~2 min of
+    # sleep -- comfortably inside the 3600s soft limit even with request
+    # overhead. The task previously attempted all 10,138 stale symbols in one
+    # run (~59 min of sleep alone) and died at the limit every single day.
+    BACKFILL_1D_CHUNK:            int   = 300
     DAILY_COVERAGE_MIN_FRAC:      float = 0.5
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
