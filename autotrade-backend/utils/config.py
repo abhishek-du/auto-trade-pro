@@ -333,11 +333,18 @@ class Settings(BaseSettings):
     # Alert when the newest 1d date covers less than this fraction of the
     # symbols the prior week carried. The watchdog only checked 5m, so a
     # collapse from 7,066 -> 2,500 -> 4 symbols went unnoticed for two sessions.
-    # Symbols per backfill_hub_1d run. At 0.35s Kite spacing, 300 is ~2 min of
-    # sleep -- comfortably inside the 3600s soft limit even with request
-    # overhead. The task previously attempted all 10,138 stale symbols in one
-    # run (~59 min of sleep alone) and died at the limit every single day.
-    BACKFILL_1D_CHUNK:            int   = 300
+    # Symbols per backfill_hub_1d run. The task previously attempted all 10,138
+    # stale symbols in one run (~59 min of sleep alone at 0.35s Kite spacing)
+    # and died on the 3600s soft limit every single day, completing nothing.
+    #
+    # 1000 raised from 300 on 2026-08-21 to clear the ~9,300-symbol backlog in
+    # days rather than weeks. MEASURED: 300 symbols took 160s, so ~0.53s per
+    # symbol end to end -> 1000 is ~9 minutes against a 3600s limit. Even a 4x
+    # slowdown (Kite throttling, retries) still lands near 35 min, well inside
+    # it. Do not raise this to "just do them all": the whole failure being
+    # fixed here was a run that could not finish, and a bounded chunk that
+    # always completes is what makes the cursor sweep work.
+    BACKFILL_1D_CHUNK:            int   = 1000
     DAILY_COVERAGE_MIN_FRAC:      float = 0.5
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
