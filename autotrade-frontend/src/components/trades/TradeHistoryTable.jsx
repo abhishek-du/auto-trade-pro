@@ -59,7 +59,7 @@ export default function TradeHistoryTable({ trades, positionBySymbol, loading, e
 
   const enriched = useMemo(() => (trades || []).map((t, i) => {
     const isOpen = (t.status ?? 'CLOSED').toUpperCase() === 'OPEN';
-    const tradeSym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
+    const tradeSym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').replace('.BO', '').toUpperCase();
     const pos = isOpen ? (positionBySymbol[tradeSym] ?? null) : null;
     const pnl = isOpen ? (pos?.unrealised_pnl ?? t.unrealised_pnl ?? t.pnl ?? 0) : (t.pnl ?? 0);
     const pnlPct = isOpen ? (pos?.unrealised_pct ?? t.unrealised_pct ?? t.pnl_percent ?? t.pnl_pct ?? 0) : (t.pnl_percent ?? t.pnl_pct ?? 0);
