@@ -342,9 +342,19 @@ class Settings(BaseSettings):
     # ~2,510 symbols and ~50s, i.e. the entire budget.
     TACTICAL_F1_MAX_SYMBOLS:      int   = 1500
     TACTICAL_F4_UNIVERSE_SIZE:    int   = 150     # 5m data covers ~1,250 symbols
+    # DAY_MOMENTUM (2026-08-21): pure trend capture, no pattern required.
+    # Added after the 21-Aug session, where F1's pattern rules fired on 1 of 29
+    # stocks that cleared volume + momentum + VWAP screens.
+    TACTICAL_DAY_MOM_MIN_RVOL:      float = 2.0
+    TACTICAL_DAY_MOM_MIN_RANGE_POS: float = 0.70   # top 30% of the day range
+    TACTICAL_DAY_MOM_MIN_GAIN_PCT:  float = 2.0
     TACTICAL_MIN_COMPOSITE_SCORE: float = 50.0
-    TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 15
-    TACTICAL_TOP_N:               int   = 5
+    # Raised 15->40 and TOP_N 5->15 on 2026-08-21. Measured that session:
+    # raw=404 -> kept=15 -> persisted=5, i.e. 99% of raw signals discarded every
+    # cycle, and GAP_AND_GO scores 96-99 vs VOLUME_BREAKOUT 72-74 so gaps took
+    # the whole top-5 and every other rule was structurally starved.
+    TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 40
+    TACTICAL_TOP_N:               int   = 15
     # Fast candle lane (audit blocker 3). Builds 1m bars from the live tick
     # stream so F1 stops computing indicators on 20-40 minute old DB bars.
     # Runs in the uvicorn process (where LIVE_TICKS lives) and publishes to

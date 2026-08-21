@@ -469,5 +469,104 @@ def vwap_crossover_5m(
     return [sig] if sig.is_sane() else []
 
 
-F1_RULES = ("ORB", "VWAP", "GAP_AND_GO", "PIVOT_BOUNCE", "PIVOT_BREAKOUT", "SCALP")
+def _cfg(name, default):
+    """Settings lookup local to this module (rules are otherwise pure)."""
+    from utils.config import settings
+    return getattr(settings, name, default)
+
+
+def day_momentum(
+    symbol: str, df_1m: pd.DataFrame, df_daily: pd.DataFrame, live_price: float,
+    *, now: datetime | None = None,
+) -> list[Signal]:
+    """Pure trend capture — no chart pattern required.
+
+    WHY THIS EXISTS (2026-08-21)
+    ----------------------------
+    Every other F1 rule needs a SHAPE: an opening-range break, a gap, a pivot
+    touch, an engulfing candle. A stock that simply grinds up all session on
+    heavy volume matches none of them. Measured on the 21-Aug session: of 29
+    stocks that cleared volume + intraday-momentum + VWAP screens, F1's existing
+    rules fired on exactly ONE (NETWEB, and only SCALP). NCC +6.9% on 13.2x
+    volume, JINDALSAW +7.8% on 17.5x, THOMASCOOK +12.1%, MANINDS +6.1% -- all
+    invisible, with good data and fresh bars.
+
+    This rule measures the move itself rather than its shape:
+      1. RVOL >= TACTICAL_DAY_MOM_MIN_RVOL      (default 2.0)
+      2. price in the top 30% of the day's range (holding its highs)
+      3. price >= 0.5% above session VWAP        (above the average buyer)
+      4. day gain >= TACTICAL_DAY_MOM_MIN_GAIN_PCT (default 2.0)
+
+    All four must hold. Individually each is common; together they describe a
+    stock being accumulated, which is the thing the pattern rules keep missing.
+
+    RVOL uses the 20 CLOSED daily bars before today, so today's own volume is
+    never part of its own baseline -- the flaw audit D5 flagged elsewhere.
+    """
+    d = closed(df_1m)
+    if len(d) < 20 or live_price <= 0 or df_daily is None or len(df_daily) < 11:
+        return []
+
+    day_high = float(d["high"].max())
+    day_low = float(d["low"].min())
+    day_open = float(d["open"].iloc[0])
+    rng = day_high - day_low
+    if rng <= 0 or day_open <= 0:
+        return []
+
+    # 1. Relative volume against the trailing 20 CLOSED sessions.
+    prior = df_daily.iloc[:-1] if len(df_daily) > 1 else df_daily
+    avg_vol = float(prior["volume"].tail(20).mean())
+    vol_today = float(d["volume"].sum())
+    if avg_vol <= 0:
+        return []
+    rvol = vol_today / avg_vol
+    if rvol < float(_cfg("TACTICAL_DAY_MOM_MIN_RVOL", 2.0)):
+        return []
+
+    # 2. Holding the top of the day's range.
+    range_pos = (live_price - day_low) / rng
+    if range_pos < float(_cfg("TACTICAL_DAY_MOM_MIN_RANGE_POS", 0.70)):
+        return []
+
+    # 3. Above session VWAP. Computed from today's bars rather than taken from
+    # IndicatorSignals: this needs the SESSION anchor, and the indicator's VWAP
+    # is over whatever window the frame happens to hold.
+    tp = (d["high"] + d["low"] + d["close"]) / 3.0
+    vol = d["volume"]
+    if float(vol.sum()) <= 0:
+        return []
+    vwap = float((tp * vol).sum() / vol.sum())
+    if vwap <= 0 or live_price < vwap * 1.005:
+        return []
+
+    # 4. A real move, not drift.
+    gain_pct = (live_price / day_open - 1.0) * 100.0
+    if gain_pct < float(_cfg("TACTICAL_DAY_MOM_MIN_GAIN_PCT", 2.0)):
+        return []
+
+    now = now or datetime.now()
+    ind = _safe_indicators(df_1m)
+    atr = float(ind.atr) if ind is not None and ind.atr and not np.isnan(ind.atr) else 0.0
+
+    # Stop: the wider of 1.5 ATR and 1% -- a 1% stop on a name that has already
+    # run 12% is inside the noise and would be taken out on any pullback.
+    stop = live_price - max(atr * 1.5, live_price * 0.01)
+    if stop <= 0 or stop >= live_price:
+        return []
+    # Target floored at 2R so the trade cannot be structurally negative-expectancy,
+    # and separately at 1.5% so a tight-ATR name still has room worth trading.
+    risk = live_price - stop
+    target = live_price + max(risk * 2.0, live_price * 0.015)
+
+    conf = _conf(70.0, min(10.0, (rvol - 2.0) * 2.0), min(8.0, (range_pos - 0.7) * 26.0))
+    sig = Signal(symbol, "BUY", live_price, stop, target, conf,
+                 "DAY_MOMENTUM", now, "F1",
+                 {"rvol": round(rvol, 2), "range_pos": round(range_pos, 2),
+                  "vwap_premium_pct": round((live_price / vwap - 1) * 100, 2),
+                  "day_gain_pct": round(gain_pct, 2), "atr": round(atr, 2)})
+    return [sig] if sig.is_sane() else []
+
+
+F1_RULES = ("ORB", "VWAP", "GAP_AND_GO", "PIVOT_BOUNCE", "PIVOT_BREAKOUT", "SCALP", "DAY_MOMENTUM")
 F4_RULES = ("OVERBOUGHT_FADE", "OVERSOLD_REBOUND", "VOLUME_BREAKOUT", "VWAP_CROSSOVER")
