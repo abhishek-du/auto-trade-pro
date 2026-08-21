@@ -402,6 +402,13 @@ class Settings(BaseSettings):
     TACTICAL_DAY_WEAK_MIN_RVOL:      float = 2.0
     TACTICAL_DAY_WEAK_MAX_RANGE_POS: float = 0.25   # bottom 25% of the day range
     TACTICAL_DAY_WEAK_MIN_LOSS_PCT:  float = 2.5    # vs 2.0 for the long side
+    # Both day rules DISABLED by backtest, 2026-08-21. 43 sessions x 250
+    # symbols, no lookahead, stop-wins-ties: DAY_MOMENTUM 53 signals / 24.5%
+    # win / -0.305 R, DAY_WEAKNESS 11 signals / 27.3% win / -0.126 R. A 2R
+    # target needs 33.3% to break even, and costs are not in those numbers.
+    # Re-enable only after a rerun shows positive expectancy.
+    TACTICAL_DAY_MOMENTUM_ENABLED:  bool  = False
+    TACTICAL_DAY_WEAKNESS_ENABLED:  bool  = False
     TACTICAL_DAY_MOM_MIN_RVOL:      float = 2.0
     TACTICAL_DAY_MOM_MIN_RANGE_POS: float = 0.70   # top 30% of the day range
     TACTICAL_DAY_MOM_MIN_GAIN_PCT:  float = 2.0

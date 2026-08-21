@@ -533,6 +533,18 @@ def day_momentum(
     RVOL uses the 20 CLOSED daily bars before today, so today's own volume is
     never part of its own baseline -- the flaw audit D5 flagged elsewhere.
     """
+    # DISABLED by measurement, 2026-08-21. Backtested over 43 sessions x 250
+    # symbols with no lookahead, the real rule functions, and stop-wins-ties on
+    # intrabar ambiguity: 53 signals, 24.5% win rate, -0.305 R expectancy,
+    # -16.2 R total. The 2R target floor needs 33.3% to break even. Costs and
+    # slippage are NOT in that number, so live would be worse.
+    #
+    # The rule is kept, not deleted: the logic is sound and the gates may simply
+    # be too loose (RVOL 2.0, range_pos 0.70). Re-enable only after a rerun
+    # shows positive expectancy on a larger sample.
+    if not bool(_cfg("TACTICAL_DAY_MOMENTUM_ENABLED", False)):
+        return []
+
     d = closed(df_1m)
     if len(d) < 20 or live_price <= 0 or df_daily is None or len(df_daily) < 11:
         return []
@@ -633,6 +645,13 @@ def day_weakness(
     RVOL uses the 20 CLOSED daily bars, so today is never part of its own
     baseline.
     """
+    # DISABLED by measurement, 2026-08-21. Same backtest: 11 signals, 27.3% win
+    # rate, -0.126 R expectancy. The sample is far too small to conclude
+    # anything on its own — but it is not evidence of an edge either, and it
+    # shares the losing structure of its long-side twin.
+    if not bool(_cfg("TACTICAL_DAY_WEAKNESS_ENABLED", False)):
+        return []
+
     d = closed(df_1m)
     if len(d) < 20 or live_price <= 0 or df_daily is None or len(df_daily) < 11:
         return []

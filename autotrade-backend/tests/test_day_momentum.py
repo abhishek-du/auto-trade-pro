@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from unittest.mock import patch
 
 from engine.tactical_rules import F1_RULES, day_momentum
 
@@ -37,7 +38,13 @@ def _daily(n=25, vol=20000.0):
     })
 
 
+@patch("utils.config.settings.TACTICAL_DAY_MOMENTUM_ENABLED", True)
 class TestFiresOnPureTrend:
+    """The rule is DISABLED by default (backtest: 24.5% win, -0.305 R over 43
+    sessions). These force the flag on, because they test the rule's LOGIC —
+    that it still fires correctly on a trending tape — which must stay true for
+    a later re-enable to be a one-flag decision rather than a rewrite.
+    """
 
     def test_a_trending_high_volume_name_fires(self):
         # 60 bars drifting +0.1 => ~+5.9% on the day, closing at the high.
@@ -193,3 +200,43 @@ class TestDayMoveReference:
         from engine.tactical_rules import _prev_close
 
         assert _prev_close(None, 123.0) == pytest.approx(123.0)
+
+
+class TestDisabledByDefault:
+    """Both day rules were disabled on 2026-08-21 after a backtest measured
+    negative expectancy: 43 sessions x 250 symbols, no lookahead, the real rule
+    functions, stop-wins-ties on intrabar ambiguity.
+
+        DAY_MOMENTUM  53 signals  24.5% win  -0.305 R  -16.2 R total
+        DAY_WEAKNESS  11 signals  27.3% win  -0.126 R
+
+    A 2R target needs a 33.3% win rate to break even, and costs are not in
+    those numbers. These tests exist so re-enabling is a deliberate act.
+    """
+
+    def test_code_default_is_off_for_both(self):
+        from utils.config import Settings
+
+        assert Settings.model_fields["TACTICAL_DAY_MOMENTUM_ENABLED"].default is False
+        assert Settings.model_fields["TACTICAL_DAY_WEAKNESS_ENABLED"].default is False
+
+    def test_day_momentum_emits_nothing_when_disabled(self):
+        df = _frame(drift=0.1)
+        live = float(df["close"].iloc[-2]) + 0.3
+        with patch("utils.config.settings.TACTICAL_DAY_MOMENTUM_ENABLED", False):
+            assert day_momentum("X.NS", df, _daily(), live) == []
+
+    def test_day_weakness_emits_nothing_when_disabled(self):
+        from engine.tactical_rules import day_weakness
+
+        df = _frame(drift=-0.1)
+        live = float(df["close"].iloc[-2]) - 0.3
+        with patch("utils.config.settings.TACTICAL_DAY_WEAKNESS_ENABLED", False):
+            assert day_weakness("X.NS", df, _daily(), live) == []
+
+    def test_rules_stay_registered_so_re_enabling_is_one_flag(self):
+        """Gated, not deleted — the logic is sound and the gates may simply be
+        too loose. Removing them would make a rerun a rewrite."""
+        from engine.tactical_rules import F1_RULES
+
+        assert "DAY_MOMENTUM" in F1_RULES and "DAY_WEAKNESS" in F1_RULES
