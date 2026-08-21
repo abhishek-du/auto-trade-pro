@@ -233,7 +233,7 @@ celery_app.conf.beat_schedule = {
     # margin after the token refresh.
     "full-bse-candles-daily": {
         "task":     "tasks.refresh_full_bse_candles",
-        "schedule": crontab(hour=3, minute=0),
+        "schedule": crontab(hour=2, minute=15),
     },
 
     # Daily 03:00 UTC (08:30 IST): sync ALL NSE+BSE EQ instruments from Zerodha's
@@ -242,7 +242,7 @@ celery_app.conf.beat_schedule = {
     # Root fix: small-caps (JTEKTINDIA, SAKSOFT, SIGNPOST etc.) are now auto-tracked.
     "sync-nse-eq-instruments-daily": {
         "task":     "tasks.sync_nse_eq_instruments",
-        "schedule": crontab(hour=3, minute=0),
+        "schedule": crontab(hour=2, minute=0),
     },
 
     # Daily 03:30 UTC (09:00 IST): rebuild Hub universe by 30-day avg turnover.
@@ -259,7 +259,7 @@ celery_app.conf.beat_schedule = {
     # company_intelligence tool-call path and into a background job instead.
     "refresh-isin-map-daily": {
         "task":     "tasks.refresh_isin_map",
-        "schedule": crontab(hour=3, minute=40),
+        "schedule": crontab(hour=2, minute=45),
     },
 
     # Daily 03:10 UTC (08:40 IST): backfill yesterday's 1d close for all Hub symbols.
@@ -267,7 +267,7 @@ celery_app.conf.beat_schedule = {
     # always has the latest daily candle even if intraday crawl missed symbols.
     "backfill-hub-1d-candles-daily": {
         "task":     "tasks.backfill_hub_1d_candles",
-        "schedule": crontab(hour=3, minute=10),
+        "schedule": crontab(hour=2, minute=30),
     },
 
     # Evening 12:00 UTC (17:30 IST) Mon-Fri: refresh TODAY's 1d close for the
@@ -340,6 +340,13 @@ celery_app.conf.beat_schedule = {
     # pattern as india_trade_loop above. Separate broker (Upstox) from every
     # other price-crawl task here (Kite) by design — can't compete with or
     # slow down the Hub universe's live-trading price cadence.
+    # Every 30 min, but the task itself refuses to run during market hours
+    # (2026-08-21). It processes ~1,918 symbols over ~8 minutes and holds one of
+    # only two default-queue slots for that whole time. That is the documented
+    # 2026-08-03 CPU-contention culprit, and on 21 Aug it was one of the two
+    # tasks occupying both slots while fast_sl_check was being starved. The
+    # symbols it syncs are the LONG TAIL — outside the F1 universe, not
+    # tradeable — so nothing in the trading path needs them intraday.
     "long-tail-intraday-every-30min": {
         "task":     "tasks.sync_long_tail_intraday",
         "schedule": 1800,
@@ -385,7 +392,7 @@ celery_app.conf.beat_schedule = {
     # NSE/BSE equity instruments are NOT synced — Hub uses candles for its universe.
     "zerodha-nfo-instrument-refresh-daily": {
         "task":     "tasks.india_tasks.refresh_zerodha_instruments",
-        "schedule": crontab(hour=3, minute=5),
+        "schedule": crontab(hour=2, minute=5),
     },
 
     # Daily 00:35 UTC = 06:05 IST: check if Kite token expired at 6 AM
@@ -404,7 +411,7 @@ celery_app.conf.beat_schedule = {
     # Daily 02:30 UTC = 08:00 IST: refresh PE/market-cap/beta fundamentals
     "refresh-stock-info-daily": {
         "task":     "tasks.refresh_stock_info_cache",
-        "schedule": crontab(hour=2, minute=30),
+        "schedule": crontab(hour=3, minute=0),
     },
 
     # Every 60 s: sector performance from PRICE_CACHE

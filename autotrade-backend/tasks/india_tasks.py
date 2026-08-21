@@ -3743,6 +3743,22 @@ def refresh_full_bse_candles_task(days_back: int = 7):
 # sync_long_tail_intraday_upstox for the full design writeup.
 
 async def _sync_long_tail_intraday():
+    # ── Off-hours only (2026-08-21) ──────────────────────────────────────────
+    # This processes ~1,918 symbols over ~8 minutes and holds one of only two
+    # default-queue slots for that entire time. It is the documented
+    # 2026-08-03 CPU-contention culprit, and on 21 Aug it was one of the two
+    # tasks occupying both slots while fast_sl_check — the 5s stop-loss loop —
+    # was being starved out entirely.
+    #
+    # The symbols it syncs are the LONG TAIL: outside the F1 universe and not
+    # tradeable, so nothing in the live path needs them refreshed mid-session.
+    # Runs on the same 30-minute cadence outside market hours, which is ample.
+    from crawler.india_price_feed import is_nse_market_open
+
+    if is_nse_market_open():
+        logger.info("[long_tail] skipped — market open, leaving the slot to the trading path")
+        return {"skipped": "market_open"}
+
     from crawler.upstox_historical import sync_long_tail_intraday_upstox
     from tasks._db import celery_session
     async with celery_session() as session:
