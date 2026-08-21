@@ -380,6 +380,12 @@ class Settings(BaseSettings):
     ENABLE_EXHAUSTION_EXIT:        bool  = True
     ENABLE_PARTIAL_BOOKING_T2:     bool  = True
     PARTIAL_BOOKING_T2_PCT:        float = 0.030  # +3.0% -> book another 30%
+    # DAY_WEAKNESS (2026-08-21) — the short mirror of DAY_MOMENTUM.
+    # Gates are TIGHTER than the long side on purpose: a short's loss is
+    # unbounded, it is MIS-only on NSE, and it must clear the VIX panic guard.
+    TACTICAL_DAY_WEAK_MIN_RVOL:      float = 2.0
+    TACTICAL_DAY_WEAK_MAX_RANGE_POS: float = 0.25   # bottom 25% of the day range
+    TACTICAL_DAY_WEAK_MIN_LOSS_PCT:  float = 2.5    # vs 2.0 for the long side
     TACTICAL_DAY_MOM_MIN_RVOL:      float = 2.0
     TACTICAL_DAY_MOM_MIN_RANGE_POS: float = 0.70   # top 30% of the day range
     TACTICAL_DAY_MOM_MIN_GAIN_PCT:  float = 2.0

@@ -475,6 +475,36 @@ def _cfg(name, default):
     return getattr(settings, name, default)
 
 
+def _prev_close(df_daily, fallback: float) -> float:
+    """Yesterday's close from the daily frame, or `fallback` if unavailable.
+
+    Uses the last daily bar whose close differs from today's forming bar. The
+    daily frame may or may not already carry a bar for today depending on when
+    the backfill ran, so the second-to-last bar is taken when the frame is long
+    enough and the last one otherwise.
+    """
+    try:
+        if df_daily is None or len(df_daily) == 0:
+            return fallback
+        closes = df_daily["close"].astype(float)
+
+        # Whether the frame's last bar is TODAY decides which row is "previous
+        # close", and it is NOT safe to assume. Measured 2026-08-21: the daily
+        # backfill was two sessions behind (newest bar 19 Aug), so a blind
+        # iloc[-2] reached back to 18 Aug and reported HSCL down 12.78% when its
+        # real day move was -7.07%. Read the date instead of guessing.
+        ref = float(closes.iloc[-1])
+        if "timestamp" in df_daily.columns and len(closes) >= 2:
+            import pandas as _pd
+
+            last_ts = _pd.to_datetime(df_daily["timestamp"].iloc[-1])
+            if last_ts.date() >= _pd.Timestamp.utcnow().date():
+                ref = float(closes.iloc[-2])       # last bar IS today
+        return ref if ref > 0 else fallback
+    except Exception:
+        return fallback
+
+
 def day_momentum(
     symbol: str, df_1m: pd.DataFrame, df_daily: pd.DataFrame, live_price: float,
     *, now: datetime | None = None,
@@ -541,7 +571,18 @@ def day_momentum(
         return []
 
     # 4. A real move, not drift.
-    gain_pct = (live_price / day_open - 1.0) * 100.0
+    # Measured against PREVIOUS CLOSE, not the frame's first bar.
+    #
+    # The executor fetches only the last 200 one-minute bars while an NSE
+    # session is 375 minutes, so `df_1m.open.iloc[0]` is the open of a bar
+    # around midday — not the day's open. Measured 2026-08-21: that made
+    # BALRAMCHIN read -0.32% when its real intraday move was -2.41%, and Kite's
+    # own day change was -4.92%. Every gain/loss gate here was scoring a partial
+    # window. Previous close also folds in the opening gap, which is the number
+    # a trader actually means by "up 3% today"; the range-position gate above
+    # still rejects a gap that has since faded.
+    ref = _prev_close(df_daily, day_open)
+    gain_pct = (live_price / ref - 1.0) * 100.0
     if gain_pct < float(_cfg("TACTICAL_DAY_MOM_MIN_GAIN_PCT", 2.0)):
         return []
 
@@ -568,5 +609,93 @@ def day_momentum(
     return [sig] if sig.is_sane() else []
 
 
-F1_RULES = ("ORB", "VWAP", "GAP_AND_GO", "PIVOT_BOUNCE", "PIVOT_BREAKOUT", "SCALP", "DAY_MOMENTUM")
+def day_weakness(
+    symbol: str, df_1m: pd.DataFrame, df_daily: pd.DataFrame, live_price: float,
+    *, now: datetime | None = None,
+) -> list[Signal]:
+    """Mirror of `day_momentum` for the short side — pure breakdown, no pattern.
+
+    WHY (2026-08-21)
+    ----------------
+    Of that session's 15 biggest losers, F1 produced signals on ONE. All 15 were
+    in the universe with good data. The cause is structural: of 13
+    signal-generating branches in this module only 3 can emit a SELL (ORB short,
+    VWAP short, OVERBOUGHT_FADE) and all three need a SHAPE — a range breakdown,
+    a VWAP cross, an overbought fade. A stock that simply bleeds all session on
+    news matches none of them. Measured that day: 251 BUY signals against 17
+    SELL. BALRAMCHIN -4.9%, RENUKA -3.8%, ANDHRSUGAR -3.8% produced nothing.
+
+    GATES ARE DELIBERATELY TIGHTER THAN THE LONG SIDE. A short's loss is
+    unbounded, it is MIS-only on NSE (forced same-day cover), and it must clear
+    the VIX panic guard. So this needs a bigger move (2.5% vs 2.0%) and a
+    firmer position in the day's range (bottom 25% vs the long side's top 30%).
+
+    RVOL uses the 20 CLOSED daily bars, so today is never part of its own
+    baseline.
+    """
+    d = closed(df_1m)
+    if len(d) < 20 or live_price <= 0 or df_daily is None or len(df_daily) < 11:
+        return []
+
+    day_high = float(d["high"].max())
+    day_low = float(d["low"].min())
+    day_open = float(d["open"].iloc[0])
+    rng = day_high - day_low
+    if rng <= 0 or day_open <= 0:
+        return []
+
+    prior = df_daily.iloc[:-1] if len(df_daily) > 1 else df_daily
+    avg_vol = float(prior["volume"].tail(20).mean())
+    vol_today = float(d["volume"].sum())
+    if avg_vol <= 0:
+        return []
+    rvol = vol_today / avg_vol
+    if rvol < float(_cfg("TACTICAL_DAY_WEAK_MIN_RVOL", 2.0)):
+        return []
+
+    # Sitting near the LOW of the day — sellers still in control.
+    range_pos = (live_price - day_low) / rng
+    if range_pos > float(_cfg("TACTICAL_DAY_WEAK_MAX_RANGE_POS", 0.25)):
+        return []
+
+    tp = (d["high"] + d["low"] + d["close"]) / 3.0
+    vol = d["volume"]
+    if float(vol.sum()) <= 0:
+        return []
+    vwap = float((tp * vol).sum() / vol.sum())
+    if vwap <= 0 or live_price > vwap * 0.995:      # must be BELOW vwap
+        return []
+
+    # Previous close, not the frame's first bar — see day_momentum for the
+    # 200-bar-window defect this fixes.
+    ref = _prev_close(df_daily, day_open)
+    loss_pct = (1.0 - live_price / ref) * 100.0
+    if loss_pct < float(_cfg("TACTICAL_DAY_WEAK_MIN_LOSS_PCT", 2.5)):
+        return []
+
+    now = now or datetime.now()
+    ind = _safe_indicators(df_1m)
+    atr = float(ind.atr) if ind is not None and ind.atr and not np.isnan(ind.atr) else 0.0
+
+    # Stop ABOVE entry for a short, target below. Same reasoning as the long
+    # side: a 1% stop on a name that has already fallen 7% is inside the noise.
+    stop = live_price + max(atr * 1.5, live_price * 0.01)
+    if stop <= live_price:
+        return []
+    risk = stop - live_price
+    target = live_price - max(risk * 2.0, live_price * 0.015)
+    if target <= 0:
+        return []
+
+    conf = _conf(70.0, min(10.0, (rvol - 2.0) * 2.0),
+                 min(8.0, (0.25 - range_pos) * 32.0))
+    sig = Signal(symbol, "SELL", live_price, stop, target, conf,
+                 "DAY_WEAKNESS", now, "F1",
+                 {"rvol": round(rvol, 2), "range_pos": round(range_pos, 2),
+                  "vwap_discount_pct": round((1 - live_price / vwap) * 100, 2),
+                  "day_loss_pct": round(loss_pct, 2), "atr": round(atr, 2)})
+    return [sig] if sig.is_sane() else []
+
+
+F1_RULES = ("ORB", "VWAP", "GAP_AND_GO", "PIVOT_BOUNCE", "PIVOT_BREAKOUT", "SCALP", "DAY_MOMENTUM", "DAY_WEAKNESS")
 F4_RULES = ("OVERBOUGHT_FADE", "OVERSOLD_REBOUND", "VOLUME_BREAKOUT", "VWAP_CROSSOVER")

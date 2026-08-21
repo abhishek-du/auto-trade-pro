@@ -269,6 +269,10 @@ class TacticalExecutor:
                         # Pure trend capture -- needs df_d for the 20-day volume
                         # baseline. See rules.day_momentum for what it fixes.
                         out += rules.day_momentum(symbol, df_1m, df_d, price)
+                        # Short mirror. F1 emitted 251 BUY vs 17 SELL signals on
+                        # 2026-08-21 and produced nothing on 14 of the 15 biggest
+                        # losers — the short side had no pattern-free rule.
+                        out += rules.day_weakness(symbol, df_1m, df_d, price)
                 else:
                     df_5m = await get_candles_df(symbol, "5m", 100, session)
                     if df_5m is None:

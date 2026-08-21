@@ -146,3 +146,50 @@ class TestCapacity:
         from engine import tactical_executor
 
         assert "rules.day_momentum(" in inspect.getsource(tactical_executor)
+
+
+class TestDayMoveReference:
+    """The day move is measured from PREVIOUS CLOSE, not the frame's first bar.
+
+    The executor fetches 200 one-minute bars while an NSE session is 375
+    minutes, so `df_1m.open.iloc[0]` is a midday bar's open. Measured
+    2026-08-21: that made BALRAMCHIN read -0.32% when its real intraday move was
+    -2.41% and its day change was -4.92%. Every gain/loss gate was scoring a
+    partial window.
+    """
+
+    def test_uses_previous_close_not_the_frames_first_bar(self):
+        import inspect
+
+        from engine import tactical_rules
+
+        src = inspect.getsource(tactical_rules.day_momentum)
+        assert "_prev_close(df_daily" in src
+        assert "live_price / day_open" not in src
+
+    def test_prev_close_is_date_aware(self):
+        """Whether the last daily bar is TODAY decides which row is the previous
+        close. Measured 2026-08-21: the daily backfill was two sessions behind,
+        so a blind iloc[-2] reached back an extra day and reported HSCL down
+        12.78% against a real -7.07%."""
+        import pandas as pd
+
+        from engine.tactical_rules import _prev_close
+
+        old = pd.DataFrame({"close": [750.25, 702.90],
+                            "timestamp": pd.to_datetime(["2026-08-18", "2026-08-19"])})
+        assert _prev_close(old, 0.0) == pytest.approx(702.90), (
+            "stale frame: the newest bar IS the previous close"
+        )
+
+        today = pd.Timestamp.utcnow().normalize()
+        fresh = pd.DataFrame({"close": [702.90, 654.40],
+                              "timestamp": [today - pd.Timedelta(days=1), today]})
+        assert _prev_close(fresh, 0.0) == pytest.approx(702.90), (
+            "fresh frame: today's bar must be skipped"
+        )
+
+    def test_falls_back_when_daily_is_unusable(self):
+        from engine.tactical_rules import _prev_close
+
+        assert _prev_close(None, 123.0) == pytest.approx(123.0)
