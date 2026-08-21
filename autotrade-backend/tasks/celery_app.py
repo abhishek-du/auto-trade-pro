@@ -12,6 +12,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from celery import Celery
+from kombu import Exchange, Queue
 from celery.schedules import crontab
 from utils.config import settings
 
@@ -40,6 +41,29 @@ celery_app = Celery(
         "tasks.tactical_tasks",
     ],
 )
+
+# ── Dedicated queue for the exit loop (2026-08-21) ───────────────────────────
+# fast_sl_check runs every 5s and is the ONLY thing enforcing stop-losses,
+# trailing stops and partial booking. On 21 Aug it executed essentially once in
+# a full session: it shared the 2-slot default pool with ~60 other beat entries,
+# and its expires=20 meant every dispatch was silently discarded before a slot
+# freed. An EXPIRED Celery task logs nothing and raises nothing, so the outage
+# was invisible while 12 positions sat unmanaged.
+#
+# Routing it to its own queue with its own single-process worker means it can
+# never queue behind a 170s tactical scan again.
+#
+# task_default_queue is set EXPLICITLY: without it, declaring task_queues would
+# leave the existing worker (which runs with no -Q) consuming a queue nothing
+# routes to, and every other task would stop dead.
+celery_app.conf.task_default_queue = "default"
+celery_app.conf.task_queues = (
+    Queue("default",    Exchange("default"),    routing_key="default"),
+    Queue("exit_queue", Exchange("exit_queue"), routing_key="exit_queue"),
+)
+celery_app.conf.task_routes = {
+    "tasks.fast_sl_check": {"queue": "exit_queue", "routing_key": "exit_queue"},
+}
 
 celery_app.conf.update(
     task_serializer="json",
@@ -278,6 +302,12 @@ celery_app.conf.beat_schedule = {
     "fast-sl-check-every-5s": {
         "task":     "tasks.fast_sl_check",
         "schedule": 5,
+        # Explicit options so the auto-loop below cannot touch this entry.
+        # It previously received the loop's default expires=20, which is how the
+        # exit loop silently stopped running: every 5s dispatch expired before a
+        # slot freed in the shared pool, and an expired task logs nothing.
+        # Now routed to its own queue and worker, with 60s of slack.
+        "options":  {"queue": "exit_queue", "expires": 60},
     },
 
     # Every 30 s during NSE hours: fast market-shock guard. Tightens/flattens

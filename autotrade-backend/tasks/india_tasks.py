@@ -1362,6 +1362,24 @@ def india_trade_loop():
 # are all updated identically.  Skips the tick entirely if Kite is unavailable.
 
 async def _fast_sl_check() -> None:
+    # ── Dead-man's-switch heartbeat (2026-08-21) ─────────────────────────────
+    # On 21 Aug this loop ran once in a full session and NOTHING surfaced it:
+    # the dispatches expired in a saturated queue, and an expired Celery task
+    # logs nothing, raises nothing and never reaches a worker. All four services
+    # showed healthy. Only counting rows in the DB exposed it.
+    #
+    # A key with a short TTL inverts that: absence is the alarm. If this loop
+    # stops, the key is simply gone within 20s, which a monitor can see.
+    try:
+        import time as _hb_time
+
+        from utils.cache import get_redis
+        await get_redis().set("exit_worker:heartbeat", str(_hb_time.time()), ex=20)
+    except Exception as _hb_exc:
+        # Logged, not silent: a heartbeat that fails quietly is exactly the
+        # blind spot it exists to remove.
+        logger.warning(f"[fast_sl] heartbeat write failed: {type(_hb_exc).__name__}: {_hb_exc}")
+
     from db.models import OpenPosition, TradeDirection
     from paper_trading.trade_simulator import close_paper_trade
     from sqlalchemy import select
