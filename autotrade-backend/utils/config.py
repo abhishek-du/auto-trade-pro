@@ -324,6 +324,12 @@ class Settings(BaseSettings):
     # decision_router's short guard; RuntimeConfig("news_short_enabled")
     # overrides it across processes with no restart.
     NEWS_SHORT_ENABLED:           bool  = True
+    # Direction cross-check (2026-08-21). Two sugar headlines scoring -0.96 on
+    # FinBERT produced SEVEN bullish CausalEvents while the sector fell 3-7%.
+    # Re-running the classifier on the same headlines returned bearish, so the
+    # model is non-deterministic here, not systematically wrong. Only fires when
+    # both reads are confident.
+    EVENT_SENTIMENT_CONFLICT_MIN: float = 0.70
     NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
     NEWS_SECTOR_MIN_TICKERS:      int   = 2
     NEWS_SECTOR_MIN_SCORE:        float = 0.7

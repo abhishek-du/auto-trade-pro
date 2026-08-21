@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
+from utils.config import settings
 from utils.logger import logger
 from utils.llm import call_llm_chat
 
@@ -50,7 +51,43 @@ class EventClassification(BaseModel):
             return {k: v for k, v in data.items() if v is not None}
         return data
 
-async def classify_event(headline: str, summary: str | None = None) -> EventClassification | None:
+def _direction_contradicts_sentiment(bullish: bool, score: float | None) -> bool:
+    """True when a confident LLM direction disagrees with a confident FinBERT score.
+
+    WHY THIS EXISTS (2026-08-21)
+    ----------------------------
+    Two sugar headlines were ingested that day:
+        "Sugar stocks fall over 7% as govt's duty-free import move sparks price woes"
+        "Sugar stocks ... tumble up to 5% as govt allows duty-free imports"
+    Both scored -0.96 on FinBERT. From those two headlines the pipeline produced
+    SEVEN consecutive BULLISH CausalEvents, while the sector fell 3-7%. Re-running
+    classify_event on the identical headlines afterwards returned bullish=False
+    both times -- so the model is not systematically wrong here, it is
+    NON-DETERMINISTIC, and a single bad roll authorised a whole sector's worth of
+    long signals.
+
+    A second, independent read is the cheap defence. FinBERT is already computed
+    for every headline, costs nothing extra, and is deterministic.
+
+    Only fires when BOTH sides are confident: a weak score says nothing, and this
+    must not veto ordinary events over sentiment noise.
+    """
+    if score is None:
+        return False
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return False
+    if abs(s) < float(getattr(settings, "EVENT_SENTIMENT_CONFLICT_MIN", 0.70)):
+        return False
+    return (bullish and s < 0) or ((not bullish) and s > 0)
+
+
+async def classify_event(
+    headline: str,
+    summary: str | None = None,
+    sentiment_score: float | None = None,
+) -> EventClassification | None:
     """
     Sends a news headline (optionally + a longer summary/filing excerpt) to the
     LLM to classify its global and sectoral impact. Returns a structured
@@ -150,7 +187,28 @@ Output exactly valid JSON matching the following structure and nothing else. No 
                 # =True) rejects those outright, which was one of the
                 # observed live failure modes ("Invalid control character").
                 data = json.loads(cleaned, strict=False)
-                return EventClassification(**data)
+                _cls = EventClassification(**data)
+
+                # Deterministic second opinion. See
+                # _direction_contradicts_sentiment for the 2026-08-21 incident:
+                # two headlines scoring -0.96 produced seven BULLISH events
+                # while the sector fell 3-7%.
+                #
+                # REFUSES rather than flipping. Under NO EVENT -> NO TRADE, no
+                # event is a safe outcome; overriding the model with FinBERT
+                # would just swap one unverified direction for another, and
+                # FinBERT is documented in this codebase as out-of-domain on
+                # some text. When two independent reads disagree confidently,
+                # the honest answer is that we do not know.
+                if _direction_contradicts_sentiment(_cls.bullish, sentiment_score):
+                    logger.warning(
+                        f"[event_classifier] direction conflict — LLM says "
+                        f"{'BULLISH' if _cls.bullish else 'BEARISH'} but sentiment "
+                        f"score is {sentiment_score:+.2f}; refusing to classify: "
+                        f"'{headline[:70]}'"
+                    )
+                    return None
+                return _cls
             except Exception as parse_exc:
                 if _attempt < 3:
                     logger.info(

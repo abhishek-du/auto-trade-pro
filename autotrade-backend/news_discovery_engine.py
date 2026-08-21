@@ -736,7 +736,20 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
         )
         return evidence, canonical.id
 
-    classification = await classify_event(headline, summary)
+    # Pass FinBERT's score so classify_event can cross-check the LLM's
+    # direction against an independent, deterministic read. See
+    # engine.event_classifier._direction_contradicts_sentiment.
+    _sent_score = None
+    try:
+        # Reuses this module's cached analyser — FinBERT load is lru_cached, so
+        # a single-headline batch here costs nothing beyond the first call.
+        _res = _get_sentiment_analyser().analyse_batch([headline])
+        if _res:
+            _sent_score = float(_res[0].get("score"))
+    except Exception as _s_exc:
+        logger.debug(f"[news_engine] sentiment cross-check unavailable: {_s_exc}")
+        _sent_score = None
+    classification = await classify_event(headline, summary, sentiment_score=_sent_score)
     if classification is None:
         logger.warning(f"[news_engine] {ticker}: event classification failed — no event, no trade")
         return None, None
