@@ -1468,9 +1468,78 @@ async def _fast_sl_check() -> None:
                 continue
 
             is_buy = pos.direction == TradeDirection.BUY
+
+            # ── Advanced exit management (2026-08-21) ────────────────────────
+            # Wrapped whole. This is the 5s loop that protects every open
+            # position; a fault in trailing or exhaustion must NEVER stop the
+            # fixed stop-loss below from firing. On any error we log and fall
+            # through to the original logic untouched.
+            #
+            # Placed BEFORE sl_hit is computed so a tightened trailing stop is
+            # evaluated on this same tick rather than the next one.
+            _adv_reason = None
+            try:
+                from paper_trading.position_tracker import update_trailing_stop
+                from utils.config import settings as _s
+
+                _c5 = None
+                _atr = 0.0
+                if bool(getattr(_s, "ENABLE_TRAILING_STOP", True)) or \
+                   bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)):
+                    from crawler.price_feed import get_latest_candles
+                    _rows = await get_latest_candles(pos.symbol, "5m", 20, session)
+                    if _rows and len(_rows) >= 5:
+                        import pandas as _pd
+                        _c5 = _pd.DataFrame([{ "open": r.open, "high": r.high, "low": r.low,
+                                               "close": r.close, "volume": r.volume}
+                                             for r in reversed(_rows)]).astype(float)
+                        _tr = (_c5["high"] - _c5["low"]).tail(14)
+                        _atr = float(_tr.mean()) if len(_tr) else 0.0
+
+                # 1. Ratchet the stop. Mutates pos.stop_loss; sl_hit below sees it.
+                if bool(getattr(_s, "ENABLE_TRAILING_STOP", True)):
+                    _moved, _note = update_trailing_stop(pos, price, _atr)
+                    if _moved:
+                        await session.commit()
+                        logger.info(f"[fast_sl] TRAILING {pos.symbol}: {_note}")
+
+                # 2. Sell into weakness before the stop is reached.
+                if _adv_reason is None and _c5 is not None and \
+                   bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)) and is_buy:
+                    from engine.indicators import detect_exhaustion
+                    _ex, _why = detect_exhaustion(_c5, _atr)
+                    if _ex:
+                        _adv_reason = "EXHAUSTION"
+                        logger.info(f"[fast_sl] EXHAUSTION {pos.symbol}: {_why}")
+
+                # 3. T2 — book another 30% at +3%, then run the rest.
+                if _adv_reason is None and bool(getattr(_s, "ENABLE_PARTIAL_BOOKING_T2", True)) \
+                   and int(getattr(pos, "exit_tier", 1) or 1) == 2 and pos.entry_price > 0:
+                    _t2_pct = float(getattr(_s, "PARTIAL_BOOKING_T2_PCT", 0.030))
+                    _t2 = pos.entry_price * (1 + _t2_pct) if is_buy else pos.entry_price * (1 - _t2_pct)
+                    if (is_buy and price >= _t2) or ((not is_buy) and price <= _t2):
+                        from paper_trading.trade_simulator import scale_out_paper_trade
+                        _p2 = await scale_out_paper_trade(pos, 0.3, price, "T2_HIT", session)
+                        pos.exit_tier = 3
+                        pos.stop_loss = (max(pos.stop_loss, pos.entry_price) if is_buy
+                                         else min(pos.stop_loss, pos.entry_price))
+                        await session.commit()
+                        logger.info(
+                            f"[fast_sl] PARTIAL_T2 {pos.symbol} booked 30% @ ₹{price:.2f} "
+                            f"pnl=₹{_p2:,.2f} — runner now trailing"
+                        )
+                        continue
+            except Exception as _adv_exc:
+                # Deliberately swallowed: the fixed stop-loss below is the
+                # guarantee and must run regardless.
+                logger.warning(f"[fast_sl] advanced exit checks failed for {pos.symbol}: {_adv_exc}")
+                _adv_reason = None
+
             sl_hit = (is_buy and price <= pos.stop_loss) or (
                 not is_buy and price >= pos.stop_loss
             )
+            if _adv_reason:
+                sl_hit = True          # route through the normal close path
             
             # Bypass fast SL for swing trades during their minimum hold period
             if sl_hit and pos.trade_style == "SWING" and pos.swing_min_hold:
@@ -1502,6 +1571,9 @@ async def _fast_sl_check() -> None:
                             partial_pnl = await scale_out_paper_trade(pos, 0.5, price, "T1_HIT", session)
                             # Move SL to cost-to-cost
                             pos.stop_loss = max(pos.stop_loss, pos.entry_price) if is_buy else min(pos.stop_loss, pos.entry_price)
+                            pos.exit_tier = 2      # T2 (30% at +3%) is next
+                            if pos.highest_high is None and is_buy:
+                                pos.highest_high = max(price, pos.entry_price)
                             # Let trailing logic in update_positions_with_current_prices handle the rest
                             pos.take_profit = 0.0  
                             await session.commit()
@@ -1520,7 +1592,7 @@ async def _fast_sl_check() -> None:
                 else:
                     continue
             else:
-                reason = "STOP_LOSS"
+                reason = _adv_reason or "STOP_LOSS"
 
             try:
                 trade = await close_paper_trade(pos, price, reason, session)

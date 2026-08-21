@@ -63,6 +63,34 @@ class TestTrailingStop:
         update_trailing_stop(p, 110.0, atr=50.0)                  # absurd ATR
         assert p.stop_loss < 110.0
 
+    def test_flat_position_is_not_tightened(self):
+        """A trailing stop protects PROFIT. It must not tighten a position that
+        has not earned anything yet.
+
+        Caught by a dry run on the live book (2026-08-21), not by the first
+        version of these tests: an ungated chandelier moved CEIGALL's stop from
+        285.81 to 314.72 while the position was DOWN 0.04% — 1% under the live
+        price, so any ordinary pullback would have stopped it out.
+        """
+        p = _pos(entry=100.0, sl=90.0)
+        changed, _ = update_trailing_stop(p, 100.0, atr=1.0)   # flat
+        assert not changed and p.stop_loss == pytest.approx(90.0)
+
+    def test_losing_position_is_not_tightened(self):
+        p = _pos(entry=100.0, sl=90.0)
+        changed, _ = update_trailing_stop(p, 97.0, atr=1.0)    # down 3%
+        assert not changed and p.stop_loss == pytest.approx(90.0)
+
+    def test_chandelier_needs_the_profit_trigger_first(self):
+        """Just below the trigger: nothing moves. Just above: both stages apply."""
+        below = _pos(entry=100.0, sl=90.0)
+        update_trailing_stop(below, 101.5, atr=0.5)            # +1.5% < 2%
+        assert below.stop_loss == pytest.approx(90.0)
+
+        above = _pos(entry=100.0, sl=90.0)
+        update_trailing_stop(above, 103.0, atr=0.5)            # +3% > 2%
+        assert above.stop_loss > 90.0
+
     def test_no_atr_still_gives_breakeven(self):
         """Without a usable ATR the chandelier is skipped rather than guessed
         from a percentage that ignores volatility — but breakeven still applies."""
@@ -133,3 +161,50 @@ class TestTimeExit:
     def test_delivery_positions_are_untouched(self):
         assert check_time_exit(_pos(product="CNC"),
                                SimpleNamespace(hour=15, minute=25)) is False
+
+
+class TestFastSlCheckSafety:
+    """The advanced exits must never be able to disable the fixed stop-loss.
+
+    fast_sl_check is the 5s loop protecting every open position. These assert
+    the structural guarantees, because a runtime failure there is silent and
+    costs real money.
+    """
+
+    def _src(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "tasks" / "india_tasks.py").read_text(
+            encoding="utf-8")
+
+    def test_advanced_block_is_fully_guarded(self):
+        src = self._src()
+        i = src.index("Advanced exit management")
+        seg = src[i:i + 4200]
+        assert "try:" in seg and "except Exception as _adv_exc" in seg, (
+            "advanced exit checks are not wrapped — an error would abort the tick "
+            "and the fixed stop-loss would never run"
+        )
+
+    def test_fixed_stop_loss_is_computed_after_the_guarded_block(self):
+        """sl_hit must be evaluated AFTER the try/except, so a trailing stop
+        tightened this tick is acted on immediately — and so a failure in the
+        block cannot skip the computation."""
+        src = self._src()
+        i_try = src.index("Advanced exit management")
+        i_exc = src.index("except Exception as _adv_exc", i_try)
+        i_sl = src.index("sl_hit = (is_buy and price <= pos.stop_loss)", i_exc)
+        assert i_exc < i_sl
+
+    def test_exhaustion_routes_through_the_normal_close_path(self):
+        """Reusing close_paper_trade keeps wallet accounting, P&L and the audit
+        row identical to every other exit."""
+        src = self._src()
+        i = src.index('reason = _adv_reason or "STOP_LOSS"')
+        assert "close_paper_trade(pos, price, reason, session)" in src[i:i + 400]
+
+    def test_t1_advances_the_tier(self):
+        """Without this the T2 branch can never fire — exit_tier would stay 1."""
+        src = self._src()
+        i = src.index("T1_HIT")
+        assert "pos.exit_tier = 2" in src[i:i + 700]

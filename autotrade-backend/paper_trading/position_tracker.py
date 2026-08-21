@@ -355,10 +355,19 @@ def update_trailing_stop(pos, current_price: float, atr: float) -> tuple[bool, s
         if new_sl != old_sl:
             note = f"breakeven at +{gain_pct:.1f}%"
 
-    # Stage 2 — chandelier. Needs a real ATR; without one, leave the stop alone
-    # rather than inventing a distance from a percentage that ignores volatility.
+    # Stage 2 — chandelier, and ONLY once the position has actually earned it.
+    #
+    # Gating this on peak gain is not cosmetic. Without it the chandelier applies
+    # to flat and losing positions too, converting the original wide stop into a
+    # tight one: a dry run on the live book (2026-08-21) moved CEIGALL's stop
+    # from 285.81 to 314.72 while the position was DOWN 0.04% — 1% under the
+    # live price, so any ordinary pullback would have stopped it out. A trailing
+    # stop is for protecting profit, not for tightening a thesis that has not
+    # worked yet.
+    peak_gain_pct = ((peak / pos.entry_price - 1.0) * 100.0) if is_long else \
+                    ((pos.entry_price / peak - 1.0) * 100.0)
     mult = float(getattr(settings, "TRAILING_STOP_ATR_MULT", 2.5))
-    if atr and atr > 0:
+    if atr and atr > 0 and peak_gain_pct >= trigger:
         chandelier = peak - mult * atr if is_long else peak + mult * atr
         cand = max(new_sl, chandelier) if is_long else min(new_sl, chandelier)
         # Never trail past the current price -- that would stop out instantly.

@@ -351,6 +351,9 @@ class Settings(BaseSettings):
     # breakeven, deferring to "trailing logic in
     # update_positions_with_current_prices" that did not exist. The runner could
     # only end at breakeven or at the 15:10 squareoff.
+    TIME_BASED_EXIT_ENABLED:       bool  = True
+    TIME_BASED_EXIT_HOUR:          int   = 15
+    TIME_BASED_EXIT_MINUTE:        int   = 10
     ENABLE_TRAILING_STOP:          bool  = True
     TRAILING_STOP_ATR_MULT:        float = 2.5
     TRAILING_BREAKEVEN_TRIGGER_PCT: float = 2.0   # move stop to entry at +2%
