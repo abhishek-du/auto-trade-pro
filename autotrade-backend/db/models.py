@@ -194,6 +194,14 @@ class OpenPosition(Base):
     # Swing trading fields
     trade_style: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNC")
     swing_min_hold: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Peak/trough since entry, for the ATR trailing stop (2026-08-21). Without
+    # these the runner left after the T1 scale-out had NO upside management at
+    # all: fast_sl_check sets take_profit=0.0 and moves the stop to breakeven,
+    # with a comment saying trailing is handled elsewhere -- it was not.
+    highest_high:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    lowest_low:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which scale-out tiers have already fired. 1 = none yet.
+    exit_tier:      Mapped[int]          = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     unrealised_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     unrealised_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

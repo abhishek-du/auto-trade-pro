@@ -1172,3 +1172,73 @@ def suggest_take_profit(entry_price: float, stop_loss: float, direction: str) ->
     risk = abs(entry_price - stop_loss)
     offset = risk * settings.MIN_RISK_REWARD
     return entry_price + offset if direction.upper() == "BUY" else entry_price - offset
+
+
+def detect_exhaustion(df, atr: float = 0.0) -> tuple[bool, str | None]:
+    """Is this move running out of buyers? Returns (exhausted, reason).
+
+    Three independent tells, any one of which fires. Each describes supply
+    meeting demand at the highs — the point where a trend gives back gains
+    faster than a stop placed under it can protect.
+
+      1. REJECTION WICK — an upper wick taking more than 60% of the bar's total
+         range. Price reached higher and was sold back down within the bar.
+      2. MOMENTUM FAILURE — fast RSI above 80 while the bar closes at or below
+         the prior close. Overbought is not itself a sell; overbought AND no
+         longer advancing is.
+      3. ABSORPTION — volume at least 1.5x the prior bar while the bar's body
+         stays inside 0.2 ATR. Heavy trade with no price progress means someone
+         is filling every buyer.
+
+    Operates on CLOSED bars only: the forming bar's wick and volume are
+    incomplete, and reading them produces a signal that changes as the bar
+    fills. Needs >= 3 closed bars, returns (False, None) otherwise — silence,
+    not a guess.
+    """
+    try:
+        import numpy as _np
+
+        if df is None or len(df) < 4:
+            return False, None
+        d = df.iloc[:-1]                       # drop the still-forming bar
+        if len(d) < 3:
+            return False, None
+
+        last = d.iloc[-1]
+        prev = d.iloc[-2]
+        o, h, l, c = (float(last["open"]), float(last["high"]),
+                      float(last["low"]), float(last["close"]))
+        rng = h - l
+        if rng <= 0:
+            return False, None
+
+        # 1. Rejection wick.
+        upper = h - max(o, c)
+        if upper / rng > 0.60:
+            return True, f"rejection wick ({upper / rng:.0%} of the bar)"
+
+        # 2. Momentum failure.
+        closes = d["close"].astype(float).values
+        if len(closes) >= 6:
+            diff = _np.diff(closes[-6:])
+            gain = float(_np.clip(diff, 0, None).mean())
+            loss = float(-_np.clip(diff, None, 0).mean())
+            # loss == 0 means an unbroken run of up-bars, i.e. RSI 100 — the
+            # MOST overbought state there is. Guarding the division by skipping
+            # it entirely (the obvious way to avoid ZeroDivisionError) silently
+            # made this tell unable to fire on exactly the parabolic move it
+            # exists to catch.
+            if gain > 0 or loss > 0:
+                rsi = 100.0 if loss <= 0 else 100.0 - 100.0 / (1.0 + gain / loss)
+                if rsi > 80.0 and c <= float(prev["close"]):
+                    return True, f"RSI {rsi:.0f} with no new high"
+
+        # 3. Absorption.
+        v, pv = float(last["volume"]), float(prev["volume"])
+        if atr and atr > 0 and pv > 0 and v > pv * 1.5 and abs(c - o) < atr * 0.2:
+            return True, f"absorption ({v / pv:.1f}x volume, flat body)"
+
+        return False, None
+    except Exception:
+        # An exit heuristic must never take down the exit loop.
+        return False, None

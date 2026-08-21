@@ -345,6 +345,18 @@ class Settings(BaseSettings):
     # DAY_MOMENTUM (2026-08-21): pure trend capture, no pattern required.
     # Added after the 21-Aug session, where F1's pattern rules fired on 1 of 29
     # stocks that cleared volume + momentum + VWAP screens.
+    # ── Exit management (2026-08-21) ─────────────────────────────────────────
+    # Before this the runner left after the T1 50% scale-out had no upside
+    # management: fast_sl_check set take_profit=0.0 and moved the stop to
+    # breakeven, deferring to "trailing logic in
+    # update_positions_with_current_prices" that did not exist. The runner could
+    # only end at breakeven or at the 15:10 squareoff.
+    ENABLE_TRAILING_STOP:          bool  = True
+    TRAILING_STOP_ATR_MULT:        float = 2.5
+    TRAILING_BREAKEVEN_TRIGGER_PCT: float = 2.0   # move stop to entry at +2%
+    ENABLE_EXHAUSTION_EXIT:        bool  = True
+    ENABLE_PARTIAL_BOOKING_T2:     bool  = True
+    PARTIAL_BOOKING_T2_PCT:        float = 0.030  # +3.0% -> book another 30%
     TACTICAL_DAY_MOM_MIN_RVOL:      float = 2.0
     TACTICAL_DAY_MOM_MIN_RANGE_POS: float = 0.70   # top 30% of the day range
     TACTICAL_DAY_MOM_MIN_GAIN_PCT:  float = 2.0

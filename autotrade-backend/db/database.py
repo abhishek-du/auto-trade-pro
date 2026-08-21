@@ -118,6 +118,10 @@ async def init_db() -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_news_items_headline_day "
         "ON news_items (md5(headline), (COALESCE(published_at, crawled_at)::date)) "
         "WHERE crawled_at >= TIMESTAMP '2026-08-21 00:00:00'",
+        # Trailing-stop state (2026-08-21). create_all never ALTERs a live table.
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS highest_high DOUBLE PRECISION",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS lowest_low DOUBLE PRECISION",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS exit_tier INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_family VARCHAR(20)",
         "CREATE INDEX IF NOT EXISTS ix_paper_trades_strategy_family ON paper_trades (strategy_family)",
         "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
