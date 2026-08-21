@@ -305,6 +305,19 @@ class TacticalExecutor:
         file reference execution symbols unconditionally, and the point of the
         guard is that a disabled pipeline never touches them.
         """
+        # Sector-breadth veto (2026-08-21): refuse a long into a sector that is
+        # broadly falling. F1 reads price patterns and has no view on news; on
+        # the duty-free-import day it bought DHAMPURSUG while all 13 sugar peers
+        # were red. Deliberately measures what the sector is DOING, because the
+        # classifier had marked that news BULLISH -- a veto keyed on the event
+        # direction would have passed the trade straight through.
+        from engine.sector_breadth_veto import sector_breadth_veto
+
+        _veto, _vreason = await sector_breadth_veto(signal.symbol, signal.side, session)
+        if _veto:
+            logger.info(f"[TACTICAL] SECTOR VETO {signal.symbol}: {_vreason}")
+            return False, None, None, f"sector breadth veto: {_vreason}"
+
         # Admin toggle (Path F), checked alongside TACTICAL_EXECUTION_ENABLED.
         # Signals are still scanned, scored and PERSISTED when this is off --
         # only execution stops -- so the tactical_signals audit trail stays

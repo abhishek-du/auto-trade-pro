@@ -354,6 +354,20 @@ class Settings(BaseSettings):
     TIME_BASED_EXIT_ENABLED:       bool  = True
     TIME_BASED_EXIT_HOUR:          int   = 15
     TIME_BASED_EXIT_MINUTE:        int   = 10
+    # Sector-breadth veto (2026-08-21). On the duty-free-import day the
+    # tactical pipeline bought DHAMPURSUG while all 13 sugar peers were red,
+    # because F1 reads price patterns and the CLASSIFIER had marked the news
+    # BULLISH. This measures what the sector is doing instead of what the news
+    # claims. Longs only; fails open on thin data.
+    TACTICAL_SECTOR_BREADTH_VETO:  bool  = True
+    # 3, not 5: membership is harvested from events, which name a mix of
+    # tickers and company names, and the name forms are unmatchable against
+    # candle symbols. Measured on the sugar day that yielded only 4 usable
+    # peers -- a 5 floor made the veto unable to fire on the very incident it
+    # was built for. Four peers all red is still a real breadth reading.
+    TACTICAL_SECTOR_VETO_MIN_PEERS: int  = 3
+    TACTICAL_SECTOR_VETO_DOWN_FRAC: float = 0.70
+    TACTICAL_SECTOR_VETO_LOOKBACK_H: int = 24
     ENABLE_TRAILING_STOP:          bool  = True
     TRAILING_STOP_ATR_MULT:        float = 2.5
     TRAILING_BREAKEVEN_TRIGGER_PCT: float = 2.0   # move stop to entry at +2%
