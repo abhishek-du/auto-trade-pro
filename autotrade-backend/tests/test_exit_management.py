@@ -180,7 +180,7 @@ class TestFastSlCheckSafety:
     def test_advanced_block_is_fully_guarded(self):
         src = self._src()
         i = src.index("Advanced exit management")
-        seg = src[i:i + 4200]
+        seg = src[i:i + 6000]   # widened: the eligibility block sits above the try
         assert "try:" in seg and "except Exception as _adv_exc" in seg, (
             "advanced exit checks are not wrapped — an error would abort the tick "
             "and the fixed stop-loss would never run"
@@ -208,3 +208,56 @@ class TestFastSlCheckSafety:
         src = self._src()
         i = src.index("T1_HIT")
         assert "pos.exit_tier = 2" in src[i:i + 700]
+
+
+class TestExhaustionRespectsExitEligibility:
+    """A SWING position inside its minimum-hold window has fast exits
+    deliberately suppressed, so an exit signal computed for it can never be
+    acted on.
+
+    Measured 2026-08-24: RUBICON.NS (SWING, swing_min_hold two days out) had
+    exhaustion fire 358 times in one session — every 5 seconds — and closed
+    nothing, because the swing bypass reset sl_hit each time. GLAND.NS, an
+    ordinary position, fired once and closed once, which is how the mechanism
+    is supposed to behave.
+
+    Not merely log noise: every one of those 358 detections cost a 5m candle
+    query plus an ATR computation on the 5-second exit loop, for a decision that
+    was structurally impossible.
+    """
+
+    def _src(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "tasks" / "india_tasks.py").read_text(
+            encoding="utf-8")
+
+    def test_eligibility_is_computed_before_the_advanced_block(self):
+        src = self._src()
+        i_flag = src.index("_exit_blocked = False")
+        i_try = src.index("Advanced exit management")
+        assert i_flag < src.index("except Exception as _adv_exc", i_try)
+
+    def test_exhaustion_is_gated_on_it(self):
+        src = self._src()
+        # Anchor on the guarded call site itself, not a bare substring: the
+        # setting name also appears in utils/config.py's own import surface.
+        i = src.index("if _adv_reason is None and _c5 is not None")
+        assert "not _exit_blocked" in src[i:i + 220]
+
+    def test_trailing_is_NOT_gated_on_it(self):
+        """Tightening a stop is not an exit. The ratcheted level must still be
+        maintained through the hold window so it applies the moment that window
+        ends."""
+        src = self._src()
+        i = src.index("update_trailing_stop(pos, price, _atr)")
+        seg = src[i - 400:i]
+        assert "not _exit_blocked" not in seg
+
+    def test_blocked_condition_matches_the_bypass_below(self):
+        """If these two drift apart, the check is gated on the wrong thing."""
+        src = self._src()
+        i = src.index("_exit_blocked = False")
+        seg = src[i:i + 500]
+        assert 'pos.trade_style == "SWING"' in seg and "pos.swing_min_hold" in seg
+        assert "< pos.swing_min_hold" in seg

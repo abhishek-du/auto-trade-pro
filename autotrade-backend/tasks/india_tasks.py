@@ -1496,6 +1496,25 @@ async def _fast_sl_check() -> None:
             # Placed BEFORE sl_hit is computed so a tightened trailing stop is
             # evaluated on this same tick rather than the next one.
             _adv_reason = None
+
+            # Is this position even ALLOWED to exit right now? A SWING trade
+            # inside its minimum-hold window has fast exits deliberately
+            # suppressed (see the bypass below), so an exit signal computed for
+            # it can never be acted on.
+            #
+            # Measured 2026-08-24: RUBICON.NS is SWING with swing_min_hold two
+            # days out. Exhaustion fired on it 358 times in one session — every
+            # 5 seconds — and closed nothing, because the bypass reset sl_hit
+            # each time. That is not just log noise: each detection cost a 5m
+            # candle query plus an ATR computation on the exit worker, on the
+            # 5-second loop, for a decision that was structurally impossible.
+            _exit_blocked = False
+            if pos.trade_style == "SWING" and pos.swing_min_hold:
+                from datetime import datetime as _dt2
+                from zoneinfo import ZoneInfo as _ZI2
+                if _dt2.now(_ZI2("Asia/Kolkata")).replace(tzinfo=None) < pos.swing_min_hold:
+                    _exit_blocked = True
+
             try:
                 from paper_trading.position_tracker import update_trailing_stop
                 from utils.config import settings as _s
@@ -1522,7 +1541,11 @@ async def _fast_sl_check() -> None:
                         logger.info(f"[fast_sl] TRAILING {pos.symbol}: {_note}")
 
                 # 2. Sell into weakness before the stop is reached.
-                if _adv_reason is None and _c5 is not None and \
+                # Skipped entirely while the position cannot exit — see
+                # _exit_blocked above. Trailing still runs: tightening a stop is
+                # not an exit, and the ratcheted level applies the moment the
+                # hold window ends.
+                if _adv_reason is None and _c5 is not None and not _exit_blocked and \
                    bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)) and is_buy:
                     from engine.indicators import detect_exhaustion
                     _ex, _why = detect_exhaustion(_c5, _atr)
