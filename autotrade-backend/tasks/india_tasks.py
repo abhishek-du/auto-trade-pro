@@ -26,6 +26,27 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def daily_coverage_is_stalled(
+    newest: int, baseline: int, min_frac: float = 0.5
+) -> bool:
+    """Has the full-universe daily candle write stopped landing?
+
+    `newest`   best single-day symbol count in the last few days
+    `baseline` best single-day symbol count over the trailing month
+
+    Split out from the watchdog so the decision can be tested directly: the
+    interesting cases are a cold start (no history to compare against) and a
+    small partial write arriving after a healthy full one, and neither is
+    reachable from a test that can only add rows to a live table.
+
+    `baseline > 100` keeps a fresh install quiet — with almost no history every
+    comparison looks like a collapse, and an alert nobody can act on is noise.
+    """
+    if baseline <= 100:
+        return False
+    return newest < baseline * min_frac
+
+
 def _is_india_trading_window() -> bool:
     """True during NSE market hours plus 30 minutes after close (9:15–16:00 IST)."""
     now = datetime.datetime.now(_IST)
@@ -2846,11 +2867,21 @@ def kite_sync_holdings_task():
     soft_time_limit=1200,
     time_limit=1260,
 )
-def kite_live_candles_task():
+def kite_live_candles_task(closing_sweep: bool = False):
     """Fetch 1-minute candles from Kite every 3 min while NSE market is open.
 
     Covers the full hub universe (2,569+ symbols) via concurrent fetching
     (semaphore=3). Runs 09:15–15:30 IST Mon–Fri via beat. Upsert-safe.
+
+    `closing_sweep=True` runs the same pass just after the close, which is the
+    only way the final minutes of the session ever land. On a 3-minute beat the
+    last in-session tick fires at 15:30 exactly, and a full pass over the
+    universe does not finish before the task's own window closes: measured on
+    24 Aug, only 582 symbols carried a 15:29 bar while 1,463 stopped at 15:26.
+    Those missing minutes are not idle ones — the sugar pack did most of its
+    move in them, which is why DWARKESH and BAJAJHIND showed a 3% gap against
+    the Kite close. The sweep re-fetches with the whole session available, and
+    the upsert makes re-covering settled bars free.
     """
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
@@ -2858,7 +2889,11 @@ def kite_live_candles_task():
 
     now_ist = datetime.datetime.now(_IST)
     h, m = now_ist.hour, now_ist.minute
-    in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
+    if closing_sweep:
+        # After the close, but still the same trading day.
+        in_session = ((h, m) >= (15, 30)) and (h < 18) and now_ist.weekday() < 5
+    else:
+        in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
     if not in_session:
         return {"skipped": "outside_market_hours"}
 
@@ -3467,26 +3502,47 @@ async def _candle_staleness_watchdog():
         from tasks._db import celery_session as _cs
         from sqlalchemy import text as _txt
 
+        # Ask "when did the daily feed last write the WHOLE universe", not
+        # "what is the newest 1d row".
+        #
+        # MAX(timestamp) is not the freshness signal it looks like. Several
+        # tasks write 1d rows for tiny symbol sets — kite_sync_candles covers a
+        # 33-name watchlist at 10:00 UTC, and the index symbols get written
+        # separately — while the full ~8,000-symbol write lands in a single
+        # batch the following morning. So MAX(timestamp) routinely names a date
+        # holding 4 or 33 symbols, and comparing that against an 8,000-symbol
+        # baseline reports a 99% "collapse" every single afternoon. An alert
+        # that fires daily on healthy data trains everyone to ignore it, which
+        # is worse than no alert.
+        #
+        # Note also that a 1d bar is stamped at IST midnight stored as naive
+        # UTC (D 00:00 IST -> D-1 18:30), so `timestamp::date` reads one day
+        # BEFORE the session it describes. Hence the generous day window here:
+        # this checks liveness, not exact dating.
         async with _cs() as _s2:
             _cov = (await _s2.execute(_txt("""
+                WITH per_day AS (
+                    SELECT timestamp::date AS d, COUNT(DISTINCT symbol) AS n
+                    FROM candles
+                    WHERE timeframe = '1d'
+                      AND timestamp >= CURRENT_DATE - 30
+                    GROUP BY 1
+                )
                 SELECT
-                  (SELECT COUNT(DISTINCT symbol) FROM candles
-                     WHERE timeframe='1d' AND timestamp::date = (
-                       SELECT MAX(timestamp)::date FROM candles WHERE timeframe='1d')),
-                  (SELECT COUNT(DISTINCT symbol) FROM candles
-                     WHERE timeframe='1d'
-                       AND timestamp::date < (SELECT MAX(timestamp)::date FROM candles WHERE timeframe='1d')
-                       AND timestamp >= CURRENT_DATE - 7)
+                  (SELECT COALESCE(MAX(n), 0) FROM per_day
+                     WHERE d >= CURRENT_DATE - 4),
+                  (SELECT COALESCE(MAX(n), 0) FROM per_day)
             """))).fetchone()
         _newest, _baseline = int(_cov[0] or 0), int(_cov[1] or 0)
         from utils.config import settings as _cfg_s
         _min_frac = float(getattr(_cfg_s, "DAILY_COVERAGE_MIN_FRAC", 0.5))
-        if _baseline > 100 and _newest < _baseline * _min_frac:
+        if daily_coverage_is_stalled(_newest, _baseline, _min_frac):
             logger.error(
-                f"[watchdog] DAILY CANDLE COVERAGE COLLAPSE — newest 1d date has "
-                f"{_newest} symbols vs {_baseline} in the prior week "
-                f"({_newest / _baseline:.0%}). RVOL baselines, 20-day highs and "
-                f"day-move gates are all reading from this."
+                f"[watchdog] DAILY CANDLE FEED STALLED — the best daily coverage "
+                f"in the last 4 days is {_newest} symbols against a 30-day best "
+                f"of {_baseline} ({_newest / _baseline:.0%}). The full-universe "
+                f"daily write has not landed. RVOL baselines, 20-day highs, "
+                f"day-move gates and the hub universe all read from this."
             )
     except Exception as _cov_exc:
         logger.debug(f"[watchdog] daily-coverage check failed: {_cov_exc}")
@@ -3527,6 +3583,38 @@ async def _candle_staleness_watchdog():
     except Exception as exc:
         logger.warning(f"[watchdog] telegram alert failed: {exc}")
     return {"status": "stale_alerted", "age_min": round(age, 1)}
+
+
+@celery_app.task(
+    name="tasks.resample_intraday_candles",
+    soft_time_limit=110,
+    time_limit=140,
+)
+def resample_intraday_candles_task(lookback_minutes: int = 180):
+    """Derive 5m / 15m / 1h bars from the 1m bars already in Postgres.
+
+    Replaces the per-symbol yfinance fetch that used to produce these
+    timeframes and could not finish a pass inside its own beat interval — on
+    24 Aug the newest 5m bar was 14:50 IST and the newest 1h 14:15 IST, so F4
+    was scoring a session it could not see the end of. This is one SQL
+    statement per timeframe over data we already hold: no network, no rate
+    limit, and the coarse bars can never lag the 1m feed they are built from.
+
+    Runs on scan_queue so it can never compete for a default-queue slot with
+    the trading path. PAPER TRADING — read-only aggregation, no orders.
+    """
+    async def _run():
+        from crawler.candle_resampler import resample_intraday
+        from tasks._db import celery_session
+
+        async with celery_session() as session:
+            return await resample_intraday(
+                session, lookback_minutes=lookback_minutes
+            )
+
+    result = _run_async(_run())
+    logger.info(f"[resample_intraday] {result}")
+    return result
 
 
 @celery_app.task(name="tasks.candle_staleness_watchdog")
@@ -3776,11 +3864,28 @@ async def _sync_long_tail_intraday():
     # The symbols it syncs are the LONG TAIL: outside the F1 universe and not
     # tradeable, so nothing in the live path needs them refreshed mid-session.
     # Runs on the same 30-minute cadence outside market hours, which is ample.
+    # 2026-08-24: the off-hours guard above was added on 21 Aug, but the task
+    # wrapper still carried the ORIGINAL `_is_india_trading_window()` gate
+    # (09:15-16:00 IST). The two are very nearly complements, so between them
+    # the task could only execute in the 15:30-16:00 sliver -- once a day at
+    # best, against a 30-minute beat. Long-tail intraday coverage silently
+    # stopped being refreshed. The wrapper gate is gone now; this function owns
+    # the whole decision.
     from crawler.india_price_feed import is_nse_market_open
+
+    now_ist = datetime.datetime.now(_IST)
 
     if is_nse_market_open():
         logger.info("[long_tail] skipped — market open, leaving the slot to the trading path")
         return {"skipped": "market_open"}
+
+    # Weekdays only, and only once the session has produced something to sync.
+    # Without this the 30-minute beat would fire through the small hours
+    # fetching a session that has not happened yet.
+    if now_ist.weekday() >= 5:
+        return {"skipped": "weekend"}
+    if (now_ist.hour, now_ist.minute) < (15, 30):
+        return {"skipped": "pre_session_close"}
 
     from crawler.upstox_historical import sync_long_tail_intraday_upstox
     from tasks._db import celery_session
@@ -3801,8 +3906,10 @@ def sync_long_tail_intraday_task():
     """Every ~30 min during NSE hours: intraday candles, via Upstox, for every
     NSE+BSE EQ symbol NOT already covered by the Kite-based Hub universe crawl.
     PAPER TRADING — read-only market data, no orders."""
-    if not _is_india_trading_window():
-        return
+    # NOTE: deliberately NO `_is_india_trading_window()` gate here. This task
+    # is off-hours by design (see _sync_long_tail_intraday), and that window
+    # (09:15-16:00 IST) is the complement of the one this task wants, so the
+    # pair cancelled out and the task effectively stopped running on 21 Aug.
     logger.info("[sync_long_tail_intraday] starting long-tail intraday refresh")
     return _run_async(_sync_long_tail_intraday())
 

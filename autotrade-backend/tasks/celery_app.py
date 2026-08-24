@@ -60,9 +60,28 @@ celery_app.conf.task_default_queue = "default"
 celery_app.conf.task_queues = (
     Queue("default",    Exchange("default"),    routing_key="default"),
     Queue("exit_queue", Exchange("exit_queue"), routing_key="exit_queue"),
+    Queue("scan_queue", Exchange("scan_queue"), routing_key="scan_queue"),
 )
 celery_app.conf.task_routes = {
     "tasks.fast_sl_check": {"queue": "exit_queue", "routing_key": "exit_queue"},
+    # ── Tactical scans get their own lane too (2026-08-24) ───────────────────
+    # Measured that session: F1 was dispatched ~89 times and executed 15, all
+    # of those before the entry window even opened. A scan takes 121s measured
+    # end to end; against a 175s expiry in a two-slot pool permanently occupied
+    # by kite_live_candles / india_price_scan / market_scanner, nearly every
+    # dispatch expired before a slot freed — and an expired Celery task logs
+    # nothing, so Path F produced zero entries all day in complete silence.
+    #
+    # This is the same failure the exit loop had before it got exit_queue, and
+    # the same fix. The exit worker's numbers are the argument: fast_sl_check
+    # ran ONCE on 21 Aug and 49,876 times on 24 Aug after the split.
+    #
+    # Note F1's 121s is mostly waiting on Kite quotes for ~1,500 symbols, not
+    # CPU. A dedicated slot removes the queueing; it does not add meaningful
+    # load to the box.
+    "tasks.resample_intraday_candles":                 {"queue": "scan_queue", "routing_key": "scan_queue"},
+    "tasks.tactical_tasks.run_tactical_intraday":      {"queue": "scan_queue", "routing_key": "scan_queue"},
+    "tasks.tactical_tasks.run_tactical_mean_reversion": {"queue": "scan_queue", "routing_key": "scan_queue"},
 }
 
 celery_app.conf.update(
@@ -170,12 +189,12 @@ celery_app.conf.beat_schedule = {
     "tactical-intraday-3min": {
         "task":     "tasks.tactical_tasks.run_tactical_intraday",
         "schedule": crontab(minute="*/3", hour="3-10", day_of_week="1-5"),
-        "options":  {"expires": 175},     # < the 180s cadence
+        "options":  {"queue": "scan_queue", "expires": 175},   # < the 180s cadence
     },
     "tactical-meanrev-5min": {
         "task":     "tasks.tactical_tasks.run_tactical_mean_reversion",
         "schedule": crontab(minute="*/5", hour="3-10", day_of_week="1-5"),
-        "options":  {"expires": 280},     # < the 300s cadence
+        "options":  {"queue": "scan_queue", "expires": 280},   # < the 300s cadence
     },
 
     # End-of-day Path F summary. 10:05 UTC = 15:35 IST, five minutes after the
@@ -514,6 +533,46 @@ celery_app.conf.beat_schedule = {
     # Every 5 min: warn (Telegram) if the live price feed has gone stale during
     # NSE hours — early warning for a frozen feed (expired token / dead ticker /
     # wedged worker). The task self-gates on market hours.
+    # Every 2 min during NSE hours + a closing sweep: rebuild 5m/15m/1h from
+    # the 1m bars already in Postgres (crawler/candle_resampler.py).
+    #
+    # This replaces the yfinance per-symbol fetch inside india_price_scan,
+    # which averaged 657s against a 300s beat and left the last 40 minutes of
+    # every session with no 5m bar at all (measured 24 Aug: newest 5m 14:50
+    # IST, newest 1h 14:15 IST, market closes 15:30). Aggregating from data we
+    # already hold is a SQL statement, not 1,400 HTTP calls, so it finishes in
+    # seconds and the coarse timeframes track the 1m feed exactly.
+    #
+    # hour="3-10" covers 09:15-15:30 IST; the run at 10:02 UTC lands after the
+    # final 1m bars are written and seals the closing 5m/15m bar.
+    # scan_queue, so it cannot take a slot from the trading path.
+    "resample-intraday-candles": {
+        "task":     "tasks.resample_intraday_candles",
+        "schedule": crontab(minute="*/2", hour="3-10", day_of_week="1-5"),
+        "options":  {"queue": "scan_queue", "expires": 110},
+    },
+    # 10:03 UTC (15:33 IST): re-fetch 1m for the whole universe now that the
+    # session is complete. The in-session beat's last tick is at 15:30 sharp
+    # and a full pass does not finish inside its window, so on 24 Aug only 582
+    # symbols held a 15:29 bar against 1,463 that stopped at 15:26. Ordering
+    # matters: this runs BEFORE the resample close-sweep below, so the coarse
+    # bars are rebuilt from complete 1m data.
+    "kite-1m-close-sweep": {
+        "task":     "tasks.kite_live_candles",
+        "schedule": crontab(minute=3, hour=10, day_of_week="1-5"),
+        "kwargs":   {"closing_sweep": True},
+        "options":  {"expires": 1500},
+    },
+
+    "resample-intraday-close-sweep": {
+        "task":     "tasks.resample_intraday_candles",
+        # 10:08 UTC — after kite-1m-close-sweep above has landed the final
+        # 1m bars, so the closing 5m/15m/1h bars are built from complete data.
+        "schedule": crontab(minute=8, hour=10, day_of_week="1-5"),
+        "kwargs":   {"lookback_minutes": 420},   # the whole session
+        "options":  {"queue": "scan_queue", "expires": 600},
+    },
+
     "candle-staleness-watchdog-5min": {
         "task":     "tasks.candle_staleness_watchdog",
         "schedule": 300,
