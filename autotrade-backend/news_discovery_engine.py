@@ -43,6 +43,12 @@ _last_anomaly_investigation: dict[str, datetime] = {}
 # Negative-leaning keywords for corporate-announcement side inference — wider
 # than the RSS headline list since announcement categories use formal terms
 # ("Resignation", "Credit Rating") rather than headline verbs ("plunge").
+from engine.event_classifier import resolve_nse_direction
+
+# Fallback only. NSE's own filing category decides direction where the table
+# knows it (see the announcement loop); this keyword scan covers the categories
+# it does not, and is deliberately NOT the primary signal — it defaults to BUY,
+# which is how every routine filing became a bullish candidate.
 _ANNOUNCEMENT_BEARISH_KEYWORDS = (
     "resign", "downgrade", "default", "loss", "decline", "disqualif", "suspend",
 )
@@ -1588,7 +1594,41 @@ async def run_news_discovery_loop():
                         _processed_seq_ids.add(ann["seq_id"])
                         ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
                         text = f"{ann['category']} {ann['summary']}".lower()
-                        side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
+
+                        # NSE's own filing category decides whether this is a
+                        # trade candidate at all (2026-08-24).
+                        #
+                        # The keyword scan below defaults to BUY, so EVERY
+                        # routine filing became a bullish candidate. Replayed
+                        # over 4,500 historical announcements it agreed with the
+                        # exchange category on direction almost always — 9
+                        # disagreements, 0.2% — but it also turned 3,504 of them
+                        # (77.9%) into BUY/SELL candidates that the category says
+                        # carry no direction at all.
+                        #
+                        # That is where the damage was. Those are NSE's routine
+                        # categories, dominated by "Outcome of Board Meeting",
+                        # measured at -0.737% mean excess return with a 36.3% win
+                        # rate over 1,169 observations
+                        # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md).
+                        # Acting on them lost money; the fix is to not act.
+                        #
+                        # So the value here is suppression, not direction
+                        # correction. The keyword scan survives only as the
+                        # fallback for categories the table does not know.
+                        _res = resolve_nse_direction(ann["category"], text)
+                        if _res is not None and _res[0] == "NEUTRAL":
+                            logger.info(
+                                f"⏭️  NSE category '{ann['category']}' carries no direction "
+                                f"— not a trade candidate: {ticker}"
+                            )
+                            continue
+                        if _res is not None:
+                            side = "BUY" if _res[0] == "LONG" else "SELL"
+                        else:
+                            # Unmapped category: no exchange opinion, keep the
+                            # old heuristic rather than inventing a direction.
+                            side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
 
                         logger.info(f"🔍 Analyzing NSE announcement: {headline}")
                         if market_open:

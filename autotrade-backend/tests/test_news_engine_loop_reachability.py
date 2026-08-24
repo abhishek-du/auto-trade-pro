@@ -103,3 +103,92 @@ def test_rss_handling_is_guarded_at_all():
         "RSS article handling is unguarded — any error there will again skip "
         "every later section of the cycle, including the NSE fetch"
     )
+
+
+# ── direction / suppression for NSE announcements ────────────────────────────
+
+def test_announcement_direction_comes_from_the_exchange_category():
+    """The keyword scan must be the fallback, not the primary signal.
+
+    Replayed over 4,500 historical announcements the scan agreed with NSE's
+    category on direction almost always (9 disagreements, 0.2%) — but because
+    it defaults to BUY it also turned 3,504 of them (77.9%) into bullish
+    candidates from categories that carry no direction at all. Those are NSE's
+    routine filings, measured at -0.737% mean excess with a 36.3% win rate over
+    1,169 observations. The value of this wiring is suppression, not direction.
+    """
+    fn = _loop_fn()
+    calls = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "resolve_nse_direction"
+    ]
+    assert calls, (
+        "the announcement loop no longer consults resolve_nse_direction — "
+        "every routine filing is a BUY candidate again"
+    )
+
+
+def test_neutral_announcements_are_skipped_not_traded():
+    """A NEUTRAL category must `continue`, not fall through to a side.
+
+    Assigning BUY/SELL to a filing NSE files as routine is exactly the
+    behaviour measured as loss-making.
+    """
+    fn = _loop_fn()
+    guard = None
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.If):
+            continue
+        test_src = ast.dump(node.test)
+        if "NEUTRAL" in test_src and "_res" in test_src:
+            guard = node
+            break
+    assert guard is not None, "no NEUTRAL guard found in the announcement loop"
+    assert any(isinstance(s, ast.Continue) for s in ast.walk(guard)), (
+        "a NEUTRAL category must skip the announcement entirely — falling "
+        "through assigns it a tradable side"
+    )
+
+
+def test_the_keyword_scan_survives_only_as_a_fallback():
+    """`side` must be derived from the exchange category, with the scan behind it.
+
+    An earlier version of this test only looked for "_res is not None" near the
+    keyword scan — which the NEUTRAL guard above it already satisfies. It
+    therefore passed with the scan promoted back to the primary signal, the
+    exact regression it was written to catch. It now asserts on the assignment.
+    """
+    fn = _loop_fn()
+
+    # every `side = ...` assignment inside the announcement loop
+    assigns = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "side" for t in n.targets)
+    ]
+    assert assigns, "no `side` assignment found in the loop"
+
+    from_res = [a for a in assigns
+                if any(isinstance(x, ast.Name) and x.id == "_res" for x in ast.walk(a.value))]
+    from_kw = [a for a in assigns
+               if any(isinstance(x, ast.Name) and x.id == "_ANNOUNCEMENT_BEARISH_KEYWORDS"
+                      for x in ast.walk(a.value))]
+
+    assert from_res, (
+        "`side` is never derived from resolve_nse_direction — the exchange "
+        "category is being ignored and the keyword scan is primary again"
+    )
+    assert from_kw, "the fallback heuristic is gone — unmapped categories lose their direction"
+
+    # the keyword assignment must be reachable only when _res gave nothing,
+    # i.e. it sits inside an `else` or a branch testing _res
+    guarded = False
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If) and any(a in node.orelse for a in from_kw):
+            if any(isinstance(x, ast.Name) and x.id == "_res" for x in ast.walk(node.test)):
+                guarded = True
+    assert guarded, (
+        "the keyword scan is not in the else-branch of a test on _res — it can "
+        "run even when the exchange supplied a direction"
+    )
