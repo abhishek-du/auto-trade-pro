@@ -1,11 +1,98 @@
 import json
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
 from utils.config import settings
 from utils.logger import logger
 from utils.llm import call_llm_chat
+
+# ── NSE's own announcement taxonomy ──────────────────────────────────────────
+# When NSE publishes a corporate announcement it files it under a category of
+# its own. That category is the exchange's classification of the filing, not a
+# model's opinion of the headline, and it measurably carries the direction our
+# LLM does not.
+#
+# Measured over 4,309 NSE announcements (docs/2026-08-24_PHASE3_GROUND_TRUTH_
+# NEWS_ALPHA.md), same category, two taxonomies:
+#
+#     ORDER_WIN, NSE's category   n=84    mean excess +1.053%   win 65.5%
+#     ORDER_WIN, our classifier   n=158   mean excess -0.245%   win 37.3%
+#
+# The strongest bullish category under the exchange's own labels is the
+# second-worst under ours. The LLM is not adding information here; it is
+# replacing a good label with a bad one. So for NSE-sourced items the category
+# decides direction and the LLM keeps only the work it is actually good at —
+# sectors, entities, horizon, reasoning.
+_NSE_LONG = {
+    "Bagging/Receiving of orders/contracts": "ORDER_WIN",
+    "Awarding of order(s)/contract(s)":      "ORDER_WIN",
+    "Acquisition":                           "ACQUISITION",
+    "Amalgamation/Merger":                   "ACQUISITION",
+    "Buyback":                               "BUYBACK",
+    "Product launch":                        "PRODUCT_LAUNCH",
+    "Agreements":                            "MAJOR_PARTNERSHIP",
+    "Memorandum of Understanding/Agreements": "MAJOR_PARTNERSHIP",
+}
+_NSE_SHORT = {
+    "Resignation of Director/KMP/SMP":                  "MANAGEMENT_RESIGNATION",
+    "Resignation":                                      "MANAGEMENT_RESIGNATION",
+    "Resignation of Statutory Auditor":                 "AUDITOR_RESIGNATION",
+    "Reasons for Delayed/Non-submission of Financial":  "DELAYED_FILING",
+    "Granting/withdrawal/surrender/cancellation/suspe": "REGULATORY_ACTION",
+}
+# Categories that genuinely carry no direction. "Outcome of Board Meeting" is
+# NSE's category for results declarations: it says results were declared, not
+# whether they beat. Measured mean excess -0.737% with a 36.3% win rate over
+# 1,169 observations — the label is not merely uninformative, acting on it
+# loses money. These return NEUTRAL and produce NO directional event.
+_NSE_NEUTRAL = {
+    "Outcome of Board Meeting", "Press Release", "Press Release (Revised)",
+    "Dividend", "Reply to Clarification- Financial results",
+    "Clarification - Financial Results", "Monthly Business Updates",
+    "Preferential issue", "Rights Issue", "Scheme of Arrangement", "Demerger",
+}
+# Two categories measured NEGATIVE as longs and are deliberately not traded
+# long: CORPORATE_RESTRUCTURE (mean -0.975%, CI [-1.891, -0.136], n=23) and
+# MAJOR_PARTNERSHIP (mean -0.319%, n=39). Scheme of Arrangement and Demerger
+# are therefore in the neutral set above rather than in _NSE_LONG.
+
+# Only these sources file under NSE's taxonomy. Gating on source rather than on
+# the category string alone means an unrelated feed whose category happens to
+# collide with an exchange label cannot flip a direction.
+_EXCHANGE_FILING_SOURCES = {"NSE-Announcements"}
+
+_RATING_UP   = re.compile(r"\b(upgrad|revised upward|improve|positive outlook)", re.I)
+_RATING_DOWN = re.compile(r"\b(downgrad|revised downward|negative outlook|default|watch with negative)", re.I)
+
+
+def resolve_nse_direction(nse_category: str | None, text: str = "") -> tuple[str, str] | None:
+    """NSE category -> ('LONG'|'SHORT'|'NEUTRAL', our category name).
+
+    Returns None when the category is outside the table, which means "we have
+    no exchange-supplied opinion" — the caller should then keep whatever the
+    LLM said rather than inventing a direction.
+
+    Credit-rating direction comes from the announcement text, never from the
+    bare category: "Credit Rating" alone does not say which way.
+    """
+    cat = (nse_category or "").strip()
+    if not cat:
+        return None
+    if cat.startswith("Credit Rating"):
+        if _RATING_DOWN.search(text):
+            return ("SHORT", "RATING_DOWNGRADE")
+        if _RATING_UP.search(text):
+            return ("LONG", "RATING_UPGRADE")
+        return ("NEUTRAL", "RATING_UNCLEAR")
+    if cat in _NSE_LONG:
+        return ("LONG", _NSE_LONG[cat])
+    if cat in _NSE_SHORT:
+        return ("SHORT", _NSE_SHORT[cat])
+    if cat in _NSE_NEUTRAL:
+        return ("NEUTRAL", "ROUTINE_DISCLOSURE")
+    return None
 
 class EventClassification(BaseModel):
     # Required — the fields _build_evidence()/DecisionEvidence.from_classification()
@@ -87,6 +174,8 @@ async def classify_event(
     headline: str,
     summary: str | None = None,
     sentiment_score: float | None = None,
+    nse_category: str | None = None,
+    source: str | None = None,
 ) -> EventClassification | None:
     """
     Sends a news headline (optionally + a longer summary/filing excerpt) to the
@@ -188,6 +277,47 @@ Output exactly valid JSON matching the following structure and nothing else. No 
                 # observed live failure modes ("Invalid control character").
                 data = json.loads(cleaned, strict=False)
                 _cls = EventClassification(**data)
+
+                # ── The exchange's own label outranks the model's ────────────
+                # Applied BEFORE the sentiment check below, and it short-
+                # circuits it: that check exists to catch a model whose
+                # direction is unverifiable, and NSE's category is not the
+                # model's opinion. Letting FinBERT sentiment veto the
+                # exchange's own filing category would be the tail wagging
+                # the dog.
+                # The source check lives HERE, not at the call site, so a future
+                # caller cannot accidentally hand an RSS feed's `category` field
+                # to a table built for exchange filings. Every other source's
+                # category vocabulary is unrelated, and the measurement behind
+                # this table covers NSE filings only.
+                _nse = (
+                    resolve_nse_direction(nse_category, f"{headline} {summary or ''}")
+                    if source in _EXCHANGE_FILING_SOURCES else None
+                )
+                if _nse is not None:
+                    _dir, _cat = _nse
+                    if _dir == "NEUTRAL":
+                        # No directional claim. The news item is still stored by
+                        # the caller; only the tradable event is withheld, which
+                        # is the correct NO EVENT -> NO TRADE outcome.
+                        logger.info(
+                            f"[event_classifier] NSE category '{nse_category}' carries no "
+                            f"direction — no event emitted: '{headline[:60]}'"
+                        )
+                        return None
+                    _was = "BULLISH" if _cls.bullish else "BEARISH"
+                    _now = "BULLISH" if _dir == "LONG" else "BEARISH"
+                    if _was != _now:
+                        logger.info(
+                            f"[event_classifier] NSE category '{nse_category}' overrides LLM "
+                            f"{_was} -> {_now}: '{headline[:60]}'"
+                        )
+                    _cls.bullish = (_dir == "LONG")
+                    _cls.category = _cat
+                    # The exchange is the primary source; this is what
+                    # source_reliability is for.
+                    _cls.source_reliability = 1.0
+                    return _cls
 
                 # Deterministic second opinion. See
                 # _direction_contradicts_sentiment for the 2026-08-21 incident:

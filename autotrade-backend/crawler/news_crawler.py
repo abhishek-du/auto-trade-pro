@@ -43,7 +43,7 @@ from crawler.news_router import (
     dedupe_key,
     route_headline,
 )
-from engine.event_classifier import classify_event
+from engine.event_classifier import classify_event, resolve_nse_direction
 
 # Ensure NLTK vader_lexicon is available. Used as fallback by SentimentAnalyser.
 
@@ -1486,13 +1486,47 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # describes moves that already happened — it is not a catalyst. Both used
     # to compete for this budget purely on |FinBERT score|, which is how
     # ambient wire copy crowded out real filings.
+    # Exchange filings do not compete on sentiment (2026-08-24).
+    #
+    # |FinBERT| > 0.6 is a threshold for news PROSE. NSE files in dry legal
+    # language — "X Limited: Outcome of Board Meeting — X Limited has informed
+    # the Exchange..." — and FinBERT reads that as neutral. Measured over the
+    # last 14 days: NSE-Announcements has a MEDIAN |score| of 0.000 and only
+    # 8.7% clear the threshold, while ambient wire copy ("Markets") medians at
+    # 0.911 with 74.4% clearing it. The 8.7% that do clear then lose the cap's
+    # top-15 ranking to that same wire copy.
+    #
+    # Result: 2,100 NSE announcements in 14 days, ZERO classified. The single
+    # source whose own category demonstrably carries direction
+    # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md) never reached the
+    # classifier at all, filtered out by a sentiment model reading legalese.
+    #
+    # A filing earns its budget from having a DIRECTIONAL exchange category,
+    # not from how emotive its text is. Neutral categories are deliberately
+    # excluded here too: resolve_nse_direction would suppress them downstream
+    # anyway, so spending an LLM round-trip on them is pure waste. That makes
+    # this cheaper than the old behaviour, not more expensive — ~0.2 extra
+    # items per crawl against a cap of 15.
+    def _filing_with_direction(i: int) -> bool:
+        it = new_items[i]
+        if _routes[i] != ROUTE_FILING:
+            return False
+        res = resolve_nse_direction(it.get("category"), it.get("headline") or "")
+        return res is not None and res[0] in ("LONG", "SHORT")
+
     _eligible = lambda i: (
-        abs(sentiments[i]["score"]) > 0.6
-        and _routes[i] not in (ROUTE_MACRO, ROUTE_NOISE)
+        _filing_with_direction(i)
+        or (
+            abs(sentiments[i]["score"]) > 0.6
+            and _routes[i] not in (ROUTE_MACRO, ROUTE_NOISE)
+        )
     )
+    # Filings rank ahead of prose: an exchange category is a stronger claim on
+    # the budget than a sentiment score, which is the ordering that failed.
     _to_classify = sorted(
         (i for i in range(len(sentiments)) if _eligible(i)),
-        key=lambda i: abs(sentiments[i]["score"]), reverse=True,
+        key=lambda i: (_filing_with_direction(i), abs(sentiments[i]["score"])),
+        reverse=True,
     )[:_MAX_CLASSIFY_PER_CRAWL]
     _classify_idx = set(_to_classify)
     if len(_classify_idx) < sum(1 for i in range(len(sentiments)) if _eligible(i)):
@@ -1514,7 +1548,15 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
         metadata_dict = None
         if _i in _classify_idx:
-            classification = await classify_event(item["headline"], item.get("summary", ""))
+            # NSE files each announcement under its own category. For those
+            # items that category, not the model, decides direction — see
+            # engine/event_classifier.resolve_nse_direction and
+            # docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md. Passed only
+            # for NSE-sourced rows; every other source is unaffected.
+            classification = await classify_event(
+                item["headline"], item.get("summary", ""),
+                nse_category=item.get("category"), source=item.get("source"),
+            )
             if classification:
                 metadata_dict = classification.model_dump()
         elif _i in _macro_scores:
