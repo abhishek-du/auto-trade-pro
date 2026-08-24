@@ -1397,11 +1397,39 @@ async def run_news_discovery_loop():
                 except Exception as exc:
                     logger.error(f"[news_engine] sentiment scoring failed: {exc}")
                     sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(new_articles)
+                # INSERT ... ON CONFLICT DO NOTHING, not an ORM add (2026-08-24).
+                #
+                # This block used to session.add() every article and commit once.
+                # `uq_news_items_headline_day` is a unique index on
+                # (md5(headline), COALESCE(published_at, crawled_at)::date), and
+                # RSS feeds re-serve the same story every cycle — so one repeat
+                # headline raised UniqueViolationError, which propagated to this
+                # loop's outer `except Exception` and skipped the REST OF THE
+                # CYCLE.
+                #
+                # Everything after this point is what was being skipped, every
+                # 15 seconds: the ticker extraction below, and — the expensive
+                # one — section 2's NSE corporate-announcement fetch. Measured
+                # consequence: NSE announcements stopped being ingested entirely
+                # after 2026-08-21 03:29 while the loop appeared healthy, logging
+                # only its RSS fetches. The exchange feed itself was fine; called
+                # directly it returned today's filings immediately.
+                #
+                # Bare on_conflict_do_nothing() with no index inference, matching
+                # crawler/news_crawler.py: inferring a PARTIAL expression index
+                # means restating its exact predicate, which silently stops
+                # matching the day the index changes.
+                from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+                _dupes = 0
                 async with AsyncSessionLocal() as session:
                     for article, sent in zip(new_articles, sentiments):
                         headline = article.get('headline', '')
-                        if headline:
-                            new_item = NewsItem(
+                        if not headline:
+                            continue
+                        stmt = (
+                            _pg_insert(NewsItem.__table__)
+                            .values(
                                 headline=headline,
                                 source=article.get('source', 'RSS'),
                                 url=article.get('url'),
@@ -1410,58 +1438,84 @@ async def run_news_discovery_loop():
                                 score=sent.get('score', 0.0),
                                 tickers_affected=None,
                             )
-                            session.add(new_item)
-                    await session.commit()
-            
-            for article in new_articles:
-                headline = article.get('headline', '')
-                if not headline:
-                    continue
-                summary = article.get('summary', headline)
-                _processed_headlines.add(headline)
-                
-                action_words = [
-                    'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal',
-                    'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger',
-                    'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend',
-                    'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade',
-                    # 2026-07-27 coverage widening — real catalysts that lacked a
-                    # matching word were silently dropped before ever reaching the
-                    # event classifier (LAURUSLABS/ORIENTTECH/LODHA-class misses):
-                    'order', 'wins', ' win', 'won ', 'bags', 'bag ', 'secures', 'secured',
-                    'contract', 'result', 'record', 'beat', 'beats', 'rises', 'rise ',
-                    'doubles', 'triples', 'rally', 'rallies', 'gains', 'gain ', 'awarded',
-                    'award', 'approval', 'approved', 'launch', 'expansion', 'guidance',
-                    'q1', 'q2', 'q3', 'q4', 'earnings', 'revenue', 'pat ', 'ebitda',
-                    'buyback', 'demerger', 'raises', 'cuts', 'hikes', 'slumps', 'tumbles',
-                    'falls', 'drops', 'sinks', 'high', 'multibagger', 'block deal',
-                ]
-                if not any(w in headline.lower() for w in action_words):
-                    continue
-                    
-                logger.info(f"🔍 Analyzing High-Impact News: {headline}")
-                
-                ticker = await _extract_ticker_from_news(headline, summary)
-                if not ticker:
-                    continue
-                    
-                side = "SELL" if any(w in headline.lower() for w in ['plunge', 'crash', 'loss', 'down']) else "BUY"
-                
-                # Action based on Market Status
-                if market_open:
-                    await process_ticker(ticker, side, headline, summary)
-                else:
-                    logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
-                    async with AsyncSessionLocal() as session:
-                        new_q = PreMarketNewsQueue(
-                            symbol=ticker,
-                            side=side,
-                            headline=headline,
-                            summary=summary,
-                            status="PENDING"
+                            .on_conflict_do_nothing()
+                            .returning(NewsItem.__table__.c.id)
                         )
-                        session.add(new_q)
-                        await session.commit()
+                        if (await session.execute(stmt)).scalar() is None:
+                            _dupes += 1
+                    await session.commit()
+                if _dupes:
+                    logger.debug(
+                        f"[news_engine] {_dupes}/{len(new_articles)} duplicate "
+                        f"headline(s) suppressed at insert"
+                    )
+            
+            # Each section of this loop is fault-isolated (2026-08-24).
+            #
+            # The outer `except` at the bottom catches everything and then
+            # sleeps to the next cycle, so ANY error raised here skipped every
+            # section below it — including section 2's NSE fetch. That is how
+            # NSE corporate announcements stopped being ingested after
+            # 2026-08-21 03:29 while the loop looked healthy: a duplicate RSS
+            # headline raised UniqueViolationError here, every 15 seconds, and
+            # the exchange feed below was never reached. The duplicate itself
+            # is fixed above; this stops the NEXT unexpected error in RSS
+            # handling from silently starving the filing path again.
+            try:
+                for article in new_articles:
+                    headline = article.get('headline', '')
+                    if not headline:
+                        continue
+                    summary = article.get('summary', headline)
+                    _processed_headlines.add(headline)
+                
+                    action_words = [
+                        'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal',
+                        'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger',
+                        'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend',
+                        'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade',
+                        # 2026-07-27 coverage widening — real catalysts that lacked a
+                        # matching word were silently dropped before ever reaching the
+                        # event classifier (LAURUSLABS/ORIENTTECH/LODHA-class misses):
+                        'order', 'wins', ' win', 'won ', 'bags', 'bag ', 'secures', 'secured',
+                        'contract', 'result', 'record', 'beat', 'beats', 'rises', 'rise ',
+                        'doubles', 'triples', 'rally', 'rallies', 'gains', 'gain ', 'awarded',
+                        'award', 'approval', 'approved', 'launch', 'expansion', 'guidance',
+                        'q1', 'q2', 'q3', 'q4', 'earnings', 'revenue', 'pat ', 'ebitda',
+                        'buyback', 'demerger', 'raises', 'cuts', 'hikes', 'slumps', 'tumbles',
+                        'falls', 'drops', 'sinks', 'high', 'multibagger', 'block deal',
+                    ]
+                    if not any(w in headline.lower() for w in action_words):
+                        continue
+                    
+                    logger.info(f"🔍 Analyzing High-Impact News: {headline}")
+                
+                    ticker = await _extract_ticker_from_news(headline, summary)
+                    if not ticker:
+                        continue
+                    
+                    side = "SELL" if any(w in headline.lower() for w in ['plunge', 'crash', 'loss', 'down']) else "BUY"
+                
+                    # Action based on Market Status
+                    if market_open:
+                        await process_ticker(ticker, side, headline, summary)
+                    else:
+                        logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
+                        async with AsyncSessionLocal() as session:
+                            new_q = PreMarketNewsQueue(
+                                symbol=ticker,
+                                side=side,
+                                headline=headline,
+                                summary=summary,
+                                status="PENDING"
+                            )
+                            session.add(new_q)
+                            await session.commit()
+            except Exception as _rss_exc:
+                logger.error(
+                    f'[news_engine] RSS article handling failed, continuing to '
+                    f'the announcement feed: {_rss_exc}'
+                )
 
             # 2. Fetch NSE corporate announcements (financial results, M&A,
             #    dividends, credit-rating actions, buybacks, resignations…) —
@@ -1501,19 +1555,33 @@ async def run_news_discovery_loop():
                             logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
                             ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
 
+                    # Same duplicate-tolerant insert as the RSS block above, and
+                    # for the same reason — but this one is worse if it raises.
+                    # A UniqueViolationError here aborts the announcement
+                    # section AFTER the PDF has been downloaded, OCR'd and sent
+                    # to the LLM, so the expensive work is thrown away and the
+                    # seq_ids below are never marked processed. The next cycle
+                    # then re-fetches the same filings and repeats the whole
+                    # cost, indefinitely.
+                    from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
                     async with AsyncSessionLocal() as session:
                         for ann, sent in zip(new_announcements, ann_sentiments):
-                            session.add(NewsItem(
-                                headline=ann["headline"],
-                                source=ann["source"],
-                                url=ann["pdf_url"],
-                                published_at=ann["published_at"],
-                                sentiment=sent.get("sentiment", "neutral"),
-                                score=sent.get("score", 0.0),
-                                tickers_affected=[ann["symbol"]],
-                                category=ann["category"],
-                                company=ann["company"],
-                            ))
+                            await session.execute(
+                                _pg_insert(NewsItem.__table__)
+                                .values(
+                                    headline=ann["headline"],
+                                    source=ann["source"],
+                                    url=ann["pdf_url"],
+                                    published_at=ann["published_at"],
+                                    sentiment=sent.get("sentiment", "neutral"),
+                                    score=sent.get("score", 0.0),
+                                    tickers_affected=[ann["symbol"]],
+                                    category=ann["category"],
+                                    company=ann["company"],
+                                )
+                                .on_conflict_do_nothing()
+                            )
                         await session.commit()
 
                     for ann in new_announcements:
