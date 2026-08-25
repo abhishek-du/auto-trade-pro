@@ -61,6 +61,7 @@ celery_app.conf.task_queues = (
     Queue("default",    Exchange("default"),    routing_key="default"),
     Queue("exit_queue", Exchange("exit_queue"), routing_key="exit_queue"),
     Queue("scan_queue", Exchange("scan_queue"), routing_key="scan_queue"),
+    Queue("trade_queue", Exchange("trade_queue"), routing_key="trade_queue"),
 )
 celery_app.conf.task_routes = {
     "tasks.fast_sl_check": {"queue": "exit_queue", "routing_key": "exit_queue"},
@@ -82,6 +83,20 @@ celery_app.conf.task_routes = {
     "tasks.resample_intraday_candles":                 {"queue": "scan_queue", "routing_key": "scan_queue"},
     "tasks.tactical_tasks.run_tactical_intraday":      {"queue": "scan_queue", "routing_key": "scan_queue"},
     "tasks.tactical_tasks.run_tactical_mean_reversion": {"queue": "scan_queue", "routing_key": "scan_queue"},
+    # ── The trading loop gets its own lane (2026-08-25, BUG-2) ───────────────
+    # Third instance of the same failure, same fix. Measured on 2026-08-25:
+    # india_trade_loop ran 11 times inside 09:15-15:30 IST against ~375 expected
+    # at its 60s cadence, with one 329-minute gap from 09:13:21 to 14:41:58 —
+    # 88% of the session. Through that entire gap the worker log is continuous
+    # engine.indicators plus Keras model loads from ForkPoolWorker-3: the Master
+    # Intelligence Hub scoring 1,663 symbols, holding both default-queue slots.
+    #
+    # The loop is not only the (currently broken) Hub-candidate reader — it also
+    # runs auto-close, dynamic SL/TP and the drawdown circuit breaker before it
+    # gets anywhere near origination. Starving it starves those too, which is
+    # why this is worth fixing on its own merits and independently of whether
+    # the Hub path is ever revived.
+    "tasks.india_trade_loop": {"queue": "trade_queue", "routing_key": "trade_queue"},
 }
 
 celery_app.conf.update(
@@ -350,7 +365,12 @@ celery_app.conf.beat_schedule = {
     "india-trade-loop-every-60s": {
         "task":     "tasks.india_trade_loop",
         "schedule": 60,
-        "options":  {"countdown": 15},
+        # expires < the 60s cadence, matching every other high-frequency entry
+        # here. A dedicated queue with no expiry would simply move the pile-up
+        # rather than remove it: if one cycle overruns, the backlog grows without
+        # bound instead of the stale cycle dropping. See the auto-expiry note
+        # below on the 63k-task Redis backlog this convention exists to prevent.
+        "options":  {"countdown": 15, "queue": "trade_queue", "expires": 55},
     },
 
     # Every 30 min during NSE hours: intraday candles, via Upstox, for every

@@ -1,0 +1,37 @@
+# Dedicated worker for tasks.india_trade_loop (2026-08-25, BUG-2).
+#
+# Third instance of the same failure the exit loop and the tactical scan both
+# hit: a 60s task sharing the two default-queue slots with the Master
+# Intelligence Hub cycle, which scores ~1,663 symbols and holds a slot for
+# hours. Measured 2026-08-25: 11 cycles inside 09:15-15:30 IST against ~375
+# expected, one gap of 329 minutes.
+#
+# concurrency=1 is deliberate. The loop manages open positions and must never
+# run two cycles concurrently against the same book.
+#
+# CPUQuota is lower than the scan worker's because this task is DB reads plus
+# a handful of price lookups, not a 1,500-symbol quote sweep.
+[Unit]
+Description=AutoTrade Pro — Celery TRADE worker (india_trade_loop, dedicated queue)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python -m celery -A tasks.celery_app worker \
+    --queues=trade_queue \
+    --concurrency=1 \
+    --hostname=trade@%%h \
+    --loglevel=info \
+    --prefetch-multiplier=1
+Restart=always
+RestartSec=5
+CPUQuota=40%
+MemoryMax=1200M
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/celery-trade-worker.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/celery-trade-worker.err
+
+[Install]
+WantedBy=default.target
