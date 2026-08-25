@@ -606,8 +606,14 @@ async def _india_trade_loop():
         # Exit/risk management above (Step 1 auto-close, dynamic SL/TP, circuit
         # breaker) runs unconditionally either way and is unaffected.
         # Owner decision 2026-08-20 (contract SS10b): hub entries re-enabled.
+        # BUG-1 (Phase 3): `settings` is read here but locally imported ~22
+        # lines below, so Python treats it as a local for the whole function and
+        # this line raises UnboundLocalError on every call — 87 lines before the
+        # Hub query at :697 that this flag is supposed to gate. `_cfg` is the
+        # same module, already bound at :520, so this is the smallest possible
+        # repair and adds no import.
         _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
-            getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
+            getattr(_cfg, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
         )
         # Admin toggle (Path B). Gates ENTRIES only: everything above this point
         # -- auto-close, dynamic SL/TP, the drawdown circuit breaker -- has
