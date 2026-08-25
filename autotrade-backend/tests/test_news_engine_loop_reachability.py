@@ -21,14 +21,25 @@ import pytest
 SRC = Path(__file__).resolve().parents[1] / "news_discovery_engine.py"
 
 
+# The cycle body was split out of run_news_discovery_loop() on 2026-08-25
+# (Phase 1B task A) so that run_news_discovery_loop() owns only task lifecycle —
+# start the NSE poller, run the cycles, cancel the poller. The guarantees below
+# are about the CYCLE BODY, so they follow it to _news_discovery_cycles().
+_CYCLE_FN = "_news_discovery_cycles"
+
+
 def _loop_fn() -> ast.AsyncFunctionDef:
     tree = ast.parse(SRC.read_text())
     fn = next(
         (n for n in ast.walk(tree)
-         if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_news_discovery_loop"),
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == _CYCLE_FN),
         None,
     )
-    assert fn is not None, "run_news_discovery_loop() not found"
+    assert fn is not None, (
+        f"{_CYCLE_FN}() not found — if the loop body was renamed or re-merged "
+        f"into run_news_discovery_loop(), point _CYCLE_FN at it so these "
+        f"reachability guarantees keep being checked somewhere"
+    )
     return fn
 
 
@@ -58,13 +69,21 @@ def test_rss_insert_tolerates_duplicate_headlines():
     )
 
 
-def test_the_nse_fetch_is_not_nested_inside_the_rss_error_path():
-    """Section 2 must sit outside whatever guards section 1.
+def test_the_nse_fetch_is_not_reachable_from_the_rss_error_path():
+    """Section 2 must not be skippable by anything section 1 does.
 
-    If the NSE fetch is nested inside section 1's try block, an RSS failure
-    still skips it and the fix is cosmetic.
+    Originally this asserted the fetch sat outside section 1's try block. That
+    guaranteed an RSS *exception* could not skip it — but not that a slow
+    section 1 could starve it, which is what actually happened: section 1 awaits
+    a full LLM ReAct loop per article, and on 2026-08-25 the fetch did not run
+    between 09:14:50 and 16:05:29 IST while 619 agent decisions ran in that gap.
+
+    Phase 1B moved the fetch into _nse_announcement_poller(), an independent
+    task. That satisfies the original guarantee strictly more strongly — a
+    separate task cannot be reached by section 1's control flow at all — so the
+    assertion follows the fetch rather than being deleted.
     """
-    fn = _loop_fn()
+    tree = ast.parse(SRC.read_text())
 
     def contains_nse_fetch(node) -> bool:
         return any(
@@ -73,21 +92,41 @@ def test_the_nse_fetch_is_not_nested_inside_the_rss_error_path():
             for n in ast.walk(node)
         )
 
-    assert contains_nse_fetch(fn), "the loop no longer fetches NSE announcements at all"
+    poller = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_nse_announcement_poller"),
+        None,
+    )
+    assert poller is not None, "_nse_announcement_poller() not found"
+    assert contains_nse_fetch(poller), (
+        "the poller no longer fetches NSE announcements — nothing does"
+    )
 
-    # Any try whose handler is the RSS guard must NOT contain the NSE fetch.
-    for node in ast.walk(fn):
+    # and the cycle body must NOT fetch: doing so puts it back behind the LLM work
+    assert not contains_nse_fetch(_loop_fn()), (
+        "the cycle body fetches announcements again — section 1's LLM work "
+        "will starve it, which is the defect this separation removes"
+    )
+
+    # the consumer drain must also sit outside the RSS guard, or an RSS error
+    # still skips the announcements that were successfully fetched
+    def contains_drain(node) -> bool:
+        return any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_drain_nse_queue"
+            for n in ast.walk(node)
+        )
+
+    assert contains_drain(_loop_fn()), "the cycle body never drains the queue"
+    for node in ast.walk(_loop_fn()):
         if not isinstance(node, ast.Try):
             continue
-        names = {
-            h.name for h in node.handlers if h.name
-        }
-        if "_rss_exc" not in names:
+        if "_rss_exc" not in {h.name for h in node.handlers if h.name}:
             continue
         for stmt in node.body:
-            assert not contains_nse_fetch(stmt), (
-                "the NSE announcement fetch is inside the RSS guard — an RSS "
-                "error would skip it, which is the bug this guard exists to fix"
+            assert not contains_drain(stmt), (
+                "the queue drain is inside the RSS guard — an RSS error would "
+                "skip announcements the poller already captured"
             )
 
 

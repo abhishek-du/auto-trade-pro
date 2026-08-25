@@ -1572,6 +1572,31 @@ async def _fast_sl_check() -> None:
                     _ex, _why = detect_exhaustion(_c5, _atr)
                     if _ex:
                         _adv_reason = "EXHAUSTION"
+                        # Instrumentation only (2026-08-25, Phase 1B task D).
+                        # Two BHEL positions were opened and exhaustion-exited
+                        # five seconds apart with MFE = MAE = 0.000, which is
+                        # consistent with entry and exit reading the same closed
+                        # 5m bar — but only consistent, not proven: the stored
+                        # 5m series is rebuilt from 1m by the resampler, so a
+                        # replay cannot recover the frame the live check held.
+                        # detect_exhaustion drops the forming bar, so the bar it
+                        # actually consumed is _c5[-2]. Log it, and the entry, so
+                        # the next occurrence is decidable from the record rather
+                        # than inferred. No behaviour changes here.
+                        try:
+                            _bars = list(getattr(_c5, "index", []) or [])
+                            _consumed = _c5["timestamp"].iloc[-2] if "timestamp" in getattr(_c5, "columns", []) and len(_c5) >= 2 else None
+                            _forming = _c5["timestamp"].iloc[-1] if "timestamp" in getattr(_c5, "columns", []) and len(_c5) >= 1 else None
+                            logger.info(
+                                f"[fast_sl] EXHAUSTION_AUDIT {pos.symbol} "
+                                f"entry_at={pos.opened_at} entry_px={pos.entry_price} "
+                                f"check_at={datetime.datetime.utcnow().isoformat()} "
+                                f"consumed_bar={_consumed} forming_bar={_forming} "
+                                f"bars={len(_c5) if _c5 is not None else 0} atr={_atr} "
+                                f"reason={_why}"
+                            )
+                        except Exception as _audit_exc:
+                            logger.debug(f"[fast_sl] EXHAUSTION_AUDIT logging failed: {_audit_exc}")
                         logger.info(f"[fast_sl] EXHAUSTION {pos.symbol}: {_why}")
 
                 # 3. T2 — book another 30% at +3%, then run the rest.

@@ -366,7 +366,24 @@ class TacticalExecutor:
                     "units": sizing.quantity,
                     "usd_value": sizing.notional,
                 },
-                product="MIS" if signal.sub_pipeline == "F1" else "CNC",
+                # Every tactical pipeline is intraday: F1 and F4 both scan only
+                # inside the 09:15-15:20 entry window. CNC here was not a design
+                # choice — it was an unexplained one-liner that made F4 signals
+                # delivery trades, and delivery has three consequences none of
+                # the F4 rules want:
+                #   1. trade_simulator maps CNC -> trade_style="SWING" and sets
+                #      swing_min_hold = +48h, and india_tasks suppresses the
+                #      stop loss for that whole window (fast_sl_check sets
+                #      sl_hit = False). An intraday mean-reversion trade was
+                #      held for two sessions with no stop.
+                #   2. that same 48h hold pinned capital, so later signals were
+                #      refused by the cash buffer.
+                #   3. a CNC SELL is a delivery short, which the cash segment
+                #      does not permit at all. engine/agent/execution.py blocks
+                #      it on the live path; paper mode did not, so F4 opened
+                #      three shorts that could never have been placed for real.
+                # Tactical signals are intraday, so they are MIS.
+                product="MIS",
             )
         except Exception as exc:
             return False, None, None, f"intent build failed: {exc}"

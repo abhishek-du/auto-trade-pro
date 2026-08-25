@@ -180,11 +180,17 @@ class TestFastSlCheckSafety:
     def test_advanced_block_is_fully_guarded(self):
         src = self._src()
         i = src.index("Advanced exit management")
-        seg = src[i:i + 6000]   # widened: the eligibility block sits above the try
-        assert "try:" in seg and "except Exception as _adv_exc" in seg, (
+        # Located by search, not by a fixed-width window. The window was 6000
+        # chars and had already been "widened" once; adding ~1.3k of exhaustion
+        # audit logging inside the block pushed the handler past it and failed
+        # this test while the guarantee itself still held. A magic number that
+        # has to grow whenever the block grows is not testing anything.
+        assert "except Exception as _adv_exc" in src[i:], (
             "advanced exit checks are not wrapped — an error would abort the tick "
             "and the fixed stop-loss would never run"
         )
+        j = src.index("except Exception as _adv_exc", i)
+        assert "try:" in src[i:j], "the handler exists but nothing opens a try before it"
 
     def test_fixed_stop_loss_is_computed_after_the_guarded_block(self):
         """sl_hit must be evaluated AFTER the try/except, so a trailing stop

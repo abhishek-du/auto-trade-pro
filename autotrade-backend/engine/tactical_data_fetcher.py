@@ -65,9 +65,24 @@ VIX_SYMBOL = "^INDIAVIX"
 SESSION_OPEN = (9, 15)
 ORB_END = (9, 30)
 SESSION_CLOSE = (15, 30)
-# Path F stops originating before the close so it never proposes an entry that
-# could not be managed; mirrors the 15:20 cutoff the India loop uses.
-ENTRY_CUTOFF = (15, 20)
+# Path F stops originating before the intraday squareoff, so it never proposes
+# an entry that cannot be held.
+#
+# This was 15:20 — "mirrors the 15:20 cutoff the India loop uses" — but 15:20 is
+# ZERODHA's auto-squareoff, not ours. Ours is tasks.intraday_squareoff, beat-
+# scheduled at 09:40 UTC = 15:10 IST (tasks/celery_app.py), which closes every
+# OpenPosition with product="MIS". Tactical signals are all MIS, so a tactical
+# entry between 15:10 and 15:20 was structurally unholdable: it opened into a
+# squareoff that had already run, or was about to.
+#
+# Measured 2026-08-25: four ORB/PIVOT_BREAKOUT entries opened at 15:08 IST and
+# were closed by MIS_SQUAREOFF at 15:11 — 171-181 seconds of exposure, -Rs628
+# in round-trip costs for four trades that could never have been managed.
+#
+# 15:10 IST is the authoritative boundary because it is the earliest thing that
+# force-closes a tactical position. If the squareoff schedule moves, this must
+# move with it.
+ENTRY_CUTOFF = (15, 10)
 
 
 @dataclass(frozen=True)
@@ -98,13 +113,17 @@ def _at(d: datetime, hm: tuple[int, int]) -> datetime:
 def in_entry_window(when: datetime | None = None) -> bool:
     """True when a NEW tactical signal may be generated.
 
-    Deliberately stricter than the exit window: origination stops at 15:20 IST
-    even though the session runs to 15:30.
+    Deliberately stricter than the exit window: origination stops at the
+    intraday squareoff (15:10 IST) even though the session runs to 15:30.
+
+    The upper bound is EXCLUSIVE. At exactly 15:10:00 the squareoff task is
+    due, so an entry stamped 15:10:00 is already too late — 15:09:59 is the
+    last instant a tactical position can be opened and still be managed.
     """
     t = when or now_ist()
     if t.weekday() >= 5:
         return False
-    return _at(t, SESSION_OPEN) <= t <= _at(t, ENTRY_CUTOFF)
+    return _at(t, SESSION_OPEN) <= t < _at(t, ENTRY_CUTOFF)
 
 
 def orb_window(when: datetime | None = None) -> tuple[datetime, datetime]:
