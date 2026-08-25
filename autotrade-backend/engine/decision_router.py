@@ -964,6 +964,31 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
     return result
 
 
+def _emitter_identity() -> dict:
+    """Who wrote this audit row.
+
+    `simulation_logs` records no emitting process, so production traffic and
+    test traffic are indistinguishable at query time. That is not theoretical:
+    144 rows for the fixture symbol TESTCO.NS sit in the production table, and
+    attributing them required tracing an error string that happened to land in
+    a payload — a code trace, not a query.
+
+    Additive JSON only. It changes no routing decision and no execution
+    behaviour, and historical rows are left exactly as they are.
+    """
+    import os
+    import sys
+    return {
+        # PYTEST_CURRENT_TEST is set by pytest for the duration of each test,
+        # so this is true only for rows a test actually caused.
+        "pytest": bool(os.environ.get("PYTEST_CURRENT_TEST")),
+        # argv[0]'s basename distinguishes the celery workers, the news engine
+        # and uvicorn from one another without leaking a full path.
+        "process": os.path.basename(sys.argv[0] or "") or "unknown",
+        "pid": os.getpid(),
+    }
+
+
 async def _log_intent_audit(
     intent: TradeIntent, mode: TradeMode, result: RoutingResult, session: AsyncSession,
 ) -> None:
@@ -1000,6 +1025,7 @@ async def _log_intent_audit(
                 "reason":            result.reason,
                 "mode":              mode.value,
                 "strategy":          intent.strategy,
+                "emitter":           _emitter_identity(),
             },
             timestamp=datetime.utcnow(),
         )

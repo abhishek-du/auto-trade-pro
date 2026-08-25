@@ -849,7 +849,55 @@ async def _find_canonical_event(headline: str, session) -> "tuple[object, int] |
     return None
 
 
-async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
+async def _resolve_news_id(session, headline: str, published_at) -> int | None:
+    """The NewsItem.id for a headline that ON CONFLICT DO NOTHING just skipped.
+
+    `RETURNING id` yields NULL on conflict, so a duplicate headline would leave
+    its CausalEvent with news_id=NULL — the very gap this exists to close. This
+    re-reads the row using the CONFLICT TARGET ITSELF, so the lookup is exactly
+    as unique as the constraint that rejected the insert:
+
+        uq_news_items_headline_day
+          UNIQUE (md5(headline), (COALESCE(published_at, crawled_at))::date)
+          WHERE crawled_at >= '2026-08-21'
+
+    All three parts are reproduced below, including the partial-index predicate
+    — a conflict can only have been raised against a row inside that range, and
+    without the predicate an older duplicate outside it could be returned
+    instead. COALESCE(:published_at, now()) mirrors what the failed INSERT would
+    have stored: crawled_at defaults to now(), so a row with no published_at
+    keys on today's date.
+
+    This is an exact key match, not a heuristic. It never falls back to
+    timestamp proximity, symbol matching or fuzzy headline comparison: if the
+    key does not resolve to exactly one row, it returns None and the event is
+    written with news_id=NULL rather than a guess.
+    """
+    from sqlalchemy import text as _text
+    try:
+        rows = (await session.execute(_text("""
+            SELECT id FROM news_items
+            WHERE md5(headline) = md5(:headline)
+              AND (COALESCE(published_at, crawled_at))::date
+                  = (COALESCE(CAST(:published_at AS timestamp), now()))::date
+              AND crawled_at >= TIMESTAMP '2026-08-21 00:00:00'
+        """), {"headline": headline, "published_at": published_at})).scalars().all()
+    except Exception as exc:
+        logger.debug(f"[news_engine] news_id lookup failed for a duplicate headline: {exc}")
+        return None
+    if len(rows) == 1:
+        return int(rows[0])
+    if len(rows) > 1:
+        # Should be impossible while the unique index exists. Refuse to pick.
+        logger.warning(
+            f"[news_engine] news_id lookup matched {len(rows)} rows — ambiguous, "
+            f"leaving news_id NULL rather than guessing"
+        )
+    return None
+
+
+async def _build_evidence(ticker: str, side: str, headline: str, summary: str,
+                          news_id: int | None = None):
     """Classify this event (headline + summary, not headline-only) and persist
     a CausalEvent row for traceability, connecting the previously-disconnected
     event-classification pipeline (crawler/event_pipeline.py) to the actual
@@ -930,7 +978,17 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
             companies = list(set(llm_companies + [bare_ticker]))
 
             causal = CausalEvent(
-                news_id=None,  # this pipeline doesn't have a NewsItem row to link — see audit doc §3.6
+                # news_id is threaded from the NewsItem this cycle inserted for
+                # this exact headline (2026-08-25). It stays None when the
+                # caller has no NewsItem — the anomaly-catalyst and pre-market
+                # queue paths genuinely create events with no news row, and a
+                # NULL there is correct, not a gap. Historical rows are NOT
+                # backfilled: causal_events.news_id was 100% populated
+                # 2026-07-16..07-21 by crawler/event_pipeline.py and 0% after
+                # origination moved to this engine, and Phase 7 established the
+                # historical linkage is unrecoverable (0 exact matches on every
+                # candidate key), so only new rows carry it.
+                news_id=news_id,
                 event_title=classification.category,
                 country=classification.impact,  # matches crawler/event_pipeline.py's existing (mis)use of this column
                 importance=classification.surprise_score,
@@ -1302,11 +1360,11 @@ async def _persist_news_decision(
         logger.debug(f"[news_engine] persist decision failed for {ticker}: {exc}")
 
 
-async def process_ticker(ticker, side, headline, summary):
+async def process_ticker(ticker, side, headline, summary, news_id=None):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
-    cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary)
+    cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary, news_id)
     cand.event_id = event_id
 
     if event_id is None:
@@ -1571,6 +1629,11 @@ async def _news_discovery_cycles():
             # 1. Fetch Global/Indian News (RSS)
             news_items = await fetch_free_rss_news() 
             new_articles = [n for n in news_items if n.get('headline', '') not in _processed_headlines]
+
+            # headline -> NewsItem.id for the rows this cycle inserted or found
+            # (2026-08-25). Initialised before the `if new_articles:` guard so
+            # the dispatch below can always read it, even on an empty cycle.
+            _news_ids: dict[str, int] = {}
             
             if new_articles:
                 logger.info(f"📰 Found {len(new_articles)} new global/Indian headlines.")
@@ -1628,8 +1691,16 @@ async def _news_discovery_cycles():
                             .on_conflict_do_nothing()
                             .returning(NewsItem.__table__.c.id)
                         )
-                        if (await session.execute(stmt)).scalar() is None:
+                        _new_id = (await session.execute(stmt)).scalar()
+                        if _new_id is None:
+                            # ON CONFLICT DO NOTHING returns NULL — the row
+                            # already exists. Resolve it by the conflict target
+                            # itself so the CausalEvent still links correctly.
                             _dupes += 1
+                            _new_id = await _resolve_news_id(
+                                session, headline, article.get('published_at'))
+                        if _new_id is not None:
+                            _news_ids[headline] = int(_new_id)
                     await session.commit()
                 if _dupes:
                     logger.debug(
@@ -1685,7 +1756,8 @@ async def _news_discovery_cycles():
                 
                     # Action based on Market Status
                     if market_open:
-                        await process_ticker(ticker, side, headline, summary)
+                        await process_ticker(ticker, side, headline, summary,
+                                             news_id=_news_ids.get(headline))
                     else:
                         logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
                         async with AsyncSessionLocal() as session:
@@ -1750,9 +1822,11 @@ async def _news_discovery_cycles():
                 # cost, indefinitely.
                 from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
+                # headline -> NewsItem.id, same purpose as the RSS map above.
+                _ann_news_ids: dict[str, int] = {}
                 async with AsyncSessionLocal() as session:
                     for ann, sent in zip(new_announcements, ann_sentiments):
-                        await session.execute(
+                        _ann_id = (await session.execute(
                             _pg_insert(NewsItem.__table__)
                             .values(
                                 headline=ann["headline"],
@@ -1766,7 +1840,13 @@ async def _news_discovery_cycles():
                                 company=ann["company"],
                             )
                             .on_conflict_do_nothing()
-                        )
+                            .returning(NewsItem.__table__.c.id)
+                        )).scalar()
+                        if _ann_id is None:
+                            _ann_id = await _resolve_news_id(
+                                session, ann["headline"], ann["published_at"])
+                        if _ann_id is not None:
+                            _ann_news_ids[ann["headline"]] = int(_ann_id)
                     await session.commit()
                     _NSE_POLL_STATS["nse_items_inserted"] += len(new_announcements)
 
@@ -1812,7 +1892,8 @@ async def _news_discovery_cycles():
 
                     logger.info(f"🔍 Analyzing NSE announcement: {headline}")
                     if market_open:
-                        await process_ticker(ticker, side, headline, summary)
+                        await process_ticker(ticker, side, headline, summary,
+                                             news_id=_ann_news_ids.get(ann['headline']))
                     else:
                         logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
                         async with AsyncSessionLocal() as session:
