@@ -1,8 +1,8 @@
-# LLM client: Amazon Nova Pro via AWS Bedrock's native Runtime Converse API.
+# LLM client: NVIDIA Nemotron Super 3 120B via AWS Bedrock's native Runtime Converse API.
 # Single provider — no fallback chain.
 #
 # Switched from openai.gpt-oss-120b (Mantle OpenAI-compatible gateway) to
-# amazon.nova-pro-v1:0 on 2026-07-24. Nova Pro does NOT support the
+# nvidia.nemotron-super-3-120b on 2026-07-24. Nemotron Super does NOT support the
 # bedrock-mantle endpoint (confirmed against AWS's own model card — only
 # bedrock-runtime/Converse), so this uses boto3 instead of the `openai` SDK.
 # Nova is also not a chain-of-thought reasoning model like gpt-oss was — it
@@ -48,7 +48,7 @@ def _set_last_reasoning(value: "str | None") -> None:
 def get_last_reasoning() -> "str | None":
     """Reasoning text from the most recent LLM call on this async task, if any.
 
-    Always None as of the 2026-07-24 Nova Pro switch -- Nova has no separate
+    Always None as of the 2026-07-24 Nemotron Super switch -- Nova has no separate
     reasoning channel. Kept for backward compat with existing callers."""
     try:
         return _LAST_REASONING.get()
@@ -57,7 +57,7 @@ def get_last_reasoning() -> "str | None":
 
 
 # ── Robust JSON extraction ──────────────────────────────────────────────────
-# Added 2026-07-24 alongside the Nova Pro switch: confirmed live that Nova
+# Added 2026-07-24 alongside the Nemotron Super switch: confirmed live that Nova
 # sometimes adds a sentence of explanation before or after a requested "ONLY
 # JSON, nothing else" response (unlike gpt-oss, which reliably returned bare
 # JSON) -- e.g. engine/sector_graph.py and crawler/pdf_parser.py used to do a
@@ -86,7 +86,7 @@ def extract_json_from_response(resp: "str | None") -> "dict | list | None":
         return None
 
 
-# ── Nova Pro (native Bedrock Converse API) — sole LLM provider ─────────────────
+# ── Nemotron Super (native Bedrock Converse API) — sole LLM provider ─────────────────
 _mantle_blocked_until: float = 0.0
 # Exponential-backoff state for the transient-error branch (throttling/server
 # errors that persist past the immediate retry) -- reset to 0 on any
@@ -152,7 +152,7 @@ _mantle_sync_client = _nova_client
 
 def _mantle_budget(max_tokens: int) -> int:
     """Floor every request at MANTLE_MIN_TOKENS, ceil at
-    MANTLE_MAX_OUTPUT_TOKENS (10,000 -- Nova Pro's real ceiling on this
+    MANTLE_MAX_OUTPUT_TOKENS (10,000 -- Nemotron Super's real ceiling on this
     account, confirmed 2026-07-24 live via the API's own ValidationException,
     not the ~5K figure on AWS's model card page or the 300K context-window
     figure -- context window and max output tokens are different limits). A
@@ -206,7 +206,7 @@ def _extract_converse_text(resp: dict) -> str:
 
 
 # ── Shared cross-process rate limiter ───────────────────────────────────────
-# AWS Bedrock's Nova Pro quota (25 RPM cross-region, confirmed live via the
+# AWS Bedrock's Nemotron Super quota (25 RPM cross-region, confirmed live via the
 # service-quotas API) is per AWS ACCOUNT, not per process -- but this
 # codebase runs several independent Python processes that all call the same
 # account (the news-engine systemd service, every Celery worker process, the
@@ -307,7 +307,7 @@ async def call_mantle_chat(
     timeout: float = 60.0,
     model: str | None = None,
 ) -> str | None:
-    """Inference via Amazon Nova Pro (native Bedrock Runtime Converse API).
+    """Inference via NVIDIA Nemotron Super 3 120B (native Bedrock Runtime Converse API).
 
     Returns the assistant text or None on any failure. `timeout` is accepted
     for backward compat but is a no-op against this provider -- see
@@ -326,7 +326,7 @@ async def call_mantle_chat(
     a chain-of-thought reasoning model whose reasoning tokens shared the
     max_tokens budget with the answer, so a successful-but-empty response
     was a real, common failure mode requiring a "retry at low reasoning
-    effort" mitigation (see git history). Nova Pro has no such shared-budget
+    effort" mitigation (see git history). Nemotron Super has no such shared-budget
     reasoning channel, so that failure mode isn't expected here — empty
     content on a technically-successful call still gets one plain retry
     below, purely as a defensive fallback, not because it's anticipated.
@@ -438,7 +438,7 @@ async def call_llm_chat_stream(
     timeout: float = 90.0,
     model: str | None = None,
 ):
-    """Async generator that streams Amazon Nova Pro responses.
+    """Async generator that streams NVIDIA Nemotron Super 3 120B responses.
 
     Yields dicts: {"type": "content"|"error"|"done", "text": "..."}. No
     "reasoning" type is ever yielded -- the previous gpt-oss provider had a
@@ -521,13 +521,13 @@ async def call_llm_chat(
     temperature: float = 0.3,
     timeout: float | None = None,
     model: str | None = None,
-    # Legacy params — accepted but ignored (all inference is Nova Pro now)
+    # Legacy params — accepted but ignored (all inference is Nemotron Super now)
     groq_fallback: bool = True,
     skip_ollama: bool = False,
 ) -> str | None:
     """Single entry point for all non-streaming inference.
 
-    Uses Amazon Nova Pro exclusively. The `groq_fallback` and `skip_ollama`
+    Uses NVIDIA Nemotron Super 3 120B exclusively. The `groq_fallback` and `skip_ollama`
     params are accepted for backward compatibility but ignored — there is
     only one provider now.
     """
@@ -558,7 +558,7 @@ async def call_llm_chat_full(
     persists both to the llm_reasoning_log table.
 
     Returns {"content": str|None, "reasoning": str|None, "model": str}.
-    `reasoning` is always None as of the Nova Pro switch (see
+    `reasoning` is always None as of the Nemotron Super switch (see
     get_last_reasoning()'s docstring) -- kept in the return shape so callers
     that destructure this dict don't need a rewrite.
     Persistence is best-effort and never raises into the caller.
@@ -638,7 +638,7 @@ def _acquire_llm_rate_slot_sync() -> None:
 
 
 def _mantle_sync_chat(prompt: str, system: str, max_tokens: int = 512) -> str:
-    """Sync Nova Pro inference. Returns '' on any failure."""
+    """Sync Nemotron Super inference. Returns '' on any failure."""
     client = _mantle_sync_client()
     if client is None:
         return ""
@@ -659,12 +659,12 @@ def _mantle_sync_chat(prompt: str, system: str, max_tokens: int = 512) -> str:
 
 
 def quick_analysis(prompt: str, system: str = "You are a concise financial analyst.") -> str:
-    """Fast sync inference via Amazon Nova Pro. Returns '' if unavailable."""
+    """Fast sync inference via NVIDIA Nemotron Super 3 120B. Returns '' if unavailable."""
     return _mantle_sync_chat(prompt, system, max_tokens=512)
 
 
 def explain(prompt: str, system: str = "You are an expert trading strategy explainer.") -> str:
-    """Detailed explanation via Amazon Nova Pro."""
+    """Detailed explanation via NVIDIA Nemotron Super 3 120B."""
     return _mantle_sync_chat(prompt, system, max_tokens=1024)
 
 

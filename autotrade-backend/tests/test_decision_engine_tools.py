@@ -192,16 +192,21 @@ class TestFundamentalsSourcesFromCompanyIntelligence:
 
     @pytest.mark.asyncio
     async def test_yfinance_never_called_directly_by_this_tool(self):
-        # Upstox-primary fix: fetch_fundamentals_yfinance is no longer called
-        # directly by _tool_fundamentals at all -- it's still used (correctly)
-        # inside get_company_intelligence()'s own internal fallback, but not
-        # here as a second, parallel path.
+        # Upstox-primary fix: _tool_fundamentals must not open a second,
+        # parallel yfinance path alongside get_company_intelligence().
+        #
+        # This used to patch engine.fundamental_analyzer.fetch_fundamentals_yfinance
+        # and assert_not_called() on it -- but that symbol was deleted in the
+        # Upstox migration, so patch() itself raised AttributeError and the test
+        # never actually ran (audit 2026-08-19). Assert the stronger, still-true
+        # property directly: the name is gone from the module entirely.
+        import engine.fundamental_analyzer as fa
+        assert not hasattr(fa, "fetch_fundamentals_yfinance")
+
         with patch("engine.company_intelligence.get_company_intelligence",
                    AsyncMock(return_value=_make_ci())), \
-             patch("engine.fundamental_analyzer.fetch_fundamentals_screener", AsyncMock(return_value={})), \
-             patch("engine.fundamental_analyzer.fetch_fundamentals_yfinance") as mock_yf:
+             patch("engine.fundamental_analyzer.fetch_fundamentals_screener", AsyncMock(return_value={})):
             await de._tool_fundamentals("TESTCO.NS")
-        mock_yf.assert_not_called()
 
 
 class TestFundamentalsPerSessionCache:

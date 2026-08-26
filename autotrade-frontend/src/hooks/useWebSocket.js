@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { withWsToken } from '../utils/wsAuth';
 
 export function useWebSocket(path, { onMessage, reconnectDelay = 3000 } = {}) {
   const [status, setStatus] = useState('connecting');
@@ -8,7 +9,7 @@ export function useWebSocket(path, { onMessage, reconnectDelay = 3000 } = {}) {
 
   const connect = useCallback(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}${path}`;
+    const url = withWsToken(`${proto}//${window.location.host}${path}`);
     const ws = new WebSocket(url);
     wsRef.current = ws;
 

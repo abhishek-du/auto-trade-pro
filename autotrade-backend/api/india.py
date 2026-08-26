@@ -83,6 +83,7 @@ from engine.mutual_fund_analyzer import (
 from engine.signal_generator import save_signal
 from utils.config import settings
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["India"])
 
@@ -791,6 +792,7 @@ async def list_fii_dii_history(
     "/fii-dii/fetch",
     response_model=FIIDIIFlowOut,
     summary="Manually fetch fresh FII/DII data from NSE and persist immediately",
+    dependencies=[Depends(require_auth)],
 )
 async def fetch_fii_dii_now(db: AsyncSession = Depends(get_db)):
     try:
@@ -908,6 +910,7 @@ async def get_mf_nav_history(
     "/mutual-funds/{scheme_code}/refresh",
     response_model=MutualFundNAVOut,
     summary="Fetch fresh NAV from AMFI and persist to DB",
+    dependencies=[Depends(require_auth)],
 )
 async def refresh_mf_nav(scheme_code: str, db: AsyncSession = Depends(get_db)):
     summary = await fetch_and_save_nav(scheme_code, db)
@@ -1041,6 +1044,7 @@ async def get_fundamentals(symbol: str, db: AsyncSession = Depends(get_db)):
 @router.post(
     "/fundamentals/refresh",
     summary="Trigger a full fundamental data refresh for all NSE symbols",
+    dependencies=[Depends(require_auth)],
 )
 async def refresh_fundamentals(
     background_tasks: BackgroundTasks,
@@ -1370,6 +1374,7 @@ async def list_india_signals(
     "/signals/trigger",
     response_model=TriggerResult,
     summary="Trigger a full India signal generation pass",
+    dependencies=[Depends(require_auth)],
 )
 async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
     """Always runs the full India signal scan regardless of market hours.
@@ -1406,6 +1411,7 @@ async def trigger_india_signals(db: AsyncSession = Depends(get_db)):
     "/seed",
     response_model=SeedResultOut,
     summary="Seed all Indian market data: candles → FII/DII → signals",
+    dependencies=[Depends(require_auth)],
 )
 async def seed_india_data(
     db:    AsyncSession = Depends(get_db),
@@ -1511,6 +1517,7 @@ async def seed_india_data(
     "/backtest",
     response_model=BacktestResultOut,
     summary="Run walk-forward backtest on India watchlist symbols",
+    dependencies=[Depends(require_auth)],
 )
 async def run_india_backtest(
     body: BacktestRequestIn,
@@ -1648,7 +1655,7 @@ async def get_top_movers():
     }
 
 
-@router.post("/live-prices/refresh", summary="Force immediate price cache refresh")
+@router.post("/live-prices/refresh", summary="Force immediate price cache refresh", dependencies=[Depends(require_auth)])
 async def force_refresh_live_prices():
     """Forces an immediate refresh of the price cache. Returns updated prices."""
     from crawler.live_prices import refresh_all_prices
@@ -1793,7 +1800,7 @@ async def get_watchlist_sector(sector_name: str):
     return {"sector": sector_name, "stocks": stocks, "count": len(stocks)}
 
 
-@router.post("/watchlist/refresh", summary="Force refresh prices + signal enrichment")
+@router.post("/watchlist/refresh", summary="Force refresh prices + signal enrichment", dependencies=[Depends(require_auth)])
 async def refresh_watchlist(db: AsyncSession = Depends(get_db)):
     """Refreshes PRICE_CACHE and re-injects latest signal data. Returns timing stats."""
     import time as _t
@@ -1967,7 +1974,7 @@ async def get_breadth_history():
     return list(BREADTH_HISTORY)
 
 
-@router.post("/breadth/refresh")
+@router.post("/breadth/refresh", dependencies=[Depends(require_auth)])
 async def refresh_breadth():
     """Force immediate breadth data refresh."""
     from crawler.market_breadth import refresh_breadth_data
@@ -2043,7 +2050,7 @@ async def get_sector_detail(sector_key: str):
     return data
 
 
-@router.post("/sectors/refresh")
+@router.post("/sectors/refresh", dependencies=[Depends(require_auth)])
 async def refresh_sectors():
     """Force immediate sector data refresh."""
     from crawler.sector_data import refresh_sector_data, get_sector_summary
@@ -2224,7 +2231,7 @@ async def get_calendar_ipos(db: AsyncSession = Depends(get_db)):
     return {"upcoming": upcoming, "recently_listed": recent}
 
 
-@router.post("/calendar/seed")
+@router.post("/calendar/seed", dependencies=[Depends(require_auth)])
 async def seed_calendar(db: AsyncSession = Depends(get_db)):
     from engine.calendar_engine import seed_calendar_events
     result = await seed_calendar_events(db, months_ahead=3)
@@ -2242,7 +2249,7 @@ async def get_user_watchlist(db: AsyncSession = Depends(get_db)):
     return {"symbols": [r.symbol for r in rows], "count": len(rows)}
 
 
-@router.post("/user-watchlist/{symbol}", summary="Add symbol to agent scan universe")
+@router.post("/user-watchlist/{symbol}", summary="Add symbol to agent scan universe", dependencies=[Depends(require_auth)])
 async def add_to_user_watchlist(symbol: str, db: AsyncSession = Depends(get_db)):
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     ns_symbol = f"{sym}.NS"
@@ -2259,7 +2266,7 @@ async def add_to_user_watchlist(symbol: str, db: AsyncSession = Depends(get_db))
     return {"status": "added", "symbol": ns_symbol}
 
 
-@router.delete("/user-watchlist/{symbol}", summary="Remove symbol from agent scan universe")
+@router.delete("/user-watchlist/{symbol}", summary="Remove symbol from agent scan universe", dependencies=[Depends(require_auth)])
 async def remove_from_user_watchlist(symbol: str, db: AsyncSession = Depends(get_db)):
     sym = symbol.upper().replace(".NS", "").replace(".BO", "")
     ns_symbol = f"{sym}.NS"
@@ -2425,7 +2432,7 @@ async def get_market_shortlist(
     }
 
 
-@router.post("/market-scanner/run", summary="Trigger market scanner manually")
+@router.post("/market-scanner/run", summary="Trigger market scanner manually", dependencies=[Depends(require_auth)])
 async def trigger_market_scanner(db: AsyncSession = Depends(get_db)):
     """Run the market scanner immediately (for testing / manual trigger)."""
     try:

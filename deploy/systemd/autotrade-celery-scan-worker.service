@@ -1,0 +1,43 @@
+[Unit]
+# Dedicated worker for the tactical scans (2026-08-24).
+#
+# On 24 Aug, F1 was dispatched ~89 times and executed 15 — all of those before
+# the entry window opened. A scan measures 121s end to end; against a 175s
+# expiry in a two-slot pool permanently held by kite_live_candles /
+# india_price_scan / market_scanner, nearly every dispatch expired before a
+# slot freed. An expired Celery task logs nothing, so Path F produced zero
+# entries for a whole session in silence.
+#
+# Same failure and same fix as the exit loop. The proof that the pattern works:
+# fast_sl_check ran ONCE on 21 Aug and 49,876 times on 24 Aug after exit_queue.
+#
+# concurrency=1 is deliberate: two overlapping 121s scans would double-hit the
+# Kite quote endpoint (429s were already observed) and could persist duplicate
+# signals for the same bar.
+#
+# CPUQuota caps the blast radius. F1 is mostly WAITING on Kite for ~1,500
+# symbols rather than burning CPU, so this is a ceiling, not a throttle on
+# normal operation.
+Description=AutoTrade Pro — Celery SCAN worker (tactical F1/F4, dedicated queue)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python -m celery -A tasks.celery_app worker \
+    --queues=scan_queue \
+    --concurrency=1 \
+    --hostname=scan@%%h \
+    --loglevel=info \
+    --prefetch-multiplier=1
+Restart=always
+RestartSec=5
+CPUQuota=60%
+MemoryMax=1500M
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/celery-scan-worker.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/celery-scan-worker.err
+
+[Install]
+WantedBy=default.target

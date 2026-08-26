@@ -10,3 +10,6 @@ __pycache__/
 .env.*
 !**/.env.example
 *.bak
+
+# Service stdout/stderr capture (systemd StandardOutput=append:)
+logs/

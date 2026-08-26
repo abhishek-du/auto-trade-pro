@@ -9,12 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from api.auth import require_auth
 from utils.config import settings
+from utils.logger import logger
 from utils.runtime_config import RuntimeConfig, _KNOWN_KEYS
 
 router = APIRouter(tags=["Settings"])
@@ -32,7 +33,10 @@ class RuntimeSettingsOut(BaseModel):
     indian_market_max_risk:  float
     indian_intraday_sl_pct:  float
     enable_fii_dii_analysis: bool
-    enable_options_chain:    bool
+    # enable_options_chain removed 2026-08-19: an F&O leftover. It was still
+    # REQUIRED here but RuntimeConfig.to_dict() never supplied it (and it is not
+    # in _KNOWN_KEYS), so GET /api/v1/settings/ returned 500 on every call since
+    # the F&O removal in 91457d7 -- the Settings page was simply broken.
     enable_india_vix:        bool
     enable_mutual_funds:     bool
     enable_ml_predictions:   bool
@@ -60,7 +64,6 @@ class SettingsPatch(BaseModel):
     indian_market_max_risk:  float | None = None
     indian_intraday_sl_pct:  float | None = None
     enable_fii_dii_analysis: bool  | None = None
-    enable_options_chain:    bool  | None = None
     enable_india_vix:        bool  | None = None
     enable_mutual_funds:     bool  | None = None
     enable_ml_predictions:   bool  | None = None
@@ -93,6 +96,7 @@ async def get_settings(db: AsyncSession = Depends(get_db)):
     "/",
     response_model=RuntimeSettingsOut,
     summary="Partially update runtime settings — only provided keys are changed",
+    dependencies=[Depends(require_auth)],
 )
 async def patch_settings(
     payload: SettingsPatch,
@@ -117,6 +121,7 @@ async def patch_settings(
 @router.delete(
     "/{key}",
     summary="Reset a single setting to its .env / config.py default",
+    dependencies=[Depends(require_auth)],
 )
 async def reset_setting(key: str, db: AsyncSession = Depends(get_db)):
     if key not in _KNOWN_KEYS:
@@ -184,3 +189,87 @@ async def set_trade_mode(
     await RuntimeConfig.set(db, "paper_mode", body.paper_mode)
     await db.commit()
     return {"mode": "PAPER" if body.paper_mode else "LIVE", "updated": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy execution toggles
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StrategyFlagsUpdate(BaseModel):
+    """One or more strategy toggles. Unknown names are rejected, not ignored.
+
+    Silently dropping an unknown key would let the UI believe it disabled a
+    strategy that is still trading -- the worst possible failure for this
+    screen. See `update_strategy_flags`.
+    """
+
+    flags: dict[str, bool] = Field(
+        ...,
+        description="Short strategy name -> enabled. e.g. {\"tactical\": false}",
+    )
+
+
+@router.get(
+    "/strategies",
+    summary="Current on/off state of every strategy execution toggle",
+)
+async def get_strategy_flags(db: AsyncSession = Depends(get_db)):
+    """Read-only, so no auth -- consistent with GET /settings/.
+
+    Values come from RuntimeConfig (DB-backed), so this reflects what every
+    process sees, not this uvicorn worker's in-memory settings.
+    """
+    from utils.runtime_config import STRATEGY_FLAGS, RuntimeConfig
+
+    cfg = await RuntimeConfig.load(db)
+    return {
+        "flags": {name: bool(cfg._get(key, True)) for name, key in STRATEGY_FLAGS.items()},
+        # The UI shows this so an operator is not left guessing whether a
+        # toggle needs a deploy to take hold.
+        "effective": "immediate",
+        "note": "Stored in RuntimeConfig (DB). Every process picks the change up "
+                "on its next decision; no restart required.",
+    }
+
+
+@router.post(
+    "/strategies",
+    summary="Enable or disable strategies at runtime",
+    dependencies=[Depends(require_auth)],
+)
+async def update_strategy_flags(
+    payload: StrategyFlagsUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Flip one or more strategy toggles. Takes effect immediately.
+
+    AUTHENTICATED, unlike its sibling `PATCH /settings/` (audit D4). Disabling
+    every strategy halts automatic trading, which is exactly the kind of action
+    that must not be anonymous.
+    """
+    from utils.runtime_config import STRATEGY_FLAGS, RuntimeConfig
+
+    unknown = sorted(set(payload.flags) - set(STRATEGY_FLAGS))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Unknown strategy name(s): {', '.join(unknown)}. "
+                f"Valid names: {', '.join(sorted(STRATEGY_FLAGS))}"
+            ),
+        )
+
+    updates = {STRATEGY_FLAGS[name]: bool(val) for name, val in payload.flags.items()}
+    await RuntimeConfig.set_many(db, updates)
+
+    cfg = await RuntimeConfig.load(db)
+    current = {name: bool(cfg._get(key, True)) for name, key in STRATEGY_FLAGS.items()}
+    logger.warning(
+        "[settings] strategy toggles changed: "
+        + ", ".join(f"{n}={'ON' if v else 'OFF'}" for n, v in sorted(payload.flags.items()))
+    )
+    if not any(current.values()):
+        logger.warning("[settings] ALL strategies are now disabled — no path can originate a trade")
+
+    return {"status": "updated", "flags": current,
+            "all_disabled": not any(current.values())}

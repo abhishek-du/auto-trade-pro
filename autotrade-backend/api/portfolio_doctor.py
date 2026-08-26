@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import PortfolioDiagnosis, TrackerPortfolio
 from engine.portfolio_doctor import run_full_diagnosis, run_quick_diagnosis
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Portfolio Doctor"])
 
@@ -26,7 +27,7 @@ class DiagnosisRequest(BaseModel):
 
 # ── POST /diagnose ────────────────────────────────────────────────────────────
 
-@router.post("/diagnose")
+@router.post("/diagnose", dependencies=[Depends(require_auth)])
 async def create_diagnosis(
     req: DiagnosisRequest,
     db: AsyncSession = Depends(get_db),
@@ -139,7 +140,7 @@ async def quick_check(
 
 # ── DELETE /diagnose/{diagnosis_id} ──────────────────────────────────────────
 
-@router.delete("/diagnose/{diagnosis_id}")
+@router.delete("/diagnose/{diagnosis_id}", dependencies=[Depends(require_auth)])
 async def delete_diagnosis(
     diagnosis_id: str,
     db: AsyncSession = Depends(get_db),

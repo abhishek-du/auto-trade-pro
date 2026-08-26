@@ -13,6 +13,7 @@ from engine.signal_generator import generate_signal, save_signal
 # India is the production engine; the base analyze_all_symbols is retained inside
 # signal_generator for forex/US flow only. Wire user-facing scans to India.
 from engine.india_signal_generator import analyze_all_india_symbols as analyze_all_symbols
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Signals"])
 
@@ -47,6 +48,7 @@ async def list_signals(db: AsyncSession = Depends(get_db)):
     "/trigger",
     response_model=TriggerResult,
     summary="Manually trigger analyze_all_symbols() — for testing",
+    dependencies=[Depends(require_auth)],
 )
 async def trigger_analysis(db: AsyncSession = Depends(get_db)):
     """Run a full signal-generation pass right now and persist results."""
@@ -64,6 +66,7 @@ async def trigger_analysis(db: AsyncSession = Depends(get_db)):
 @router.post(
     "/seed",
     summary="Fetch price data then run signal analysis — use this to bootstrap before Celery starts",
+    dependencies=[Depends(require_auth)],
 )
 async def seed_and_analyse(db: AsyncSession = Depends(get_db)):
     """

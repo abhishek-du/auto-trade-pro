@@ -267,6 +267,203 @@ class Settings(BaseSettings):
     ZERODHA_ACCESS_TOKEN:  str  = ""
     ZERODHA_REQUEST_TOKEN: str  = ""
     ZERODHA_REDIRECT_URL:  str  = "http://localhost:8000/api/v1/zerodha/callback"
+    # ── Path F — Tactical pipeline (shadow mode) ──────────────────────────────
+    # An independent technical-signal pipeline (ORB/VWAP/pivots/mean-reversion).
+    # It runs in SHADOW mode: signals are scored, sized and written to
+    # tactical_signals, but nothing is executed — Path F has no execution code
+    # path at all. See engine/tactical_executor.py and README_TACTICAL.md.
+    # Phase 2: execution is governed by TACTICAL_EXECUTION_ENABLED below.
+    # OFF by default; see the contract amendment.
+    TACTICAL_PIPELINE_ENABLED:    bool  = True
+    # TACTICAL_EXECUTION_MODE retired in Phase 2 — superseded by
+    # TACTICAL_EXECUTION_ENABLED below (two flags could contradict).
+    TACTICAL_CAPITAL:             float = 500_000.0
+    # Daily bucket ON/OFF (contract SS10c, owner decision 2026-08-20).
+    # Default True -- a fresh checkout keeps the brake. Set false in .env for
+    # the current run. When False the daily cap does not apply AT ALL; risk is
+    # still recorded to Redis so the daily total stays observable.
+    TACTICAL_RISK_BUCKET_ENABLED: bool = True
+    TACTICAL_MAX_TOTAL_RISK:      float = 0.02    # 2% of capital, whole bucket
+    TACTICAL_MAX_PER_TRADE_RISK:  float = 0.005   # 0.5% per trade
+    TACTICAL_VIX_THRESHOLD:       float = 25.0
+    TACTICAL_VIX_SIZE_SCALE:      float = 0.5     # halve size above the threshold
+    # ── Sector-level news fallback (2026-08-20) ──────────────────────────────
+    # classify_event() is single-company shaped and returned None for all five
+    # sugar/ethanol headlines on 19-20 Aug, so NO EVENT -> NO TRADE kept the
+    # engine out of a 16% sector move. MIN_TICKERS is 2, not the 3 originally
+    # proposed, because MEASURED extraction on those stories produced at most 2
+    # tickers per headline -- a 3 floor fires on none of them.
+    # ── News-Only architecture switches (owner decision 2026-08-20) ──────────
+    # Both were HARDCODED True since the News-Only pivot and are now flags, so
+    # they can be re-blocked without a deploy. Contract SS10b records the change.
+    #
+    # Defaults stay True -- a fresh checkout is still News-Only. The paper run
+    # enables them in .env.
+    #
+    # CONSEQUENCE, stated plainly: with these False, `NO EVENT -> NO TRADE` no
+    # longer holds for StrategyFamily.TECHNICAL. Those trades carry no canonical
+    # event and no per-family daily risk bucket -- only validate_signal's 12
+    # checks, market hours, MAX_PORTFOLIO_RISK and MAX_OPEN_POSITIONS.
+    TECHNICAL_ORIGINATION_BLOCKED: bool = True
+    NEWS_ONLY_BLOCKS_HUB_ENTRIES:  bool = True
+    # Shortlist size feeding india_trade_loop. Was 100; raised on 2026-08-20 now
+    # that TECHNICAL intents can actually execute (at 100 with the block on, the
+    # extra scanning was pure CPU cost for zero trades).
+    MARKET_SCANNER_TOP_N:          int  = 500
+    # P0 fix 2026-08-20: derive the news trade side from the LLM classification
+    # instead of the keyword heuristic. Measured: the two disagreed on 106 of 428
+    # Direct-News evaluations (24.8%) in one session, and ZERO SELL trades ever
+    # reached the execution gate because bearish headlines without one of four
+    # keywords defaulted to BUY and then contradicted their own classification.
+    # Flag exists so the old behaviour can be restored without a deploy.
+    NEWS_SIDE_FROM_CLASSIFIER:    bool  = True
+    # Kill switch for news-driven SHORTS specifically. EQUITY_SHORT_ENABLED is
+    # only read by hub_short/exhaustion_short and never covered the news paths,
+    # so before this there was no way to stop a news short except reverting the
+    # P0 fix -- which would reintroduce the side bug. Enforced in
+    # decision_router's short guard; RuntimeConfig("news_short_enabled")
+    # overrides it across processes with no restart.
+    NEWS_SHORT_ENABLED:           bool  = True
+    # Direction cross-check (2026-08-21). Two sugar headlines scoring -0.96 on
+    # FinBERT produced SEVEN bullish CausalEvents while the sector fell 3-7%.
+    # Re-running the classifier on the same headlines returned bearish, so the
+    # model is non-deterministic here, not systematically wrong. Only fires when
+    # both reads are confident.
+    EVENT_SENTIMENT_CONFLICT_MIN: float = 0.70
+    # Alert when the newest 1d date covers less than this fraction of the
+    # symbols the prior week carried. The watchdog only checked 5m, so a
+    # collapse from 7,066 -> 2,500 -> 4 symbols went unnoticed for two sessions.
+    # Symbols per backfill_hub_1d run. The task previously attempted all 10,138
+    # stale symbols in one run (~59 min of sleep alone at 0.35s Kite spacing)
+    # and died on the 3600s soft limit every single day, completing nothing.
+    #
+    # 1000 raised from 300 on 2026-08-21 to clear the ~9,300-symbol backlog in
+    # days rather than weeks. MEASURED: 300 symbols took 160s, so ~0.53s per
+    # symbol end to end -> 1000 is ~9 minutes against a 3600s limit. Even a 4x
+    # slowdown (Kite throttling, retries) still lands near 35 min, well inside
+    # it. Do not raise this to "just do them all": the whole failure being
+    # fixed here was a run that could not finish, and a bounded chunk that
+    # always completes is what makes the cursor sweep work.
+    BACKFILL_1D_CHUNK:            int   = 1000
+    DAILY_COVERAGE_MIN_FRAC:      float = 0.5
+    NEWS_SECTOR_FALLBACK_ENABLED: bool  = True
+    NEWS_SECTOR_MIN_TICKERS:      int   = 2
+    NEWS_SECTOR_MIN_SCORE:        float = 0.7
+    TACTICAL_F1_MIN_TURNOVER_CR:  float = 5.0     # Minimum ₹5 crore daily turnover
+    TACTICAL_F1_MIN_PRICE:        float = 20.0    # Minimum ₹20 share price
+    # Owner decision 2026-08-20: 1500, i.e. effectively no cap -- the >=5cr
+    # floor itself yields only 1,536 symbols. Measured ~31s of scan at that size
+    # against a 50s soft limit / 55s beat expiry.
+    # COVERAGE vs the 2026-08-20 movers (206 qualifiers, 14 sugar names):
+    #   top 50 by rank (old)   ->   5/206 movers,  0/14 sugar
+    #   >=5cr cap  500         ->  62/206 movers,  2/14 sugar
+    #   >=5cr cap 1500         -> ~171/206 movers, 11/14 sugar
+    # The remaining 3 sugar names average under 5cr (UTTAMSUGAR 3.71,
+    # PONNIERODE 1.67, UGARSUGAR 1.30) and are excluded by the FLOOR, not the
+    # cap -- no cap value reaches them. Lowering the floor to ~1.3 would mean
+    # ~2,510 symbols and ~50s, i.e. the entire budget.
+    TACTICAL_F1_MAX_SYMBOLS:      int   = 1500
+    TACTICAL_F4_UNIVERSE_SIZE:    int   = 150     # 5m data covers ~1,250 symbols
+    # DAY_MOMENTUM (2026-08-21): pure trend capture, no pattern required.
+    # Added after the 21-Aug session, where F1's pattern rules fired on 1 of 29
+    # stocks that cleared volume + momentum + VWAP screens.
+    # ── Exit management (2026-08-21) ─────────────────────────────────────────
+    # Before this the runner left after the T1 50% scale-out had no upside
+    # management: fast_sl_check set take_profit=0.0 and moved the stop to
+    # breakeven, deferring to "trailing logic in
+    # update_positions_with_current_prices" that did not exist. The runner could
+    # only end at breakeven or at the 15:10 squareoff.
+    TIME_BASED_EXIT_ENABLED:       bool  = True
+    TIME_BASED_EXIT_HOUR:          int   = 15
+    TIME_BASED_EXIT_MINUTE:        int   = 10
+    # Sector-breadth veto (2026-08-21). On the duty-free-import day the
+    # tactical pipeline bought DHAMPURSUG while all 13 sugar peers were red,
+    # because F1 reads price patterns and the CLASSIFIER had marked the news
+    # BULLISH. This measures what the sector is doing instead of what the news
+    # claims. Longs only; fails open on thin data.
+    TACTICAL_SECTOR_BREADTH_VETO:  bool  = True
+    # 3, not 5: membership is harvested from events, which name a mix of
+    # tickers and company names, and the name forms are unmatchable against
+    # candle symbols. Measured on the sugar day that yielded only 4 usable
+    # peers -- a 5 floor made the veto unable to fire on the very incident it
+    # was built for. Four peers all red is still a real breadth reading.
+    TACTICAL_SECTOR_VETO_MIN_PEERS: int  = 3
+    TACTICAL_SECTOR_VETO_DOWN_FRAC: float = 0.70
+    TACTICAL_SECTOR_VETO_LOOKBACK_H: int = 24
+    ENABLE_TRAILING_STOP:          bool  = True
+    TRAILING_STOP_ATR_MULT:        float = 2.5
+    TRAILING_BREAKEVEN_TRIGGER_PCT: float = 2.0   # move stop to entry at +2%
+    ENABLE_EXHAUSTION_EXIT:        bool  = True
+    ENABLE_PARTIAL_BOOKING_T2:     bool  = True
+    PARTIAL_BOOKING_T2_PCT:        float = 0.030  # +3.0% -> book another 30%
+    # DAY_WEAKNESS (2026-08-21) — the short mirror of DAY_MOMENTUM.
+    # Gates are TIGHTER than the long side on purpose: a short's loss is
+    # unbounded, it is MIS-only on NSE, and it must clear the VIX panic guard.
+    TACTICAL_DAY_WEAK_MIN_RVOL:      float = 2.0
+    TACTICAL_DAY_WEAK_MAX_RANGE_POS: float = 0.25   # bottom 25% of the day range
+    TACTICAL_DAY_WEAK_MIN_LOSS_PCT:  float = 2.5    # vs 2.0 for the long side
+    # Both day rules DISABLED by backtest, 2026-08-21. 43 sessions x 250
+    # symbols, no lookahead, stop-wins-ties: DAY_MOMENTUM 53 signals / 24.5%
+    # win / -0.305 R, DAY_WEAKNESS 11 signals / 27.3% win / -0.126 R. A 2R
+    # target needs 33.3% to break even, and costs are not in those numbers.
+    # Re-enable only after a rerun shows positive expectancy.
+    TACTICAL_DAY_MOMENTUM_ENABLED:  bool  = False
+    TACTICAL_DAY_WEAKNESS_ENABLED:  bool  = False
+    TACTICAL_DAY_MOM_MIN_RVOL:      float = 2.0
+    TACTICAL_DAY_MOM_MIN_RANGE_POS: float = 0.70   # top 30% of the day range
+    TACTICAL_DAY_MOM_MIN_GAIN_PCT:  float = 2.0
+    TACTICAL_MIN_COMPOSITE_SCORE: float = 50.0
+    # Raised 15->40 and TOP_N 5->15 on 2026-08-21. Measured that session:
+    # raw=404 -> kept=15 -> persisted=5, i.e. 99% of raw signals discarded every
+    # cycle, and GAP_AND_GO scores 96-99 vs VOLUME_BREAKOUT 72-74 so gaps took
+    # the whole top-5 and every other rule was structurally starved.
+    TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 40
+    TACTICAL_TOP_N:               int   = 15
+    # Fast candle lane (audit blocker 3). Builds 1m bars from the live tick
+    # stream so F1 stops computing indicators on 20-40 minute old DB bars.
+    # Runs in the uvicorn process (where LIVE_TICKS lives) and publishes to
+    # Redis for the Celery worker to read.
+    TACTICAL_FAST_CANDLE_ENABLED:      bool = True
+    TACTICAL_FAST_CANDLE_INTERVAL_SEC: int  = 5     # sampling cadence
+    TACTICAL_FAST_CANDLE_MAX_AGE_MIN:  int  = 2     # freshness bar for the fast path
+    # ── Phase 2 execution (2026-08-20) ───────────────────────────────────────
+    # OFF by default. Path F may originate trades only because §6/§10 of
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md were amended in the same
+    # commit that enabled it. Overridable at runtime via RuntimeConfig
+    # ("tactical_execution_enabled"), which is DB-backed and therefore an
+    # instant cross-process kill switch — no restart, and visible to the Celery
+    # worker (unlike settings.AGENT_ENABLED, audit D4).
+    TACTICAL_EXECUTION_ENABLED:   bool = False
+    TACTICAL_LIVE_TRADING:        bool = False   # paper only until it has a record
+    # Family-specific R:R floor. The global MIN_RISK_REWARD (2.0) admitted only
+    # 20.2% of tactical signals (PIVOT_BREAKOUT 0/137) because intraday
+    # stop/target geometry is built from structural levels that sit close to
+    # entry, so 2:1 is unreachable by construction. Lowered 2.0 -> 1.5 -> 1.2
+    # (owner decision 2026-08-20) to admit VWAP and PIVOT_BREAKOUT, which are
+    # 60% of signal volume and core to the pipeline's design.
+    # Measured on 530 live shadow signals: 2.0 -> 20.2%, 1.5 -> 27.2%,
+    # 1.2 -> 35.7%.
+    # NOTE the expectancy cost: break-even win rate rises from 40.0% at 1.5 to
+    # 45.5% at 1.2, BEFORE NSE costs. The 2%/day risk bucket is the brake.
+    TACTICAL_MIN_RISK_REWARD:     float = 1.2
+    # Notional cap for one tactical position, as a fraction of capital.
+    # This OVERRIDES the global AGENT_MAX_POSITION_WEIGHT (5%) for TACTICAL
+    # only — see engine.risk_manager.max_position_weight_for, which all three
+    # cap sites now consult. News families are unaffected.
+    TACTICAL_MAX_POSITION_NOTIONAL_PCT: float = 0.10
+
+    # ── Kite REST rate limiting (audit D6) ────────────────────────────────────
+    # Kite Connect allows ~1 req/s on quote endpoints and ~10 req/s on orders.
+    # Before this there was no limiter at all while five producers hit /quote
+    # concurrently from separate processes. See crawler/zerodha_kite_limiter.py.
+    # KITE_EXIT_RPS is a RESERVED bucket for stop-loss/exit price reads so a
+    # quote flood can never delay an exit — do not merge it into KITE_QUOTE_RPS.
+    KITE_LIMITER_ENABLED:  bool  = True
+    KITE_QUOTE_RPS:        int   = 1
+    KITE_ORDER_RPS:        int   = 10
+    KITE_EXIT_RPS:         int   = 1
+    KITE_LIMITER_MAX_WAIT: float = 5.0   # then fail open rather than wedge
+
     ZERODHA_ENABLED:       bool = False
     ZERODHA_PAPER_MODE:    bool = True
     ZERODHA_USER_ID:       str  = ""

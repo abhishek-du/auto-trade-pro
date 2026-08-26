@@ -37,6 +37,7 @@ def _silently(fn):
     """
     with _contextlib.redirect_stdout(_io.StringIO()), _contextlib.redirect_stderr(_io.StringIO()):
         return fn()
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crawler.price_feed import save_candles_to_db
@@ -933,9 +934,37 @@ async def run_india_price_crawl(
         f"source={source}  user_extra={len(user_syms)}"
     )
 
+    # Symbols whose 5m/1h bars are now DERIVED from the 1m feed
+    # (crawler/candle_resampler.py, 2026-08-24) do not need a yfinance round
+    # trip here at all. This crawl fetches 5m and 1h per symbol, one HTTP call
+    # each with a 20 s timeout, strictly sequentially; measured runtimes were
+    # avg 657 s and max 1,793 s against a 300 s beat, so it could never finish
+    # a pass and the last 40-75 minutes of every session went unwritten. It
+    # also held one of only two default-queue slots for that whole time, the
+    # same contention that starved fast_sl_check and F1.
+    #
+    # Resampling covers every symbol Kite streams 1m for (~2,350 on 24 Aug),
+    # which includes the entire market_shortlist. What is left for yfinance is
+    # the genuine remainder: indices, BSE-only names, and user watchlist
+    # additions outside the Kite universe. Skipping the rest is not a
+    # degradation — the resampled bars are strictly fresher, since they are
+    # built from 1m data that is at most one beat old.
+    covered_1m: set[str] = set()
+    try:
+        _cov = await session.execute(text(
+            "SELECT DISTINCT symbol FROM candles "
+            "WHERE timeframe = '1m' AND timestamp >= now() - INTERVAL '90 minutes'"
+        ))
+        covered_1m = {r[0] for r in _cov.all()}
+    except Exception as exc:                       # pragma: no cover - defensive
+        # Fail OPEN: an unreadable coverage set means we fetch everything, the
+        # old behaviour. Never let this optimisation cause a coverage hole.
+        logger.warning(f"[india_crawl] 1m-coverage lookup failed, fetching all: {exc}")
+
     all_candles:    list[dict] = []
     total_symbols:  int        = 0
     errors:         list[str]  = []
+    skipped_resampled: int     = 0
 
     # Step 1 — fetch candles for every symbol sequentially (avoids yfinance flood).
     # Per-symbol 20s timeout: yfinance has no native timeout and can hang for
@@ -949,8 +978,18 @@ async def run_india_price_crawl(
     # (max 15 concurrent threads) to avoid Celery SoftTimeLimit exceptions.
     counted: set[str] = set()
     sem = asyncio.Semaphore(15)
+    # Persist in batches rather than one all-or-nothing save at the end.
+    _FLUSH_EVERY = 5_000          # rows, ~ a couple of hundred symbols
+    saved = {"n": 0}
 
     async def _fetch_symbol(symbol: str):
+        nonlocal skipped_resampled
+        # Covered by the 1m -> 5m/15m/1h resampler; a yfinance fetch here would
+        # be slower, staler, and from a second feed. See the covered_1m comment.
+        if symbol in covered_1m:
+            skipped_resampled += 1
+            counted.add(symbol)
+            return
         symbol_ok = False
         async with sem:
             # 5-minute candles
@@ -992,8 +1031,34 @@ async def run_india_price_crawl(
             if symbol_ok:
                 counted.add(symbol)
 
-    # Launch all symbols concurrently
-    await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
+        # Flush incrementally (2026-08-20). This used to accumulate every
+        # candle for all ~1,400 symbols and save ONCE after the gather, so a
+        # SoftTimeLimitExceeded anywhere in the fetch discarded the entire
+        # batch. That is exactly what had been happening: the crawl started but
+        # never once reached the save, and the 5m and 1h feeds were silently
+        # dead for over a day (0 rows written today vs 290k for 1m, which a
+        # different task writes) while candle_staleness_watchdog alarmed.
+        #
+        # Flushing in batches means a timeout costs at most the current batch,
+        # not the whole run.
+        if len(all_candles) >= _FLUSH_EVERY:
+            batch, all_candles[:] = list(all_candles), []
+            try:
+                saved["n"] += await save_candles_to_db(batch, session)
+            except Exception as exc:
+                logger.warning(f"[india_price] incremental flush failed: {exc}")
+
+    # Launch all symbols concurrently. Whatever has been fetched must be saved
+    # even if this raises (soft time limit, cancellation) — see the finally.
+    try:
+        await asyncio.gather(*[_fetch_symbol(s) for s in all_symbols])
+    finally:
+        if all_candles:
+            try:
+                saved["n"] += await save_candles_to_db(list(all_candles), session)
+                all_candles.clear()
+            except Exception as exc:
+                logger.warning(f"[india_price] final flush failed: {exc}")
     total_symbols = len(counted)
 
     # Step 1b — refresh the regime's daily candles via Kite (fresh, not
@@ -1006,19 +1071,23 @@ async def run_india_price_crawl(
     # Step 3 — fetch India VIX (Kite-first, yfinance fallback)
     vix = await fetch_vix_kite_first()
 
-    # Step 4 — persist new candles to DB (chunked upsert, 3 000 rows per statement)
-    total_candles_saved = await save_candles_to_db(all_candles, session)
+    # Step 4 — persist any remainder (most rows were already flushed above)
+    if all_candles:
+        saved["n"] += await save_candles_to_db(all_candles, session)
+    total_candles_saved = saved["n"]
 
     result = {
         "total_symbols":       total_symbols,
         "total_candles_saved": total_candles_saved,
         "market_open":         market_open,
         "errors":              errors,
+        "skipped_resampled":   skipped_resampled,
     }
     logger.info(
         f"━━ India price crawl DONE  ━━  "
         f"symbols={total_symbols}/{len(all_symbols)}  "
         f"candles_saved={total_candles_saved}  "
+        f"skipped_resampled={skipped_resampled}  "
         f"vix={vix:.2f}  "
         f"errors={len(errors)}"
     )

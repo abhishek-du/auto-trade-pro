@@ -22,6 +22,7 @@ from engine.sip_engine import (
     update_current_navs,
     calculate_goal_progress,
 )
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["SIP Tracker"])
 
@@ -130,7 +131,7 @@ async def list_goals(db: AsyncSession = Depends(get_db)):
     return result
 
 
-@router.post("/goals", status_code=201)
+@router.post("/goals", status_code=201, dependencies=[Depends(require_auth)])
 async def create_goal(body: GoalCreate, db: AsyncSession = Depends(get_db)):
     if body.target_amount <= 0:
         raise HTTPException(400, "Target amount must be positive")
@@ -163,7 +164,7 @@ async def get_goal(goal_id: str, db: AsyncSession = Depends(get_db)):
     return await calculate_goal_progress(goal_id, db)
 
 
-@router.put("/goals/{goal_id}")
+@router.put("/goals/{goal_id}", dependencies=[Depends(require_auth)])
 async def update_goal(goal_id: str, body: GoalUpdate, db: AsyncSession = Depends(get_db)):
     goal = (await db.execute(
         select(SIPGoal).where(SIPGoal.id == goal_id)
@@ -185,7 +186,7 @@ async def update_goal(goal_id: str, body: GoalUpdate, db: AsyncSession = Depends
     return {"id": goal.id, "name": goal.name}
 
 
-@router.delete("/goals/{goal_id}", status_code=204)
+@router.delete("/goals/{goal_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def delete_goal(goal_id: str, db: AsyncSession = Depends(get_db)):
     goal = (await db.execute(
         select(SIPGoal).where(SIPGoal.id == goal_id)
@@ -221,7 +222,7 @@ async def list_goal_funds(goal_id: str, db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/goals/{goal_id}/funds", status_code=201)
+@router.post("/goals/{goal_id}/funds", status_code=201, dependencies=[Depends(require_auth)])
 async def add_fund_to_goal(goal_id: str, body: FundAdd, db: AsyncSession = Depends(get_db)):
     goal = (await db.execute(
         select(SIPGoal).where(SIPGoal.id == goal_id)
@@ -252,7 +253,7 @@ async def add_fund_to_goal(goal_id: str, body: FundAdd, db: AsyncSession = Depen
     return {"id": fund.id, "scheme_code": fund.scheme_code, "monthly_amount": fund.monthly_amount}
 
 
-@router.delete("/goals/{goal_id}/funds/{fund_id}", status_code=204)
+@router.delete("/goals/{goal_id}/funds/{fund_id}", status_code=204, dependencies=[Depends(require_auth)])
 async def remove_fund_from_goal(goal_id: str, fund_id: str, db: AsyncSession = Depends(get_db)):
     fund = (await db.execute(
         select(SIPFund).where(SIPFund.id == fund_id, SIPFund.goal_id == goal_id)
@@ -274,7 +275,7 @@ async def remove_fund_from_goal(goal_id: str, fund_id: str, db: AsyncSession = D
 
 # ── Installments ──────────────────────────────────────────────────────────────
 
-@router.post("/goals/{goal_id}/installments", status_code=201)
+@router.post("/goals/{goal_id}/installments", status_code=201, dependencies=[Depends(require_auth)])
 async def add_installment(goal_id: str, body: InstallmentAdd, db: AsyncSession = Depends(get_db)):
     goal = (await db.execute(
         select(SIPGoal).where(SIPGoal.id == goal_id)
@@ -436,7 +437,7 @@ async def get_nav(scheme_code: str):
 
 # ── Refresh NAVs for a goal ───────────────────────────────────────────────────
 
-@router.post("/goals/{goal_id}/refresh")
+@router.post("/goals/{goal_id}/refresh", dependencies=[Depends(require_auth)])
 async def refresh_goal_navs(goal_id: str, db: AsyncSession = Depends(get_db)):
     goal = (await db.execute(
         select(SIPGoal).where(SIPGoal.id == goal_id)

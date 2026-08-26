@@ -1,10 +1,98 @@
 import json
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
+from utils.config import settings
 from utils.logger import logger
 from utils.llm import call_llm_chat
+
+# ── NSE's own announcement taxonomy ──────────────────────────────────────────
+# When NSE publishes a corporate announcement it files it under a category of
+# its own. That category is the exchange's classification of the filing, not a
+# model's opinion of the headline, and it measurably carries the direction our
+# LLM does not.
+#
+# Measured over 4,309 NSE announcements (docs/2026-08-24_PHASE3_GROUND_TRUTH_
+# NEWS_ALPHA.md), same category, two taxonomies:
+#
+#     ORDER_WIN, NSE's category   n=84    mean excess +1.053%   win 65.5%
+#     ORDER_WIN, our classifier   n=158   mean excess -0.245%   win 37.3%
+#
+# The strongest bullish category under the exchange's own labels is the
+# second-worst under ours. The LLM is not adding information here; it is
+# replacing a good label with a bad one. So for NSE-sourced items the category
+# decides direction and the LLM keeps only the work it is actually good at —
+# sectors, entities, horizon, reasoning.
+_NSE_LONG = {
+    "Bagging/Receiving of orders/contracts": "ORDER_WIN",
+    "Awarding of order(s)/contract(s)":      "ORDER_WIN",
+    "Acquisition":                           "ACQUISITION",
+    "Amalgamation/Merger":                   "ACQUISITION",
+    "Buyback":                               "BUYBACK",
+    "Product launch":                        "PRODUCT_LAUNCH",
+    "Agreements":                            "MAJOR_PARTNERSHIP",
+    "Memorandum of Understanding/Agreements": "MAJOR_PARTNERSHIP",
+}
+_NSE_SHORT = {
+    "Resignation of Director/KMP/SMP":                  "MANAGEMENT_RESIGNATION",
+    "Resignation":                                      "MANAGEMENT_RESIGNATION",
+    "Resignation of Statutory Auditor":                 "AUDITOR_RESIGNATION",
+    "Reasons for Delayed/Non-submission of Financial":  "DELAYED_FILING",
+    "Granting/withdrawal/surrender/cancellation/suspe": "REGULATORY_ACTION",
+}
+# Categories that genuinely carry no direction. "Outcome of Board Meeting" is
+# NSE's category for results declarations: it says results were declared, not
+# whether they beat. Measured mean excess -0.737% with a 36.3% win rate over
+# 1,169 observations — the label is not merely uninformative, acting on it
+# loses money. These return NEUTRAL and produce NO directional event.
+_NSE_NEUTRAL = {
+    "Outcome of Board Meeting", "Press Release", "Press Release (Revised)",
+    "Dividend", "Reply to Clarification- Financial results",
+    "Clarification - Financial Results", "Monthly Business Updates",
+    "Preferential issue", "Rights Issue", "Scheme of Arrangement", "Demerger",
+}
+# Two categories measured NEGATIVE as longs and are deliberately not traded
+# long: CORPORATE_RESTRUCTURE (mean -0.975%, CI [-1.891, -0.136], n=23) and
+# MAJOR_PARTNERSHIP (mean -0.319%, n=39). Scheme of Arrangement and Demerger
+# are therefore in the neutral set above rather than in _NSE_LONG.
+
+# Only these sources file under NSE's taxonomy. Gating on source rather than on
+# the category string alone means an unrelated feed whose category happens to
+# collide with an exchange label cannot flip a direction.
+_EXCHANGE_FILING_SOURCES = {"NSE-Announcements"}
+
+_RATING_UP   = re.compile(r"\b(upgrad|revised upward|improve|positive outlook)", re.I)
+_RATING_DOWN = re.compile(r"\b(downgrad|revised downward|negative outlook|default|watch with negative)", re.I)
+
+
+def resolve_nse_direction(nse_category: str | None, text: str = "") -> tuple[str, str] | None:
+    """NSE category -> ('LONG'|'SHORT'|'NEUTRAL', our category name).
+
+    Returns None when the category is outside the table, which means "we have
+    no exchange-supplied opinion" — the caller should then keep whatever the
+    LLM said rather than inventing a direction.
+
+    Credit-rating direction comes from the announcement text, never from the
+    bare category: "Credit Rating" alone does not say which way.
+    """
+    cat = (nse_category or "").strip()
+    if not cat:
+        return None
+    if cat.startswith("Credit Rating"):
+        if _RATING_DOWN.search(text):
+            return ("SHORT", "RATING_DOWNGRADE")
+        if _RATING_UP.search(text):
+            return ("LONG", "RATING_UPGRADE")
+        return ("NEUTRAL", "RATING_UNCLEAR")
+    if cat in _NSE_LONG:
+        return ("LONG", _NSE_LONG[cat])
+    if cat in _NSE_SHORT:
+        return ("SHORT", _NSE_SHORT[cat])
+    if cat in _NSE_NEUTRAL:
+        return ("NEUTRAL", "ROUTINE_DISCLOSURE")
+    return None
 
 class EventClassification(BaseModel):
     # Required — the fields _build_evidence()/DecisionEvidence.from_classification()
@@ -50,7 +138,45 @@ class EventClassification(BaseModel):
             return {k: v for k, v in data.items() if v is not None}
         return data
 
-async def classify_event(headline: str, summary: str | None = None) -> EventClassification | None:
+def _direction_contradicts_sentiment(bullish: bool, score: float | None) -> bool:
+    """True when a confident LLM direction disagrees with a confident FinBERT score.
+
+    WHY THIS EXISTS (2026-08-21)
+    ----------------------------
+    Two sugar headlines were ingested that day:
+        "Sugar stocks fall over 7% as govt's duty-free import move sparks price woes"
+        "Sugar stocks ... tumble up to 5% as govt allows duty-free imports"
+    Both scored -0.96 on FinBERT. From those two headlines the pipeline produced
+    SEVEN consecutive BULLISH CausalEvents, while the sector fell 3-7%. Re-running
+    classify_event on the identical headlines afterwards returned bullish=False
+    both times -- so the model is not systematically wrong here, it is
+    NON-DETERMINISTIC, and a single bad roll authorised a whole sector's worth of
+    long signals.
+
+    A second, independent read is the cheap defence. FinBERT is already computed
+    for every headline, costs nothing extra, and is deterministic.
+
+    Only fires when BOTH sides are confident: a weak score says nothing, and this
+    must not veto ordinary events over sentiment noise.
+    """
+    if score is None:
+        return False
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return False
+    if abs(s) < float(getattr(settings, "EVENT_SENTIMENT_CONFLICT_MIN", 0.70)):
+        return False
+    return (bullish and s < 0) or ((not bullish) and s > 0)
+
+
+async def classify_event(
+    headline: str,
+    summary: str | None = None,
+    sentiment_score: float | None = None,
+    nse_category: str | None = None,
+    source: str | None = None,
+) -> EventClassification | None:
     """
     Sends a news headline (optionally + a longer summary/filing excerpt) to the
     LLM to classify its global and sectoral impact. Returns a structured
@@ -150,7 +276,69 @@ Output exactly valid JSON matching the following structure and nothing else. No 
                 # =True) rejects those outright, which was one of the
                 # observed live failure modes ("Invalid control character").
                 data = json.loads(cleaned, strict=False)
-                return EventClassification(**data)
+                _cls = EventClassification(**data)
+
+                # ── The exchange's own label outranks the model's ────────────
+                # Applied BEFORE the sentiment check below, and it short-
+                # circuits it: that check exists to catch a model whose
+                # direction is unverifiable, and NSE's category is not the
+                # model's opinion. Letting FinBERT sentiment veto the
+                # exchange's own filing category would be the tail wagging
+                # the dog.
+                # The source check lives HERE, not at the call site, so a future
+                # caller cannot accidentally hand an RSS feed's `category` field
+                # to a table built for exchange filings. Every other source's
+                # category vocabulary is unrelated, and the measurement behind
+                # this table covers NSE filings only.
+                _nse = (
+                    resolve_nse_direction(nse_category, f"{headline} {summary or ''}")
+                    if source in _EXCHANGE_FILING_SOURCES else None
+                )
+                if _nse is not None:
+                    _dir, _cat = _nse
+                    if _dir == "NEUTRAL":
+                        # No directional claim. The news item is still stored by
+                        # the caller; only the tradable event is withheld, which
+                        # is the correct NO EVENT -> NO TRADE outcome.
+                        logger.info(
+                            f"[event_classifier] NSE category '{nse_category}' carries no "
+                            f"direction — no event emitted: '{headline[:60]}'"
+                        )
+                        return None
+                    _was = "BULLISH" if _cls.bullish else "BEARISH"
+                    _now = "BULLISH" if _dir == "LONG" else "BEARISH"
+                    if _was != _now:
+                        logger.info(
+                            f"[event_classifier] NSE category '{nse_category}' overrides LLM "
+                            f"{_was} -> {_now}: '{headline[:60]}'"
+                        )
+                    _cls.bullish = (_dir == "LONG")
+                    _cls.category = _cat
+                    # The exchange is the primary source; this is what
+                    # source_reliability is for.
+                    _cls.source_reliability = 1.0
+                    return _cls
+
+                # Deterministic second opinion. See
+                # _direction_contradicts_sentiment for the 2026-08-21 incident:
+                # two headlines scoring -0.96 produced seven BULLISH events
+                # while the sector fell 3-7%.
+                #
+                # REFUSES rather than flipping. Under NO EVENT -> NO TRADE, no
+                # event is a safe outcome; overriding the model with FinBERT
+                # would just swap one unverified direction for another, and
+                # FinBERT is documented in this codebase as out-of-domain on
+                # some text. When two independent reads disagree confidently,
+                # the honest answer is that we do not know.
+                if _direction_contradicts_sentiment(_cls.bullish, sentiment_score):
+                    logger.warning(
+                        f"[event_classifier] direction conflict — LLM says "
+                        f"{'BULLISH' if _cls.bullish else 'BEARISH'} but sentiment "
+                        f"score is {sentiment_score:+.2f}; refusing to classify: "
+                        f"'{headline[:70]}'"
+                    )
+                    return None
+                return _cls
             except Exception as parse_exc:
                 if _attempt < 3:
                     logger.info(
@@ -264,3 +452,68 @@ def validate_evidence_consistency(
             )
 
     return EvidenceConsistencyResult(True, False, [], evidence.confidence, "consistent")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sector-level fallback (2026-08-20)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY: on 19-20 Aug 2026 the crawler ingested five sugar/ethanol headlines with
+# tickers correctly extracted and sentiment up to 0.89, and `classify_event`
+# returned None for every one of them -- so zero CausalEvents were created and,
+# under NO EVENT -> NO TRADE, the news engine could not act while the sector
+# rallied up to 16%. The classifier is built around single-company events
+# (earnings, orders, M&A); a story about a whole sector matches no category.
+#
+# WHY NOT THE OBVIOUS DESIGN: the brief specified "look up each ticker's sector,
+# fire if they all match". Measured, that is unsafe here -- `NSE_SECTOR_MAP` has
+# 59 entries, `india_specific.SECTOR_MAP` has 18, `market_shortlist.sector` is
+# empty for 193 of 206 symbols, and NONE of them contain a single sugar name.
+# Every unmapped ticker resolves to "Other", so "all the same sector" would be
+# TRUE for any three unrelated unmapped companies. That would mint spurious
+# sector events -- and a CausalEvent is what AUTHORISES a trade.
+#
+# So the theme is read from the HEADLINE, which is the one place the sector is
+# actually stated, and the check FAILS CLOSED: no recognised theme, no event.
+
+SECTOR_THEME_KEYWORDS: dict[str, str] = {
+    "sugar": "Sugar", "ethanol": "Sugar", "sugarcane": "Sugar", "cane": "Sugar",
+    "bank": "Banking", "banking": "Banking", "lender": "Banking", "nbfc": "Banking",
+    "it stocks": "IT", "software": "IT", "tech stocks": "IT",
+    "pharma": "Pharma", "drugmaker": "Pharma", "api": "Pharma",
+    "fmcg": "FMCG", "consumer goods": "FMCG",
+    "auto": "Auto", "automobile": "Auto", "carmaker": "Auto", "two-wheeler": "Auto",
+    "metal": "Metals", "steel": "Metals", "aluminium": "Metals", "zinc": "Metals",
+    "oil": "Energy", "gas": "Energy", "power": "Energy", "refiner": "Energy",
+    "cement": "Cement",
+    "realty": "Realty", "real estate": "Realty", "housing": "Realty",
+    "textile": "Textiles", "fertiliser": "Fertilisers", "fertilizer": "Fertilisers",
+    "airline": "Aviation", "aviation": "Aviation",
+    "defence": "Defence", "shipping": "Shipping", "paper": "Paper",
+    "tyre": "Tyres", "chemical": "Chemicals", "specialty chemical": "Chemicals",
+}
+
+# Plural/collective cues. A sector story says "sugar STOCKS rally", not
+# "Balrampur Chini rallies" -- requiring one of these keeps single-company news
+# out of the sector path even when the company happens to be in a themed industry.
+_COLLECTIVE_CUES = ("stocks", "shares", "sector", "counters", "names", "pack",
+                    "index", "companies", "mills", "makers", "firms")
+
+
+def detect_sector_theme(headline: str) -> str | None:
+    """The sector a headline is about, or None if it is not a sector story.
+
+    Requires BOTH a sector keyword and a collective cue, so
+    "Sugar stocks rally 14%" matches and "Balrampur Chini Q1 profit up" does not.
+    Returns None on anything ambiguous -- the caller must treat None as
+    "create no event".
+    """
+    if not headline:
+        return None
+    low = headline.lower()
+    if not any(cue in low for cue in _COLLECTIVE_CUES):
+        return None
+    for kw, sector in SECTOR_THEME_KEYWORDS.items():
+        if kw in low:
+            return sector
+    return None

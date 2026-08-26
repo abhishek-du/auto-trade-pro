@@ -12,7 +12,7 @@ All blocking calls (yfinance, bsedata) run in the thread-pool executor.
 
 Public API
 ----------
-fetch_fundamentals_yfinance(symbol)            -> dict   (sync)
+fetch_fundamentals_upstox(symbol)              -> dict   (async)
 fetch_fundamentals_screener(symbol_bare)       -> dict   (async)
 calculate_fundamental_score(data)              -> float  (sync, 0-100)
 get_fundamental_contribution(symbol, session)  -> float  (async, -30 to +30)
@@ -161,7 +161,7 @@ def _to_float(text: Any, default: float | None = None) -> float | None:
     return default
 
 
-# ── 1. yfinance fetch (sync) ──────────────────────────────────────────────────
+# ── 1. Upstox fundamentals fetch (async) ──────────────────────────────────────────────────
 
 async def fetch_fundamentals_upstox(symbol: str) -> dict:
     """Fetch fundamental ratios from Upstox Fundamentals API.
@@ -529,9 +529,9 @@ async def run_fundamental_update(session: AsyncSession) -> None:
     """Fetch and persist fundamentals for all NSE large + mid cap symbols.
 
     For each symbol:
-    1. Call fetch_fundamentals_yfinance() in the thread pool (non-blocking).
+    1. Call fetch_fundamentals_upstox() (async).
     2. Call fetch_fundamentals_screener() (async, includes 2s delay).
-    3. Screener.in values override yfinance where both are present.
+    3. Screener.in values override Upstox where both are present.
     4. Calculate fundamental_score.
     5. UPSERT the FundamentalData row (update existing or insert new).
 
@@ -684,15 +684,14 @@ async def fetch_and_cache_fundamentals(
     if fresh:
         return existing
 
-    loop = asyncio.get_event_loop()
-    try:
-        yf_data = await asyncio.wait_for(
-            loop.run_in_executor(None, fetch_fundamentals_yfinance, sym),
-            timeout=20.0,
-        )
-    except Exception as exc:
-        logger.debug(f"[fundamentals on-demand] yfinance {sym}: {exc}")
-        yf_data = {}
+    # Audit 2026-08-19 (found while fixing D12): this called
+    # fetch_fundamentals_yfinance, which was deleted in the Upstox migration.
+    # The resulting NameError was raised on EVERY call and swallowed by the
+    # `except Exception` below at logger.debug level, so the yfinance leg has
+    # silently contributed nothing since that migration -- it just looked like
+    # an empty result. The Upstox fetch above is the real source; drop the dead
+    # branch rather than pretend to call it.
+    yf_data: dict = {}
     try:
         sc_data = await fetch_fundamentals_screener(bare)
     except Exception as exc:

@@ -134,7 +134,7 @@ async def trigger_cycle(
 
 # ── POST /backtest ────────────────────────────────────────────────────────────
 
-@router.post("/backtest")
+@router.post("/backtest", dependencies=[Depends(require_auth)])
 async def run_backtest(req: BacktestRequest, db: AsyncSession = Depends(get_db)):
     """Run backtest on historical candle data."""
     from engine.agent.backtester import AgentBacktester
@@ -396,7 +396,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 
 # ── POST /positions/{symbol}/close ────────────────────────────────────────────
 
-@router.post("/kill-switch")
+@router.post("/kill-switch", dependencies=[Depends(require_auth)])
 async def kill_switch(
     x_kill_confirm: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
@@ -477,7 +477,7 @@ async def kill_switch(
     }
 
 
-@router.post("/positions/{symbol}/close")
+@router.post("/positions/{symbol}/close", dependencies=[Depends(require_auth)])
 async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
     """Manually close an open position — DB-authoritative.
 
@@ -523,7 +523,7 @@ async def close_position(symbol: str, db: AsyncSession = Depends(get_db)):
 
 # ── POST /signal/{symbol} ─────────────────────────────────────────────────────
 
-@router.post("/signal/{symbol}")
+@router.post("/signal/{symbol}", dependencies=[Depends(require_auth)])
 async def on_demand_signal(symbol: str, db: AsyncSession = Depends(get_db)):
     """On-demand signal without execution."""
     from crawler.price_feed import get_latest_candles
@@ -574,7 +574,7 @@ async def on_demand_signal(symbol: str, db: AsyncSession = Depends(get_db)):
 
 # ── PUT /config ───────────────────────────────────────────────────────────────
 
-@router.put("/config")
+@router.put("/config", dependencies=[Depends(require_auth)])
 async def update_config(
     body: ConfigUpdate,
     x_agent_config_update: Optional[str] = Header(None),

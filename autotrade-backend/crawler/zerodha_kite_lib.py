@@ -430,17 +430,26 @@ def convert_position(
     )
 
 
+from crawler.zerodha_kite_limiter import Bucket as _RLBucket, acquire_sync as _rl_acquire_sync
+
 # ── Market data ───────────────────────────────────────────────────────────────
 
+# D6: these are the SYNC quote path (used by crawler.live_prices._fetch_kite
+# inside run_in_executor, where there is no event loop). They hit the same Kite
+# quota as the async KiteClient methods, so they draw from the same Redis
+# buckets via the blocking variant. Fails open — never raises.
 def get_quote(instruments: Iterable[str]) -> dict:
+    _rl_acquire_sync(_RLBucket.QUOTE)
     return get_kite().quote(list(instruments))
 
 
 def get_ohlc(instruments: Iterable[str]) -> dict:
+    _rl_acquire_sync(_RLBucket.QUOTE)
     return get_kite().ohlc(list(instruments))
 
 
 def get_ltp(instruments: Iterable[str]) -> dict:
+    _rl_acquire_sync(_RLBucket.QUOTE)
     return get_kite().ltp(list(instruments))
 
 

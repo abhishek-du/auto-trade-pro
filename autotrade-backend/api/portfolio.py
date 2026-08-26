@@ -18,6 +18,7 @@ from paper_trading.position_tracker import PositionTracker
 from paper_trading.simulation_logger import SimLogger
 from paper_trading.virtual_wallet import VirtualWallet
 from utils.logger import logger
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Portfolio"])
 
@@ -107,20 +108,39 @@ async def get_paper_trades(
         select(PaperTrade).order_by(desc(PaperTrade.opened_at)).limit(limit)
     )).scalars().all()
 
-    # Fetch live unrealised PnL from open_positions for all open trades in one query
+    # Live unrealised P&L for open trades.
+    #
+    # This used to read OpenPosition.current_price / unrealised_pnl straight out
+    # of the DB, while GET /portfolio/positions recomputed them through
+    # compute_live_pnl(). The two endpoints therefore disagreed about the SAME
+    # position at the SAME instant -- measured 2026-08-21: SENCO showed
+    # cur=345.9 / pnl=-109.04 on /positions and cur=346.45 / pnl=-29.84 on
+    # /trades, because the DB columns are only refreshed by the 60s
+    # mark-to-market loop (and staler still whenever that loop is starved on the
+    # 2-slot worker). The Trades page and the Positions page then showed
+    # different P&L for the same holding, which is indistinguishable from a
+    # bookkeeping bug.
+    #
+    # Both endpoints now go through the one live path. compute_live_pnl batches
+    # its Kite LTP call and rides the D6 rate limiter, so this is one extra
+    # batched quote per request, not one per trade.
     open_trade_ids = [r.id for r in rows if r.exit_price is None]
     live_pnl: dict[int, tuple] = {}
     if open_trade_ids:
-        op_rows = (await db.execute(
-            select(
-                OpenPosition.trade_id,
-                OpenPosition.unrealised_pnl,
-                OpenPosition.unrealised_pct,
-                OpenPosition.current_price,
-            ).where(OpenPosition.trade_id.in_(open_trade_ids))
-        )).all()
-        for trade_id, upnl, upct, cur in op_rows:
-            live_pnl[trade_id] = (upnl, upct, cur)
+        op_objs = (await db.execute(
+            select(OpenPosition).where(OpenPosition.trade_id.in_(open_trade_ids))
+        )).scalars().all()
+        if op_objs:
+            from paper_trading.trade_simulator import compute_live_pnl
+
+            live_by_pos = await compute_live_pnl(op_objs, db)
+            for op in op_objs:
+                # compute_live_pnl returns (current_price, pnl, pct); this map is
+                # keyed by trade_id and ordered (pnl, pct, current_price).
+                cur, upnl, upct = live_by_pos.get(
+                    op.id, (op.current_price, op.unrealised_pnl, op.unrealised_pct)
+                )
+                live_pnl[op.trade_id] = (upnl, upct, cur)
 
     out = []
     for r in rows:
@@ -134,7 +154,11 @@ async def get_paper_trades(
 
         out.append({
             "id":               f"paper_{r.id}",
-            "symbol":           r.symbol.replace(".NS", "") if r.symbol else r.symbol,
+            # Strip BOTH exchange suffixes. Stripping only .NS produced a mixed
+            # payload -- "SENCO" alongside "RAILTEL.BO" -- so any consumer keying
+            # on symbol had to know which suffix survived.
+            "symbol":           (r.symbol.replace(".NS", "").replace(".BO", "")
+                                 if r.symbol else r.symbol),
             "direction":        r.direction.value if hasattr(r.direction, "value") else str(r.direction),
             "status":           r.status.value   if hasattr(r.status,    "value") else str(r.status),
             "entry_price":      r.entry_price,
@@ -161,7 +185,14 @@ async def get_paper_trades(
             # strategy originated the trade, e.g. "AI Predict" for the
             # Pre-Event Expectation Gap strategy. None for ordinary News/Hub
             # trades (PaperTrade.source is nullable and only set for PRE_EVENT).
-            "strategy_source":  getattr(r, "source", None),
+            # Prefer the structured family (added 2026-08-20) and fall back to
+            # the older free-text pair. `source` was only ever set for PRE_EVENT
+            # and was inconsistent elsewhere ('Direct News' vs 'DIRECT_NEWS' vs
+            # NULL), so it could not be grouped on; strategy_family can.
+            "strategy_source":  (getattr(r, "strategy_family", None)
+                                 or getattr(r, "source", None)
+                                 or getattr(r, "strategy_name", None)),
+            "strategy_family":  getattr(r, "strategy_family", None),
             # ── F&O fields so the UI can show strike / type / expiry / premium ──
             "instrument_type":  getattr(r, "instrument_type", "EQUITY"),
             "underlying_symbol": getattr(r, "underlying_symbol", None),
@@ -319,6 +350,7 @@ async def get_capital_model(
 @router.put(
     "/capital-model/policy",
     summary="Update portfolio policy (position caps, risk tolerance)",
+    dependencies=[Depends(require_auth)],
 )
 async def update_portfolio_policy(
     risk_tolerance:           str   = Query("MODERATE"),
@@ -354,6 +386,7 @@ async def update_portfolio_policy(
     "/reset",
     response_model=WalletSummary,
     summary="Reset virtual wallet to starting balance",
+    dependencies=[Depends(require_auth)],
 )
 async def reset_portfolio(
     confirm: bool = Query(False, description="Must be true to proceed"),
@@ -373,6 +406,7 @@ async def reset_portfolio(
 @router.post(
     "/reconcile",
     summary="Close stale agent trades and re-sync wallet to ₹5L unified capital pool",
+    dependencies=[Depends(require_auth)],
 )
 async def reconcile_capital(
     confirm: bool = Query(False),

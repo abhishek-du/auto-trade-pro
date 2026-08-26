@@ -94,6 +94,36 @@ async def init_db() -> None:
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS upper_circuit_days INTEGER DEFAULT 0",
         "ALTER TABLE market_shortlist ADD COLUMN IF NOT EXISTS volume_surge FLOAT DEFAULT 1.0",
         "ALTER TABLE agent_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
+        # create_all() never ALTERs an existing table, so a new column on a live
+        # table has to come through here (the repo's established dual path, D10).
+        # Sequence repair (2026-08-20). news_items_id_seq fell BEHIND MAX(id),
+        # so every INSERT asked for an id that already existed and died on the
+        # primary key. Ingestion stopped dead at 14:57 and stayed stopped for
+        # 5.5 hours while the crawler kept reporting "saved=N" -- the count is
+        # incremented before the commit, so the failure was invisible in logs.
+        # Only a row-count check against the DB revealed it.
+        #
+        # setval(..., false) so the NEXT id is exactly MAX(id)+1. Idempotent and
+        # cheap, so it runs every boot: a sequence can drift again after a
+        # restore, a manual insert with an explicit id, or a replication reseed,
+        # and this class of failure is silent every time.
+        "SELECT setval('news_items_id_seq', COALESCE((SELECT MAX(id) FROM news_items), 0) + 1, false)",
+        # News dedup (2026-08-20). PARTIAL on purpose: 14,105 historical rows
+        # are duplicates and 685 of them are referenced by causal_events.news_id
+        # under an ON DELETE NO ACTION FK, so a full unique index could not be
+        # built without either failing or breaking those references. This
+        # constrains new rows only. md5() because headlines are TEXT and btree
+        # caps a key near 2704 bytes; COALESCE because published_at is NULLABLE
+        # and Postgres treats NULLs as distinct.
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_news_items_headline_day "
+        "ON news_items (md5(headline), (COALESCE(published_at, crawled_at)::date)) "
+        "WHERE crawled_at >= TIMESTAMP '2026-08-21 00:00:00'",
+        # Trailing-stop state (2026-08-21). create_all never ALTERs a live table.
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS highest_high DOUBLE PRECISION",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS lowest_low DOUBLE PRECISION",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS exit_tier INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_family VARCHAR(20)",
+        "CREATE INDEX IF NOT EXISTS ix_paper_trades_strategy_family ON paper_trades (strategy_family)",
         "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS product VARCHAR(10) DEFAULT 'CNC'",
         *[

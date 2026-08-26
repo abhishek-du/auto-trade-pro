@@ -26,6 +26,27 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def daily_coverage_is_stalled(
+    newest: int, baseline: int, min_frac: float = 0.5
+) -> bool:
+    """Has the full-universe daily candle write stopped landing?
+
+    `newest`   best single-day symbol count in the last few days
+    `baseline` best single-day symbol count over the trailing month
+
+    Split out from the watchdog so the decision can be tested directly: the
+    interesting cases are a cold start (no history to compare against) and a
+    small partial write arriving after a healthy full one, and neither is
+    reachable from a test that can only add rows to a live table.
+
+    `baseline > 100` keeps a fresh install quiet — with almost no history every
+    comparison looks like a collapse, and an alert nobody can act on is noise.
+    """
+    if baseline <= 100:
+        return False
+    return newest < baseline * min_frac
+
+
 def _is_india_trading_window() -> bool:
     """True during NSE market hours plus 30 minutes after close (9:15–16:00 IST)."""
     now = datetime.datetime.now(_IST)
@@ -477,6 +498,11 @@ async def _phase9_market_context(session) -> dict:
 async def _india_trade_loop():
     from sqlalchemy import select
 
+    # Admin toggle (Path B). Gates ENTRIES only -- the exit/risk-management work
+    # further down (auto-close, dynamic SL/TP, drawdown breakers) is what keeps
+    # open positions safe and must run regardless, which is why this is checked
+    # at the entry branch rather than returning here. See _entries_enabled below.
+
     from db.models import OpenPosition
     from engine.llm_explainer import (
         format_paper_trade_notification,
@@ -530,11 +556,38 @@ async def _india_trade_loop():
                 ))
 
         # ── AI Dynamic Management: LLM manages SL/TP for open positions ────────
+        #
+        # Observability only (2026-08-26, phase 13). On 2026-08-26 this task ran
+        # to its Celery time limits 16 times between 10:18 and 12:03 IST —
+        # SoftTimeLimitExceeded at 300s, and 5 hard kills at 600s that SIGKILL
+        # the pool worker with no cleanup. The hang is an I/O wait somewhere in
+        # exit management, but three evidence sources cannot name it: the
+        # soft-limit traceback lands in the event loop's epoll.poll() rather
+        # than the awaiting coroutine, llm_dynamic_sl_tp logs nothing at all,
+        # and py-spy needs ptrace privileges this host does not grant.
+        #
+        # These two log lines close that gap. They are additive: the try/except
+        # below is byte-for-byte the original, the same exception is caught with
+        # the same message, and nothing branches on the timing.
+        #
+        # A START with no END is itself the signal — that is what a SIGKILL at
+        # the 600s hard limit looks like from the log.
+        import time as _t13
+        _dyn_t0 = _t13.monotonic()
+        logger.info("[india_trade_loop] LLM_DYNAMIC_SL_TP_START")
         try:
             from engine.agent.dynamic_management import llm_dynamic_sl_tp
             await llm_dynamic_sl_tp(session)
+            logger.info(
+                f"[india_trade_loop] LLM_DYNAMIC_SL_TP_END ok=True "
+                f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)}"
+            )
         except Exception as e:
             logger.error(f"[india_trade_loop] Dynamic management failed: {e}")
+            logger.info(
+                f"[india_trade_loop] LLM_DYNAMIC_SL_TP_ERROR exc={type(e).__name__} "
+                f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)}"
+            )
 
         # Circuit breaker + halt gate — AFTER exit management, BEFORE any entry.
         # check_drawdown_breakers trips the sticky trading_halted flag on a
@@ -556,21 +609,43 @@ async def _india_trade_loop():
             logger.warning("[india_trade_loop] SHOCK COOLDOWN active — exits done, no new entries")
             return
 
-        # ── News-Only Target Architecture (Phase 1) — RE-ENABLED 2026-07-24 ───
+        # ── News-Only Target Architecture (Phase 1) — RE-BLOCKED 2026-08-19 ──
         # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md §6: this is the "main
         # equity/short loop" — a technical-only BUY/SELL loop with no news
-        # catalyst requirement. Was hard-blocked from originating trades under
-        # the News-Only architecture; re-enabled by explicit user instruction
-        # after the news-driven path (news_discovery_engine.py) went ~2 days
-        # without a single trade due to a separate Mantle/Bedrock LLM
-        # reliability issue (empty content on ~80% of candidate evaluations,
-        # see utils/llm.py::call_mantle_chat). Exit/risk management above
-        # (Step 1 auto-close, dynamic SL/TP, circuit breaker) already ran
-        # unconditionally either way. The other two News-Only hard-blocks in
-        # this file (_intraday_entry_task, _open_index_option_mis) were left
-        # untouched — only this loop was asked to be re-enabled.
-        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = False
-        if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window:
+        # catalyst requirement.
+        #
+        # History: hard-blocked under the News-Only architecture, then set to
+        # False on 2026-07-24 by explicit user instruction after the news-driven
+        # path (news_discovery_engine.py) went ~2 days without a single trade
+        # during the Bedrock LLM outage (empty content on ~80% of candidate
+        # evaluations). That outage was resolved 2026-08-17, so the
+        # justification no longer held — audit finding D1
+        # (docs/DEEP_AUDIT_2026-08-19.md) flagged that the contract was
+        # consequently unenforced on this loop, and that P&L attribution was
+        # pooling news-driven and technical trades. Restored to True.
+        #
+        # Note this is belt-and-braces: engine/decision_router.py's
+        # _TECHNICAL_TRADE_ORIGINATION_BLOCKED rejects any TECHNICAL-family
+        # intent anyway. Blocking here as well avoids burning a full LLM
+        # reasoning gate + pre-trade research + risk validation per candidate
+        # every 60s on candidates that can never execute.
+        #
+        # Exit/risk management above (Step 1 auto-close, dynamic SL/TP, circuit
+        # breaker) runs unconditionally either way and is unaffected.
+        # Owner decision 2026-08-20 (contract SS10b): hub entries re-enabled.
+        _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
+            getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
+        )
+        # Admin toggle (Path B). Gates ENTRIES only: everything above this point
+        # -- auto-close, dynamic SL/TP, the drawdown circuit breaker -- has
+        # already run and keeps running when the strategy is switched off.
+        # Disabling a strategy must never strand an open position.
+        from utils.runtime_config import strategy_enabled
+
+        _strategy_on = await strategy_enabled("india_trade_loop", session)
+        if not _strategy_on:
+            logger.info("[india_trade_loop] new entries disabled by strategy toggle — exits still ran")
+        if _NEWS_ONLY_BLOCKS_HUB_ENTRIES or not is_entry_window or not _strategy_on:
             logger.info(
                 "[india_trade_loop] new-entry origination disabled — News-Only architecture "
                 "hard-block and/or past 15:20 IST — exits done, no new entries"
@@ -1335,6 +1410,24 @@ def india_trade_loop():
 # are all updated identically.  Skips the tick entirely if Kite is unavailable.
 
 async def _fast_sl_check() -> None:
+    # ── Dead-man's-switch heartbeat (2026-08-21) ─────────────────────────────
+    # On 21 Aug this loop ran once in a full session and NOTHING surfaced it:
+    # the dispatches expired in a saturated queue, and an expired Celery task
+    # logs nothing, raises nothing and never reaches a worker. All four services
+    # showed healthy. Only counting rows in the DB exposed it.
+    #
+    # A key with a short TTL inverts that: absence is the alarm. If this loop
+    # stops, the key is simply gone within 20s, which a monitor can see.
+    try:
+        import time as _hb_time
+
+        from utils.cache import get_redis
+        await get_redis().set("exit_worker:heartbeat", str(_hb_time.time()), ex=20)
+    except Exception as _hb_exc:
+        # Logged, not silent: a heartbeat that fails quietly is exactly the
+        # blind spot it exists to remove.
+        logger.warning(f"[fast_sl] heartbeat write failed: {type(_hb_exc).__name__}: {_hb_exc}")
+
     from db.models import OpenPosition, TradeDirection
     from paper_trading.trade_simulator import close_paper_trade
     from sqlalchemy import select
@@ -1361,7 +1454,7 @@ async def _fast_sl_check() -> None:
         if symbols:
             try:
                 from crawler.zerodha_market import get_live_prices
-                quotes = await get_live_prices(symbols)
+                quotes = await get_live_prices(symbols, exit_bucket=True)   # D6: reserved exit quota
                 for sym, q in (quotes or {}).items():
                     px = q.get("price") or q.get("last_price")
                     if px and px > 0:
@@ -1441,9 +1534,126 @@ async def _fast_sl_check() -> None:
                 continue
 
             is_buy = pos.direction == TradeDirection.BUY
+
+            # ── Advanced exit management (2026-08-21) ────────────────────────
+            # Wrapped whole. This is the 5s loop that protects every open
+            # position; a fault in trailing or exhaustion must NEVER stop the
+            # fixed stop-loss below from firing. On any error we log and fall
+            # through to the original logic untouched.
+            #
+            # Placed BEFORE sl_hit is computed so a tightened trailing stop is
+            # evaluated on this same tick rather than the next one.
+            _adv_reason = None
+
+            # Is this position even ALLOWED to exit right now? A SWING trade
+            # inside its minimum-hold window has fast exits deliberately
+            # suppressed (see the bypass below), so an exit signal computed for
+            # it can never be acted on.
+            #
+            # Measured 2026-08-24: RUBICON.NS is SWING with swing_min_hold two
+            # days out. Exhaustion fired on it 358 times in one session — every
+            # 5 seconds — and closed nothing, because the bypass reset sl_hit
+            # each time. That is not just log noise: each detection cost a 5m
+            # candle query plus an ATR computation on the exit worker, on the
+            # 5-second loop, for a decision that was structurally impossible.
+            _exit_blocked = False
+            if pos.trade_style == "SWING" and pos.swing_min_hold:
+                from datetime import datetime as _dt2
+                from zoneinfo import ZoneInfo as _ZI2
+                if _dt2.now(_ZI2("Asia/Kolkata")).replace(tzinfo=None) < pos.swing_min_hold:
+                    _exit_blocked = True
+
+            try:
+                from paper_trading.position_tracker import update_trailing_stop
+                from utils.config import settings as _s
+
+                _c5 = None
+                _atr = 0.0
+                if bool(getattr(_s, "ENABLE_TRAILING_STOP", True)) or \
+                   bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)):
+                    from crawler.price_feed import get_latest_candles
+                    _rows = await get_latest_candles(pos.symbol, "5m", 20, session)
+                    if _rows and len(_rows) >= 5:
+                        import pandas as _pd
+                        _c5 = _pd.DataFrame([{ "open": r.open, "high": r.high, "low": r.low,
+                                               "close": r.close, "volume": r.volume}
+                                             for r in reversed(_rows)]).astype(float)
+                        _tr = (_c5["high"] - _c5["low"]).tail(14)
+                        _atr = float(_tr.mean()) if len(_tr) else 0.0
+
+                # 1. Ratchet the stop. Mutates pos.stop_loss; sl_hit below sees it.
+                if bool(getattr(_s, "ENABLE_TRAILING_STOP", True)):
+                    _moved, _note = update_trailing_stop(pos, price, _atr)
+                    if _moved:
+                        await session.commit()
+                        logger.info(f"[fast_sl] TRAILING {pos.symbol}: {_note}")
+
+                # 2. Sell into weakness before the stop is reached.
+                # Skipped entirely while the position cannot exit — see
+                # _exit_blocked above. Trailing still runs: tightening a stop is
+                # not an exit, and the ratcheted level applies the moment the
+                # hold window ends.
+                if _adv_reason is None and _c5 is not None and not _exit_blocked and \
+                   bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)) and is_buy:
+                    from engine.indicators import detect_exhaustion
+                    _ex, _why = detect_exhaustion(_c5, _atr)
+                    if _ex:
+                        _adv_reason = "EXHAUSTION"
+                        # Instrumentation only (2026-08-25, Phase 1B task D).
+                        # Two BHEL positions were opened and exhaustion-exited
+                        # five seconds apart with MFE = MAE = 0.000, which is
+                        # consistent with entry and exit reading the same closed
+                        # 5m bar — but only consistent, not proven: the stored
+                        # 5m series is rebuilt from 1m by the resampler, so a
+                        # replay cannot recover the frame the live check held.
+                        # detect_exhaustion drops the forming bar, so the bar it
+                        # actually consumed is _c5[-2]. Log it, and the entry, so
+                        # the next occurrence is decidable from the record rather
+                        # than inferred. No behaviour changes here.
+                        try:
+                            _bars = list(getattr(_c5, "index", []) or [])
+                            _consumed = _c5["timestamp"].iloc[-2] if "timestamp" in getattr(_c5, "columns", []) and len(_c5) >= 2 else None
+                            _forming = _c5["timestamp"].iloc[-1] if "timestamp" in getattr(_c5, "columns", []) and len(_c5) >= 1 else None
+                            logger.info(
+                                f"[fast_sl] EXHAUSTION_AUDIT {pos.symbol} "
+                                f"entry_at={pos.opened_at} entry_px={pos.entry_price} "
+                                f"check_at={datetime.datetime.utcnow().isoformat()} "
+                                f"consumed_bar={_consumed} forming_bar={_forming} "
+                                f"bars={len(_c5) if _c5 is not None else 0} atr={_atr} "
+                                f"reason={_why}"
+                            )
+                        except Exception as _audit_exc:
+                            logger.debug(f"[fast_sl] EXHAUSTION_AUDIT logging failed: {_audit_exc}")
+                        logger.info(f"[fast_sl] EXHAUSTION {pos.symbol}: {_why}")
+
+                # 3. T2 — book another 30% at +3%, then run the rest.
+                if _adv_reason is None and bool(getattr(_s, "ENABLE_PARTIAL_BOOKING_T2", True)) \
+                   and int(getattr(pos, "exit_tier", 1) or 1) == 2 and pos.entry_price > 0:
+                    _t2_pct = float(getattr(_s, "PARTIAL_BOOKING_T2_PCT", 0.030))
+                    _t2 = pos.entry_price * (1 + _t2_pct) if is_buy else pos.entry_price * (1 - _t2_pct)
+                    if (is_buy and price >= _t2) or ((not is_buy) and price <= _t2):
+                        from paper_trading.trade_simulator import scale_out_paper_trade
+                        _p2 = await scale_out_paper_trade(pos, 0.3, price, "T2_HIT", session)
+                        pos.exit_tier = 3
+                        pos.stop_loss = (max(pos.stop_loss, pos.entry_price) if is_buy
+                                         else min(pos.stop_loss, pos.entry_price))
+                        await session.commit()
+                        logger.info(
+                            f"[fast_sl] PARTIAL_T2 {pos.symbol} booked 30% @ ₹{price:.2f} "
+                            f"pnl=₹{_p2:,.2f} — runner now trailing"
+                        )
+                        continue
+            except Exception as _adv_exc:
+                # Deliberately swallowed: the fixed stop-loss below is the
+                # guarantee and must run regardless.
+                logger.warning(f"[fast_sl] advanced exit checks failed for {pos.symbol}: {_adv_exc}")
+                _adv_reason = None
+
             sl_hit = (is_buy and price <= pos.stop_loss) or (
                 not is_buy and price >= pos.stop_loss
             )
+            if _adv_reason:
+                sl_hit = True          # route through the normal close path
             
             # Bypass fast SL for swing trades during their minimum hold period
             if sl_hit and pos.trade_style == "SWING" and pos.swing_min_hold:
@@ -1475,6 +1685,9 @@ async def _fast_sl_check() -> None:
                             partial_pnl = await scale_out_paper_trade(pos, 0.5, price, "T1_HIT", session)
                             # Move SL to cost-to-cost
                             pos.stop_loss = max(pos.stop_loss, pos.entry_price) if is_buy else min(pos.stop_loss, pos.entry_price)
+                            pos.exit_tier = 2      # T2 (30% at +3%) is next
+                            if pos.highest_high is None and is_buy:
+                                pos.highest_high = max(price, pos.entry_price)
                             # Let trailing logic in update_positions_with_current_prices handle the rest
                             pos.take_profit = 0.0  
                             await session.commit()
@@ -1493,7 +1706,7 @@ async def _fast_sl_check() -> None:
                 else:
                     continue
             else:
-                reason = "STOP_LOSS"
+                reason = _adv_reason or "STOP_LOSS"
 
             try:
                 trade = await close_paper_trade(pos, price, reason, session)
@@ -1734,7 +1947,9 @@ async def _intraday_entry_task():
     # run_master_intelligence_cycle). FORBIDDEN in full under the News-Only
     # architecture. Hardcoded, not a settings flag, so it can't be silently
     # re-enabled by flipping an unrelated config value.
-    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = True
+    _NEWS_ONLY_BLOCKS_HUB_ENTRIES = bool(
+        getattr(settings, "NEWS_ONLY_BLOCKS_HUB_ENTRIES", True)
+    )
     if _NEWS_ONLY_BLOCKS_HUB_ENTRIES:
         logger.info(
             "[intraday_entry] disabled — News-Only architecture hard-block "
@@ -2704,11 +2919,21 @@ def kite_sync_holdings_task():
     soft_time_limit=1200,
     time_limit=1260,
 )
-def kite_live_candles_task():
+def kite_live_candles_task(closing_sweep: bool = False):
     """Fetch 1-minute candles from Kite every 3 min while NSE market is open.
 
     Covers the full hub universe (2,569+ symbols) via concurrent fetching
     (semaphore=3). Runs 09:15–15:30 IST Mon–Fri via beat. Upsert-safe.
+
+    `closing_sweep=True` runs the same pass just after the close, which is the
+    only way the final minutes of the session ever land. On a 3-minute beat the
+    last in-session tick fires at 15:30 exactly, and a full pass over the
+    universe does not finish before the task's own window closes: measured on
+    24 Aug, only 582 symbols carried a 15:29 bar while 1,463 stopped at 15:26.
+    Those missing minutes are not idle ones — the sugar pack did most of its
+    move in them, which is why DWARKESH and BAJAJHIND showed a 3% gap against
+    the Kite close. The sweep re-fetches with the whole session available, and
+    the upsert makes re-covering settled bars free.
     """
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
@@ -2716,7 +2941,11 @@ def kite_live_candles_task():
 
     now_ist = datetime.datetime.now(_IST)
     h, m = now_ist.hour, now_ist.minute
-    in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
+    if closing_sweep:
+        # After the close, but still the same trading day.
+        in_session = ((h, m) >= (15, 30)) and (h < 18) and now_ist.weekday() < 5
+    else:
+        in_session = ((h, m) >= (9, 15)) and ((h, m) <= (15, 30)) and now_ist.weekday() < 5
     if not in_session:
         return {"skipped": "outside_market_hours"}
 
@@ -2828,6 +3057,25 @@ def run_master_intelligence_cycle():
     """Master brain cycle: build unified context, score the NSE universe,
     drive the agent on top opportunities, score MFs, log the cycle."""
     import pandas as pd
+
+    from utils.runtime_config import strategy_enabled
+
+    # Admin toggle (Path A).
+    #
+    # NOTE what this switch actually controls. Path A no longer ORIGINATES
+    # trades -- that inline loop was removed 2026-07-21 (Phase 3C Phase B).
+    # What it still does is score the universe into market_shortlist and run
+    # two exit paths: executor.check_and_close_positions() and the
+    # sector-STRONGLY_BEARISH sweep. Turning it off therefore stops SCORING
+    # (which starves Path B of candidates) and stops those two discretionary
+    # exits.
+    #
+    # Stop-losses are NOT affected: fast_sl_check runs every 5s on its own beat
+    # entry and is deliberately not gated by any strategy toggle, so an open
+    # position still exits on SL/TP with every strategy switched off.
+    if not _run_async(strategy_enabled("master_intelligence")):
+        logger.info("[hub] master intelligence cycle skipped — disabled by strategy toggle")
+        return {"status": "disabled_by_toggle"}
 
     async def _run():
         from datetime import datetime
@@ -3287,6 +3535,70 @@ async def _candle_staleness_watchdog():
     expired Kite token alike. Cooldown now lives in integrations/alerts/router.py's
     shared Redis dedup (OPERATIONS/ERROR default 1hr), not an in-process global."""
     from crawler.india_price_feed import is_nse_market_open
+    # ── Daily-coverage check (2026-08-21) ────────────────────────────────────
+    # Runs BEFORE the market-hours guard, because a daily-bar gap is only
+    # visible after the close and the 5m check below returns early when the
+    # market is shut.
+    #
+    # This watchdog only ever looked at `timeframe='5m'`. It therefore had no
+    # view of the daily feed at all, and a coverage collapse went unnoticed for
+    # two sessions: 7,066 symbols with a 1d bar on 19 Aug, 2,500 on the 20th,
+    # 4 on the 21st. Nothing alerted. It surfaced only because a trading rule
+    # read a two-day-old close and reported HSCL down 12.78% against a real
+    # -7.07%.
+    #
+    # Daily bars feed the 20-day RVOL baseline, the 20-day high, pivot levels
+    # and every day-move gate — a silent gap there quietly corrupts entry
+    # decisions rather than stopping them, which is the worse failure.
+    try:
+        from tasks._db import celery_session as _cs
+        from sqlalchemy import text as _txt
+
+        # Ask "when did the daily feed last write the WHOLE universe", not
+        # "what is the newest 1d row".
+        #
+        # MAX(timestamp) is not the freshness signal it looks like. Several
+        # tasks write 1d rows for tiny symbol sets — kite_sync_candles covers a
+        # 33-name watchlist at 10:00 UTC, and the index symbols get written
+        # separately — while the full ~8,000-symbol write lands in a single
+        # batch the following morning. So MAX(timestamp) routinely names a date
+        # holding 4 or 33 symbols, and comparing that against an 8,000-symbol
+        # baseline reports a 99% "collapse" every single afternoon. An alert
+        # that fires daily on healthy data trains everyone to ignore it, which
+        # is worse than no alert.
+        #
+        # Note also that a 1d bar is stamped at IST midnight stored as naive
+        # UTC (D 00:00 IST -> D-1 18:30), so `timestamp::date` reads one day
+        # BEFORE the session it describes. Hence the generous day window here:
+        # this checks liveness, not exact dating.
+        async with _cs() as _s2:
+            _cov = (await _s2.execute(_txt("""
+                WITH per_day AS (
+                    SELECT timestamp::date AS d, COUNT(DISTINCT symbol) AS n
+                    FROM candles
+                    WHERE timeframe = '1d'
+                      AND timestamp >= CURRENT_DATE - 30
+                    GROUP BY 1
+                )
+                SELECT
+                  (SELECT COALESCE(MAX(n), 0) FROM per_day
+                     WHERE d >= CURRENT_DATE - 4),
+                  (SELECT COALESCE(MAX(n), 0) FROM per_day)
+            """))).fetchone()
+        _newest, _baseline = int(_cov[0] or 0), int(_cov[1] or 0)
+        from utils.config import settings as _cfg_s
+        _min_frac = float(getattr(_cfg_s, "DAILY_COVERAGE_MIN_FRAC", 0.5))
+        if daily_coverage_is_stalled(_newest, _baseline, _min_frac):
+            logger.error(
+                f"[watchdog] DAILY CANDLE FEED STALLED — the best daily coverage "
+                f"in the last 4 days is {_newest} symbols against a 30-day best "
+                f"of {_baseline} ({_newest / _baseline:.0%}). The full-universe "
+                f"daily write has not landed. RVOL baselines, 20-day highs, "
+                f"day-move gates and the hub universe all read from this."
+            )
+    except Exception as _cov_exc:
+        logger.debug(f"[watchdog] daily-coverage check failed: {_cov_exc}")
+
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
 
@@ -3323,6 +3635,38 @@ async def _candle_staleness_watchdog():
     except Exception as exc:
         logger.warning(f"[watchdog] telegram alert failed: {exc}")
     return {"status": "stale_alerted", "age_min": round(age, 1)}
+
+
+@celery_app.task(
+    name="tasks.resample_intraday_candles",
+    soft_time_limit=110,
+    time_limit=140,
+)
+def resample_intraday_candles_task(lookback_minutes: int = 180):
+    """Derive 5m / 15m / 1h bars from the 1m bars already in Postgres.
+
+    Replaces the per-symbol yfinance fetch that used to produce these
+    timeframes and could not finish a pass inside its own beat interval — on
+    24 Aug the newest 5m bar was 14:50 IST and the newest 1h 14:15 IST, so F4
+    was scoring a session it could not see the end of. This is one SQL
+    statement per timeframe over data we already hold: no network, no rate
+    limit, and the coarse bars can never lag the 1m feed they are built from.
+
+    Runs on scan_queue so it can never compete for a default-queue slot with
+    the trading path. PAPER TRADING — read-only aggregation, no orders.
+    """
+    async def _run():
+        from crawler.candle_resampler import resample_intraday
+        from tasks._db import celery_session
+
+        async with celery_session() as session:
+            return await resample_intraday(
+                session, lookback_minutes=lookback_minutes
+            )
+
+    result = _run_async(_run())
+    logger.info(f"[resample_intraday] {result}")
+    return result
 
 
 @celery_app.task(name="tasks.candle_staleness_watchdog")
@@ -3562,6 +3906,39 @@ def refresh_full_bse_candles_task(days_back: int = 7):
 # sync_long_tail_intraday_upstox for the full design writeup.
 
 async def _sync_long_tail_intraday():
+    # ── Off-hours only (2026-08-21) ──────────────────────────────────────────
+    # This processes ~1,918 symbols over ~8 minutes and holds one of only two
+    # default-queue slots for that entire time. It is the documented
+    # 2026-08-03 CPU-contention culprit, and on 21 Aug it was one of the two
+    # tasks occupying both slots while fast_sl_check — the 5s stop-loss loop —
+    # was being starved out entirely.
+    #
+    # The symbols it syncs are the LONG TAIL: outside the F1 universe and not
+    # tradeable, so nothing in the live path needs them refreshed mid-session.
+    # Runs on the same 30-minute cadence outside market hours, which is ample.
+    # 2026-08-24: the off-hours guard above was added on 21 Aug, but the task
+    # wrapper still carried the ORIGINAL `_is_india_trading_window()` gate
+    # (09:15-16:00 IST). The two are very nearly complements, so between them
+    # the task could only execute in the 15:30-16:00 sliver -- once a day at
+    # best, against a 30-minute beat. Long-tail intraday coverage silently
+    # stopped being refreshed. The wrapper gate is gone now; this function owns
+    # the whole decision.
+    from crawler.india_price_feed import is_nse_market_open
+
+    now_ist = datetime.datetime.now(_IST)
+
+    if is_nse_market_open():
+        logger.info("[long_tail] skipped — market open, leaving the slot to the trading path")
+        return {"skipped": "market_open"}
+
+    # Weekdays only, and only once the session has produced something to sync.
+    # Without this the 30-minute beat would fire through the small hours
+    # fetching a session that has not happened yet.
+    if now_ist.weekday() >= 5:
+        return {"skipped": "weekend"}
+    if (now_ist.hour, now_ist.minute) < (15, 30):
+        return {"skipped": "pre_session_close"}
+
     from crawler.upstox_historical import sync_long_tail_intraday_upstox
     from tasks._db import celery_session
     async with celery_session() as session:
@@ -3581,8 +3958,10 @@ def sync_long_tail_intraday_task():
     """Every ~30 min during NSE hours: intraday candles, via Upstox, for every
     NSE+BSE EQ symbol NOT already covered by the Kite-based Hub universe crawl.
     PAPER TRADING — read-only market data, no orders."""
-    if not _is_india_trading_window():
-        return
+    # NOTE: deliberately NO `_is_india_trading_window()` gate here. This task
+    # is off-hours by design (see _sync_long_tail_intraday), and that window
+    # (09:15-16:00 IST) is the complement of the one this task wants, so the
+    # pair cancelled out and the task effectively stopped running on 21 Aug.
     logger.info("[sync_long_tail_intraday] starting long-tail intraday refresh")
     return _run_async(_sync_long_tail_intraday())
 
@@ -3735,6 +4114,13 @@ async def _backfill_hub_1d_candles():
             WHERE segment IN ('NSE', 'BSE') AND instrument_type = 'EQ'
               AND name != '' AND instrument_token > 0
               AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
+              -- Bonds/SDLs also appear with numeric-coded tradingsymbols that
+              -- the name filters above miss entirely: 708GJ31.BO, 765TN30.BO
+              -- and 786 others. Kite returns no daily candles for any of them,
+              -- so every one is a guaranteed empty fetch. Observed live
+              -- 2026-08-21: a 300-symbol chunk landed in this block and saved
+              -- 36 rows. No real NSE/BSE equity ticker starts with a digit.
+              AND tradingsymbol !~ '^[0-9]'
             ORDER BY tradingsymbol
         """))).all()
         _suffix = {"NSE": ".NS", "BSE": ".BO"}
@@ -3760,10 +4146,69 @@ async def _backfill_hub_1d_candles():
 
     # Only backfill symbols that are stale (no candle since yesterday)
     stale_symbols = [s for s in symbol_set if s not in fresh_set]
+
+    # ── Chunked + resumable (2026-08-21) ─────────────────────────────────────
+    # This task used to attempt the whole stale list in one run. Measured on
+    # 21 Aug: all_syms=10139, fresh=4, need_backfill=10138 -- and at the 0.35s
+    # spacing below that is ~59 minutes of pure sleep before any request
+    # overhead, against a 3600s soft limit. It died with SoftTimeLimitExceeded
+    # at exactly 60:00 having finished nothing, every day. Daily coverage
+    # decayed 7,066 -> 2,500 -> 4 symbols over three sessions while every
+    # service reported healthy, because a task that always dies at the limit
+    # looks identical to one that is merely slow.
+    #
+    # Two changes, together:
+    #   1. PRIORITISE the tradeable universe. Daily bars matter for symbols the
+    #      system can actually trade -- they feed the 20-day RVOL baseline, the
+    #      20-day high and the day-move gates. The long tail still gets done,
+    #      just after the names that matter.
+    #   2. Process a bounded CHUNK per run and remember the position in Redis,
+    #      so consecutive runs sweep the backlog instead of restarting it.
+    #
+    # The cursor is a symbol, not an index: the stale list is recomputed every
+    # run (symbols become fresh as they are filled), so an index would point at
+    # a different symbol each time and skip whole blocks.
+    from utils.config import settings as _bf_cfg
+
+    _chunk = int(getattr(_bf_cfg, "BACKFILL_1D_CHUNK", 300))
+    _progress_key = "backfill_hub_1d:cursor"
+
+    try:
+        from engine.tactical_data_fetcher import get_f1_universe
+        async with celery_session() as _s3:
+            _priority = {x for x in await get_f1_universe(_s3)}
+    except Exception as _pri_exc:
+        logger.debug(f"[backfill_hub_1d] priority universe unavailable: {_pri_exc}")
+        _priority = set()
+
+    # Tradeable names first, everything else after, each half in stable order.
+    stale_symbols = ([s for s in stale_symbols if s in _priority]
+                     + [s for s in stale_symbols if s not in _priority])
+
+    _cursor = None
+    try:
+        from utils.cache import get_redis
+        _cursor = await get_redis().get(_progress_key)
+    except Exception as _cur_exc:
+        logger.debug(f"[backfill_hub_1d] cursor read failed: {_cur_exc}")
+
+    _start = 0
+    if _cursor and _cursor in stale_symbols:
+        # Resume just AFTER the last symbol completed.
+        _start = stale_symbols.index(_cursor) + 1
+    _batch = stale_symbols[_start:_start + _chunk]
+    if not _batch and stale_symbols:
+        # Cursor ran off the end (or the list shrank) -- wrap to the front so a
+        # stale cursor can never wedge the sweep permanently.
+        _start, _batch = 0, stale_symbols[:_chunk]
+
     logger.info(
         f"[backfill_hub_1d] all_syms={len(symbol_set)}  fresh={len(fresh_set)}  "
-        f"need_backfill={len(stale_symbols)}"
+        f"need_backfill={len(stale_symbols)}  "
+        f"priority={len([s for s in stale_symbols if s in _priority])}  "
+        f"this_run={len(_batch)} (from index {_start})"
     )
+    stale_symbols = _batch
 
     saved_total = 0
     failed = 0
@@ -3797,8 +4242,16 @@ async def _backfill_hub_1d_candles():
             saved_total += r
         await _asyncio.sleep(_DELAY_SEC)
 
+    # Remember where this run stopped so the next one continues the sweep.
+    if stale_symbols:
+        try:
+            from utils.cache import get_redis
+            await get_redis().set(_progress_key, stale_symbols[-1], ex=86_400)
+        except Exception as _w_exc:
+            logger.debug(f"[backfill_hub_1d] cursor write failed: {_w_exc}")
+
     logger.info(
-        f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  stale={len(stale_symbols)}  "
+        f"[backfill_hub_1d] done — total_syms={len(symbol_set)}  this_run={len(stale_symbols)}  "
         f"saved={saved_total}  failed={failed}"
     )
     return {
@@ -4180,6 +4633,13 @@ def run_pre_event_gap_scan(self, min_days_until: int = 1, max_days_until: int = 
     the central execution gate with source='AI Predict' attribution.
     """
     from utils.config import settings
+    from utils.runtime_config import strategy_enabled
+
+    # Admin toggle, checked alongside the .env flag. Sync task body, so the
+    # async check is driven through the same _run_async helper the task uses.
+    if not _run_async(strategy_enabled("pre_event_gap")):
+        logger.info("[pre_event_gap] task skipped — disabled by strategy toggle")
+        return
     if not settings.PRE_EVENT_GAP_ENABLED:
         logger.debug("[pre_event_gap] task skipped — PRE_EVENT_GAP_ENABLED is False")
         return

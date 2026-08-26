@@ -20,6 +20,7 @@ from engine.allocation_engine import (
     get_recommended_allocation,
     run_risk_questionnaire,
 )
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Asset Allocation"])
 
@@ -138,7 +139,7 @@ class AnalysisRequest(BaseModel):
     new_investment:        float          = 0.0
 
 
-@router.post("/analysis")
+@router.post("/analysis", dependencies=[Depends(require_auth)])
 async def post_analysis(
     body: AnalysisRequest,
     db: AsyncSession = Depends(get_db),

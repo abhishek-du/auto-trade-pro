@@ -238,11 +238,28 @@ Respond ONLY with valid JSON:
     "reasoning": "Detailed explanation citing specific 7-Hub scores (e.g. Technical=40, News=50), specific recent news events, and current PnL to justify the dynamic update."
 }}
 """
+        # Observability only (2026-08-26, phase 13). The boundary above measures
+        # the whole function; this one measures ONE position's call, and both are
+        # needed because :292 runs every position concurrently through
+        # asyncio.gather. Total duration alone cannot distinguish "one call
+        # stalled" from "every call queued behind the shared rate limiter" —
+        # which matters, since _acquire_llm_rate_slot can itself wait up to 90s
+        # before giving up, on top of the client's 90s read timeout.
+        #
+        # The symbol and the elapsed time are logged. The prompt, the response,
+        # credentials and any order payload are NOT.
+        _llm_t0 = _time.monotonic()
+        logger.info(f"[dynamic_mgmt] BEDROCK_CALL_START {pos.symbol}")
         try:
             resp = await call_llm_chat(
                 [{"role": "system", "content": "You are an aggressive portfolio manager maintaining dynamic SL/TP using holistic data."},
                  {"role": "user", "content": prompt}],
                 max_tokens=1000, temperature=0.2
+            )
+            logger.info(
+                f"[dynamic_mgmt] BEDROCK_CALL_END {pos.symbol} ok=True "
+                f"elapsed_ms={int((_time.monotonic() - _llm_t0) * 1000)} "
+                f"chars={len(resp or '')}"
             )
             data = _parse_first_json(resp)
             if data and data.get("new_stop_loss") and data.get("new_take_profit"):

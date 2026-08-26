@@ -23,6 +23,7 @@ from functools import lru_cache
 
 import httpx
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import NewsItem
@@ -42,7 +43,7 @@ from crawler.news_router import (
     dedupe_key,
     route_headline,
 )
-from engine.event_classifier import classify_event
+from engine.event_classifier import classify_event, resolve_nse_direction
 
 # Ensure NLTK vader_lexicon is available. Used as fallback by SentimentAnalyser.
 
@@ -1485,13 +1486,47 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # describes moves that already happened — it is not a catalyst. Both used
     # to compete for this budget purely on |FinBERT score|, which is how
     # ambient wire copy crowded out real filings.
+    # Exchange filings do not compete on sentiment (2026-08-24).
+    #
+    # |FinBERT| > 0.6 is a threshold for news PROSE. NSE files in dry legal
+    # language — "X Limited: Outcome of Board Meeting — X Limited has informed
+    # the Exchange..." — and FinBERT reads that as neutral. Measured over the
+    # last 14 days: NSE-Announcements has a MEDIAN |score| of 0.000 and only
+    # 8.7% clear the threshold, while ambient wire copy ("Markets") medians at
+    # 0.911 with 74.4% clearing it. The 8.7% that do clear then lose the cap's
+    # top-15 ranking to that same wire copy.
+    #
+    # Result: 2,100 NSE announcements in 14 days, ZERO classified. The single
+    # source whose own category demonstrably carries direction
+    # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md) never reached the
+    # classifier at all, filtered out by a sentiment model reading legalese.
+    #
+    # A filing earns its budget from having a DIRECTIONAL exchange category,
+    # not from how emotive its text is. Neutral categories are deliberately
+    # excluded here too: resolve_nse_direction would suppress them downstream
+    # anyway, so spending an LLM round-trip on them is pure waste. That makes
+    # this cheaper than the old behaviour, not more expensive — ~0.2 extra
+    # items per crawl against a cap of 15.
+    def _filing_with_direction(i: int) -> bool:
+        it = new_items[i]
+        if _routes[i] != ROUTE_FILING:
+            return False
+        res = resolve_nse_direction(it.get("category"), it.get("headline") or "")
+        return res is not None and res[0] in ("LONG", "SHORT")
+
     _eligible = lambda i: (
-        abs(sentiments[i]["score"]) > 0.6
-        and _routes[i] not in (ROUTE_MACRO, ROUTE_NOISE)
+        _filing_with_direction(i)
+        or (
+            abs(sentiments[i]["score"]) > 0.6
+            and _routes[i] not in (ROUTE_MACRO, ROUTE_NOISE)
+        )
     )
+    # Filings rank ahead of prose: an exchange category is a stronger claim on
+    # the budget than a sentiment score, which is the ordering that failed.
     _to_classify = sorted(
         (i for i in range(len(sentiments)) if _eligible(i)),
-        key=lambda i: abs(sentiments[i]["score"]), reverse=True,
+        key=lambda i: (_filing_with_direction(i), abs(sentiments[i]["score"])),
+        reverse=True,
     )[:_MAX_CLASSIFY_PER_CRAWL]
     _classify_idx = set(_to_classify)
     if len(_classify_idx) < sum(1 for i in range(len(sentiments)) if _eligible(i)):
@@ -1513,7 +1548,15 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
         metadata_dict = None
         if _i in _classify_idx:
-            classification = await classify_event(item["headline"], item.get("summary", ""))
+            # NSE files each announcement under its own category. For those
+            # items that category, not the model, decides direction — see
+            # engine/event_classifier.resolve_nse_direction and
+            # docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md. Passed only
+            # for NSE-sourced rows; every other source is unaffected.
+            classification = await classify_event(
+                item["headline"], item.get("summary", ""),
+                nse_category=item.get("category"), source=item.get("source"),
+            )
             if classification:
                 metadata_dict = classification.model_dump()
         elif _i in _macro_scores:
@@ -1538,22 +1581,58 @@ async def run_news_crawl(session: AsyncSession) -> dict:
 
     # ── Persist to DB ─────────────────────────────────────────────────────────
     total_saved = 0
+    _dupes_skipped = 0          # suppressed by uq_news_items_headline_day
     broadcast_payloads: list[dict] = []
     for _p in prepared:
         item, sent = _p["item"], _p["sent"]
         tickers, metadata_dict = _p["tickers"], _p["metadata"]
 
-        row = NewsItem(
-            headline=item["headline"],
-            source=item["source"],
-            url=item.get("url"),
-            sentiment=sent["sentiment"],
-            score=sent["score"],
-            tickers_affected=tickers or None,
-            news_metadata=metadata_dict,
-            published_at=item.get("published_at"),
+        # INSERT ... ON CONFLICT DO NOTHING instead of an ORM add (2026-08-20).
+        #
+        # WHY: 82% of one day's news_items rows were redundant -- 2,371 rows for
+        # 418 unique headlines. Feeds re-serve the same story every crawl cycle
+        # and `seen_urls` only dedups WITHIN a single run, so every cycle
+        # re-inserted the lot. Downstream STALE checks caught it (212 rejections
+        # in one session) but only after the LLM budget and log volume were
+        # already spent.
+        #
+        # The guarantee now lives in the DB: partial unique index
+        # `uq_news_items_headline_day` on (md5(headline), COALESCE(published_at,
+        # crawled_at)::date). Two deliberate details:
+        #   - md5(headline), not headline: btree caps a key near 2704 bytes and
+        #     headlines are TEXT (819 chars seen). Hashing removes that cliff.
+        #   - COALESCE(..., crawled_at): published_at is NULLABLE (820 NULLs in
+        #     history) and Postgres treats NULLs as distinct, so keying on it
+        #     alone would let exactly those rows keep duplicating.
+        # The index is PARTIAL (crawled_at >= 2026-08-21) so it constrains new
+        # rows only -- 14,105 historical duplicates are left untouched, and 685
+        # of them are referenced by causal_events.news_id under an ON DELETE NO
+        # ACTION foreign key, so deleting them would have failed outright.
+        #
+        # Bare on_conflict_do_nothing() (no index inference) is used on purpose:
+        # inferring a PARTIAL expression index requires restating the exact
+        # predicate, which silently stops matching the day the index changes.
+        stmt = (
+            pg_insert(NewsItem.__table__)
+            .values(
+                headline=item["headline"],
+                source=item["source"],
+                url=item.get("url"),
+                sentiment=sent["sentiment"],
+                score=sent["score"],
+                tickers_affected=tickers or None,
+                news_metadata=metadata_dict,
+                published_at=item.get("published_at"),
+            )
+            .on_conflict_do_nothing()
+            .returning(NewsItem.__table__.c.id)
         )
-        session.add(row)
+        _inserted_id = (await session.execute(stmt)).scalar()
+        if _inserted_id is None:
+            # Already stored this cycle/day -- skip the WS broadcast too, or the
+            # UI would show the same headline again on every crawl.
+            _dupes_skipped += 1
+            continue
         total_saved += 1
         # Payload mirrors NewsItemOut so the WS listener can drop straight
         # into the same React state shape that GET /api/v1/news/ returns.
@@ -1581,6 +1660,12 @@ async def run_news_crawl(session: AsyncSession) -> dict:
     # independent of whether downstream trade evaluation succeeds, and this way
     # a failure in that tail can no longer roll back the whole crawl's news.
     await session.commit()
+
+    if _dupes_skipped:
+        logger.info(
+            f"[news] dedup: {_dupes_skipped} duplicate headline(s) suppressed at insert, "
+            f"{total_saved} new row(s) stored"
+        )
 
     # ── Strategy #5: Event-Driven Arbitrage (News Flash) ──────────────────────
     try:

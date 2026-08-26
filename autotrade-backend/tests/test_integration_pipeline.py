@@ -97,7 +97,10 @@ class TestFullApprovedFlow:
 
         llm_responses = [tool_step(t) for t in _CORE_TOOLS_WITH_EVENT] + [decide_step()]
 
-        async def _fake_open_paper_trade(signal, position_size, session):
+        async def _fake_open_paper_trade(signal, position_size, session, **kw):
+            # **kw so the stub tracks open_paper_trade's real signature —
+            # route_decision now threads product= through, and a stub that
+            # rejects it turns a passing flow into a silent False.
             return SimpleNamespace(id=123)
 
         with patch("news_discovery_engine._find_canonical_event", AsyncMock(return_value=(canonical, "matched headline"))), \
@@ -134,7 +137,8 @@ class TestFullApprovedFlow:
 
         llm_responses = [tool_step(t) for t in _CORE_TOOLS_WITH_EVENT] + [decide_step()]
 
-        async def _fake_open_paper_trade(signal, position_size, session):
+        async def _fake_open_paper_trade(signal, position_size, session, **kw):
+            # **kw — see the note on the sibling stub above.
             return SimpleNamespace(id=124)
 
         with patch("news_discovery_engine._find_canonical_event", AsyncMock(return_value=(canonical, "matched headline"))), \

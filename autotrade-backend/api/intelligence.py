@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
 from db.models import MasterIntelligenceScore, MFIntelligenceScore, HubCycleLog
+from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Intelligence Hub"])
 
@@ -550,7 +551,7 @@ async def get_top_opportunities(db: AsyncSession = Depends(get_db)):
 
 # ── POST /trigger ─────────────────────────────────────────────────────────────
 
-@router.post("/trigger")
+@router.post("/trigger", dependencies=[Depends(require_auth)])
 async def trigger_cycle():
     """Fire one master intelligence cycle via Celery (async)."""
     try:
@@ -562,7 +563,7 @@ async def trigger_cycle():
         raise HTTPException(503, f"Could not queue cycle: {exc}")
 
 
-@router.post("/rescore/{symbol}")
+@router.post("/rescore/{symbol}", dependencies=[Depends(require_auth)])
 async def rescore_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     """Rescore a single symbol inline (skips Celery — instant result).
 

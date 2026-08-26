@@ -187,6 +187,11 @@ class KiteService:
 
         instruments = [f"{h.exchange}:{h.tradingsymbol}" for h in holdings]
         try:
+            # D6: this builds its own KiteConnect and so bypasses both KiteClient
+            # and zerodha_kite_lib — it needs its own limiter call or it is a
+            # hole in the shared quota.
+            from crawler.zerodha_kite_limiter import Bucket, acquire_sync
+            acquire_sync(Bucket.QUOTE)
             quotes: dict[str, Any] = kc.ltp(instruments)
         except Exception as exc:
             logger.warning(f"[KiteService] LTP fetch failed: {exc}")

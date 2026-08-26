@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import RuntimeSettings
 from utils.config import settings
+from utils.logger import logger
 
 
 # ── Known keys and their JSON types ──────────────────────────────────────────
@@ -77,6 +78,21 @@ _KNOWN_KEYS: dict[str, type] = {
     "intraday_enabled":        bool,
     # Global fail-safe: blocks all new entries across all strategies.
     "trading_halted":          bool,
+    # Path F kill switch — DB-backed so it crosses the process boundary.
+    "tactical_execution_enabled": bool,
+    "technical_origination_blocked": bool,
+    "news_short_enabled":            bool,
+    # ── Strategy execution toggles (admin UI, 2026-08-20) ─────────────────────
+    # One switch per origination path. DB-backed so a toggle takes effect in
+    # every process without a restart. All default to True: a missing row means
+    # "enabled", so a fresh DB or a wiped table can never silently disable
+    # trading. See STRATEGY_FLAGS below for the name -> key mapping.
+    "strategy_india_trade_loop_enabled":    bool,
+    "strategy_news_engine_enabled":         bool,
+    "strategy_pre_event_gap_enabled":       bool,
+    "strategy_direct_news_enabled":         bool,
+    "strategy_tactical_enabled":            bool,
+    "strategy_master_intelligence_enabled": bool,
     # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
     # entries are blocked after a shock FLATTEN. Cleared automatically once past.
     "shock_cooldown_until":    str,
@@ -267,6 +283,28 @@ class RuntimeConfig:
         return bool(self._get("trading_halted", getattr(settings, "TRADING_HALTED", False)))
 
     @property
+    def tactical_execution_enabled(self) -> bool:
+        """Path F execution master switch. Falls back to the .env default.
+
+        DB-backed on purpose: flipping this halts the tactical pipeline in every
+        process immediately, with no restart. settings.AGENT_ENABLED does not —
+        that was audit finding D4.
+        """
+        return bool(self._get("tactical_execution_enabled",
+                              getattr(settings, "TACTICAL_EXECUTION_ENABLED", False)))
+
+
+    @property
+    def technical_origination_blocked(self) -> bool:
+        """Cross-process kill switch for TECHNICAL origination (contract SS10b).
+
+        Defaults to the .env value, so leaving this unset in the DB keeps
+        whatever the deployment chose. Setting it True in RuntimeConfig
+        re-blocks every process instantly, without a restart.
+        """
+        return bool(self._get("technical_origination_blocked",
+                              getattr(settings, "TECHNICAL_ORIGINATION_BLOCKED", True)))
+    @property
     def shock_cooldown_active(self) -> bool:
         """True while a market-shock FLATTEN cooldown is still in effect."""
         raw = self._get("shock_cooldown_until", "")
@@ -306,4 +344,57 @@ class RuntimeConfig:
             "scanner_enabled":             self.scanner_enabled,
             "intraday_enabled":            self.intraday_enabled,
             "trading_halted":              self.trading_halted,
+            "tactical_execution_enabled":  self.tactical_execution_enabled,
+            "technical_origination_blocked": self.technical_origination_blocked,
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy execution toggles
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Short admin-UI name -> RuntimeConfig key. The API and the frontend both speak
+# the short name; only this map knows the storage key.
+STRATEGY_FLAGS: dict[str, str] = {
+    "india_trade_loop":    "strategy_india_trade_loop_enabled",
+    "news_engine":         "strategy_news_engine_enabled",
+    "pre_event_gap":       "strategy_pre_event_gap_enabled",
+    "direct_news":         "strategy_direct_news_enabled",
+    "tactical":            "strategy_tactical_enabled",
+    "master_intelligence": "strategy_master_intelligence_enabled",
+}
+
+
+async def strategy_enabled(name: str, session: AsyncSession | None = None) -> bool:
+    """Is this strategy switched on? Reads RuntimeConfig, so it is cross-process.
+
+    FAILS OPEN by design: an unknown name, a missing row, or an unreachable DB
+    all return True. These are *enable* switches, and the failure mode that
+    matters is a database blip silently halting a trading system that the
+    operator believes is running. Note this is the OPPOSITE posture to
+    `tactical_risk`, which fails closed -- there the flag caps risk, so its
+    absence must not permit more. Here its absence must not forbid everything.
+
+    Pass `session` when the caller already has one; otherwise a short-lived
+    session is opened. Callers on a hot path should pass their own.
+    """
+    key = STRATEGY_FLAGS.get(name)
+    if key is None:
+        logger.warning(f"[runtime_config] unknown strategy flag '{name}' — treating as enabled")
+        return True
+
+    try:
+        if session is not None:
+            cfg = await RuntimeConfig.load(session)
+            return bool(cfg._get(key, True))
+
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as own:
+            cfg = await RuntimeConfig.load(own)
+            return bool(cfg._get(key, True))
+    except Exception as exc:
+        logger.warning(
+            f"[runtime_config] strategy flag '{name}' unreadable ({exc}) — treating as enabled"
+        )
+        return True

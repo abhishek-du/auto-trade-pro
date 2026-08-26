@@ -28,6 +28,127 @@ _processed_seq_ids = set()
 _NSE_ANNOUNCEMENT_POLL_SEC = 60
 _last_nse_announcement_fetch: datetime | None = None
 
+# The announcement poller runs as its own asyncio task (2026-08-25). It has to,
+# because section 2 used to sit *after* section 1 in the same loop body, and
+# section 1 awaits process_ticker() — a full LLM ReAct loop — once per new RSS
+# article. Measured on 2026-08-25: the NSE fetch ran at 09:14:50 IST and not
+# again until 16:05:29, a 411-minute gap exactly spanned by 619 agent decisions.
+# NSE's market-wide feed is a 20-item sliding window, so every filing made
+# during the session scrolled out unseen. Result: zero in-session announcements
+# ingested on every trading day from 2026-08-17 onward.
+#
+# The fetch is the only part that is time-critical (miss the window, lose the
+# filing forever), so that is the only part that moved. PDF/OCR/LLM enrichment,
+# persistence and candidate processing all still happen in the main loop,
+# exactly where and in the order they did before — a queued item can wait, a
+# missed poll cannot be recovered.
+_NSE_QUEUE_MAX = 200
+_NSE_QUEUE: "asyncio.Queue[dict] | None" = None      # created inside the running loop
+
+# Instrumentation for the poller. Read-only outside the poller itself.
+_NSE_POLL_STATS: dict = {
+    "nse_poll_started_at":   None,
+    "nse_poll_completed_at": None,
+    "nse_poll_duration":     None,
+    "nse_items_seen":        0,
+    "nse_items_new":         0,
+    "nse_items_duplicate":   0,
+    "nse_items_enqueued":    0,
+    "nse_items_dropped":     0,   # queue full — never silently discarded, always logged
+    "nse_items_inserted":    0,   # incremented by the consumer after a successful persist
+    "nse_errors":            0,
+    "queue_depth":           0,
+    "polls_total":           0,
+}
+
+
+def get_nse_poll_stats() -> dict:
+    """Snapshot of the announcement poller's counters."""
+    s = dict(_NSE_POLL_STATS)
+    s["queue_depth"] = _NSE_QUEUE.qsize() if _NSE_QUEUE is not None else 0
+    return s
+
+
+async def _nse_announcement_poller() -> None:
+    """Fetch NSE corporate announcements on a fixed cadence, forever.
+
+    Deliberately does no LLM, PDF or OCR work and opens no long transaction:
+    anything slow here would reintroduce the starvation this task exists to
+    remove. It fetches, decides which seq_ids are new, and hands them to a
+    BOUNDED queue for the main loop to process.
+
+    Marking seq_ids as processed happens here, at enqueue time, not after
+    processing. That is what makes a slow consumer safe: the next poll will not
+    re-enqueue an item that is still sitting in the queue. The cost is that an
+    item in flight is lost if the process dies — the same exposure the previous
+    in-process set already had, since a restart cleared it anyway. Persistence
+    is protected independently by ON CONFLICT DO NOTHING in the consumer.
+    """
+    global _NSE_QUEUE
+    if _NSE_QUEUE is None:
+        _NSE_QUEUE = asyncio.Queue(maxsize=_NSE_QUEUE_MAX)
+
+    while True:
+        started = datetime.now()
+        _NSE_POLL_STATS["nse_poll_started_at"] = started
+        try:
+            announcements = await fetch_nse_corporate_announcements()
+            seen = len(announcements)
+            new = [a for a in announcements if a.get("seq_id") and a["seq_id"] not in _processed_seq_ids]
+            _NSE_POLL_STATS["nse_items_seen"] += seen
+            _NSE_POLL_STATS["nse_items_duplicate"] += seen - len(new)
+            _NSE_POLL_STATS["nse_items_new"] += len(new)
+
+            for ann in new:
+                try:
+                    _NSE_QUEUE.put_nowait(ann)
+                except asyncio.QueueFull:
+                    # Bounded on purpose. Dropping loudly beats growing without
+                    # limit until the process is OOM-killed mid-session.
+                    _NSE_POLL_STATS["nse_items_dropped"] += 1
+                    logger.error(
+                        f"[nse_poller] queue full ({_NSE_QUEUE_MAX}) — dropped "
+                        f"{ann.get('symbol')} seq={ann.get('seq_id')}. The consumer "
+                        f"is not keeping up."
+                    )
+                    continue
+                _processed_seq_ids.add(ann["seq_id"])
+                _NSE_POLL_STATS["nse_items_enqueued"] += 1
+
+            if new:
+                logger.info(
+                    f"📋 [nse_poller] {len(new)} new of {seen} fetched — queued "
+                    f"(depth {_NSE_QUEUE.qsize()})"
+                )
+        except asyncio.CancelledError:
+            logger.info("[nse_poller] cancelled — stopping cleanly")
+            raise
+        except Exception as exc:
+            # A failed poll must not end the poller, and must not touch the
+            # main loop. Next tick tries again.
+            _NSE_POLL_STATS["nse_errors"] += 1
+            logger.error(f"[nse_poller] poll failed: {exc}")
+        finally:
+            done = datetime.now()
+            _NSE_POLL_STATS["nse_poll_completed_at"] = done
+            _NSE_POLL_STATS["nse_poll_duration"] = (done - started).total_seconds()
+            _NSE_POLL_STATS["polls_total"] += 1
+
+        await asyncio.sleep(_NSE_ANNOUNCEMENT_POLL_SEC)
+
+
+def _drain_nse_queue(limit: int = 25) -> list[dict]:
+    """Take up to `limit` queued announcements without blocking."""
+    if _NSE_QUEUE is None:
+        return []
+    out: list[dict] = []
+    while len(out) < limit:
+        try:
+            out.append(_NSE_QUEUE.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return out
+
 # ── Pre-event anomaly scan (2026-07-23) ──────────────────────────────────────
 # Phase 1 of the anomaly-detection engine (see engine/anomaly_detector.py and
 # the approved plan): scans the tracked universe for abnormal price/volume
@@ -43,6 +164,12 @@ _last_anomaly_investigation: dict[str, datetime] = {}
 # Negative-leaning keywords for corporate-announcement side inference — wider
 # than the RSS headline list since announcement categories use formal terms
 # ("Resignation", "Credit Rating") rather than headline verbs ("plunge").
+from engine.event_classifier import resolve_nse_direction
+
+# Fallback only. NSE's own filing category decides direction where the table
+# knows it (see the announcement loop); this keyword scan covers the categories
+# it does not, and is deliberately NOT the primary signal — it defaults to BUY,
+# which is how every routine filing became a bullish candidate.
 _ANNOUNCEMENT_BEARISH_KEYWORDS = (
     "resign", "downgrade", "default", "loss", "decline", "disqualif", "suspend",
 )
@@ -104,6 +231,33 @@ def _strip_corporate_suffixes(name: str) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
+# ── Candidate lifecycle instrumentation (2026-08-25, Phase 1B task E) ────────
+# Every headline that does not become an agent decision must say why, exactly
+# once. Four of _extract_ticker_from_news()'s six exits used to return None
+# silently, so a candidate could vanish with nothing in the record.
+#
+# Scope note: this is the stage where candidates actually disappear. The
+# "event named 5 tickers, the agent evaluated 1" gap is NOT a loss here —
+# causal_events.bullish_stocks is a verification input read by
+# decision_router._verify_canonical_event, never a work queue. One headline
+# yields one ticker by design.
+_TICKER_DROP_REASONS: dict[str, int] = {}
+
+
+def _drop_candidate(reason: str, headline: str, detail: str = "") -> None:
+    """Record one terminal reason for a headline that produced no candidate."""
+    _TICKER_DROP_REASONS[reason] = _TICKER_DROP_REASONS.get(reason, 0) + 1
+    logger.info(
+        f"[candidate_lifecycle] DROPPED reason={reason} "
+        f"headline={headline[:90]!r}" + (f" detail={detail[:120]!r}" if detail else "")
+    )
+
+
+def get_candidate_drop_reasons() -> dict:
+    """Terminal-reason tally since process start."""
+    return dict(_TICKER_DROP_REASONS)
+
+
 async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
     """Identify the company a news item is about via a fast LLM call, then
     resolve it to a REAL, tradeable NSE symbol via engine.portfolio_service's
@@ -149,9 +303,14 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
         # silent-drop bug this function's own docstring already root-caused
         # once (the BCCL.NS case). Take only the first non-empty line.
         company_name = next((ln.strip() for ln in (resp or "").splitlines() if ln.strip()), "")
-    except Exception:
+    except Exception as _exc:
+        _drop_candidate("LLM_ERROR", headline, str(_exc))
         return None
-    if not company_name or company_name.upper() == "NONE":
+    if not company_name:
+        _drop_candidate("LLM_EMPTY", headline)
+        return None
+    if company_name.upper() == "NONE":
+        _drop_candidate("NO_LISTED_COMPANY", headline)
         return None
 
     # Repetition/garbage guard (2026-07-27): live-observed nemotron looping on
@@ -171,10 +330,12 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
             f"output ({len(company_name)} chars) — treating as extraction "
             f"failure, not a resolution failure: '{company_name[:60]}...'"
         )
+        _drop_candidate("MALFORMED_EXTRACTION", headline, company_name)
         return None
 
     query = _strip_corporate_suffixes(company_name)
     if not query:
+        _drop_candidate("EMPTY_AFTER_SUFFIX_STRIP", headline, company_name)
         return None
 
     from engine.portfolio_service import search_stocks_async
@@ -184,10 +345,12 @@ async def _extract_ticker_from_news(headline: str, summary: str) -> str | None:
             matches = await search_stocks_async(query, session)
     except Exception as exc:
         logger.debug(f"[news_engine] instrument lookup failed for '{company_name}': {exc}")
+        _drop_candidate("INSTRUMENT_LOOKUP_ERROR", headline, str(exc))
         return None
 
     if not matches:
         logger.info(f"[news_engine] no NSE instrument match for extracted company '{company_name}' — skipping (fail-closed)")
+        _drop_candidate("UNKNOWN_SYMBOL", headline, company_name)
         return None
 
     resolved = matches[0]["symbol"]
@@ -373,6 +536,17 @@ async def _execute_news_trade(
     trust `evidence` (a caller-provided DecisionEvidence snapshot, used only
     for audit-log convenience) as the authority.
     """
+
+    # Admin toggle. Placed HERE, not around the discovery loop, so news is still
+    # crawled, classified and persisted while execution is off -- disabling the
+    # strategy must not create a gap in the event history that later analysis
+    # would read as "no news happened".
+    from utils.runtime_config import strategy_enabled
+
+    if not await strategy_enabled("news_engine"):
+        logger.info(f"[news_trade] {ticker}: skipped — news engine disabled by strategy toggle")
+        return False
+
     from crawler.market_snapshot import get_market_snapshot
     from engine.decision_router import (
         TradeIntent, ConfidenceSource, EventDirectness, StrategyFamily, execute_trade_intent, RoutingOutcome,
@@ -675,7 +849,55 @@ async def _find_canonical_event(headline: str, session) -> "tuple[object, int] |
     return None
 
 
-async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
+async def _resolve_news_id(session, headline: str, published_at) -> int | None:
+    """The NewsItem.id for a headline that ON CONFLICT DO NOTHING just skipped.
+
+    `RETURNING id` yields NULL on conflict, so a duplicate headline would leave
+    its CausalEvent with news_id=NULL — the very gap this exists to close. This
+    re-reads the row using the CONFLICT TARGET ITSELF, so the lookup is exactly
+    as unique as the constraint that rejected the insert:
+
+        uq_news_items_headline_day
+          UNIQUE (md5(headline), (COALESCE(published_at, crawled_at))::date)
+          WHERE crawled_at >= '2026-08-21'
+
+    All three parts are reproduced below, including the partial-index predicate
+    — a conflict can only have been raised against a row inside that range, and
+    without the predicate an older duplicate outside it could be returned
+    instead. COALESCE(:published_at, now()) mirrors what the failed INSERT would
+    have stored: crawled_at defaults to now(), so a row with no published_at
+    keys on today's date.
+
+    This is an exact key match, not a heuristic. It never falls back to
+    timestamp proximity, symbol matching or fuzzy headline comparison: if the
+    key does not resolve to exactly one row, it returns None and the event is
+    written with news_id=NULL rather than a guess.
+    """
+    from sqlalchemy import text as _text
+    try:
+        rows = (await session.execute(_text("""
+            SELECT id FROM news_items
+            WHERE md5(headline) = md5(:headline)
+              AND (COALESCE(published_at, crawled_at))::date
+                  = (COALESCE(CAST(:published_at AS timestamp), now()))::date
+              AND crawled_at >= TIMESTAMP '2026-08-21 00:00:00'
+        """), {"headline": headline, "published_at": published_at})).scalars().all()
+    except Exception as exc:
+        logger.debug(f"[news_engine] news_id lookup failed for a duplicate headline: {exc}")
+        return None
+    if len(rows) == 1:
+        return int(rows[0])
+    if len(rows) > 1:
+        # Should be impossible while the unique index exists. Refuse to pick.
+        logger.warning(
+            f"[news_engine] news_id lookup matched {len(rows)} rows — ambiguous, "
+            f"leaving news_id NULL rather than guessing"
+        )
+    return None
+
+
+async def _build_evidence(ticker: str, side: str, headline: str, summary: str,
+                          news_id: int | None = None):
     """Classify this event (headline + summary, not headline-only) and persist
     a CausalEvent row for traceability, connecting the previously-disconnected
     event-classification pipeline (crawler/event_pipeline.py) to the actual
@@ -725,7 +947,20 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
         )
         return evidence, canonical.id
 
-    classification = await classify_event(headline, summary)
+    # Pass FinBERT's score so classify_event can cross-check the LLM's
+    # direction against an independent, deterministic read. See
+    # engine.event_classifier._direction_contradicts_sentiment.
+    _sent_score = None
+    try:
+        # Reuses this module's cached analyser — FinBERT load is lru_cached, so
+        # a single-headline batch here costs nothing beyond the first call.
+        _res = _get_sentiment_analyser().analyse_batch([headline])
+        if _res:
+            _sent_score = float(_res[0].get("score"))
+    except Exception as _s_exc:
+        logger.debug(f"[news_engine] sentiment cross-check unavailable: {_s_exc}")
+        _sent_score = None
+    classification = await classify_event(headline, summary, sentiment_score=_sent_score)
     if classification is None:
         logger.warning(f"[news_engine] {ticker}: event classification failed — no event, no trade")
         return None, None
@@ -743,7 +978,17 @@ async def _build_evidence(ticker: str, side: str, headline: str, summary: str):
             companies = list(set(llm_companies + [bare_ticker]))
 
             causal = CausalEvent(
-                news_id=None,  # this pipeline doesn't have a NewsItem row to link — see audit doc §3.6
+                # news_id is threaded from the NewsItem this cycle inserted for
+                # this exact headline (2026-08-25). It stays None when the
+                # caller has no NewsItem — the anomaly-catalyst and pre-market
+                # queue paths genuinely create events with no news row, and a
+                # NULL there is correct, not a gap. Historical rows are NOT
+                # backfilled: causal_events.news_id was 100% populated
+                # 2026-07-16..07-21 by crawler/event_pipeline.py and 0% after
+                # origination moved to this engine, and Phase 7 established the
+                # historical linkage is unrecoverable (0 exact matches on every
+                # candidate key), so only new rows carry it.
+                news_id=news_id,
                 event_title=classification.category,
                 country=classification.impact,  # matches crawler/event_pipeline.py's existing (mis)use of this column
                 importance=classification.surprise_score,
@@ -1115,11 +1360,11 @@ async def _persist_news_decision(
         logger.debug(f"[news_engine] persist decision failed for {ticker}: {exc}")
 
 
-async def process_ticker(ticker, side, headline, summary):
+async def process_ticker(ticker, side, headline, summary, news_id=None):
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
-    cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary)
+    cand.evidence, event_id = await _build_evidence(ticker, side, headline, summary, news_id)
     cand.event_id = event_id
 
     if event_id is None:
@@ -1128,6 +1373,46 @@ async def process_ticker(ticker, side, headline, summary):
         # gate, so don't spend an LLM call deliberating over it.
         logger.info(f"[news_engine] {ticker}: no canonical event — skipping (no LLM call)")
         return False
+
+    # ── P0 (2026-08-20): trust the CLASSIFIER for direction, not the keyword guess ──
+    #
+    # `side` arrives here from a crude keyword heuristic. There are three such
+    # sites and they all default to BUY:
+    #   :1395  side = "SELL" if any(w in headline for w in
+    #                              ['plunge','crash','loss','down']) else "BUY"
+    #   :1470  same shape against _ANNOUNCEMENT_BEARISH_KEYWORDS
+    #   :947   ditto
+    # Meanwhile `_build_evidence` has just produced a real LLM classification.
+    # The two disagreed on 106 of 428 Direct-News evaluations on 2026-08-20
+    # (24.8%), and `direct_news_strategy:198` fails closed on disagreement — so
+    # a quarter of all classified news was discarded, and NOT ONE SELL ever
+    # reached the execution gate: every bearish headline without one of those
+    # four words defaulted to BUY and then contradicted its own classification.
+    #
+    # Correcting it HERE rather than at the three call sites fixes all of them at
+    # once, and does it after the classification exists — which is the only point
+    # where the true direction is actually known.
+    #
+    # `cand` and `dec` were built with the stale side, so both are re-pointed;
+    # `dec.action` is what the LLM debate argues for and what the executed intent
+    # inherits, so leaving it stale would ask the LLM to defend the wrong trade.
+    #
+    # NEUTRAL/unknown classifications are left alone: there is no direction to
+    # take, and the downstream gate will reject them anyway.
+    from utils.config import settings as _cfg_mod   # module-scope import is local-only here
+
+    if bool(getattr(_cfg_mod, "NEWS_SIDE_FROM_CLASSIFIER", True)):
+        _dir = (getattr(cand.evidence, "direction", "") or "").upper()
+        if _dir in ("BULLISH", "BEARISH"):
+            _correct = "BUY" if _dir == "BULLISH" else "SELL"
+            if _correct != side:
+                logger.info(
+                    f"[news_engine] {ticker}: side corrected {side} -> {_correct} "
+                    f"(classifier says {_dir}; keyword heuristic was wrong)"
+                )
+                side = _correct
+                cand.side = _correct
+                dec.action = _correct
 
     # Direct News strategy (2026-07-27) — fires on the SAME classified evidence,
     # completely independent of the LLM debate below. Never blocks on it, never
@@ -1283,7 +1568,31 @@ async def process_ticker(ticker, side, headline, summary):
 
 async def run_news_discovery_loop():
     logger.info("🚀 Starting 24/7 News-First Discovery Engine (Database Queue)...")
-    
+
+    global _NSE_QUEUE
+    _NSE_QUEUE = asyncio.Queue(maxsize=_NSE_QUEUE_MAX)
+    nse_task = asyncio.create_task(_nse_announcement_poller(), name="nse_announcement_poller")
+    logger.info(
+        f"📡 NSE announcement poller started as an independent task "
+        f"(every {_NSE_ANNOUNCEMENT_POLL_SEC}s, queue max {_NSE_QUEUE_MAX})"
+    )
+
+    try:
+        await _news_discovery_cycles()
+    finally:
+        # Clean shutdown: cancel, then await so the CancelledError is actually
+        # delivered and the task is not left pending at interpreter exit.
+        nse_task.cancel()
+        try:
+            await nse_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("[news_engine] NSE announcement poller stopped")
+
+
+async def _news_discovery_cycles():
+    """The main loop body. Split out so run_news_discovery_loop() owns only
+    task lifecycle — start, run, cancel — and the shutdown path stays readable."""
     while True:
         try:
             # Root-caused 2026-07-27: this used to read
@@ -1320,6 +1629,11 @@ async def run_news_discovery_loop():
             # 1. Fetch Global/Indian News (RSS)
             news_items = await fetch_free_rss_news() 
             new_articles = [n for n in news_items if n.get('headline', '') not in _processed_headlines]
+
+            # headline -> NewsItem.id for the rows this cycle inserted or found
+            # (2026-08-25). Initialised before the `if new_articles:` guard so
+            # the dispatch below can always read it, even on an empty cycle.
+            _news_ids: dict[str, int] = {}
             
             if new_articles:
                 logger.info(f"📰 Found {len(new_articles)} new global/Indian headlines.")
@@ -1333,11 +1647,39 @@ async def run_news_discovery_loop():
                 except Exception as exc:
                     logger.error(f"[news_engine] sentiment scoring failed: {exc}")
                     sentiments = [{"sentiment": "neutral", "score": 0.0}] * len(new_articles)
+                # INSERT ... ON CONFLICT DO NOTHING, not an ORM add (2026-08-24).
+                #
+                # This block used to session.add() every article and commit once.
+                # `uq_news_items_headline_day` is a unique index on
+                # (md5(headline), COALESCE(published_at, crawled_at)::date), and
+                # RSS feeds re-serve the same story every cycle — so one repeat
+                # headline raised UniqueViolationError, which propagated to this
+                # loop's outer `except Exception` and skipped the REST OF THE
+                # CYCLE.
+                #
+                # Everything after this point is what was being skipped, every
+                # 15 seconds: the ticker extraction below, and — the expensive
+                # one — section 2's NSE corporate-announcement fetch. Measured
+                # consequence: NSE announcements stopped being ingested entirely
+                # after 2026-08-21 03:29 while the loop appeared healthy, logging
+                # only its RSS fetches. The exchange feed itself was fine; called
+                # directly it returned today's filings immediately.
+                #
+                # Bare on_conflict_do_nothing() with no index inference, matching
+                # crawler/news_crawler.py: inferring a PARTIAL expression index
+                # means restating its exact predicate, which silently stops
+                # matching the day the index changes.
+                from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+                _dupes = 0
                 async with AsyncSessionLocal() as session:
                     for article, sent in zip(new_articles, sentiments):
                         headline = article.get('headline', '')
-                        if headline:
-                            new_item = NewsItem(
+                        if not headline:
+                            continue
+                        stmt = (
+                            _pg_insert(NewsItem.__table__)
+                            .values(
                                 headline=headline,
                                 source=article.get('source', 'RSS'),
                                 url=article.get('url'),
@@ -1346,100 +1688,147 @@ async def run_news_discovery_loop():
                                 score=sent.get('score', 0.0),
                                 tickers_affected=None,
                             )
-                            session.add(new_item)
-                    await session.commit()
-            
-            for article in new_articles:
-                headline = article.get('headline', '')
-                if not headline:
-                    continue
-                summary = article.get('summary', headline)
-                _processed_headlines.add(headline)
-                
-                action_words = [
-                    'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal',
-                    'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger',
-                    'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend',
-                    'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade',
-                    # 2026-07-27 coverage widening — real catalysts that lacked a
-                    # matching word were silently dropped before ever reaching the
-                    # event classifier (LAURUSLABS/ORIENTTECH/LODHA-class misses):
-                    'order', 'wins', ' win', 'won ', 'bags', 'bag ', 'secures', 'secured',
-                    'contract', 'result', 'record', 'beat', 'beats', 'rises', 'rise ',
-                    'doubles', 'triples', 'rally', 'rallies', 'gains', 'gain ', 'awarded',
-                    'award', 'approval', 'approved', 'launch', 'expansion', 'guidance',
-                    'q1', 'q2', 'q3', 'q4', 'earnings', 'revenue', 'pat ', 'ebitda',
-                    'buyback', 'demerger', 'raises', 'cuts', 'hikes', 'slumps', 'tumbles',
-                    'falls', 'drops', 'sinks', 'high', 'multibagger', 'block deal',
-                ]
-                if not any(w in headline.lower() for w in action_words):
-                    continue
-                    
-                logger.info(f"🔍 Analyzing High-Impact News: {headline}")
-                
-                ticker = await _extract_ticker_from_news(headline, summary)
-                if not ticker:
-                    continue
-                    
-                side = "SELL" if any(w in headline.lower() for w in ['plunge', 'crash', 'loss', 'down']) else "BUY"
-                
-                # Action based on Market Status
-                if market_open:
-                    await process_ticker(ticker, side, headline, summary)
-                else:
-                    logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
-                    async with AsyncSessionLocal() as session:
-                        new_q = PreMarketNewsQueue(
-                            symbol=ticker,
-                            side=side,
-                            headline=headline,
-                            summary=summary,
-                            status="PENDING"
+                            .on_conflict_do_nothing()
+                            .returning(NewsItem.__table__.c.id)
                         )
-                        session.add(new_q)
-                        await session.commit()
+                        _new_id = (await session.execute(stmt)).scalar()
+                        if _new_id is None:
+                            # ON CONFLICT DO NOTHING returns NULL — the row
+                            # already exists. Resolve it by the conflict target
+                            # itself so the CausalEvent still links correctly.
+                            _dupes += 1
+                            _new_id = await _resolve_news_id(
+                                session, headline, article.get('published_at'))
+                        if _new_id is not None:
+                            _news_ids[headline] = int(_new_id)
+                    await session.commit()
+                if _dupes:
+                    logger.debug(
+                        f"[news_engine] {_dupes}/{len(new_articles)} duplicate "
+                        f"headline(s) suppressed at insert"
+                    )
+            
+            # Each section of this loop is fault-isolated (2026-08-24).
+            #
+            # The outer `except` at the bottom catches everything and then
+            # sleeps to the next cycle, so ANY error raised here skipped every
+            # section below it — including section 2's NSE fetch. That is how
+            # NSE corporate announcements stopped being ingested after
+            # 2026-08-21 03:29 while the loop looked healthy: a duplicate RSS
+            # headline raised UniqueViolationError here, every 15 seconds, and
+            # the exchange feed below was never reached. The duplicate itself
+            # is fixed above; this stops the NEXT unexpected error in RSS
+            # handling from silently starving the filing path again.
+            try:
+                for article in new_articles:
+                    headline = article.get('headline', '')
+                    if not headline:
+                        continue
+                    summary = article.get('summary', headline)
+                    _processed_headlines.add(headline)
+                
+                    action_words = [
+                        'surge', 'soar', 'plunge', 'jump', 'crash', 'fta', 'deal',
+                        'profit', 'loss', 'fda', 'acquire', 'acquisition', 'merger',
+                        'buyout', 'stake', 'invest', 'fund', 'spinoff', 'dividend',
+                        'bonus', 'split', 'resign', 'default', 'upgrade', 'downgrade',
+                        # 2026-07-27 coverage widening — real catalysts that lacked a
+                        # matching word were silently dropped before ever reaching the
+                        # event classifier (LAURUSLABS/ORIENTTECH/LODHA-class misses):
+                        'order', 'wins', ' win', 'won ', 'bags', 'bag ', 'secures', 'secured',
+                        'contract', 'result', 'record', 'beat', 'beats', 'rises', 'rise ',
+                        'doubles', 'triples', 'rally', 'rallies', 'gains', 'gain ', 'awarded',
+                        'award', 'approval', 'approved', 'launch', 'expansion', 'guidance',
+                        'q1', 'q2', 'q3', 'q4', 'earnings', 'revenue', 'pat ', 'ebitda',
+                        'buyback', 'demerger', 'raises', 'cuts', 'hikes', 'slumps', 'tumbles',
+                        'falls', 'drops', 'sinks', 'high', 'multibagger', 'block deal',
+                    ]
+                    if not any(w in headline.lower() for w in action_words):
+                        continue
+                    
+                    logger.info(f"🔍 Analyzing High-Impact News: {headline}")
+                
+                    ticker = await _extract_ticker_from_news(headline, summary)
+                    if not ticker:
+                        continue
+                    
+                    side = "SELL" if any(w in headline.lower() for w in ['plunge', 'crash', 'loss', 'down']) else "BUY"
+                
+                    # Action based on Market Status
+                    if market_open:
+                        await process_ticker(ticker, side, headline, summary,
+                                             news_id=_news_ids.get(headline))
+                    else:
+                        logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
+                        async with AsyncSessionLocal() as session:
+                            new_q = PreMarketNewsQueue(
+                                symbol=ticker,
+                                side=side,
+                                headline=headline,
+                                summary=summary,
+                                status="PENDING"
+                            )
+                            session.add(new_q)
+                            await session.commit()
+            except Exception as _rss_exc:
+                logger.error(
+                    f'[news_engine] RSS article handling failed, continuing to '
+                    f'the announcement feed: {_rss_exc}'
+                )
 
-            # 2. Fetch NSE corporate announcements (financial results, M&A,
-            #    dividends, credit-rating actions, buybacks, resignations…) —
-            #    on its own slower cadence, see _NSE_ANNOUNCEMENT_POLL_SEC.
-            global _last_nse_announcement_fetch
+            # 2. Process NSE corporate announcements (financial results, M&A,
+            #    dividends, credit-rating actions, buybacks, resignations…).
+            #
+            #    The FETCH no longer happens here — _nse_announcement_poller()
+            #    owns it and runs as an independent task, because this block
+            #    sits after section 1 and section 1 awaits an LLM ReAct loop per
+            #    article. See the comment on _NSE_QUEUE for the measurement.
+            #    Everything below this point is unchanged: same enrichment, same
+            #    persistence, same direction resolution, same dispatch.
             now = datetime.now()
-            if (_last_nse_announcement_fetch is None
-                    or (now - _last_nse_announcement_fetch).total_seconds() >= _NSE_ANNOUNCEMENT_POLL_SEC):
-                _last_nse_announcement_fetch = now
-                announcements = await fetch_nse_corporate_announcements()
-                new_announcements = [
-                    a for a in announcements if a["seq_id"] and a["seq_id"] not in _processed_seq_ids
-                ]
+            new_announcements = _drain_nse_queue()
+            if new_announcements:
+                logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
+                from db.models import NewsItem
+                from crawler.pdf_parser import process_nse_announcement
+                from engine.sector_graph import get_second_order_trades
 
-                if new_announcements:
-                    logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
-                    from db.models import NewsItem
-                    from crawler.pdf_parser import process_nse_announcement
-                    from engine.sector_graph import get_second_order_trades
+                ann_sentiments = []
+                for ann in new_announcements:
+                    try:
+                        # 1. Download PDF -> 2. OCR -> 3. LLM Analysis
+                        llm_res = await process_nse_announcement(ann["symbol"], ann["headline"], ann["pdf_url"])
 
-                    ann_sentiments = []
-                    for ann in new_announcements:
-                        try:
-                            # 1. Download PDF -> 2. OCR -> 3. LLM Analysis
-                            llm_res = await process_nse_announcement(ann["symbol"], ann["headline"], ann["pdf_url"])
+                        # Map signal to sentiment for DB
+                        sig = llm_res.get("trading_signal", "HOLD")
+                        sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
+                        score = llm_res.get("impact_score", 0) / 100.0
 
-                            # Map signal to sentiment for DB
-                            sig = llm_res.get("trading_signal", "HOLD")
-                            sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
-                            score = llm_res.get("impact_score", 0) / 100.0
+                        # Update headline with deep LLM summary
+                        ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
 
-                            # Update headline with deep LLM summary
-                            ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
+                        ann_sentiments.append({"sentiment": sent, "score": score})
+                    except Exception as exc:
+                        logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
+                        ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
 
-                            ann_sentiments.append({"sentiment": sent, "score": score})
-                        except Exception as exc:
-                            logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
-                            ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
+                # Same duplicate-tolerant insert as the RSS block above, and
+                # for the same reason — but this one is worse if it raises.
+                # A UniqueViolationError here aborts the announcement
+                # section AFTER the PDF has been downloaded, OCR'd and sent
+                # to the LLM, so the expensive work is thrown away and the
+                # seq_ids below are never marked processed. The next cycle
+                # then re-fetches the same filings and repeats the whole
+                # cost, indefinitely.
+                from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
-                    async with AsyncSessionLocal() as session:
-                        for ann, sent in zip(new_announcements, ann_sentiments):
-                            session.add(NewsItem(
+                # headline -> NewsItem.id, same purpose as the RSS map above.
+                _ann_news_ids: dict[str, int] = {}
+                async with AsyncSessionLocal() as session:
+                    for ann, sent in zip(new_announcements, ann_sentiments):
+                        _ann_id = (await session.execute(
+                            _pg_insert(NewsItem.__table__)
+                            .values(
                                 headline=ann["headline"],
                                 source=ann["source"],
                                 url=ann["pdf_url"],
@@ -1449,26 +1838,70 @@ async def run_news_discovery_loop():
                                 tickers_affected=[ann["symbol"]],
                                 category=ann["category"],
                                 company=ann["company"],
-                            ))
-                        await session.commit()
+                            )
+                            .on_conflict_do_nothing()
+                            .returning(NewsItem.__table__.c.id)
+                        )).scalar()
+                        if _ann_id is None:
+                            _ann_id = await _resolve_news_id(
+                                session, ann["headline"], ann["published_at"])
+                        if _ann_id is not None:
+                            _ann_news_ids[ann["headline"]] = int(_ann_id)
+                    await session.commit()
+                    _NSE_POLL_STATS["nse_items_inserted"] += len(new_announcements)
 
-                    for ann in new_announcements:
-                        _processed_seq_ids.add(ann["seq_id"])
-                        ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
-                        text = f"{ann['category']} {ann['summary']}".lower()
+                for ann in new_announcements:
+                    _processed_seq_ids.add(ann["seq_id"])
+                    ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
+                    text = f"{ann['category']} {ann['summary']}".lower()
+
+                    # NSE's own filing category decides whether this is a
+                    # trade candidate at all (2026-08-24).
+                    #
+                    # The keyword scan below defaults to BUY, so EVERY
+                    # routine filing became a bullish candidate. Replayed
+                    # over 4,500 historical announcements it agreed with the
+                    # exchange category on direction almost always — 9
+                    # disagreements, 0.2% — but it also turned 3,504 of them
+                    # (77.9%) into BUY/SELL candidates that the category says
+                    # carry no direction at all.
+                    #
+                    # That is where the damage was. Those are NSE's routine
+                    # categories, dominated by "Outcome of Board Meeting",
+                    # measured at -0.737% mean excess return with a 36.3% win
+                    # rate over 1,169 observations
+                    # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md).
+                    # Acting on them lost money; the fix is to not act.
+                    #
+                    # So the value here is suppression, not direction
+                    # correction. The keyword scan survives only as the
+                    # fallback for categories the table does not know.
+                    _res = resolve_nse_direction(ann["category"], text)
+                    if _res is not None and _res[0] == "NEUTRAL":
+                        logger.info(
+                            f"⏭️  NSE category '{ann['category']}' carries no direction "
+                            f"— not a trade candidate: {ticker}"
+                        )
+                        continue
+                    if _res is not None:
+                        side = "BUY" if _res[0] == "LONG" else "SELL"
+                    else:
+                        # Unmapped category: no exchange opinion, keep the
+                        # old heuristic rather than inventing a direction.
                         side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
 
-                        logger.info(f"🔍 Analyzing NSE announcement: {headline}")
-                        if market_open:
-                            await process_ticker(ticker, side, headline, summary)
-                        else:
-                            logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
-                            async with AsyncSessionLocal() as session:
-                                session.add(PreMarketNewsQueue(
-                                    symbol=ticker, side=side, headline=headline,
-                                    summary=summary, status="PENDING",
-                                ))
-                                await session.commit()
+                    logger.info(f"🔍 Analyzing NSE announcement: {headline}")
+                    if market_open:
+                        await process_ticker(ticker, side, headline, summary,
+                                             news_id=_ann_news_ids.get(ann['headline']))
+                    else:
+                        logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
+                        async with AsyncSessionLocal() as session:
+                            session.add(PreMarketNewsQueue(
+                                symbol=ticker, side=side, headline=headline,
+                                summary=summary, status="PENDING",
+                            ))
+                            await session.commit()
 
             # 2b. Pre-event anomaly scan (2026-07-23, Phase 1): abnormal
             #     price/volume behaviour can precede the official filing by

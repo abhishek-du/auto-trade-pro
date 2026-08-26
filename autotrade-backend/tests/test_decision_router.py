@@ -115,10 +115,22 @@ def _patch_equity_approval():
 # routing through this function, these tests catch it.
 
 class TestTechnicalHardBlock:
+    """The block is CONDITIONAL as of contract SS10b (2026-08-20).
+
+    `TECHNICAL_ORIGINATION_BLOCKED` used to be a hardcoded True; the owner
+    turned it off for the paper run. These tests still matter -- they prove the
+    block genuinely blocks when it is ON, which is what the kill switch and the
+    code default rely on -- so each one pins the flag True explicitly rather
+    than inheriting whatever the deployment happens to be set to.
+
+    The OFF direction is covered in tests/test_technical_origination_unblocked.py.
+    """
+
     @pytest.mark.asyncio
     async def test_technical_strategy_always_blocked(self):
         intent = make_intent(strategy_family=StrategyFamily.TECHNICAL, event_id=None, evidence_ids=[])
-        with _patch_resolve_mode():
+        with _patch_resolve_mode(), patch(
+            "utils.config.settings.TECHNICAL_ORIGINATION_BLOCKED", True):
             result = await authorize_trade_intent(intent, make_session())
         assert result.approved is False
         assert result.outcome == RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN
@@ -131,7 +143,8 @@ class TestTechnicalHardBlock:
             strategy_family=StrategyFamily.TECHNICAL, confidence=99.0,
             confidence_source=ConfidenceSource.CALCULATED, event_id=None, evidence_ids=[],
         )
-        with _patch_resolve_mode():
+        with _patch_resolve_mode(), patch(
+            "utils.config.settings.TECHNICAL_ORIGINATION_BLOCKED", True):
             result = await authorize_trade_intent(intent, make_session())
         assert result.approved is False
         assert result.outcome == RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN
@@ -144,7 +157,8 @@ class TestTechnicalHardBlock:
         # BLOCKED_TECHNICAL_ORIGIN, not an event-check outcome.
         canonical = make_canonical_event()
         intent = make_intent(strategy_family=StrategyFamily.TECHNICAL, event_id=1, evidence_ids=["1"])
-        with _patch_resolve_mode():
+        with _patch_resolve_mode(), patch(
+            "utils.config.settings.TECHNICAL_ORIGINATION_BLOCKED", True):
             result = await authorize_trade_intent(intent, make_session(canonical))
         assert result.outcome == RoutingOutcome.BLOCKED_TECHNICAL_ORIGIN
 

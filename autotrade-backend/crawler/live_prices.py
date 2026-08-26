@@ -83,7 +83,12 @@ def get_price(symbol: str) -> dict | None:
     # 2. PRICE_CACHE (15-sec refresh)
     cached = PRICE_CACHE.get(symbol)
     if cached and cached.get("price"):
-        age = _time.time() - cached.get("_ts", _time.time())
+        # D3 (audit 2026-08-19): the default was _time.time(), which made
+        # `age` exactly 0.0 for every entry that never had a _ts stamped --
+        # i.e. this guard always passed and a days-old price was returned as
+        # age_seconds: 0.0. Default 0 == epoch == infinitely stale, so a
+        # missing timestamp now fails closed and we fall through to None.
+        age = _time.time() - cached.get("_ts", 0)
         if age <= 30.0:
             return {
                 **{k: v for k, v in cached.items() if not k.startswith("_")},
@@ -309,6 +314,8 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
 
                     meta = _SYMBOL_META.get(sym, {})
                     results[sym] = {
+                        # D3: real fetch time, so downstream freshness checks mean something.
+                        "_ts":            time.time(),
                         "symbol":         sym,
                         "name":           meta.get("name", sym),
                         "type":           meta.get("type", "stock"),
@@ -385,6 +392,8 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
                 meta = _SYMBOL_META.get(sym, {})
                 prev = PRICE_CACHE.get(sym, {})
                 results[sym] = {
+                    # D3: real fetch time, so downstream freshness checks mean something.
+                    "_ts":            time.time(),
                     "symbol":         sym,
                     "name":           meta.get("name", sym),
                     "type":           meta.get("type", "stock"),
@@ -467,6 +476,8 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, dict]:
 
             meta = _SYMBOL_META.get(sym, {})
             results[sym] = {
+                # D3: real fetch time, so downstream freshness checks mean something.
+                "_ts":            time.time(),
                 "symbol":         sym,
                 "name":           meta.get("name", sym),
                 "type":           meta.get("type", "stock"),
@@ -602,6 +613,8 @@ async def hydrate_prices_from_redis() -> dict[str, dict]:
         return PRICE_CACHE
 
     incoming = payload.get("prices") or {}
+    # Fallback timestamp for entries published before _ts stamping existed.
+    _published_at = float(payload.get("published_at") or 0)
     merged = 0
     for sym, entry in incoming.items():
         existing = PRICE_CACHE.get(sym)
@@ -618,6 +631,14 @@ async def hydrate_prices_from_redis() -> dict[str, dict]:
                 "signal":            existing.get("signal") or entry.get("signal"),
                 "signal_confidence": existing.get("signal_confidence") or entry.get("signal_confidence"),
             }
+        # D3: do NOT restamp _ts here. publish_prices_to_redis() JSON-serialises
+        # the whole entry, so the producer's _ts already rides through Redis;
+        # overwriting it with now() would relabel a snapshot that can be up to
+        # the 900s TTL old as brand new -- the exact lie this fix removes. Only
+        # synthesise one when the producer genuinely sent none, and then use the
+        # payload's own published_at rather than now().
+        if not entry.get("_ts"):
+            entry["_ts"] = _published_at
         PRICE_CACHE[sym] = entry
         merged += 1
     if merged:

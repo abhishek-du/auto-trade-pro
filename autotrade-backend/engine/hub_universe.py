@@ -22,8 +22,9 @@ from utils.logger import logger
 async def rebuild_hub_universe(
     session: AsyncSession,
     *,
-    top_n: int = 3000,
-    min_turnover_cr: float = 1.0,
+    top_n: int = 20000,
+    min_turnover_cr: float = 0.0,
+    fast_lane_min_turnover_cr: float = 5.0,
 ) -> dict:
     """Rebuild the hub_universe table: top-N NSE equities by 30-day avg turnover.
 
@@ -101,6 +102,62 @@ async def rebuild_hub_universe(
             LIMIT :n
         """), {"min_t": min_turnover, "n": top_n})).all()
 
+    # ── Fast lane: yesterday's movers ────────────────────────────────────────
+    # A 30-day average is structurally blind to the stock that wakes up. On
+    # 24 Aug MARATHON traded Rs 135cr and MAXESTATES Rs 108cr — 170x and 123x
+    # their own 30-day averages of Rs 0.79cr and Rs 0.88cr, both far under the
+    # Rs 5cr bar, so neither was in the universe and neither could be scanned.
+    # 22 of the day's 107 big movers were main-board names in exactly this
+    # position.
+    #
+    # The average is the right primary ranking — it is what "normally liquid"
+    # means — but it must not be the only door. A symbol that actually traded
+    # real money in the most recent session is liquid enough to scan today,
+    # whatever its trailing mean says. Measured against 24 Aug's tape, a Rs 5cr
+    # last-session floor admits 58 extra symbols (~2% more universe) and
+    # recovers 15 of the 38 missed movers.
+    #
+    # This is inherently one session behind — nothing can know today's turnover
+    # before today. That is acceptable because these moves are thematic and run
+    # for days (the sugar and rice packs ran all week), so being in from day two
+    # still catches most of the move.
+    #
+    # Per symbol, the best single session in the recent window — NOT a single
+    # global "latest timestamp". A global MAX(timestamp) picks whichever symbol
+    # was written most recently (here the 33-name Kite watchlist, whose bars
+    # land at 10:00 UTC while the full universe lands the next morning), so the
+    # fast lane would only ever consider those 33. Asking each symbol for its
+    # own best recent day is what actually finds the stock that woke up.
+    fast_rows = (await session.execute(text(f"""
+        SELECT symbol, MAX(volume * close) AS turnover
+        FROM candles
+        WHERE timeframe = '1d'
+          AND timestamp > NOW() - INTERVAL '4 days'
+          {_exclude}
+        GROUP BY symbol
+        HAVING MAX(volume * close) >= :fast_t
+           AND MAX(volume * close) <> 'NaN'
+    """), {"fast_t": fast_lane_min_turnover_cr * 1e7})).all()
+
+    # NOTE — there is deliberately no "new listing" clause here.
+    #
+    # LALITHAA listed on 24 Aug and did Rs 2,459cr, the largest turnover on the
+    # exchange, yet was absent from the universe. The tempting fix is to admit
+    # symbols whose first bar is recent. It is redundant: a fresh listing has
+    # only a handful of bars, so its 30-day AVERAGE is simply its own recent
+    # turnover, and a name trading that kind of money ranks at the top on the
+    # ordinary path the moment it has a daily bar at all. A first draft of that
+    # clause was measured to admit nothing the ranking did not already admit.
+    #
+    # LALITHAA's real problem is upstream and is NOT solved here: on listing day
+    # it had zero 1d rows (and zero 1m rows), so there was nothing to rank. Full
+    # NSE daily coverage is refreshed weekly (`full-nse-candles-weekly`, Sunday
+    # 01:00), which is what a newly listed symbol has to wait for. Making new
+    # listings tradeable sooner means fixing that cadence, not adding a second
+    # door into this query.
+    ranked = {r.symbol for r in rows}
+    extra = [r for r in fast_rows if r.symbol not in ranked]
+
     await session.execute(delete(HubUniverse))
     for rank, r in enumerate(rows, start=1):
         # Swing mode: stocks ranked 50-1500 are swing candidates.
@@ -113,10 +170,23 @@ async def rebuild_hub_universe(
             rank=rank,
             is_swing=True,
         ))
+
+    # Fast-lane and new-listing entries rank after the turnover-ranked block.
+    # They are in the universe so they get scanned, not because they are more
+    # liquid than the names above them.
+    for offset, r in enumerate(extra, start=1):
+        session.add(HubUniverse(
+            symbol=r.symbol,
+            turnover_cr=round(float(r.turnover) / 1e7, 2),
+            rank=len(rows) + offset,
+            is_swing=True,
+        ))
     await session.commit()
 
     summary = {
-        "universe_size": len(rows),
+        "universe_size": len(rows) + len(extra),
+        "ranked": len(rows),
+        "fast_lane": len(extra),
         "min_turnover_cr": min_turnover_cr,
         "top": [r.symbol.replace(".NS", "").replace(".BO", "") for r in rows[:5]],
     }

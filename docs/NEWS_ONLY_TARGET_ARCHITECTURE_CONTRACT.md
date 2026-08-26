@@ -280,6 +280,7 @@ if intent.strategy_family == StrategyFamily.EVENT_DRIVEN:
 | `intelligence_hub.py` (`MasterIntelligenceScore`) | Feeds trade-triggering thresholds directly (§4-9 above) | **CONTEXT/VALIDATION ONLY** — see §7 |
 | Technical indicators / `compute_trade_levels` | Already filter-only for News Direct | **FILTER ONLY**, universally — never a trigger, for any strategy |
 | `validate_signal` / `RiskManagerAgent` / `check_drawdown_breakers` | Fragmented, strategy-dependent | **UNIFIED, MANDATORY** for every `TradeIntent` regardless of family |
+| `engine/tactical_executor.py` (Path F — Tactical) | **ALLOWED (Phase 2, 2026-08-20)** — the first and only event-less automatic originator this contract permits. Constrained instead by its own risk bucket: 2% of capital per day and 0.5% per trade, enforced in Redis (`engine/tactical_risk.py`), failing closed. Gated by `TACTICAL_EXECUTION_ENABLED` (default **False**) with a DB-backed RuntimeConfig kill switch, and `TACTICAL_LIVE_TRADING=False` so it is paper-only until it has a record. Runs a **1.2** minimum reward:risk and a **10%** per-position notional cap in place of the global 2.0 / 5% — both relaxations, both justified and bounded by the daily bucket in §10a condition 4. |
 | Central Execution Gate | Gate for 11/12 paths | **THE ONLY DOOR** — target is 1/1, not 11/12 |
 
 **FORBIDDEN, precisely defined:** the component must not call `open_paper_trade`, `open_option_paper_trade`, `open_spread_paper_trade`, `open_future_paper_trade`, `open_iron_condor_paper_trade`, `AgentExecutionManager.execute`, or `place_real_order`, directly or indirectly, under any code path, regardless of feature flags. A feature-flagged-off strategy that still contains a live call to one of these functions is not "safely disabled" — it is disabled *by configuration*, which is reversible by anyone who flips the flag without knowing this contract exists. Genuine disabling means the call site itself is gone or hard-blocked at the function entry (see §8's two-phase process).
@@ -370,6 +371,198 @@ intent = TradeIntent(
 ```
 
 ---
+
+
+---
+
+### §10a — Amendment: TACTICAL origination (2026-08-20)
+
+**This clause narrows §1 line 49, §6 line 281 and §10's forbidden pattern.**
+Read them together; where they conflict for `StrategyFamily.TACTICAL`, this
+clause governs.
+
+Until this date the contract permitted **no** event-less automatic originator.
+Path F (intraday momentum, mean reversion) originates from technical conditions
+with no `CausalEvent`, so it ran shadow-only — generating, scoring and sizing
+signals into `tactical_signals` while containing no execution code path at all.
+
+Effective 2026-08-20, `StrategyFamily.TACTICAL` **may originate trades**, on all
+of the following conditions. They are cumulative; failing any one revokes the
+permission:
+
+1. **Off by default in code.** `TACTICAL_EXECUTION_ENABLED` defaults to
+   `False` in `utils/config.py`, with a DB-backed
+   `RuntimeConfig("tactical_execution_enabled")` kill switch that halts every
+   process without a restart. The default is what a fresh checkout does; an
+   operator enabling it in `.env` for a paper run does not change it.
+   *(Enabled in `.env` on 2026-08-20 for the paper run.)*
+2. **Paper only.** `TACTICAL_LIVE_TRADING=False`. The execution gate blocks
+   `TradeMode.LIVE` for this family regardless of `PAPER_MODE`.
+3. **Its own risk bucket**, because it has no event materiality to act as a
+   brake: **2% of capital per day, 0.5% per trade**, enforced per trading day in
+   Redis and **failing closed** if Redis is unreadable.
+4. **Same central gate, two calibrated parameters.** A TACTICAL intent passes
+   the identical market-hours, confidence-provenance and 12-check
+   `validate_signal` path as every other family. **Two** of those checks read a
+   family-specific value; everything else is byte-identical:
+
+| Parameter | News families | `TACTICAL` | Where |
+|---|---|---|---|
+| Minimum reward:risk | **2.0** | **1.2** | `risk_manager.validate_signal` check 4 |
+| Per-position notional cap | **5%** (`AGENT_MAX_POSITION_WEIGHT`) | **10%** (`TACTICAL_MAX_POSITION_NOTIONAL_PCT`) | `risk_manager.max_position_weight_for`, consulted by check 5, `calculate_position_size`, and the `trade_simulator` hard guard |
+| Daily risk bucket | *(none — event materiality is the brake)* | **2% / day, 0.5% / trade** | `engine/tactical_risk.py`, Redis, fails closed |
+
+   **Both deviations are relaxations, and this clause previously said the
+   tactical bucket was "an additional cap, never a replacement." That is no
+   longer strictly true and the text is corrected here rather than left to
+   drift.** The rationale, recorded so a later reviewer can judge it:
+
+   - *R:R 1.2* — the blanket 2.0 admitted only 20.2% of tactical signals
+     (`PIVOT_BREAKOUT` 0/137). Intraday stop/target geometry is built from
+     structural levels (ORB range, VWAP band, pivots) that sit far closer to
+     entry than an event-driven target, so 2:1 is unreachable by construction,
+     not by weak setups. Measured on 530 live shadow signals:
+
+     | Floor | Signals admitted | VWAP | PIVOT_BREAKOUT |
+     |---|---|---|---|
+     | 2.0 | 107 (20.2%) | 17 (9.4%) | 0 (0.0%) |
+     | 1.5 | 144 (27.2%) | 23 (12.7%) | 6 (4.4%) |
+     | **1.2** | **189 (35.7%)** | **45 (24.9%)** | **14 (10.2%)** |
+
+     Set to 1.2 by owner decision on 2026-08-20 to admit VWAP and
+     PIVOT_BREAKOUT, which together are 60% of signal volume (318/530) and core
+     to the pipeline's design.
+
+     **Two facts recorded here so they are not lost:** (a) even at 1.2 those two
+     rules remain 81% excluded (59 of 318 admitted) — their median R:R is 0.83
+     and 0.42 respectively, so no defensible floor admits most of them; the
+     honest fix is their target geometry, not the gate. (b) The break-even win
+     rate rises from 40.0% at 1.5 to **45.5% at 1.2, before NSE costs**. This
+     floor buys throughput with expectancy headroom, and the paper run exists
+     to establish whether the realised win rate clears it.
+   - *Notional 10%* — those same tight stops make risk-based sizing ask for a
+     large share count against a small per-share risk. Under the 5% cap the
+     **notional** bound, not the risk bound, decided nearly every tactical size,
+     cutting realised per-trade risk to ~0.1% and admitting ~20 trades/day into
+     a bucket dimensioned for 4. The 10% cap restores the 2% / 0.5% risk bucket
+     as the primary brake and leaves the notional cap to do only what it is for:
+     limiting concentration in a single tight-stop name.
+
+   The daily bucket is the compensating control for both, and it has no
+   counterpart in the news families.
+5. **Minimum 7 days of paper trading** with execution enabled before live is
+   even discussed. The *evaluation* date is the owner's to choose; this floor
+   governs only the live decision.
+6. **This clause must be amended again before live**, in a reviewed commit.
+
+**What is still forbidden, unchanged:** every other event-less originator.
+`TECHNICAL` remains hard-blocked (`_TECHNICAL_TRADE_ORIGINATION_BLOCKED = True`).
+§2 line 162 still governs — `strategy_family` is a label a caller sets, not
+proof — so relabelling a technical scan as TACTICAL to reach the gate is a
+violation of this clause, not a use of it. TACTICAL is permitted because of the
+constraints above, not because of its name.
+
+*Amended 2026-08-20 by Claude Opus 5, at the repository owner's explicit
+instruction, in the same commit that added `StrategyFamily.TACTICAL` and wired
+`engine/tactical_executor.py` to the gate. `tests/test_tactical_execution_gate.py`
+asserts this document and the code cannot silently drift apart.*
+
+### §10b — Amendment: TECHNICAL origination re-enabled (2026-08-20)
+
+**This amendment reverses the central premise of this document.** §1, §5, §6 and
+§10 were written to make technical origination impossible; §10b makes it
+possible again. Where they conflict for `StrategyFamily.TECHNICAL`, this clause
+governs. Nothing here is a loophole in the earlier text — it is a deliberate
+replacement of it, made by the repository owner on 2026-08-20.
+
+**What changed.** Two hardcoded constants became settings, both still defaulting
+to `True` so a fresh checkout stays News-Only:
+
+| Flag | Was | `.env` now | Effect when `False` |
+|---|---|---|---|
+| `TECHNICAL_ORIGINATION_BLOCKED` | hardcoded `True` (`decision_router.py`) | `false` | a `TECHNICAL` intent reaches `route_decision` |
+| `NEWS_ONLY_BLOCKS_HUB_ENTRIES` | hardcoded `True` (`india_tasks.py` ×2) | `false` | `india_trade_loop` and `intraday_entry` originate again |
+
+`MARKET_SCANNER_TOP_N` was raised 100 → 500 at the same time. That was pointless
+while the blocks were on — the extra scanning produced intents that were all
+rejected — and is only defensible now that they execute.
+
+**What this costs, stated plainly.** `_verify_canonical_event` short-circuits
+for every non-`EVENT_DRIVEN` family, so **`NO EVENT → NO TRADE` no longer holds
+for `TECHNICAL`.** The global invariant in §5 is now false as written. A
+TECHNICAL trade traces to no `CausalEvent.id`, and performance data will pool
+news-driven and technical trades unless queries separate them by
+`strategy_family`.
+
+`TECHNICAL` also has **no per-family daily risk bucket**, unlike `TACTICAL`'s 2%
+/ 0.5% in §10a condition 3. It is therefore the *least* constrained originator
+in the system, not the most. What still applies to it:
+
+- NSE market-hours gate
+- confidence provenance (`CALCULATED` only)
+- the 12-check `validate_signal`, including R:R ≥ 2.0 and the 5% notional cap
+- `MAX_PORTFOLIO_RISK` 15% and `MAX_OPEN_POSITIONS` 125
+- `PAPER_MODE=true` — paper only
+
+**Reversibility.** Both flags are readable from `.env` *and* from
+`RuntimeConfig("technical_origination_blocked")`, which re-blocks every process
+instantly with no restart — the property `api/agent.py`'s in-process kill switch
+lacks (audit D4).
+
+**Why the paper run must be read differently now.** The Path F evaluation was
+scoped to measure `TACTICAL`. With TECHNICAL also live, the book contains two
+un-separated populations. Any P&L review must group by `strategy_family` or it
+measures nothing about either.
+
+*Amended 2026-08-20 by Claude Opus 5 at the repository owner's explicit and
+repeated instruction. The engineering advice on record was that this widens the
+least-constrained path in the system; the decision to proceed is the owner's.*
+
+### §10c — Amendment: TACTICAL daily risk bucket disabled (2026-08-20)
+
+§10a condition 3 made "its own risk bucket — **2% of capital per day, 0.5% per
+trade**, enforced per trading day in Redis and failing closed" a **cumulative
+condition** of TACTICAL being permitted to originate at all. The owner has
+disabled that bucket. **Condition 3 is therefore revoked, not merely retuned**,
+and this clause records what replaces it: nothing.
+
+| | §10a as written | Now |
+|---|---|---|
+| Daily tactical risk cap | 2% of capital (₹10,000) | **none** |
+| Per-trade sizing basis | 0.5% (₹2,500) | 0.5% — retained, see below |
+| Flag | — | `TACTICAL_RISK_BUCKET_ENABLED=false` (code default `true`) |
+
+**Per-trade risk is retained because it is not a cap.** `TACTICAL_MAX_PER_TRADE_RISK`
+is the *sizing basis* — `quantity = (capital × 0.5%) / stop_distance`. Removing
+it would not loosen a limit; it would leave the pipeline with no way to compute
+a position size at all. It therefore stays.
+
+**What still constrains the tactical path:**
+
+- `MAX_PORTFOLIO_RISK` — 15% of equity summed across all open positions
+- `MAX_OPEN_POSITIONS` — 125 (a runaway-loop guard, not a capital limiter)
+- the 10% per-position notional cap from §10a condition 4
+- the 3-consecutive-stop cooldown — now the **only loss-reactive control** in
+  the path
+
+**What no longer constrains it:** the number of trades per day, and the total
+risk committed per day. Both are unbounded until the portfolio-level cap binds.
+
+Risk is still written to Redis under `tactical:risk:{date}` when the cap is off,
+so the daily summary keeps reporting what was committed and re-enabling the cap
+does not start from a blank slate.
+
+**Consequence for the paper run.** §10a condition 5 requires 7 paper days before
+live is discussed. That evaluation was designed around a bounded-risk system. A
+run with no daily cap measures a different system than the one §10a describes,
+so its P&L cannot by itself support a live decision — the cap would have to be
+restored and re-measured first.
+
+*Amended 2026-08-20 by Claude Opus 5 at the repository owner's explicit
+instruction, after the owner was shown that this revokes §10a condition 3 and
+was offered two bounded alternatives (₹25,000/day and ₹50,000/day). The
+engineering advice on record was to keep a bounded cap; the decision to remove
+it is the owner's.*
 
 ## 11. What This Contract Deliberately Does Not Decide Yet
 

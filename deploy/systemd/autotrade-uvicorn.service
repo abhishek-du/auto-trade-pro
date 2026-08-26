@@ -31,8 +31,8 @@ TimeoutStopSec=30
 MemoryAccounting=yes
 MemoryHigh=2G
 MemoryMax=3G
-StandardOutput=append:/tmp/uvicorn.log
-StandardError=append:/tmp/uvicorn.log
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/uvicorn.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/uvicorn.err
 
 [Install]
 WantedBy=default.target

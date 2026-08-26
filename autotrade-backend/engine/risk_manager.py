@@ -155,6 +155,37 @@ async def _today_closed_pnl(session: AsyncSession) -> float:
 # 1. Signal validator
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+def max_position_weight_for(signal) -> float:
+    """The per-position notional cap that applies to THIS signal's family.
+
+    TACTICAL (Path F) overrides the global 5% backstop with its own 10%. That
+    is a deliberate owner decision: tactical entries use tight structural stops
+    (ORB range, VWAP band, pivot level), so risk-based sizing asks for a large
+    share count against a small per-share risk. Under the 5% global cap the
+    notional bound -- not the risk bound -- decided almost every tactical size,
+    which silently cut per-trade risk to ~0.1% and let ~20 trades/day into a
+    bucket meant for 4. The 2% daily / 0.5% per-trade bucket in
+    `engine/tactical_risk.py` remains the primary brake; this cap exists only to
+    stop concentration in tight-stop names.
+
+    Every other family keeps AGENT_MAX_POSITION_WEIGHT untouched.
+
+    NOTE: `strategy_family` is attached to the signal by
+    `decision_router._intent_to_signal` as a plain string. A signal that never
+    passed through the router has no such attribute and correctly gets the
+    global cap -- fail-safe, since the stricter value is the default.
+
+    All THREE notional cap sites must call this or the override does not survive
+    the trip: this module's check 5 (rejects), its `calculate_position_size`
+    (trims), and `trade_simulator`'s hard guard (raises). Each previously
+    hard-coded AGENT_MAX_POSITION_WEIGHT on its own.
+    """
+    if getattr(signal, "strategy_family", None) == "TACTICAL":
+        return float(getattr(settings, "TACTICAL_MAX_POSITION_NOTIONAL_PCT", 0.10))
+    return float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+
+
 async def validate_signal(
     signal:          TradingSignal,
     wallet_balance:  float,
@@ -426,6 +457,19 @@ async def validate_signal(
     # T1 = 2×ATR (1:1) but T2 = 4×ATR (2:1) — so checking T1 would wrongly reject
     # every dynamically-managed trade. Fall back to take_profit (T1) for legacy
     # signals that don't carry a target_2.
+    # Family-specific floor (2026-08-20). The global 2.0 is right for swing and
+    # event-driven trades, but intraday stop/target geometry cannot reach it:
+    # measured over 505 recorded tactical signals, only 20.6% cleared 2.0 and
+    # PIVOT_BREAKOUT cleared 0 of 130 — its target IS R2 and its stop IS the
+    # pivot, so 2:1 is arithmetically unreachable. A floor no strategy can meet
+    # is not a risk control, it is a silent disable switch.
+    #
+    # TACTICAL therefore uses TACTICAL_MIN_RISK_REWARD (1.5), still demanding
+    # positive expectancy. Every other family is unchanged.
+    _family = getattr(signal, "strategy_family", None)
+    if _family == "TACTICAL":
+        min_rr = float(getattr(settings, "TACTICAL_MIN_RISK_REWARD", 1.2))
+
     final_target = getattr(signal, "target_2", 0.0) or signal.take_profit
     risk   = abs(signal.entry_price - signal.stop_loss)
     reward = abs(final_target - signal.entry_price)
@@ -448,7 +492,7 @@ async def validate_signal(
     # Belt-and-suspenders: even if calculate_position_size somehow exceeds the cap,
     # reject the trade here so no single position ever exceeds 5% of equity.
     pos = this_pos
-    _max_pos_weight = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    _max_pos_weight = max_position_weight_for(signal)
     _effective_equity = wallet_balance + sum(getattr(p, "size_usd", 0.0) or 0.0 for p in open_positions)
     _max_single_notional = _effective_equity * _max_pos_weight
     if pos["usd_value"] > _max_single_notional * 1.01:   # 1% tolerance
@@ -542,7 +586,7 @@ def calculate_position_size(signal: TradingSignal, balance: float, cfg=None) -> 
     # Hard cap at AGENT_MAX_POSITION_WEIGHT (default 5%) — one position can never
     # exceed this fraction of balance regardless of stop distance or confidence.
     # Shorts capped at half that (2.5%).
-    _max_weight = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    _max_weight = max_position_weight_for(signal)
     if _is_short:
         _max_weight *= 0.5
     max_notional = balance * _max_weight

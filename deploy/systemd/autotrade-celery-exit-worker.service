@@ -1,0 +1,37 @@
+[Unit]
+# Dedicated worker for the exit loop (2026-08-21).
+#
+# fast_sl_check is the only thing enforcing stop-losses, trailing stops and
+# partial booking. On 21 Aug it ran essentially once in a full session because
+# it shared the 2-slot default pool with ~60 other beat entries and its
+# dispatches expired before a slot freed. Expired Celery tasks log nothing, so
+# 12 positions sat unmanaged with every service reporting healthy.
+#
+# This worker consumes ONLY exit_queue, so the exit loop can never queue behind
+# a 170s tactical scan again. concurrency=1 is deliberate: the loop is serial by
+# nature and two copies racing the same positions could double-close a trade.
+#
+# NOTE: no auto-reload wrapper here, unlike the main worker. A watchmedo restart
+# mid-tick would drop the very loop this unit exists to keep alive.
+Description=AutoTrade Pro — Celery EXIT worker (stop-loss / trailing, dedicated queue)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONPATH=/home/cis/windows/auto-trade-pro/autotrade-backend
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/cis/windows/auto-trade-pro/autotrade-backend/.venv/bin/python -m celery -A tasks.celery_app worker \
+    --queues=exit_queue \
+    --concurrency=1 \
+    --hostname=exit@%%h \
+    --loglevel=info \
+    --prefetch-multiplier=1
+Restart=always
+RestartSec=5
+MemoryMax=1G
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/celery-exit-worker.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/celery-exit-worker.err
+
+[Install]
+WantedBy=default.target

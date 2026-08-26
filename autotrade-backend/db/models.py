@@ -4,7 +4,7 @@ from enum import Enum as PyEnum
 
 from sqlalchemy import (
     BigInteger, Boolean, Date, DateTime, Enum, Float, ForeignKey,
-    Index, Integer, JSON, String, Text, UniqueConstraint, func,
+    Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -109,6 +109,12 @@ class PaperTrade(Base):
     # Entry snapshot — populated when the trade opens
     product:            Mapped[str]          = mapped_column(String(10),  nullable=False, default="CNC")
     strategy_name:      Mapped[str | None]   = mapped_column(String(40),  nullable=True)
+    # Which origination path opened this trade (StrategyFamily.value): TECHNICAL,
+    # EVENT_DRIVEN, DIRECT_NEWS, PRE_EVENT, TACTICAL. Added 2026-08-20 -- before
+    # it, attribution relied on the free-text `strategy_name`/`source` pair,
+    # which was inconsistent ('Direct News' vs 'DIRECT_NEWS' vs NULL) and could
+    # not be grouped on. Any P&L review that mixes strategies needs this.
+    strategy_family:    Mapped[str | None]   = mapped_column(String(20),  nullable=True, index=True)
     # High-level strategy SOURCE label for attribution (added 2026-07-24 for the
     # parallel Pre-Event Expectation Gap strategy). NULL for every pre-existing
     # row and for the News Strategy (interpreted as "AI"); the new strategy sets
@@ -188,6 +194,14 @@ class OpenPosition(Base):
     # Swing trading fields
     trade_style: Mapped[str] = mapped_column(String(10), nullable=False, server_default="CNC")
     swing_min_hold: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Peak/trough since entry, for the ATR trailing stop (2026-08-21). Without
+    # these the runner left after the T1 scale-out had NO upside management at
+    # all: fast_sl_check sets take_profit=0.0 and moves the stop to breakeven,
+    # with a comment saying trailing is handled elsewhere -- it was not.
+    highest_high:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    lowest_low:     Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which scale-out tiers have already fired. 1 = none yet.
+    exit_tier:      Mapped[int]          = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
     unrealised_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     unrealised_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
@@ -1713,3 +1727,52 @@ class CausalEvent(Base):
 
     def __repr__(self) -> str:
         return f"<CausalEvent id={self.id} event={self.event_title!r} imp={self.importance}>"
+
+
+class TacticalSignal(Base):
+    """Path F audit log — every tactical signal that survived Layer 1.
+
+    This is the ONLY table Path F writes to. Everything else it touches
+    (hub_universe, master_intelligence_scores, open_positions, paper_trades) is
+    read-only, by design: Path F runs in shadow mode and never opens a position,
+    so `executed` is False on every row until execution is wired in Phase 2.
+
+    `reason` carries why a signal was not executed — in Phase 1 that is always
+    the shadow-mode notice, which keeps the column honest rather than blank.
+    """
+
+    __tablename__ = "tactical_signals"
+    __table_args__ = (
+        Index("ix_tactical_symbol_ts", "symbol", "timestamp"),
+        Index("ix_tactical_strategy_ts", "strategy", "timestamp"),
+    )
+
+    id:            Mapped[int]      = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    symbol:        Mapped[str]      = mapped_column(String(20), nullable=False, index=True)
+    timestamp:     Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    strategy:      Mapped[str]      = mapped_column(String(50), nullable=False)   # ORB | VWAP | OVERSOLD_REBOUND ...
+    sub_pipeline:  Mapped[str]      = mapped_column(String(4),  nullable=False, server_default="F1")
+    signal_type:   Mapped[str]      = mapped_column(String(10), nullable=False)   # BUY | SELL
+    entry_price:   Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    stop_loss:     Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    target:        Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    composite_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_prob:       Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity:      Mapped[int | None]   = mapped_column(Integer, nullable=True)
+    risk_amount:   Mapped[float | None] = mapped_column(Float, nullable=True)
+    executed:      Mapped[bool]      = mapped_column(Boolean, nullable=False, server_default="false")
+    reason:        Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_json:     Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at:    Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    # Phase 2 (2026-08-20): execution audit trail. Null while the pipeline runs
+    # with TACTICAL_EXECUTION_ENABLED=False, so a null here is meaningful —
+    # it says "never reached the router", not "router said no".
+    executed_at:   Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    order_ref:     Mapped[str | None] = mapped_column(String(40), nullable=True)
+    routing_outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return (
+            f"<TacticalSignal {self.symbol} {self.signal_type} {self.strategy} "
+            f"score={self.composite_score} executed={self.executed}>"
+        )

@@ -205,8 +205,11 @@ zope.interface==8.5
 
 # OpenAI SDK — no longer the active LLM path (kept only in case any script
 # still imports it directly); primary LLM is now boto3 Bedrock Runtime below.
-openai>=1.40
+openai==2.44.0
 
 # boto3 — AWS Bedrock Runtime (Converse API), primary LLM provider as of
-# 2026-07-24 (Amazon Nova Pro, amazon.nova-pro-v1:0). See utils/llm.py.
-boto3>=1.43
+# 2026-07-24. Model is nvidia.nemotron-super-3-120b (MANTLE_MODEL); the
+# earlier amazon.nova-pro-v1:0 reference was stale. See utils/llm.py.
+# Pinned (D11-o) — this is the primary LLM path and was the only unpinned
+# entry alongside openai in an otherwise fully ==-pinned file.
+boto3==1.43.55

@@ -44,7 +44,9 @@ def get_live_tick(symbol: str) -> dict | None:
     tick = LIVE_TICKS.get(token)
     if tick:
         import time
-        tick["_age_seconds"] = time.time() - tick.get("_ts", time.time())
+        # D3: default 0 (not now()) so a tick with no _ts reads as
+        # infinitely stale rather than perfectly fresh.
+        tick["_age_seconds"] = time.time() - tick.get("_ts", 0)
     return tick
 
 
@@ -61,7 +63,15 @@ def _normalise_symbol(s: str) -> str:
     # NFO symbols: end with CE/PE (options) or contain FUT
     if s.endswith("CE") or s.endswith("PE") or "FUT" in s:
         return s
-    return s if s.endswith(".NS") else f"{s}.NS"
+    # Already-suffixed symbols and indices must be left alone (2026-08-20).
+    # This used to blindly append ".NS" to anything not ending in ".NS", so a
+    # BSE holding became "ZAGGLE.BO.NS" and an index became "^NSEI.NS". Neither
+    # resolves to an instrument token, so _resubscribe_open_positions() silently
+    # dropped them and Kite was never asked for those symbols — one of the
+    # reasons an open BSE position's price sat frozen.
+    if s.startswith("^") or "." in s:
+        return s
+    return f"{s}.NS"
 
 
 def set_open_position_symbols(symbols: set[str]) -> None:
@@ -156,6 +166,11 @@ def on_ticks(ws, ticks: list[dict]) -> None:
             "change": round(change, 2),
             "change_pct": round(change_pct, 2),
             "data_source": "kite_ws",
+            # D3 (audit 2026-08-19): LIVE_TICKS[token] gets a _ts above, but the
+            # PRICE_CACHE mirror never did -- so live_prices.get_price()'s 30s
+            # freshness guard defaulted to now() and always passed, reporting a
+            # days-old price as age_seconds: 0.0.
+            "_ts": time.time(),
         })
         PRICE_CACHE[sym] = existing
 
@@ -369,6 +384,79 @@ def _load_open_positions_sync() -> None:
             set_open_position_symbols(syms)
         except Exception as exc:
             logger.debug(f"[zerodha_ticker] open position preload failed: {exc}")
+
+
+async def sync_open_position_subscriptions() -> dict:
+    """Reconcile the ticker's subscription set against the DB. Returns a summary.
+
+    THE CROSS-PROCESS SUBSCRIPTION GAP
+    ----------------------------------
+    `subscribe_open_position()` only works inside the process that owns the
+    WebSocket. `_resubscribe_open_positions()` opens with
+
+        if not CONNECTED or _active_ws is None:
+            return
+
+    — a SILENT no-op. The KiteTicker runs on a daemon thread in the **uvicorn**
+    process (main.py), but trades are opened by the **news engine** and the
+    **Celery worker**, which are separate OS processes. Their `_active_ws` is
+    always None, so the subscribe call returns without subscribing, without
+    raising, and without logging. Kite is working perfectly — it is simply never
+    asked for that symbol, so it never pushes a tick for it, and the price stays
+    frozen at whatever was last cached.
+
+    Worse: the only caller of `subscribe_open_position()` is
+    `engine/agent/execution.py:167`, which sits on the agent executor path that
+    the News-Only TECHNICAL block disables. The live path
+    (news -> decision_router -> open_paper_trade) never subscribes AT ALL, in
+    any process.
+
+    WHY RECONCILE RATHER THAN MESSAGE-PASS
+    --------------------------------------
+    A Redis pub/sub channel would fix the isolation, but it needs every
+    execution path to remember to publish — and the path that matters today
+    never called subscribe in the first place, so that failure mode would
+    survive. Reconciling against `open_positions` instead makes the DB the
+    single source of truth (the same pattern `RuntimeConfig` uses for
+    halt/resume), so it is correct no matter which process opened the trade,
+    whether it remembered to announce it, or whether the socket has since
+    reconnected. It is self-healing rather than announcement-dependent.
+
+    Runs in the ticker's own process; a no-op anywhere else.
+    """
+    global _OPEN_POSITION_SYMBOLS
+
+    if not CONNECTED or _active_ws is None:
+        return {"skipped": "ticker not running in this process"}
+
+    try:
+        from sqlalchemy import text
+
+        from db.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as sess:
+            rows = await sess.execute(text("SELECT DISTINCT symbol FROM open_positions"))
+            db_symbols = {_normalise_symbol(r[0]) for r in rows.fetchall() if r[0]}
+    except Exception as exc:
+        logger.warning(f"[zerodha_ticker] subscription reconcile: DB read failed: {exc}")
+        return {"error": str(exc)}
+
+    added = db_symbols - _OPEN_POSITION_SYMBOLS
+    removed = _OPEN_POSITION_SYMBOLS - db_symbols
+    _OPEN_POSITION_SYMBOLS = db_symbols
+
+    if added:
+        # Subscribe only the new ones; the rest are already on the socket.
+        _resubscribe_open_positions(symbols=added)
+        logger.info(
+            f"[zerodha_ticker] subscription reconcile: +{len(added)} new position(s) "
+            f"subscribed {sorted(added)}"
+        )
+
+    # Deliberately NOT unsubscribing on `removed`: a closed position's symbol may
+    # still be in the watchlist tier, and an extra QUOTE subscription is cheap
+    # next to the risk of dropping a symbol something else is reading.
+    return {"added": sorted(added), "removed": sorted(removed), "total": len(db_symbols)}
 
 
 def stop_kite_ticker() -> None:

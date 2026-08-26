@@ -42,6 +42,9 @@ from utils.logger import logger
 _IST = ZoneInfo("Asia/Kolkata")
 _CACHE_TTL_SEC = 5.0
 
+# Max age for a WebSocket tick before we prefer a fresh REST quote (D3).
+_WS_TICK_MAX_AGE_SEC = 30.0
+
 _snapshot_cache: dict[str, "MarketSnapshot"] = {}
 
 
@@ -107,6 +110,22 @@ def _from_websocket_tick(symbol: str) -> MarketSnapshot | None:
     tick = get_live_tick(symbol)
     if not tick or not tick.get("last_price"):
         return None
+
+    # D3 (audit 2026-08-19): get_live_tick() already computes _age_seconds and
+    # this function used to throw it away, returning ANY tick with a non-zero
+    # last_price as source="zerodha_ws". If the KiteTicker dropped, or an
+    # illiquid mid-cap simply stopped printing, _fetch_fresh() never fell
+    # through to REST -- and this is the entry-price source for every live news
+    # trade (news_discovery_engine.py:392). Honour the age instead: past the
+    # threshold, return None so the caller falls through to the REST quote.
+    age = float(tick.get("_age_seconds") or 0.0)
+    if age > _WS_TICK_MAX_AGE_SEC:
+        logger.debug(
+            f"[market_snapshot] {symbol}: ws tick {age:.1f}s old "
+            f"(> {_WS_TICK_MAX_AGE_SEC}s) — falling through to REST"
+        )
+        return None
+
     ohlc = tick.get("ohlc") or {}
     depth = tick.get("depth") or {}
     ltp = float(tick["last_price"])

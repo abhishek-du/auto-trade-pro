@@ -52,6 +52,7 @@ class RoutingOutcome(str, Enum):
     BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
     BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
     BLOCKED_TECHNICAL_ORIGIN     = "BLOCKED_TECHNICAL_ORIGIN"      # News-Only hard-block: TECHNICAL may not originate trades (2026-07-21)
+    BLOCKED_SHORT                = "BLOCKED_SHORT"                 # short leg refused: VIX panic, or shorting switched off (2026-08-20)
     BLOCKED_MARKET_CLOSED        = "BLOCKED_MARKET_CLOSED"         # NSE not open for trading (2026-07-27)
     WATCHLIST_ONLY               = "WATCHLIST_ONLY"
     ERROR           = "ERROR"
@@ -121,6 +122,23 @@ class StrategyFamily(str, Enum):
     # resolvable event_id, so the invariant holds without this family-
     # specific router check.
     DIRECT_NEWS  = "DIRECT_NEWS"
+    # TACTICAL (Phase 2, 2026-08-20): the Path F tactical pipeline — intraday
+    # momentum and mean reversion originating from technical conditions with no
+    # news event.
+    #
+    # This is a DELIBERATE, CONTRACT-AMENDING addition, not an oversight. Until
+    # today the contract permitted no event-less automatic originator at all
+    # (§1 line 49, §6 line 281, §10 line 347). Path F ran shadow-only for
+    # exactly that reason. §6 and §10 of
+    # docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md were amended in the same
+    # commit that added this member — if you are reading this and the contract
+    # does NOT list TACTICAL, the two have drifted and the code is wrong.
+    #
+    # Unlike PRE_EVENT and DIRECT_NEWS, TACTICAL is not event-anchored, so it
+    # carries its own risk bucket (2% of capital/day, 0.5% per trade, enforced
+    # in Redis by engine/tactical_risk.py) rather than relying on event
+    # materiality as its brake.
+    TACTICAL     = "TACTICAL"
 
 
 @dataclass
@@ -247,6 +265,7 @@ async def route_decision(
     session:      AsyncSession,
     position_size: dict | None = None,
     source:       str = "signal_engine",
+    product:      str = "CNC",
 ) -> RoutingResult:
     """Route a trading signal to paper or live execution.
 
@@ -305,13 +324,23 @@ async def route_decision(
         try:
             from engine.zerodha_executor import place_real_order
             qty = int(position_size.get("units", 1)) if position_size else 1
+            # D2 (audit 2026-08-19): signal_id= and confidence= were passed
+            # here but place_real_order() accepts neither (its keyword-only
+            # params are signal, order_type, product, exchange, variety, price,
+            # trigger_price, tag). Every live order therefore raised TypeError,
+            # which the broad `except Exception` below swallowed and reported as
+            # a generic RoutingOutcome.ERROR -- indistinguishable from a broker
+            # outage. Nothing is lost by dropping them: `conf` is already logged
+            # below, and place_real_order derives its own ATP_{id} tag from
+            # signal.id. tests/test_live_order_path.py pins this against the
+            # real signature so it cannot drift again.
             result = await place_real_order(
                 symbol=signal.symbol,
                 transaction_type=signal.action,
                 quantity=qty,
                 session=session,
-                signal_id=str(getattr(signal, "id", "")),
-                confidence=conf,
+                signal=signal,
+                product=product,
             )
             order_id = (result or {}).get("order_id")
             outcome = (
@@ -340,7 +369,7 @@ async def route_decision(
         from paper_trading.trade_simulator import open_paper_trade
         if position_size is None:
             position_size = {"units": 1, "usd_value": getattr(signal, "entry_price", 0) * 1}
-        trade = await open_paper_trade(signal, position_size, session)
+        trade = await open_paper_trade(signal, position_size, session, product=product)
         order_id = f"PAPER-{trade.id}" if trade else None
         logger.info(
             f"[decision_router] PAPER {signal.symbol} {signal.action} "
@@ -361,9 +390,13 @@ async def route_decision(
 
 
 def _intent_to_signal(intent: TradeIntent) -> Any:
+    # NOTE: the returned TradingSignal carries `strategy_family` as an attached
+    # attribute (set at the end of this function). validate_signal() is
+    # otherwise family-blind — it receives a TradingSignal, not a TradeIntent —
+    # and needs the family to apply the TACTICAL-specific R:R floor.
     """Build a TradingSignal from a TradeIntent for route_decision()/validate_signal()."""
     from engine.signal_generator import TradingSignal
-    return TradingSignal(
+    _sig = TradingSignal(
         symbol=intent.symbol, timeframe="event", action=intent.action,
         confidence=intent.confidence, entry_price=intent.entry_price,
         stop_loss=intent.stop_loss, take_profit=intent.take_profit,
@@ -380,6 +413,13 @@ def _intent_to_signal(intent: TradeIntent) -> Any:
             "Direct News" if intent.strategy == "DIRECT_NEWS" else None
         ),
     )
+    # Family is not a TradingSignal field; attach it so the risk gate can
+    # apply per-family policy without threading the intent all the way down.
+    try:
+        _sig.strategy_family = intent.strategy_family.value
+    except Exception:
+        pass
+    return _sig
 
 
 @dataclass
@@ -537,6 +577,65 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
         await _log_intent_audit(intent, mode, result, session)
         return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
+    # ── Short-leg guards (2026-08-20) ────────────────────────────────────────
+    # Context: until the P0 side fix (68d6dc3) the news paths could not produce
+    # a SELL at all -- the side came from a keyword guess that defaulted to BUY,
+    # so every bearish headline contradicted its own classification and was
+    # dropped. Not one short reached this gate in the 2026-08-20 session. From
+    # the next session they can, which makes two gaps worth closing first:
+    #
+    #   1. `SHORT_MAX_VIX` existed in config with the comment "block ALL shorts
+    #      when panic (VIX > 28)" and was read by NOTHING -- 0 references
+    #      outside utils/config.py. A documented safety control that does not
+    #      exist is worse than none, because it gets relied on. Now enforced.
+    #
+    #   2. `EQUITY_SHORT_ENABLED` is only consulted by hub_short.py and
+    #      exhaustion_short.py. The news paths never looked at it, so there was
+    #      no way to stop news-driven shorts short of reverting the P0 fix --
+    #      which would reintroduce the bug. NEWS_SHORT_ENABLED closes that,
+    #      backed by RuntimeConfig so it kills across processes with no restart.
+    #
+    # Placed here, after market hours and before everything else, because this
+    # is the single gate every originator funnels through. Exits are unaffected:
+    # they close OpenPosition rows directly and never build a TradeIntent.
+    if str(getattr(intent, "action", "")).upper() == "SELL":
+        _short_block = None
+
+        # (a) panic gate — applies to EVERY family, not just news.
+        _max_vix = float(getattr(settings, "SHORT_MAX_VIX", 0) or 0)
+        if _max_vix > 0:
+            try:
+                from crawler.live_prices import PRICE_CACHE
+                _vix = float((PRICE_CACHE.get("^INDIAVIX") or {}).get("price") or 0)
+            except Exception:
+                _vix = 0.0
+            # Fails OPEN on a missing reading: a stale cache must not silently
+            # ban shorting for the day. A real panic shows up in the cache.
+            if _vix > _max_vix:
+                _short_block = f"India VIX {_vix:.1f} > {_max_vix:.1f} — shorts blocked (panic guard)"
+
+        # (b) news-path short switch — .env default with a RuntimeConfig override.
+        if _short_block is None and intent.strategy_family in (
+            StrategyFamily.EVENT_DRIVEN, StrategyFamily.DIRECT_NEWS
+        ):
+            _news_short = bool(getattr(settings, "NEWS_SHORT_ENABLED", True))
+            try:
+                from utils.runtime_config import RuntimeConfig as _RC2
+                _cfg2 = await _RC2.load(session)
+                _news_short = bool(_cfg2._get("news_short_enabled", _news_short))
+            except Exception as _e2:
+                logger.debug(f"[execution_gate] news_short flag unreadable ({_e2}) — using .env")
+            if not _news_short:
+                _short_block = "news-driven shorts are switched off (NEWS_SHORT_ENABLED=false)"
+
+        if _short_block:
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_SHORT, mode=mode,
+                                   reason=_short_block, metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (short) {intent.symbol} — {_short_block}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=_short_block,
+                                       outcome=result.outcome)
+
     # ── News-Only architecture hard-block (2026-07-21) ─────────────────────────
     # User-directed strategic pivot: "Make the system pure News-Only. Hard-block
     # all independent TECHNICAL strategy trade origination... The final
@@ -561,7 +660,29 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     # SL/TP placement, position sizing, risk validation, and market context for
     # EVENT_DRIVEN candidates. It may no longer independently create, authorize,
     # or execute a trade of its own.
-    _TECHNICAL_TRADE_ORIGINATION_BLOCKED = True
+    # UNBLOCKED 2026-08-20 by owner decision; see contract SS10b.
+    # Was hardcoded True since the News-Only pivot. Now a setting so it can be
+    # re-blocked instantly without a deploy, and so a RuntimeConfig kill switch
+    # can reach it across processes.
+    #
+    # WHAT THIS COSTS: a TECHNICAL intent has NO canonical-event requirement --
+    # _verify_canonical_event short-circuits for every non-EVENT_DRIVEN family --
+    # so `NO EVENT -> NO TRADE` no longer holds for this family. It also has NO
+    # per-family daily risk bucket, unlike TACTICAL's 2%/day. What still applies:
+    # market hours, confidence provenance, the 12-check validate_signal (R:R 2.0,
+    # 5% notional cap), MAX_PORTFOLIO_RISK 15% and MAX_OPEN_POSITIONS 125.
+    _TECHNICAL_TRADE_ORIGINATION_BLOCKED = bool(
+        getattr(settings, "TECHNICAL_ORIGINATION_BLOCKED", True)
+    )
+    try:
+        from utils.runtime_config import RuntimeConfig as _RC
+        _rc = await _RC.load(session)
+        _TECHNICAL_TRADE_ORIGINATION_BLOCKED = bool(
+            getattr(_rc, "technical_origination_blocked",
+                    _TECHNICAL_TRADE_ORIGINATION_BLOCKED)
+        )
+    except Exception as _exc:
+        logger.debug(f"[execution_gate] technical runtime flag unreadable ({_exc}) — using .env")
     if _TECHNICAL_TRADE_ORIGINATION_BLOCKED and intent.strategy_family == StrategyFamily.TECHNICAL:
         reason = (
             "TECHNICAL strategy_family trade origination is hard-blocked — the system is "
@@ -597,6 +718,46 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
             result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
                                     metadata={"strategy": intent.strategy})
             logger.warning(f"[execution_gate] BLOCKED (pre-event live gate) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+    if intent.strategy_family == StrategyFamily.TACTICAL:
+        # Explicit branch rather than relying on "nothing blocks it".
+        #
+        # Every family check in this function is an `==` test against one
+        # member, so a new enum member is ALLOWED BY DEFAULT — adding
+        # StrategyFamily.TACTICAL alone was already enough to make it execute.
+        # That is too quiet for a family the contract forbade until today, so
+        # the authority is stated here where a reader looking for "can TACTICAL
+        # trade?" will actually find it.
+        #
+        # The enabled flag is read from RuntimeConfig (DB-backed) with the .env
+        # value as the fallback, so it doubles as an instant cross-process kill
+        # switch: no restart, and unlike settings.AGENT_ENABLED (audit D4) it is
+        # actually visible to the Celery worker.
+        _tactical_on = settings.TACTICAL_EXECUTION_ENABLED
+        try:
+            from utils.runtime_config import RuntimeConfig
+            _cfg = await RuntimeConfig.load(session)
+            _tactical_on = bool(getattr(_cfg, "tactical_execution_enabled", _tactical_on))
+        except Exception as exc:
+            logger.debug(f"[execution_gate] tactical runtime flag unreadable ({exc}) — using .env")
+
+        if not _tactical_on:
+            reason = "Tactical execution disabled (TACTICAL_EXECUTION_ENABLED=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_DISABLED, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.info(f"[execution_gate] BLOCKED (tactical master switch) {intent.symbol} strategy={intent.strategy}")
+            await _log_intent_audit(intent, mode, result, session)
+            return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
+
+        if mode == TradeMode.LIVE and not settings.TACTICAL_LIVE_TRADING:
+            # Paper is the only sanctioned mode for Path F until it has a track
+            # record — see the contract amendment's 7-day condition.
+            reason = "Tactical live trading disabled (TACTICAL_LIVE_TRADING=False)"
+            result = RoutingResult(outcome=RoutingOutcome.BLOCKED_GATE, mode=mode, reason=reason,
+                                    metadata={"strategy": intent.strategy})
+            logger.warning(f"[execution_gate] BLOCKED (tactical live gate) {intent.symbol} strategy={intent.strategy}")
             await _log_intent_audit(intent, mode, result, session)
             return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
@@ -798,9 +959,34 @@ async def execute_trade_intent(intent: TradeIntent, session: AsyncSession) -> Ro
                 f"Halving BUY quantity from {old_units} to {new_units} to manage risk."
             )
 
-    result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy)
+    result = await route_decision(auth.signal, session, position_size=position_size, source=intent.strategy, product=intent.product)
     await _log_intent_audit(intent, auth.mode, result, session)
     return result
+
+
+def _emitter_identity() -> dict:
+    """Who wrote this audit row.
+
+    `simulation_logs` records no emitting process, so production traffic and
+    test traffic are indistinguishable at query time. That is not theoretical:
+    144 rows for the fixture symbol TESTCO.NS sit in the production table, and
+    attributing them required tracing an error string that happened to land in
+    a payload — a code trace, not a query.
+
+    Additive JSON only. It changes no routing decision and no execution
+    behaviour, and historical rows are left exactly as they are.
+    """
+    import os
+    import sys
+    return {
+        # PYTEST_CURRENT_TEST is set by pytest for the duration of each test,
+        # so this is true only for rows a test actually caused.
+        "pytest": bool(os.environ.get("PYTEST_CURRENT_TEST")),
+        # argv[0]'s basename distinguishes the celery workers, the news engine
+        # and uvicorn from one another without leaking a full path.
+        "process": os.path.basename(sys.argv[0] or "") or "unknown",
+        "pid": os.getpid(),
+    }
 
 
 async def _log_intent_audit(
@@ -839,6 +1025,7 @@ async def _log_intent_audit(
                 "reason":            result.reason,
                 "mode":              mode.value,
                 "strategy":          intent.strategy,
+                "emitter":           _emitter_identity(),
             },
             timestamp=datetime.utcnow(),
         )

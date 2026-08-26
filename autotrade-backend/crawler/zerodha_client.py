@@ -22,6 +22,11 @@ from pathlib import Path
 
 import httpx
 
+from crawler.zerodha_kite_limiter import Bucket as _RLBucket, acquire as _rl_acquire
+_RL_QUOTE = _RLBucket.QUOTE
+_RL_ORDER = _RLBucket.ORDER
+_RL_EXIT  = _RLBucket.EXIT
+
 from utils.config import settings
 from utils.logger import logger
 
@@ -49,6 +54,7 @@ class KiteClient:
     # ── Low-level transport ───────────────────────────────────────────────────
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
+        await _rl_acquire(_RL_QUOTE)   # D6
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
                 f"{self.BASE}{path}",
@@ -62,6 +68,7 @@ class KiteClient:
             return data["data"]
 
     async def _post(self, path: str, data: dict | None = None) -> dict:
+        await _rl_acquire(_RL_ORDER)   # D6
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 f"{self.BASE}{path}",
@@ -75,6 +82,7 @@ class KiteClient:
             return result["data"]
 
     async def _delete(self, path: str, params: dict | None = None) -> dict | None:
+        await _rl_acquire(_RL_ORDER)   # D6
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.delete(
                 f"{self.BASE}{path}",
@@ -137,8 +145,12 @@ class KiteClient:
 
     # ── Market data ───────────────────────────────────────────────────────────
 
-    async def get_quote(self, instruments: list[str]) -> dict:
+    async def get_quote(self, instruments: list[str], *, exit_bucket: bool = False) -> dict:
         """Full quote for a list of instruments ('NSE:RELIANCE', etc.)."""
+        # D6: shared cross-process Kite quote throttle. exit_bucket routes
+        # stop-loss/exit reads to a RESERVED quota so a dashboard or scan
+        # burst can never delay an exit. Fails open — never raises.
+        await _rl_acquire(_RL_EXIT if exit_bucket else _RL_QUOTE)
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
                 f"{self.BASE}/quote",
@@ -148,8 +160,12 @@ class KiteClient:
             r.raise_for_status()
             return r.json()["data"]
 
-    async def get_ohlc(self, instruments: list[str]) -> dict:
+    async def get_ohlc(self, instruments: list[str], *, exit_bucket: bool = False) -> dict:
         """Lightweight OHLC + last price."""
+        # D6: shared cross-process Kite quote throttle. exit_bucket routes
+        # stop-loss/exit reads to a RESERVED quota so a dashboard or scan
+        # burst can never delay an exit. Fails open — never raises.
+        await _rl_acquire(_RL_EXIT if exit_bucket else _RL_QUOTE)
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
                 f"{self.BASE}/quote/ohlc",
@@ -159,8 +175,12 @@ class KiteClient:
             r.raise_for_status()
             return r.json()["data"]
 
-    async def get_ltp(self, instruments: list[str]) -> dict:
+    async def get_ltp(self, instruments: list[str], *, exit_bucket: bool = False) -> dict:
         """Last traded price only — lightest endpoint."""
+        # D6: shared cross-process Kite quote throttle. exit_bucket routes
+        # stop-loss/exit reads to a RESERVED quota so a dashboard or scan
+        # burst can never delay an exit. Fails open — never raises.
+        await _rl_acquire(_RL_EXIT if exit_bucket else _RL_QUOTE)
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
                 f"{self.BASE}/quote/ltp",

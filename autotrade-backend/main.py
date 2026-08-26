@@ -210,6 +210,88 @@ async def lifespan(app: FastAPI):
 
     _bg_tasks.append(_asyncio.create_task(_warmup_info_cache()))
 
+    # ── Ticker subscription reconcile ────────────────────────────────────────
+    # The KiteTicker lives in THIS process, but trades are opened by the news
+    # engine and the Celery worker — separate OS processes whose
+    # `subscribe_open_position()` call hits `_active_ws is None` and returns
+    # silently. A position opened elsewhere therefore never got subscribed, so
+    # Kite never pushed a tick for it and its price stayed frozen at the last
+    # cached value. (The live news path never called subscribe at all.)
+    #
+    # Reconciling against `open_positions` here makes the DB the source of
+    # truth, so it works regardless of which process opened the trade and
+    # self-heals after a reconnect. See
+    # crawler/zerodha_ticker.py::sync_open_position_subscriptions.
+    async def _ticker_subscription_loop():
+        await _asyncio.sleep(45)   # let the ticker connect and do its first subscribe
+        while not _stop_event.is_set():
+            try:
+                from crawler.zerodha_ticker import sync_open_position_subscriptions
+                await sync_open_position_subscriptions()
+            except Exception as exc:
+                logger.warning(f"[ticker_sync] reconcile failed: {exc}")
+            try:
+                await _asyncio.wait_for(_stop_event.wait(), timeout=30)
+                break
+            except _asyncio.TimeoutError:
+                pass
+
+    _bg_tasks.append(_asyncio.create_task(_ticker_subscription_loop()))
+
+    # ── Fast 1-minute candle lane (Path F, audit blocker 3) ──────────────────
+    # kite_live_candles bulk-fetches thousands of symbols, so the newest 1m bar
+    # in `candles` trails 15-40 minutes — measured at 37 min during the
+    # 2026-08-20 audit, which was rejecting F1 entirely for stretches.
+    #
+    # The tick stream is already here. This aggregates it into 1m bars for the
+    # F1 universe and publishes to Redis, costing no Kite REST quota and adding
+    # no Celery task. It must run in THIS process because LIVE_TICKS is a
+    # module-level dict owned by the ticker thread.
+    async def _fast_candle_loop():
+        from crawler.live_candle_builder import get_builder
+
+        await _asyncio.sleep(50)   # after the ticker has connected and subscribed
+        builder = get_builder()
+        interval = int(getattr(settings, "TACTICAL_FAST_CANDLE_INTERVAL_SEC", 5))
+        universe: list[str] = []
+        last_universe_refresh = 0.0
+
+        while not _stop_event.is_set():
+            try:
+                if not getattr(settings, "TACTICAL_FAST_CANDLE_ENABLED", True):
+                    await _asyncio.sleep(30)
+                    continue
+
+                import time as _t
+                # Refresh the universe every 5 min — cheap, and picks up
+                # hub_universe rebuilds without a restart.
+                if _t.monotonic() - last_universe_refresh > 300:
+                    try:
+                        from db.database import AsyncSessionLocal
+                        from engine.tactical_data_fetcher import get_f1_universe
+                        async with AsyncSessionLocal() as _s:
+                            # Same universe F1 scans, so every symbol it looks at
+                            # can have a fresh tick-built bar. Symbols with no live
+                            # tick are skipped by sample_once, so an unsubscribed
+                            # name costs nothing here.
+                            universe = await get_f1_universe(_s)
+                        last_universe_refresh = _t.monotonic()
+                    except Exception as exc:
+                        logger.debug(f"[fast_candle] universe refresh failed: {exc}")
+
+                if universe:
+                    await builder.sample_once(universe)
+            except Exception as exc:
+                logger.warning(f"[fast_candle] sample loop error: {exc}")
+
+            try:
+                await _asyncio.wait_for(_stop_event.wait(), timeout=interval)
+                break
+            except _asyncio.TimeoutError:
+                pass
+
+    _bg_tasks.append(_asyncio.create_task(_fast_candle_loop()))
+
     # ── Kite WebSocket ticker ────────────────────────────────────────────────
     # Start whenever Zerodha is enabled + token is present — market-hours check
     # was removed so a mid-session backend restart auto-reconnects the feed.

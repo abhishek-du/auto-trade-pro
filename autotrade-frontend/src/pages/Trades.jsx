@@ -78,7 +78,7 @@ function TradesInner() {
   const positionBySymbol = useMemo(() => {
     const m = {};
     positions.forEach((p) => {
-      const sym = (p.symbol ?? '').replace('.NS', '').toUpperCase();
+      const sym = (p.symbol ?? '').replace('.NS', '').replace('.BO', '').toUpperCase();
       if (sym) m[sym] = p;
     });
     return m;
@@ -97,7 +97,7 @@ function TradesInner() {
   // For open trades, use live unrealised P&L from position map (or trade record)
   const openTrades = trades.filter((t) => (t.status ?? 'CLOSED').toUpperCase() === 'OPEN');
   const openPnls   = openTrades.map((t) => {
-    const tradeSym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').toUpperCase();
+    const tradeSym = (t.symbol ?? t.ticker ?? '').replace('.NS', '').replace('.BO', '').toUpperCase();
     const pos      = positionBySymbol[tradeSym] ?? null;
     return pos?.unrealised_pnl ?? t.pnl ?? 0;
   });

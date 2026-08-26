@@ -259,7 +259,12 @@ async def open_paper_trade(
     # This gate catches bugs in ANY caller (india_trade_loop, agent_loop,
     # paper_trade_loop, manual trigger). No trade touches the DB without passing.
     _guard_equity = float(getattr(settings, "AGENT_EQUITY", 2_000_000))
-    _guard_max_w  = float(getattr(settings, "AGENT_MAX_POSITION_WEIGHT", 0.05))
+    # Family-aware: TACTICAL carries its own 10% cap (see
+    # engine.risk_manager.max_position_weight_for). Imported locally because
+    # engine.decision_router imports this module, so a top-level import back
+    # into engine.risk_manager would close a cycle.
+    from engine.risk_manager import max_position_weight_for
+    _guard_max_w  = max_position_weight_for(signal)
     _guard_max_notional = _guard_equity * _guard_max_w
     usd_value_check = position_size.get("usd_value", 0)
     if usd_value_check > _guard_max_notional * 1.10:
@@ -378,6 +383,10 @@ async def open_paper_trade(
         opened_at=now,
         # Attribution
         strategy_name=(_strategy[:40] if _strategy else None),
+        # _intent_to_signal attaches this as a plain string; a signal that never
+        # passed through the router has none, which is correctly stored as NULL
+        # rather than guessed at.
+        strategy_family=(str(getattr(signal, "strategy_family", None) or "")[:20] or None),
         source=(getattr(signal, "source", None) or ("AI Predict" if _strategy == "PRE_EVENT_EXPECTATION_GAP" else None)),
         regime_at_entry=(_regime_entr[:20] if _regime_entr else None),
         entry_reason=_entry_rsn,
@@ -717,7 +726,7 @@ async def compute_live_pnl(
     if eq_syms:
         try:
             from crawler.zerodha_market import get_live_prices
-            quotes = await get_live_prices(eq_syms)
+            quotes = await get_live_prices(eq_syms, exit_bucket=True)   # D6: reserved exit quota
             for sym, q in (quotes or {}).items():
                 px = q.get("price") or q.get("last_price")
                 if px and px > 0:
@@ -835,7 +844,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
     if eq_syms:
         try:
             from crawler.zerodha_market import get_live_prices
-            quotes = await get_live_prices(eq_syms)
+            quotes = await get_live_prices(eq_syms, exit_bucket=True)   # D6: reserved exit quota
             for sym, q in (quotes or {}).items():
                 px = q.get("price") or q.get("last_price")
                 if px and px > 0:

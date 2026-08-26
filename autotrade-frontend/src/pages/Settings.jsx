@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Save, Plus, X, Settings as SettingsIcon, AlertTriangle, TrendingUp, Shield, Layers, Ban, Ghost } from 'lucide-react';
+import { Save, Plus, X, Settings as SettingsIcon, AlertTriangle, TrendingUp, Shield, Layers, Ban, Ghost, Zap } from 'lucide-react';
 import toast from 'react-hot-toast';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { getSettings, saveSettings, apiFetch } from '../api/client';
@@ -194,57 +194,167 @@ function NseWatchlistEditor() {
   );
 }
 
-// ── Strategy toggles (UI-only — not wired to the backend) ───────────────────
-// Every strategy path documented in /pipeline and /documentation, with its
-// real current status. Toggle state lives entirely in the browser
-// (localStorage) — flipping a switch here does not call any API and does
-// not change what the live agent actually does. See STORAGE_KEY below.
+
+// ── Strategy Execution Toggles (BACKEND-WIRED) ─────────────────────────────
+// Unlike StrategiesPanel below — which is a local display preference — these
+// switches write to RuntimeConfig in the database. Every process (uvicorn,
+// Celery worker, news engine) reads the flag at its next decision point, so a
+// change takes effect without a restart.
+//
+// Flags default to ON when absent: a wiped table or a fresh DB must never
+// silently halt trading. That means "no data" reads as enabled, which is why
+// the panel shows an explicit error state rather than defaulting to off.
+
+const EXECUTION_STRATEGIES = [
+  { id: 'master_intelligence', name: 'Master Intelligence (Path A)',
+    desc: 'Scores the NSE universe into the shortlist and runs two discretionary exits. Does NOT originate trades.' },
+  { id: 'india_trade_loop', name: 'India Trade Loop (Path B — Technical)',
+    desc: 'Technical entries from the shortlist. Gates entries only — exits and stop-losses keep running when off.' },
+  { id: 'news_engine', name: 'News Engine (Path C — Event-Driven)',
+    desc: 'LLM ReAct debate on canonical events. When off, news is still crawled and classified; only execution stops.' },
+  { id: 'pre_event_gap', name: 'Pre-Event Gap (Path D)',
+    desc: 'Nowcasts the surprise on scheduled corporate events 1–15 days out.' },
+  { id: 'direct_news', name: 'Direct News (Path E)',
+    desc: 'Trades straight off event classification, no LLM debate.' },
+  { id: 'tactical', name: 'Tactical Pipeline (Path F)',
+    desc: 'Intraday + mean-reversion scans. When off, signals are still scored and persisted; only execution stops.' },
+];
+
+function StrategyExecutionPanel() {
+  const [flags,   setFlags]   = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+  const [saving,  setSaving]  = useState(null);   // id currently being written
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await apiFetch('/api/v1/settings/strategies');
+      setFlags(d?.flags ?? null);
+      setError(null);
+    } catch (e) {
+      setError(e?.message || 'Could not load strategy toggles');
+      setFlags(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = async (id) => {
+    if (!flags || saving) return;
+    const next = !flags[id];
+    // Optimistic, then reconciled against the server's echo below — the server
+    // is the authority on what is actually running.
+    setFlags(f => ({ ...f, [id]: next }));
+    setSaving(id);
+    try {
+      const res = await apiFetch('/api/v1/settings/strategies', {
+        method: 'POST',
+        body: JSON.stringify({ flags: { [id]: next } }),
+      });
+      if (res?.flags) setFlags(res.flags);
+      const label = EXECUTION_STRATEGIES.find(s => s.id === id)?.name || id;
+      toast.success(`${label} ${next ? 'enabled' : 'disabled'} — effective now`);
+      if (res?.all_disabled) {
+        toast('All strategies are off. Nothing will open a new trade.', { icon: '\u26a0\ufe0f' });
+      }
+    } catch (e) {
+      setFlags(f => ({ ...f, [id]: !next }));   // roll back
+      toast.error(e?.message || 'Could not save — the strategy was not changed');
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const allOff = flags && EXECUTION_STRATEGIES.every(s => !flags[s.id]);
+
+  return (
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
+        <Zap size={16} className="text-emerald-400" />
+        <h2 className="text-slate-200 font-semibold text-sm">Strategy Execution</h2>
+        <span className="text-muted text-xs">— live control, takes effect immediately</span>
+      </div>
+
+      <div className="flex items-start gap-2.5 mx-5 mt-4 bg-emerald-500/10 border border-emerald-500/25 rounded-lg px-3 py-2.5">
+        <Zap size={13} className="text-emerald-400 mt-0.5 shrink-0" />
+        <p className="text-emerald-300 text-[11px] leading-relaxed">
+          These switches <strong>do control the live agent</strong>. Changes are stored in the database and
+          picked up by every process at its next decision — no restart required.
+          Stop-losses are never gated: open positions keep exiting even with every strategy off.
+        </p>
+      </div>
+
+      {allOff && (
+        <div className="flex items-start gap-2.5 mx-5 mt-3 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2.5">
+          <AlertTriangle size={13} className="text-amber-400 mt-0.5 shrink-0" />
+          <p className="text-amber-300 text-[11px] leading-relaxed">
+            Every strategy is off. Nothing will originate a new trade.
+          </p>
+        </div>
+      )}
+
+      <div className="px-5 py-2">
+        {loading && <div className="py-6 flex justify-center"><LoadingSpinner /></div>}
+
+        {!loading && error && (
+          <div className="py-5 text-center">
+            <p className="text-rose-300 text-xs mb-2">{error}</p>
+            <button onClick={load}
+              className="text-cyan text-xs underline hover:no-underline focus:outline-none focus:ring-2 focus:ring-cyan/50 rounded">
+              Try again
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && flags && (
+          <div className="divide-y divide-border/50">
+            {EXECUTION_STRATEGIES.map(s => (
+              <div key={s.id} className="flex items-center gap-3 py-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-slate-200 text-sm font-medium">{s.name}</p>
+                    <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                      flags[s.id] ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-600/30 text-slate-400'
+                    }`}>
+                      {flags[s.id] ? 'On' : 'Off'}
+                    </span>
+                  </div>
+                  <p className="text-muted text-[11px] mt-0.5 leading-snug">{s.desc}</p>
+                </div>
+                <ToggleSwitch
+                  checked={!!flags[s.id]}
+                  disabled={saving === s.id}
+                  onClick={() => toggle(s.id)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Supporting components (UI-only — not wired to the backend) ──────────────
+// The six ORIGINATION PATHS are controlled by StrategyExecutionPanel above,
+// which reads its state from the API and is therefore always accurate. This
+// list covers only the components that have no individual runtime switch.
+//
+// Deliberately does NOT repeat the six paths. It used to, and the copies drifted:
+// on 2026-08-20 this panel still showed Path A and Path B as "BLOCKED
+// (architecture)" a day after the block was lifted, listed four F&O strategies
+// as LIVE months after the subsystem was deleted in 91457d7, and never listed
+// Path F at all. Hardcoded status that duplicates backend state goes stale.
+//
+// Toggle state here lives entirely in the browser (localStorage) and changes
+// nothing about what the agent does.
 
 const STORAGE_KEY = 'prajna_strategy_toggles_v1';
 
 const STRATEGIES = [
-  {
-    id: 'news_strategy',
-    name: 'News Strategy (Event-Driven)',
-    desc: 'Clusters headlines into a canonical event, runs an LLM ReAct debate, trades on TAKE. The primary equity engine.',
-    status: 'LIVE',
-  },
-  {
-    id: 'pre_event_gap',
-    name: 'Pre-Event Expectation Gap',
-    desc: 'Nowcasts the likely surprise on scheduled corporate events (earnings, board meetings) 1–15 days out.',
-    status: 'LIVE',
-  },
-  {
-    id: 'direct_news',
-    name: 'Direct News',
-    desc: 'Trades directly off event classification — no LLM debate. Fires alongside News Strategy on the same event.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_options',
-    name: 'F&O — Option Buying',
-    desc: 'Options buying off the symbol-aware options factor.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_futures',
-    name: 'F&O — Futures',
-    desc: 'Futures execution with its own margin model.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_hedge',
-    name: 'F&O — Hedging',
-    desc: 'Protective hedge overlay on open positions.',
-    status: 'LIVE',
-  },
-  {
-    id: 'fno_vol',
-    name: 'F&O — Volatility Strategies',
-    desc: 'Volatility-targeting option strategies (spreads/straddles).',
-    status: 'LIVE',
-  },
   {
     id: 'intraday_mis',
     name: 'Intraday MIS',
@@ -262,18 +372,6 @@ const STRATEGIES = [
     name: 'ML Direction Predictor',
     desc: 'Per-symbol LSTM 3-class (UP/DOWN/FLAT) prediction, ±15 nudge on the technical score.',
     status: 'LIVE',
-  },
-  {
-    id: 'master_intel_cycle',
-    name: 'Master Intelligence Cycle (Path A)',
-    desc: 'Pure technical scan. Hard-blocked from opening trades by the News-Only architecture decision — scores only, feeds context to the live paths.',
-    status: 'BLOCKED',
-  },
-  {
-    id: 'india_trade_loop',
-    name: 'India Trade Loop (Path B)',
-    desc: 'Same News-Only hard-block as Path A — runs for instrumentation only, never executes.',
-    status: 'BLOCKED',
   },
   {
     id: 'scan_paper_trader',
@@ -424,15 +522,16 @@ function StrategiesPanel() {
     <div className="glass-panel border border-border rounded-xl overflow-hidden">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
         <Layers size={16} className="text-purple-400" />
-        <h2 className="text-slate-200 font-semibold text-sm">Strategies</h2>
-        <span className="text-muted text-xs">— every strategy path present in the code</span>
+        <h2 className="text-slate-200 font-semibold text-sm">Supporting Components</h2>
+        <span className="text-muted text-xs">— no individual runtime switch</span>
       </div>
 
       <div className="flex items-start gap-2.5 mx-5 mt-4 bg-blue-500/10 border border-blue-500/25 rounded-lg px-3 py-2.5">
         <AlertTriangle size={13} className="text-blue-400 mt-0.5 shrink-0" />
         <p className="text-blue-300 text-[11px] leading-relaxed">
-          These switches are a <strong>local display preference only</strong> — they are not wired to the
-          trading agent. Turning a live strategy off here does not stop it from trading.
+          Components that run alongside the six origination paths. These switches are a
+          <strong> local display preference only</strong> and do not affect trading.
+          The six paths themselves are controlled in <strong>Strategy Execution</strong> above.
         </p>
       </div>
 
@@ -537,6 +636,7 @@ export default function Settings() {
       </div>
 
       {/* Strategies — always visible, never blocked by the backend fetch below */}
+      <StrategyExecutionPanel />
       <StrategiesPanel />
 
       {loading ? (

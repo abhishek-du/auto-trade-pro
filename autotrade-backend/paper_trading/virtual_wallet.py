@@ -204,6 +204,35 @@ class VirtualWallet:
         if pnl > 0:
             wallet.winning_trades += 1
 
+        # Recompute unrealised from the positions that are ACTUALLY still open.
+        #
+        # This line used to reuse `wallet.unrealised_pnl` as-is, which still held
+        # the just-closed position's final mark-to-market value — so the same
+        # trade was counted twice: once as net realised, and again as phantom
+        # unrealised. Because a closed position's last `current_price` IS its
+        # exit price, that phantom equals the trade's GROSS pnl exactly.
+        #
+        # Observed 2026-08-19: one trade closed for +145.51 net (+181.73 gross)
+        # with no other position open, and the daily snapshot recorded equity
+        # 500,327.23 == 500,000 + 145.51 + 181.73. Daily P&L read 327.23 instead
+        # of 145.51 — 2.25x overstated. take_daily_snapshot() is called
+        # on-demand right after a close, so this fired on EVERY close, and the
+        # inflated equity also propagated into peak_balance, which understates
+        # max_drawdown — a risk-control input, not just a chart.
+        #
+        # flush() first: the sessionmaker sets autoflush=False, so the caller's
+        # pending DELETE (close) or size reduction (scale-out) would otherwise
+        # not be visible to this SELECT. close_paper_trade already deletes and
+        # flushes before calling us; this makes the guarantee local instead of
+        # depending on the caller.
+        await session.flush()
+        total_unrealised = (
+            await session.execute(
+                select(func.coalesce(func.sum(OpenPosition.unrealised_pnl), 0.0))
+            )
+        ).scalar() or 0.0
+        wallet.unrealised_pnl = float(total_unrealised)
+
         start = await VirtualWallet._start_balance(session)
         wallet.equity = start + wallet.realised_pnl + wallet.unrealised_pnl
         VirtualWallet._update_drawdown(wallet)

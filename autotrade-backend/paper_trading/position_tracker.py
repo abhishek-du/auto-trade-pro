@@ -293,3 +293,108 @@ class PositionTracker:
             select(OpenPosition.id).where(OpenPosition.symbol == symbol).limit(1)
         )
         return result.scalar_one_or_none() is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exit management (2026-08-21)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE GAP THIS CLOSES
+# -------------------
+# After the T1 50% scale-out, fast_sl_check sets `take_profit = 0.0` and moves
+# the stop to breakeven, with a comment deferring to "trailing logic in
+# update_positions_with_current_prices". That trailing logic does not exist --
+# grepped, there is exactly one stop_loss reassignment in the whole exit path
+# and it is the breakeven line itself. So the runner had NO upside management:
+# it could only end at breakeven or at the 15:10 squareoff.
+
+
+def update_trailing_stop(pos, current_price: float, atr: float) -> tuple[bool, str | None]:
+    """Ratchet the stop up behind the peak. Returns (changed, note).
+
+    Two stages, in order:
+      1. Once the trade is +TRAILING_BREAKEVEN_TRIGGER_PCT, the stop moves to
+         entry. Risk on the position becomes zero.
+      2. Thereafter the stop trails at TRAILING_STOP_ATR_MULT ATR below the
+         highest high seen SINCE ENTRY (a chandelier exit).
+
+    The stop only ever moves in the favourable direction -- `max()` for a long,
+    `min()` for a short. A trailing stop that can loosen is not a stop.
+
+    Mutates `pos` but does not commit; the caller owns the transaction.
+    """
+    from utils.config import settings
+
+    if not bool(getattr(settings, "ENABLE_TRAILING_STOP", True)):
+        return False, None
+    if current_price <= 0 or pos.entry_price <= 0:
+        return False, None
+
+    is_long = str(getattr(pos.direction, "value", pos.direction)).upper() == "BUY"
+    note = None
+
+    # Track the extreme. Seeded from entry so a position opened before this
+    # column existed does not trail from a NULL.
+    if is_long:
+        peak = max(float(pos.highest_high or pos.entry_price), current_price)
+        pos.highest_high = peak
+    else:
+        peak = min(float(pos.lowest_low or pos.entry_price), current_price)
+        pos.lowest_low = peak
+
+    gain_pct = ((current_price / pos.entry_price - 1.0) * 100.0) if is_long else \
+               ((pos.entry_price / current_price - 1.0) * 100.0)
+
+    old_sl = float(pos.stop_loss or 0.0)
+    new_sl = old_sl
+
+    # Stage 1 — breakeven.
+    trigger = float(getattr(settings, "TRAILING_BREAKEVEN_TRIGGER_PCT", 2.0))
+    if gain_pct >= trigger:
+        new_sl = max(new_sl, pos.entry_price) if is_long else min(new_sl, pos.entry_price)
+        if new_sl != old_sl:
+            note = f"breakeven at +{gain_pct:.1f}%"
+
+    # Stage 2 — chandelier, and ONLY once the position has actually earned it.
+    #
+    # Gating this on peak gain is not cosmetic. Without it the chandelier applies
+    # to flat and losing positions too, converting the original wide stop into a
+    # tight one: a dry run on the live book (2026-08-21) moved CEIGALL's stop
+    # from 285.81 to 314.72 while the position was DOWN 0.04% — 1% under the
+    # live price, so any ordinary pullback would have stopped it out. A trailing
+    # stop is for protecting profit, not for tightening a thesis that has not
+    # worked yet.
+    peak_gain_pct = ((peak / pos.entry_price - 1.0) * 100.0) if is_long else \
+                    ((pos.entry_price / peak - 1.0) * 100.0)
+    mult = float(getattr(settings, "TRAILING_STOP_ATR_MULT", 2.5))
+    if atr and atr > 0 and peak_gain_pct >= trigger:
+        chandelier = peak - mult * atr if is_long else peak + mult * atr
+        cand = max(new_sl, chandelier) if is_long else min(new_sl, chandelier)
+        # Never trail past the current price -- that would stop out instantly.
+        if is_long and cand < current_price and cand > new_sl:
+            new_sl, note = cand, f"trailed to {cand:.2f} (peak {peak:.2f})"
+        elif (not is_long) and cand > current_price and cand < new_sl:
+            new_sl, note = cand, f"trailed to {cand:.2f} (trough {peak:.2f})"
+
+    if new_sl != old_sl:
+        pos.stop_loss = new_sl
+        return True, note
+    return False, None
+
+
+def check_time_exit(pos, now_ist) -> bool:
+    """True when an intraday position must be flattened before the close.
+
+    NOTE: a scheduled squareoff already exists (`_intraday_squareoff_task`,
+    15:10 IST). This is a per-tick backstop for the 5s loop so a position is not
+    left open if that task is starved on the worker -- which has happened.
+    """
+    from utils.config import settings
+
+    if not bool(getattr(settings, "TIME_BASED_EXIT_ENABLED", True)):
+        return False
+    if str(getattr(pos, "product", "") or "").upper() != "MIS":
+        return False
+    hour = int(getattr(settings, "TIME_BASED_EXIT_HOUR", 15))
+    minute = int(getattr(settings, "TIME_BASED_EXIT_MINUTE", 10))
+    return (now_ist.hour, now_ist.minute) >= (hour, minute)
