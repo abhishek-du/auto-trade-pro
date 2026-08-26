@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import re
-from datetime import datetime
+import time as _time
+from datetime import datetime, timedelta
 from db.database import AsyncSessionLocal
 from db.models import PreMarketNewsQueue
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from crawler.news_crawler import (
     fetch_newsdata_india, fetch_free_rss_news, fetch_nse_corporate_announcements,
     SentimentAnalyser,
@@ -13,7 +14,17 @@ from engine.agent.decision_engine import llm_tooluse_candidate
 from utils.llm import call_llm_chat
 from crawler.india_price_feed import is_nse_market_open
 
-logging.basicConfig(level=logging.INFO)
+# Timestamped format (2026-08-26, phase 19). basicConfig's default is
+# "LEVEL:name:message" with NO timestamp, and this logger's output lands in
+# logs/news-engine.err. That made every line in that file undatable, which is
+# why the 2026-08-26 investigation could not attribute poller/queue/consumer
+# counts to a session — the file appends since 2026-08-19, so seven days of
+# lines were indistinguishable. Format only; level and handlers unchanged.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger("news_engine")
 
 # Track processed news headlines to avoid duplicates (persist in memory for the run)
@@ -26,6 +37,13 @@ _processed_seq_ids = set()
 # free RSS feeds are — polling it every 15s (this loop's cadence) risks the
 # IP getting blocked. Gate it behind its own, slower cadence instead.
 _NSE_ANNOUNCEMENT_POLL_SEC = 60
+
+# Oldest a premarket_news_queue row may be and still be drained at market open
+# (2026-08-26, phase 19). Generous by design: 3 days covers a Friday-evening
+# filing drained on Monday morning, including a long weekend. See the drain site
+# for the measurement that motivated it — 2,451 PENDING rows reaching back to
+# 2026-08-14, re-read from the start on every cycle.
+_PREMARKET_MAX_AGE_DAYS = 3
 _last_nse_announcement_fetch: datetime | None = None
 
 # The announcement poller runs as its own asyncio task (2026-08-25). It has to,
@@ -115,6 +133,20 @@ async def _nse_announcement_poller() -> None:
                 _processed_seq_ids.add(ann["seq_id"])
                 _NSE_POLL_STATS["nse_items_enqueued"] += 1
 
+            # Telemetry on EVERY poll (2026-08-26, phase 19), not only when
+            # something new arrived. A poll that finds nothing new is exactly
+            # the case the 2026-08-26 investigation could not distinguish from
+            # a poll that never happened: the fetch logged "N/20 high-impact"
+            # from inside crawler.news_crawler, while this module stayed silent
+            # unless `new` was non-empty. Counts and a queue depth only — no
+            # headlines, no payloads, no credentials.
+            logger.info(
+                f"[nse_poller] poll seen={seen} new={len(new)} "
+                f"dup={seen - len(new)} enqueued={_NSE_POLL_STATS['nse_items_enqueued']} "
+                f"dropped={_NSE_POLL_STATS['nse_items_dropped']} "
+                f"depth={_NSE_QUEUE.qsize()}/{_NSE_QUEUE_MAX} "
+                f"polls={_NSE_POLL_STATS['polls_total']} errors={_NSE_POLL_STATS['nse_errors']}"
+            )
             if new:
                 logger.info(
                     f"📋 [nse_poller] {len(new)} new of {seen} fetched — queued "
@@ -1612,19 +1644,83 @@ async def _news_discovery_cycles():
             market_open = is_nse_market_open()
 
             # 0. If Market is Open, Process DB Queue First
+            #
+            # Read the queue, CLOSE the transaction, then process. This used to
+            # be one `async with` that held a transaction open across the whole
+            # loop — and process_ticker() below is the full trade pipeline:
+            # evidence building, the LLM ReAct loop (up to 20 rounds), grounding
+            # checks and execution, i.e. minutes per ticker. The session sat in
+            # `idle in transaction` for that entire time; on 2026-08-26 one was
+            # observed at 1,955 seconds, holding a connection out of
+            # max_connections=100 the whole while.
+            #
+            # Marking each item PROCESSED in its own short transaction also
+            # removes a duplicate-trade risk: previously a failure on item 3 of
+            # 5 rolled back the single commit at the end, so items 1 and 2 were
+            # left PENDING after their trades had already been placed and were
+            # re-processed on the next cycle.
             if market_open:
                 async with AsyncSessionLocal() as session:
-                    res = await session.execute(select(PreMarketNewsQueue).where(PreMarketNewsQueue.status == "PENDING"))
-                    queued_items = res.scalars().all()
-                    
-                    if queued_items:
-                        logger.info(f"🌅 Market is OPEN! Processing {len(queued_items)} queued night/pre-market database alerts...")
-                        for item in queued_items:
-                            await process_ticker(item.symbol, item.side, item.headline, item.summary)
-                            item.status = "PROCESSED"
-                            item.processed_at = datetime.now()
-                            session.add(item)
-                        await session.commit()
+                    # Only drain news that is genuinely "overnight" (2026-08-26,
+                    # phase 19). This table's own docstring says it exists for
+                    # "high-impact news captured outside of trading hours for
+                    # processing at market open" — but nothing ever bounded how
+                    # old a PENDING row may be, and the drain had no cutoff.
+                    #
+                    # Measured on 2026-08-26: 2,451 PENDING rows reaching back to
+                    # 2026-08-14 — twelve days. The engine's own log shows the
+                    # drain announcing "Processing 2611 queued" on 24 separate
+                    # occasions, i.e. re-reading the same backlog from the start
+                    # every time, spending a full LLM ReAct loop per item on
+                    # headlines up to twelve days stale. Only 570 process_ticker
+                    # invocations were logged against 65,270 drained items, so the
+                    # loop never got near the end before the cycle turned over —
+                    # and live NSE announcements were reached 4 times in 7 days.
+                    #
+                    # _PREMARKET_MAX_AGE_DAYS is deliberately generous: 3 days
+                    # covers a Friday-evening filing drained on Monday morning
+                    # (and a long weekend), while excluding the stale bulk. Older
+                    # rows are LEFT PENDING and simply not drained — no row is
+                    # mutated, deleted or expired here, so this is reversible by
+                    # reverting this file alone.
+                    _cutoff = datetime.now() - timedelta(days=_PREMARKET_MAX_AGE_DAYS)
+                    res = await session.execute(
+                        select(PreMarketNewsQueue).where(
+                            PreMarketNewsQueue.status == "PENDING",
+                            PreMarketNewsQueue.captured_at >= _cutoff,
+                        )
+                    )
+                    # Detach to plain values: the ORM instances die with the
+                    # session below, and nothing here needs them to stay live.
+                    queued_items = [
+                        (i.id, i.symbol, i.side, i.headline, i.summary)
+                        for i in res.scalars().all()
+                    ]
+
+                if queued_items:
+                    logger.info(f"🌅 Market is OPEN! Processing {len(queued_items)} queued night/pre-market database alerts...")
+                    # Record how far the drain actually gets (2026-08-26, phase
+                    # 19). The log used to announce the batch size and then say
+                    # nothing more, so a drain that announced 2,611 items and
+                    # completed 3 before the cycle turned over was
+                    # indistinguishable from one that finished. Counts only.
+                    _drain_t0 = _time.monotonic()
+                    _drain_done = 0
+                    for item_id, symbol, side, headline, summary in queued_items:
+                        await process_ticker(symbol, side, headline, summary)
+                        async with AsyncSessionLocal() as mark_session:
+                            await mark_session.execute(
+                                sa_update(PreMarketNewsQueue)
+                                .where(PreMarketNewsQueue.id == item_id)
+                                .values(status="PROCESSED", processed_at=datetime.now())
+                            )
+                            await mark_session.commit()
+                        _drain_done += 1
+                    logger.info(
+                        f"[premarket_drain] completed={_drain_done}/{len(queued_items)} "
+                        f"elapsed_s={int(_time.monotonic() - _drain_t0)} "
+                        f"max_age_days={_PREMARKET_MAX_AGE_DAYS}"
+                    )
             
             # 1. Fetch Global/Indian News (RSS)
             news_items = await fetch_free_rss_news() 
