@@ -590,6 +590,24 @@ async def _india_trade_loop():
         import asyncio as _aio14
         import time as _t13
         _DYN_MGMT_DEADLINE_SEC = 120.0
+
+        # Close the position-update transaction before the LLM stage begins
+        # (2026-08-26). update_positions_with_current_prices() above reaches
+        # VirtualWallet, whose _fetch() does SELECT ... FOR UPDATE on the single
+        # wallet row; without this commit that exclusive lock is held from :542
+        # until the end-of-cycle commit at :1410 — across the Bedrock call
+        # below. That is what produced the 44-backend convoy on 2026-08-26:
+        # every other task and API handler wanting the wallet queued behind one
+        # trade loop that was waiting on an external HTTP response.
+        #
+        # Committing at this phase boundary is the same reasoning the existing
+        # commit at :1379 already documents ("so the position is persisted even
+        # if the task hits SoftTimeLimitExceeded") — and it makes the exits and
+        # PnL marks from the phase above durable BEFORE a stage that can time
+        # out. Safe for the ORM objects still in use: celery_session() sets
+        # expire_on_commit=False (tasks/_db.py).
+        await session.commit()
+
         _dyn_t0 = _t13.monotonic()
         logger.info("[india_trade_loop] LLM_DYNAMIC_SL_TP_START")
         try:
@@ -3002,6 +3020,14 @@ def kite_live_candles_task(closing_sweep: bool = False):
             await _r.aclose()
 
     if not _run_async(_acquire_lock()):
+        # Log the skip (2026-08-26, phase 18). The lock itself is correct and
+        # stays: a 3-minute beat against a run that took 10-18 minutes would
+        # otherwise stack concurrent full-universe fetches until the worker
+        # pool is exhausted. But this path returned WITHOUT logging, so the
+        # loss was invisible — ~125 dispatches on 2026-08-26 produced 37
+        # completions and no record of the ~88 that were dropped. One line
+        # makes the effective cadence measurable instead of inferred.
+        logger.info("[kite_live_candles] SKIPPED already_running")
         return {"skipped": "already_running"}
 
     async def _run():

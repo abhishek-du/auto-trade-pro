@@ -397,37 +397,121 @@ async def sync_live_1m_candles(
 
     _IST = ZoneInfo("Asia/Kolkata")
     now_ist = _dt.datetime.now(_IST).replace(tzinfo=None)
-    from_dt = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    day_open_ist = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
     to_dt   = now_ist
 
     if symbols is None:
         symbols = list(settings.nse_symbols) + list(getattr(settings, "nse_mid_symbols", []))
+
+    # ── Per-symbol delta window (2026-08-26, phase 18) ───────────────────────
+    #
+    # This used to fetch [09:15 .. now] for EVERY symbol on EVERY run. Measured
+    # production consequence on 2026-08-26:
+    #
+    #   14:51:20  {'symbols': 2560, 'candles': 738902, 'saved': 65495}  1107s
+    #   15:13:24  {'symbols': 2560, 'candles': 807064, 'saved': 16679}
+    #   15:39:35  {'symbols': 2560, 'candles': 863744, 'saved': 20491}
+    #
+    # ~800,000 candles fetched to persist ~20,000 — a 97.5% waste ratio that
+    # grows all day. A run took 10-18 minutes against a 3-minute beat schedule,
+    # and the Redis NX lock in kite_live_candles_task silently dropped every
+    # dispatch that arrived meanwhile (~125 dispatched, 37 completed), so the
+    # EFFECTIVE refresh cadence became the run duration. Measured live lag was
+    # p50 16 min across 1,743 symbols, 60% of them over 10 minutes stale.
+    #
+    # Measured cost of the two window shapes on the live Kite API (10 symbols):
+    #   full day 09:15-15:30 : 0.170s mean, 365 bars/symbol
+    #   5-minute delta       : 0.044s mean, 1.5 bars/symbol
+    #
+    # Asking only for what is missing is therefore ~3.9x cheaper per request and
+    # ~75x cheaper in rows written. Nothing else changes: same symbols, same
+    # concurrency, same delay, same beat schedule, same Redis lock, same
+    # on_conflict_do_nothing upsert.
+    #
+    # FAIL-SAFE: if the lookup raises for any reason, _from_by_symbol stays
+    # empty and every symbol falls back to day_open_ist — i.e. exactly the old
+    # behaviour. A symbol with no bar today is not in the map and also falls
+    # back, so its first fetch of the day is still the full window.
+    def _stored_symbol(s: str) -> str:
+        # Must mirror get_kite_candles_for_range's sym_save rule above, or the
+        # lookup silently misses and every symbol degrades to the full window.
+        if s.endswith(".NS") or s.endswith(".BO") or s.startswith("^"):
+            return s
+        return f"{s}.NS"
+
+    _from_by_symbol: dict[str, _dt.datetime] = {}
+    _t_lookup = _time.monotonic()
+    try:
+        from sqlalchemy import text as _text
+        _day_start_utc = (
+            day_open_ist.replace(tzinfo=_IST)
+            .astimezone(_dt.timezone.utc)
+            .replace(tzinfo=None)
+        )
+        _stored_to_input = {_stored_symbol(s): s for s in symbols}
+        _rows = (await session.execute(
+            _text(
+                "SELECT symbol, MAX(timestamp) AS mx FROM candles "
+                "WHERE timeframe = '1m' AND timestamp >= :day_start "
+                "AND symbol = ANY(:syms) GROUP BY symbol"
+            ),
+            {"day_start": _day_start_utc, "syms": list(_stored_to_input.keys())},
+        )).all()
+        for _r in _rows:
+            _orig = _stored_to_input.get(_r.symbol)
+            if _orig is None or _r.mx is None:
+                continue
+            # candles.timestamp is UTC-naive (see get_kite_candles_for_range,
+            # which converts Kite's tz-aware IST to UTC before storing). Kite
+            # expects exchange-local naive datetimes, so convert back.
+            _from_by_symbol[_orig] = (
+                _r.mx.replace(tzinfo=_dt.timezone.utc)
+                .astimezone(_IST)
+                .replace(tzinfo=None)
+            )
+    except Exception as exc:
+        _from_by_symbol = {}
+        logger.warning(
+            f"[live_1m] delta-window lookup failed, falling back to full-day "
+            f"window for all symbols: {type(exc).__name__}"
+        )
+    _lookup_ms = int((_time.monotonic() - _t_lookup) * 1000)
 
     sem = asyncio.Semaphore(concurrency)
     errors: list[str] = []
 
     async def _fetch(sym: str) -> list[dict]:
         async with sem:
-            result = await get_kite_candles_for_range(sym, from_dt, to_dt, interval="1m")
+            result = await get_kite_candles_for_range(
+                sym, _from_by_symbol.get(sym, day_open_ist), to_dt, interval="1m"
+            )
             await asyncio.sleep(delay_sec)
             return result or []
 
+    _t_fetch = _time.monotonic()
     results = await asyncio.gather(*[_fetch(s) for s in symbols], return_exceptions=True)
+    _fetch_ms = int((_time.monotonic() - _t_fetch) * 1000)
 
+    _t_transform = _time.monotonic()
     all_candles: list[dict] = []
+    completed = 0
     for sym, res in zip(symbols, results):
         if isinstance(res, Exception):
             errors.append(f"{sym}:{res}")
         else:
+            completed += 1
             all_candles.extend(res)
+    _transform_ms = int((_time.monotonic() - _t_transform) * 1000)
 
     saved = 0
+    _t_db = _time.monotonic()
     if all_candles:
         saved = await save_candles_to_db(all_candles, session)
         try:
             await session.commit()
         except Exception:
             await session.rollback()
+    _db_ms = int((_time.monotonic() - _t_db) * 1000)
 
     elapsed = _time.monotonic() - _run_start
     summary = {
@@ -435,6 +519,16 @@ async def sync_live_1m_candles(
         "candles": len(all_candles),
         "saved":   saved,
         "errors":  len(errors),
+        # Observability (2026-08-26, phase 18). Phase 17 could only derive the
+        # transform+DB share as an arithmetic residual of the total; these
+        # split it for real. Monotonic throughout. No symbol payloads, no
+        # credentials, no request bodies are logged.
+        "completed":   completed,
+        "delta_syms":  len(_from_by_symbol),
+        "lookup_ms":   _lookup_ms,
+        "fetch_ms":    _fetch_ms,
+        "transform_ms": _transform_ms,
+        "db_ms":       _db_ms,
     }
     if elapsed >= _SLOW_RUN_WARN_SEC:
         logger.warning(f"[live_1m] slow run ({elapsed:.0f}s) → {summary}")

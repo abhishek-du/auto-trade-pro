@@ -265,6 +265,9 @@ async def validate_signal(
     this_pos  = calculate_position_size(signal, wallet_balance, cfg=cfg)
     this_risk = this_pos["risk_amount"]
     this_notional = this_pos["usd_value"]
+    # Same weight calculate_position_size() caps with at :609, recomputed here
+    # only so the zero-notional rejection message can state the real budget.
+    _max_weight_for_msg = max_position_weight_for(signal)
 
     # ── Checks 1b/1c: portfolio risk budget + cash buffer ────────────────────
     # Both are capital-based, count-independent (Check 1a above is the only
@@ -285,6 +288,26 @@ async def validate_signal(
                 reason = (
                     f"Portfolio risk budget full: open {current_open_risk/equity*100:.1f}% "
                     f"+ this {this_risk/equity*100:.1f}% > {max_port_risk*100:.0f}% of equity"
+                )
+            elif this_notional <= 0:
+                # Classification only (2026-08-26, phase 19). The gate below is
+                # correct and unchanged; its MESSAGE was not. On 1,024 of 1,931
+                # capital rejections it read "deploying ₹0 would breach the
+                # reserve" — but deploying ₹0 breaches nothing, and the sentence
+                # blamed the candidate for a book that was already over the line.
+                #
+                # Investigated and RULED OUT as a sizing bug: units come from
+                # int(max_notional // entry_price) at :594, where max_notional is
+                # free cash x AGENT_MAX_POSITION_WEIGHT. With the book ~99.6%
+                # deployed, free cash was ~₹1,945, so 5% of it is ~₹97 against a
+                # median entry price of ₹1,186 — zero whole shares. Modelling
+                # that arithmetic reproduced the zero flag on 1,027 of 1,027
+                # observed cases. The zero is correct; only the wording was not.
+                reason = (
+                    f"No capital for a whole share: free cash ₹{max(equity - deployed_capital, 0):.0f} "
+                    f"allows ₹{max(equity - deployed_capital, 0) * _max_weight_for_msg:.0f} "
+                    f"for this position, below one share at ₹{getattr(signal, 'entry_price', 0) or 0:.0f} "
+                    f"(deployed ₹{deployed_capital:.0f} / equity ₹{equity:.0f})"
                 )
             else:
                 reason = (
