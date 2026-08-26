@@ -130,20 +130,51 @@ def _trading_days_since(event_date, today) -> int:
     return days
 
 
-def estimate_trade_cost(qty: int, price: float, side: str = "BUY") -> float:
-    """Realistic Indian equity delivery transaction cost (Varsity Module 7).
+def estimate_trade_cost(
+    qty: int, price: float, side: str = "BUY", product: str = "CNC"
+) -> float:
+    """Indian equity transaction cost, product-aware (Varsity Module 7).
 
     Brokerage (capped ₹20) + STT + exchange turnover + SEBI + stamp (buy only)
     + 18% GST. Charged on both legs of every close so paper P&L reflects real
     round-trip friction instead of an over-optimistic zero-commission fill.
+
+    PRODUCT MATTERS, and until 2026-08-26 this function ignored it (2026-08-26,
+    phase 23). It had no `product` argument, its docstring said "delivery", and
+    it charged delivery STT — 0.1% on BOTH legs — to every trade including
+    intraday. NSE equity intraday STT is 0.025% on the SELL leg only, and the
+    stamp rate is 0.003% rather than 0.015%.
+
+    Measured consequence on the 72 closed trades on record: MIS and CNC were
+    both charged a median 0.294% round-trip when their real costs differ by
+    roughly 3x. Across 44 MIS trades that is ~₹3,787 of cost a broker would not
+    have charged — against ₹806 of total recorded P&L. Corrected, the same book
+    reads +₹4,393 gross of nothing rather than +₹806.
+
+    `product` defaults to "CNC" so any caller that has not been updated keeps
+    exactly the previous behaviour; only callers that pass a product change.
+
+    NOTE this is NOT purely an accounting function. The cost it returns is
+    subtracted at :507, flows into VirtualWallet.return_margin, and thence into
+    the wallet balance that engine/risk_manager.py sizes against. Correcting it
+    therefore raises the wallet slightly and permits marginally larger future
+    positions. That is a real behaviour change, small but non-zero.
     """
     notional  = qty * price
     brokerage = min(20.0, 0.0003 * notional)
-    stt       = notional * 0.001
     exchange  = notional * 0.0000345
     sebi      = notional * 0.000001
-    stamp     = notional * 0.00015 if side == "BUY" else 0.0
-    gst       = (brokerage + exchange + sebi) * 0.18
+
+    if (product or "CNC").upper() == "MIS":
+        # Intraday: STT on the sell leg only, at a quarter of the delivery rate.
+        stt   = notional * 0.00025 if side == "SELL" else 0.0
+        stamp = notional * 0.00003 if side == "BUY" else 0.0
+    else:
+        # Delivery: STT on both legs; the pre-2026-08-26 behaviour, unchanged.
+        stt   = notional * 0.001
+        stamp = notional * 0.00015 if side == "BUY" else 0.0
+
+    gst = (brokerage + exchange + sebi) * 0.18
     return round(brokerage + stt + exchange + sebi + stamp + gst, 2)
 
 
@@ -499,10 +530,14 @@ async def scale_out_paper_trade(
     # Calculate P&L for the scaled-out portion
     if position.direction.value == "BUY":
         gross_pnl = (current_price - trade.entry_price) * close_units
-        cost = estimate_trade_cost(close_units, trade.entry_price, "BUY") + estimate_trade_cost(close_units, current_price, "SELL")
+        _prod = getattr(trade, "product", None) or "CNC"
+        cost = (estimate_trade_cost(close_units, trade.entry_price, "BUY", _prod)
+                + estimate_trade_cost(close_units, current_price, "SELL", _prod))
     else:
         gross_pnl = (trade.entry_price - current_price) * close_units
-        cost = estimate_trade_cost(close_units, trade.entry_price, "SELL") + estimate_trade_cost(close_units, current_price, "BUY")
+        _prod = getattr(trade, "product", None) or "CNC"
+        cost = (estimate_trade_cost(close_units, trade.entry_price, "SELL", _prod)
+                + estimate_trade_cost(close_units, current_price, "BUY", _prod))
         
     partial_pnl = gross_pnl - cost
     
@@ -581,10 +616,14 @@ async def close_paper_trade(
 
     if position.direction == TradeDirection.BUY:
         gross_pnl = (close_price - trade.entry_price) * remaining
-        cost = estimate_trade_cost(remaining, trade.entry_price, "BUY") + estimate_trade_cost(remaining, close_price, "SELL")
+        _prod = getattr(trade, "product", None) or "CNC"
+        cost = (estimate_trade_cost(remaining, trade.entry_price, "BUY", _prod)
+                + estimate_trade_cost(remaining, close_price, "SELL", _prod))
     else:
         gross_pnl = (trade.entry_price - close_price) * remaining
-        cost = estimate_trade_cost(remaining, trade.entry_price, "SELL") + estimate_trade_cost(remaining, close_price, "BUY")
+        _prod = getattr(trade, "product", None) or "CNC"
+        cost = (estimate_trade_cost(remaining, trade.entry_price, "SELL", _prod)
+                + estimate_trade_cost(remaining, close_price, "BUY", _prod))
     
     pnl = gross_pnl - cost + partial_pnl
 
