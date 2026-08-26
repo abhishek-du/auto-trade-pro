@@ -19,15 +19,30 @@ from utils.config import settings
 from utils.logger import logger
 
 
-def estimate_trade_cost(qty: int, price: float, side: str = "BUY") -> float:
-    """Varsity M7: realistic Indian equity delivery cost."""
+def estimate_trade_cost(
+    qty: int, price: float, side: str = "BUY", product: str = "CNC"
+) -> float:
+    """Varsity M7: realistic Indian equity cost, product-aware.
+
+    Kept byte-compatible with paper_trading/trade_simulator.py::estimate_trade_cost
+    (2026-08-26, phase 23). That copy was corrected to charge intraday STT to
+    MIS instead of delivery STT; this duplicate carried the identical defect, and
+    leaving it uncorrected would make the backtester and the live simulator
+    disagree about the cost of the same trade.
+    """
     notional  = qty * price
     brokerage = min(20.0, 0.0003 * notional)
-    stt       = notional * 0.001           # 0.1% STT on delivery buy
     exchange  = notional * 0.0000345       # NSE turnover charges
     sebi      = notional * 0.000001
-    stamp     = notional * 0.00015 if side == "BUY" else 0.0
-    gst       = (brokerage + exchange + sebi) * 0.18
+
+    if (product or "CNC").upper() == "MIS":
+        stt   = notional * 0.00025 if side == "SELL" else 0.0   # intraday: sell leg only
+        stamp = notional * 0.00003 if side == "BUY" else 0.0
+    else:
+        stt   = notional * 0.001                                 # delivery: both legs
+        stamp = notional * 0.00015 if side == "BUY" else 0.0
+
+    gst = (brokerage + exchange + sebi) * 0.18
     return round(brokerage + stt + exchange + sebi + stamp + gst, 2)
 
 
