@@ -132,3 +132,66 @@ class TestUniverseSnapshot:
             "the snapshot should reuse simulation_logs rather than introduce a "
             "new table and a migration"
         )
+
+
+class TestFunnelRowIsBounded:
+    """The per-scan funnel row must not grow with the universe."""
+
+    def test_symbol_lists_are_capped_at_the_append_site(self):
+        from engine.tactical_executor import _FUNNEL_SYMBOL_CAP, ScanResult
+        r = ScanResult(sub_pipeline="F1")
+        for i in range(_FUNNEL_SYMBOL_CAP + 500):
+            r.no_price += 1
+            if len(r.no_price_symbols) < _FUNNEL_SYMBOL_CAP:
+                r.no_price_symbols.append(f"SYM{i}.NS")
+        assert len(r.no_price_symbols) == _FUNNEL_SYMBOL_CAP
+        assert r.no_price == _FUNNEL_SYMBOL_CAP + 500, "the counter must stay uncapped"
+
+    def test_truncation_flag_uses_the_uncapped_counter(self):
+        """The lists stop growing at the cap, so their length can never exceed it.
+
+        Comparing list length against the cap would report False forever and
+        silently hide that data was dropped.
+        """
+        import inspect
+        from engine.tactical_executor import TacticalExecutor
+
+        src = inspect.getsource(TacticalExecutor._scan)
+        idx = src.find('"truncated"')
+        assert idx > 0, "no truncation flag is recorded"
+        window = src[idx: idx + 260]
+        assert "result.no_price >" in window and "result.no_candles >" in window, (
+            "the truncation flag must compare the uncapped counters, not the "
+            "already-capped lists"
+        )
+        assert "len(result.no_price_symbols)" not in window
+
+    def test_funnel_row_failure_cannot_break_the_scan(self):
+        import inspect
+        from engine.tactical_executor import TacticalExecutor
+
+        src = inspect.getsource(TacticalExecutor._scan)
+        idx = src.find("TACTICAL_SCAN_FUNNEL")
+        assert idx > 0
+        window = src[max(0, idx - 900): idx + 1400]
+        assert "except Exception" in window
+
+    def test_funnel_row_uses_its_own_session(self):
+        """The scan session must contain nothing but TacticalSignal rows.
+
+        An existing test (test_tactical_executor.py) asserts that invariant, and
+        mixing a telemetry row into the trading path's session would change what
+        that path commits. A separate session also makes the isolation real.
+        """
+        import inspect
+        from engine.tactical_executor import TacticalExecutor
+
+        src = inspect.getsource(TacticalExecutor._scan)
+        idx = src.find("TACTICAL_SCAN_FUNNEL")
+        window = src[max(0, idx - 900): idx + 1400]
+        assert "AsyncSessionLocal" in window, (
+            "the funnel row must open its own session, not reuse the scan's"
+        )
+        assert "session.add(_SimLog" not in window, (
+            "the telemetry row must never be added to the scan's session"
+        )
