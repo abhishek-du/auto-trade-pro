@@ -93,17 +93,8 @@ async def score_and_filter(
     *,
     min_score: float = 50.0,
     top_n: int = 15,
-    overflow_out: list | None = None,
 ) -> list[tuple[Signal, float]]:
-    """Score every signal, drop the weak ones, keep the best `top_n`.
-
-    `overflow_out`, when given, is EXTENDED with the signals that cleared
-    min_score but fell outside `top_n` — the ranks this function currently
-    discards without trace. It is a research capture and changes nothing about
-    the return value, so a caller that passes nothing gets byte-identical
-    behaviour. Nothing downstream may execute what lands in that list; see
-    tests/test_rank_overflow_capture.py.
-    """
+    """Score every signal, drop the weak ones, keep the best `top_n`."""
     if not signals:
         return []
 
@@ -119,8 +110,4 @@ async def score_and_filter(
             f"[tactical_scoring] {len(scored)} signals -> {len(kept)} above "
             f"{min_score} -> keeping {min(len(kept), top_n)}"
         )
-
-    if overflow_out is not None:
-        overflow_out.extend(kept[top_n:])
-
     return kept[:top_n]

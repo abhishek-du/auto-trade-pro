@@ -89,11 +89,22 @@ def _execution_enabled() -> bool:
 # every scan.
 _FUNNEL_SYMBOL_CAP = 250
 
-# How many below-the-cut signals one scan records for research. TACTICAL_TOP_N
-# is 5 and TACTICAL_MAX_SIGNALS_PER_CYCLE is 15, so ranks 1-15 already leave a
-# TacticalSignal row each and are researchable today. Ranks 16-40 leave nothing
-# at all — they are dropped inside score_and_filter. This capture exists to
-# answer ONE question: is the cut discarding signals that were worth taking?
+# How many below-the-cut signals one scan records for research.
+#
+# The effective values are TACTICAL_TOP_N = 15 and
+# TACTICAL_MAX_SIGNALS_PER_CYCLE = 40, both from utils/config.py. The literals
+# in the _cfg() fallbacks below are DEAD -- Settings defines both fields, so
+# getattr never reaches the default -- and reading them as the live values is
+# exactly the mistake that first pointed this capture at the wrong band.
+#
+# So the pipeline cuts twice:
+#     score_and_filter  keeps the best 40 above the composite floor
+#     rank_signals      selects 15 of those; only those 15 are persisted
+#
+# Ranks 1-15 leave a TacticalSignal row each and are researchable today.
+# Ranks 16-40 are scored, ordered, and then dropped at rank_signals with no
+# trace at all. THAT is the band this captures, and it exists to answer ONE
+# question: is the cut discarding signals that were worth taking?
 #
 # It is research-only. These rows are SimulationLog entries. No TacticalSignal
 # is created, no intent is built, no sizing is requested and no risk is booked,
@@ -228,20 +239,26 @@ class TacticalExecutor:
                 result.reason = "no rule triggered"
                 return result
 
-            overflow: list = []
             scored = await score_and_filter(
                 signals,
                 session,
                 min_score=float(_cfg("TACTICAL_MIN_COMPOSITE_SCORE", 50.0)),
-                top_n=int(_cfg("TACTICAL_MAX_SIGNALS_PER_CYCLE", 15)),
-                overflow_out=overflow,
+                top_n=int(_cfg("TACTICAL_MAX_SIGNALS_PER_CYCLE", 40)),
             )
             result.kept = len(scored)
             if not scored:
                 result.reason = "all signals below composite threshold"
                 return result
 
-            ranked = rank_signals(scored, top_n=int(_cfg("TACTICAL_TOP_N", 5)))
+            ranked = rank_signals(scored, top_n=int(_cfg("TACTICAL_TOP_N", 15)))
+
+            # The research band: scored and ordered, then NOT selected. Derived
+            # by identity against `ranked` rather than by slicing at a constant,
+            # so it stays correct if the ML ranker is ever loaded and reorders
+            # (rank_signals sorts by ml_prob when a model exists). TOP_N itself
+            # is read, never written.
+            _selected = {id(sig) for sig, _, _ in ranked}
+            overflow = [(sig, sc) for sig, sc in scored if id(sig) not in _selected]
 
             for signal, composite, ml_prob in ranked:
                 await self._persist(signal, composite, ml_prob, open_map, ctx, session, result)
@@ -271,7 +288,7 @@ class TacticalExecutor:
             # test asserts exactly that — and mixing a telemetry row into it
             # would change what the trading path commits. A separate session
             # also makes the failure isolation real rather than nominal.
-            await self._capture_rank_overflow(pipeline, overflow, len(scored), ctx)
+            await self._capture_rank_overflow(pipeline, overflow, len(ranked), ctx)
 
             try:
                 from db.database import AsyncSessionLocal as _ASL
@@ -330,7 +347,10 @@ class TacticalExecutor:
     async def _capture_rank_overflow(
         self, pipeline: str, overflow: list, kept_n: int, ctx: MarketContext
     ) -> None:
-        """Record the signals that fell below the persist cut. NEVER executes.
+        """Record the ranks that were scored but not selected. NEVER executes.
+
+        `kept_n` is len(ranked), i.e. TACTICAL_TOP_N, so the first recorded rank
+        is 16 when TOP_N is 15.
 
         Writes at most _RANK_OVERFLOW_CAP SimulationLog rows' worth of data as a
         single row, on its OWN session — the scan's session is expected to
@@ -367,8 +387,8 @@ class TacticalExecutor:
                     "target": round(float(sig.target or 0), 2),
                     "entry_eligible": eligible,
                     "not_persisted_reason": (
-                        f"rank {kept_n + offset + 1} > TACTICAL_MAX_SIGNALS_PER_CYCLE "
-                        f"({kept_n}) — dropped inside score_and_filter"
+                        f"rank {kept_n + offset + 1} > TACTICAL_TOP_N ({kept_n}) "
+                        f"— scored and ordered, then dropped at rank_signals"
                     ),
                 })
 

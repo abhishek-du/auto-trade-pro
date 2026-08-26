@@ -40,9 +40,11 @@ Built 2026-08-26 evening for the 2026-08-27 session.
 **One thing changed:** under V2, an exit classified `PROFIT_MANAGEMENT` is
 deferred until the position has been open 120 minutes.
 
-Nothing else. Signal rules, universe, turnover, `TACTICAL_TOP_N`, R:R, capital
-limits, Master Score, prompts, AI routing, BUG-1, the candidate queue, entry
-execution and position sizing are untouched.
+Nothing else. Signal rules, universe, turnover, `TACTICAL_TOP_N` (**15**), R:R,
+capital limits, Master Score, prompts, AI routing, BUG-1, the candidate queue,
+entry execution and position sizing are untouched. Verified in Phase 25.1 by
+diffing all 134 strategy-affecting settings between the two modes: exactly one
+differs.
 
 ### Deferred under V2 (6 reasons)
 
@@ -299,18 +301,33 @@ wrapped, after the trading commit, no re-raise.
 
 ## 10. Rank 16–40 capture
 
-`score_and_filter` gained an optional `overflow_out` list. Passing nothing
-gives byte-identical behaviour; the executor passes one and writes the entries
-below the persist cut to a `TACTICAL_RANK_OVERFLOW` row: symbol, rank, score,
-signal type, reference price, stop, target, `entry_eligible`, and why it was
-not persisted.
+> **CORRECTED IN PHASE 25.1.** This section originally said `TACTICAL_TOP_N` is
+> 5 and `TACTICAL_MAX_SIGNALS_PER_CYCLE` is 15. **Both were wrong**, and the
+> capture was aimed at the wrong band as a result. See §14.
 
-Fourteen tests enforce that it **cannot execute**: no `TradeIntent`, no
+The effective values are **`TACTICAL_TOP_N = 15`** and
+**`TACTICAL_MAX_SIGNALS_PER_CYCLE = 40`** (`utils/config.py:433-434`), neither
+overridden in `.env`. The pipeline cuts twice:
+
+```
+score_and_filter   keeps the best 40 above the composite floor
+rank_signals       selects 15 of those; only those 15 are persisted
+```
+
+So ranks 16–40 are dropped at `rank_signals`, not inside `score_and_filter`.
+The capture derives its band as `scored` minus `ranked`, by object identity —
+correct whether or not the ML ranker is loaded (it currently is not, so
+`rank_signals` preserves composite order and the band is exactly ranks 16–40).
+
+Each entry records symbol, rank, score, signal type, reference price, stop,
+target, `entry_eligible`, and why it was not persisted.
+
+Twenty-two tests enforce that it **cannot execute**: no `TradeIntent`, no
 `execute_trade_intent`, no sizing requested, no risk booked, no `TacticalSignal`
 row, own session, bounded at 25, runs after the scan has committed.
 
-**`TACTICAL_TOP_N` is unchanged at 5** and a test asserts it
-(`test_the_cut_itself_was_not_widened`). Capturing is not trading.
+**`TACTICAL_TOP_N` is unchanged at 15**, in both modes, pinned on the VALUE
+rather than on a source literal. Capturing is not trading.
 
 ---
 
@@ -397,3 +414,83 @@ avoid.
 that, and the sample sizes above cannot separate horizons. It is: *did the
 gate fire where it was supposed to, did anything fire that should not have,
 and did the family mix move the way the hypothesis predicts?*
+
+---
+
+## 14. Phase 25.1 — pre-market QA (2026-08-26, later that evening)
+
+### The TOP_N contradiction was real, and the error was mine
+
+| | value |
+|---|---|
+| A. configured (`utils/config.py:434`) | **15** |
+| B. code default (same line — there is no separate default) | **15** |
+| C. `.env` | **absent** — not overridden |
+| D. runtime in the scan worker | **15** |
+| E. actual rank cut applied | **15** (`rank_signals`), after a 40-wide scoring cut |
+| F. changed by Phase 25? | **No.** Last touched in `5451353`, months ago. |
+
+**The configuration was always correct. The Phase 25 report was wrong.**
+
+`engine/tactical_executor.py` reads the settings as
+`_cfg("TACTICAL_TOP_N", 5)`, where `_cfg` is `getattr(settings, name, default)`.
+Because `Settings` defines the field, **the `5` is dead** — `getattr` never
+reaches it. I read those fallback literals as the live values and wrote "TOP_N
+is unchanged at 5" and "MAX_SIGNALS_PER_CYCLE is 15" into the report, a code
+comment, and a test.
+
+### The consequence was a genuine implementation bug
+
+Believing the cut was at 15, I hooked the capture into `score_and_filter` and
+took `kept[top_n:]`. With the real `top_n = 40`, that captured **ranks 41+** —
+not the 16–40 band the brief asked for. The band that is actually discarded
+without trace is dropped one stage later, at `rank_signals`.
+
+### Fixed
+
+- `engine/tactical_scoring.py` **reverted to its pre-Phase-25 state.** The
+  `overflow_out` hook was solving the wrong problem and is gone; the file is
+  byte-identical to the baseline.
+- `engine/tactical_executor.py` derives the band as `scored` minus `ranked` by
+  object identity, and passes `len(ranked)` as the rank offset so the first
+  recorded rank is 16.
+- Dead `_cfg` fallback literals aligned to the real fields (`5`→`15`,
+  `15`→`40`). **Zero behaviour change** — `Settings` defines both, so the
+  fallback is unreachable — but the stale numbers were the landmine.
+- `not_persisted_reason` named the wrong cut; corrected.
+- Tests now pin the **value** (`settings.TACTICAL_TOP_N == 15`) in both modes,
+  not a source literal. Asserting the literal is exactly what hid the error.
+
+### Verification results
+
+| Check | Result |
+|---|---|
+| Strategy config diff, CONTROL vs V2 | **134 settings compared, 1 differs**: `TRADING_STRATEGY_MODE` |
+| Exit blast radius, all 18 reasons at 1/119/120 min | 12 never deferred; **exactly 6** deferrable, released at 120 |
+| Entry path vs baseline `50d6834` | **byte-identical** — rules, scoring, ranker, risk, data fetcher, risk_manager, decision_router |
+| Any entry-path module referencing the mode or gate | **none** |
+| BUG-1 | shadowing import at `:706` still present; hub entry path still dead |
+| MIS / CNC round trip | **0.107% / 0.294%**; simulator == backtester; unknown product → delivery |
+| Historical `paper_trades` | **72 closed, 0 modified**, sum(pnl) 805.77 — unchanged |
+| Wallet | balance 477,054.99, equity 501,863.67 — unchanged from baseline |
+| `_mfe_src` / `_mae_src` / `exit_family` persisted | yes |
+| Research isolation | 100 tests pass |
+| Full suite | **2,054 passed / 27 failed / 7 skipped / 5 errors** |
+| New failures / new errors | **0 / 0** — same nine files as the Phase-19 baseline |
+| Runtime smoke | mode=V2, min_hold=120, TOP_N=15; 119m deferred, 120m allowed, stop/invalidation/squareoff allowed |
+
+### What this means for tomorrow
+
+The overflow rows will now carry ranks **16–40** rather than 41+. That is the
+band the question was about, so tomorrow can actually answer whether the cut at
+15 discards signals worth taking.
+
+Nothing about the V2 experiment itself changed: same 120-minute hypothesis,
+same six deferred reasons, same signals, same TOP_N of 15.
+
+### Still unresolved
+
+- The replay's negative result (§6) stands and is unchanged by any of this.
+- `shock_guard` and `portfolio_reallocation` are classified and provably
+  ungated, but still have not been observed firing under V2 in a live session.
+- Per-stage latencies and a live `opportunity_ts` still do not exist.

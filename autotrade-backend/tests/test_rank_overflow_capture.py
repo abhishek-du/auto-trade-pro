@@ -1,12 +1,21 @@
 """Ranks 16-40 are recorded for research and must never become trades.
 
-TACTICAL_MAX_SIGNALS_PER_CYCLE is 15, so ranks 1-15 already leave a
-TacticalSignal row each and are researchable today. Ranks beyond that were
-dropped inside score_and_filter without trace, which is why the Phase-24 audit
-could not say whether the cut discards signals worth taking.
+CORRECTED IN PHASE 25.1. The first version of this file asserted TOP_N = 5 and
+MAX_SIGNALS_PER_CYCLE = 15. Both were wrong: those numbers are the DEAD
+fallback literals inside the _cfg() calls in tactical_executor, and Settings
+defines both fields, so getattr never reaches them. The effective values are
+TACTICAL_TOP_N = 15 and TACTICAL_MAX_SIGNALS_PER_CYCLE = 40.
 
-This capture answers that question and nothing else. TACTICAL_TOP_N is
-unchanged; no sizing is requested, no risk is booked, no intent is built.
+That mistake pointed the capture at the wrong band. The pipeline cuts twice:
+
+    score_and_filter   keeps the best 40 above the composite floor
+    rank_signals       selects 15 of those; only those 15 are persisted
+
+so ranks 16-40 are dropped at rank_signals, NOT inside score_and_filter. The
+capture now derives its band from `scored` minus `ranked`, by object identity,
+which is correct whether or not the ML ranker is loaded.
+
+TACTICAL_TOP_N is read and never written; TestTopNIsUnchanged pins that.
 """
 from __future__ import annotations
 
@@ -36,50 +45,70 @@ class _Sig:
         self.meta = {"score_hint": score_hint}
 
 
-class TestOverflowIsCaptured:
-    def _run(self, n_signals, top_n, monkeypatch):
-        sigs = [_Sig(f"S{i}.NS", i) for i in range(n_signals)]
+class TestScoringIsUntouched:
+    """Phase 25.1 reverted the change to score_and_filter entirely.
 
-        async def _fake_sectors(symbols, session):
-            return {}
+    Deriving the band from `scored` minus `ranked` in the executor needs no
+    hook inside the scorer, and the hook it originally grew was capturing
+    ranks 41+ rather than 16-40.
+    """
 
-        monkeypatch.setattr("engine.tactical_scoring.fetch_sector_scores", _fake_sectors)
-        # Deterministic descending scores so ranks are unambiguous.
-        scores = {s.symbol: 90.0 - i for i, s in enumerate(sigs)}
-        monkeypatch.setattr(
-            "engine.tactical_scoring.composite_score",
-            lambda s, sector: scores[s.symbol],
-        )
-
-        overflow: list = []
-        kept = asyncio.run(score_and_filter(
-            sigs, None, min_score=0.0, top_n=top_n, overflow_out=overflow))
-        return kept, overflow
-
-    def test_signals_below_the_cut_land_in_the_overflow(self, monkeypatch):
-        kept, overflow = self._run(40, 15, monkeypatch)
-        assert len(kept) == 15
-        assert len(overflow) == 25
-        assert overflow[0][0].symbol == "S15.NS", "rank 16 is the first overflow entry"
-
-    def test_the_return_value_is_unchanged_by_capturing(self, monkeypatch):
-        with_capture, _ = self._run(40, 15, monkeypatch)
-        sigs = [s.symbol for s, _ in with_capture]
-
-        # Same inputs, no overflow list at all.
-        again, overflow = self._run(40, 15, monkeypatch)
-        assert [s.symbol for s, _ in again] == sigs
-
-    def test_omitting_the_list_is_byte_identical(self, monkeypatch):
-        """A caller that passes nothing must see the old behaviour."""
+    def test_score_and_filter_has_no_research_hook(self):
+        sig = inspect.signature(score_and_filter)
+        assert "overflow_out" not in sig.parameters
         src = inspect.getsource(score_and_filter)
-        i = src.index("if overflow_out is not None:")
-        assert "overflow_out.extend" in src[i:i + 120]
         assert src.rstrip().endswith("return kept[:top_n]")
 
-    def test_no_overflow_when_everything_fits(self, monkeypatch):
-        kept, overflow = self._run(5, 15, monkeypatch)
-        assert len(kept) == 5 and overflow == []
+
+class TestOverflowIsTheCorrectBand:
+    """`scored` minus `ranked` — the signals that were ordered, then not taken."""
+
+    def _band(self, scored, ranked):
+        selected = {id(s) for s, _, _ in ranked}
+        return [(s, sc) for s, sc in scored if id(s) not in selected]
+
+    def test_first_overflow_entry_is_rank_sixteen(self):
+        scored = [(_Sig(f"S{i}.NS", i), 90.0 - i) for i in range(40)]
+        ranked = [(s, sc, 0.5) for s, sc in scored[:15]]
+        band = self._band(scored, ranked)
+        assert len(band) == 25
+        assert band[0][0].symbol == "S15.NS", "0-indexed 15 is rank 16"
+        assert band[-1][0].symbol == "S39.NS", "the band ends at rank 40"
+
+    def test_nothing_selected_is_ever_in_the_band(self):
+        scored = [(_Sig(f"S{i}.NS", i), 90.0 - i) for i in range(40)]
+        ranked = [(s, sc, 0.5) for s, sc in scored[:15]]
+        band_syms = {s.symbol for s, _ in self._band(scored, ranked)}
+        taken = {s.symbol for s, _, _ in ranked}
+        assert not (band_syms & taken)
+
+    def test_it_survives_an_ml_ranker_that_reorders(self):
+        """rank_signals sorts by ml_prob when a model exists, so a constant
+        slice would capture the wrong signals. Identity does not care."""
+        scored = [(_Sig(f"S{i}.NS", i), 90.0 - i) for i in range(20)]
+        ranked = [(scored[7][0], 83.0, 0.9), (scored[2][0], 88.0, 0.8)]
+        band_syms = {s.symbol for s, _ in self._band(scored, ranked)}
+        assert "S7.NS" not in band_syms and "S2.NS" not in band_syms
+        assert len(band_syms) == 18
+
+    def test_empty_band_when_everything_was_selected(self):
+        scored = [(_Sig(f"S{i}.NS", i), 90.0 - i) for i in range(5)]
+        ranked = [(s, sc, 0.5) for s, sc in scored]
+        assert self._band(scored, ranked) == []
+
+    def test_the_executor_uses_exactly_this_derivation(self):
+        src = _code_only(tx.TacticalExecutor._scan)
+        i = src.index("_selected = ")
+        seg = src[i:i + 260]
+        assert "id(sig) for sig, _, _ in ranked" in seg
+        assert "if id(sig) not in _selected" in seg
+
+    def test_the_rank_offset_starts_from_the_selected_count(self):
+        """kept_n must be len(ranked), not len(scored), or every recorded rank
+        is wrong by 25."""
+        src = _code_only(tx.TacticalExecutor._scan)
+        i = src.index("_capture_rank_overflow")
+        assert "len(ranked)" in src[i:i + 120]
 
 
 def _code_only(fn) -> str:
@@ -138,11 +167,61 @@ class TestCaptureCannotExecute:
 
 
 class TestTopNIsUnchanged:
-    def test_the_cut_itself_was_not_widened(self):
-        """Capturing is not the same as trading, and tonight only one is allowed."""
+    """The effective cut is 15, in BOTH modes. Phase 25.1 pins the VALUE, not
+    the fallback literal — asserting the literal is what hid the error."""
+
+    def test_the_effective_value_is_fifteen(self):
+        from utils.config import settings
+
+        assert settings.TACTICAL_TOP_N == 15
+
+    def test_the_scoring_cut_is_forty(self):
+        from utils.config import settings
+
+        assert settings.TACTICAL_MAX_SIGNALS_PER_CYCLE == 40
+
+    @pytest.mark.parametrize("mode", ["CONTROL", "V2"])
+    def test_top_n_is_identical_in_both_modes(self, monkeypatch, mode):
+        """V2 changes exits. It must not touch the selection cut."""
+        from utils.config import settings
+        from engine.tactical_executor import _cfg
+
+        monkeypatch.setattr(settings, "TRADING_STRATEGY_MODE", mode, raising=False)
+        assert _cfg("TACTICAL_TOP_N", 15) == 15
+        assert _cfg("TACTICAL_MAX_SIGNALS_PER_CYCLE", 40) == 40
+
+    def test_the_fallback_literals_match_the_real_fields(self):
+        """Dead code today — Settings defines both — but a stale literal here
+        is what made Phase 25 report TOP_N as 5 and aim the capture at ranks
+        41+ instead of 16-40."""
+        from utils.config import settings
+
         scan = _code_only(tx.TacticalExecutor._scan)
-        i = scan.index("rank_signals(scored")
-        assert "'TACTICAL_TOP_N', 5" in scan[i:i + 160]
+        assert f"'TACTICAL_TOP_N', {settings.TACTICAL_TOP_N}" in scan
+        assert (f"'TACTICAL_MAX_SIGNALS_PER_CYCLE', "
+                f"{settings.TACTICAL_MAX_SIGNALS_PER_CYCLE}") in scan
+
+    def test_no_write_to_the_cut_anywhere_in_the_executor(self):
+        """Checked on the AST. The explanatory comments in the module name both
+        settings with an '=' after them, so a raw substring search matches the
+        prose and proves nothing."""
+        import pathlib
+
+        tree = ast.parse(pathlib.Path(tx.__file__).read_text())
+        written = set()
+        for n in ast.walk(tree):
+            targets = []
+            if isinstance(n, ast.Assign):
+                targets = n.targets
+            elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+                targets = [n.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    written.add(t.id)
+                elif isinstance(t, ast.Attribute):
+                    written.add(t.attr)
+        for cut in ("TACTICAL_TOP_N", "TACTICAL_MAX_SIGNALS_PER_CYCLE"):
+            assert cut not in written, f"the executor assigns {cut}"
 
     def test_ranked_still_feeds_persist_not_the_overflow(self):
         scan = _code_only(tx.TacticalExecutor._scan)
