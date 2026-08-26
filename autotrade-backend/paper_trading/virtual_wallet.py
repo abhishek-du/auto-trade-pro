@@ -40,8 +40,24 @@ class VirtualWallet:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     @staticmethod
-    async def _fetch(session: AsyncSession) -> WalletRow | None:
-        result = await session.execute(select(WalletRow).limit(1).with_for_update())
+    async def _fetch(session: AsyncSession, *, for_update: bool = True) -> WalletRow | None:
+        # `for_update` exists because there is exactly ONE wallet row, so
+        # SELECT ... FOR UPDATE serialises every caller against every other
+        # caller until the enclosing transaction commits — readers included.
+        #
+        # On 2026-08-26 that produced a 44-backend convoy: india_trade_loop
+        # took this lock at india_tasks.py:542 and did not commit until
+        # :1410, holding it across the dynamic-management LLM call. Forty
+        # other backends — most of them read-only get_summary() calls from
+        # API handlers and the /ws/portfolio stream — queued on Lock/tuple
+        # behind it, exhausted max_connections=100, and every DB-backed
+        # endpoint started returning 500.
+        #
+        # Writers still take the lock (they must). Readers must not.
+        stmt = select(WalletRow).limit(1)
+        if for_update:
+            stmt = stmt.with_for_update()
+        result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
     @staticmethod
@@ -97,13 +113,17 @@ class VirtualWallet:
     # ── Public API ────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def get_or_create(session: AsyncSession) -> WalletRow:
+    async def get_or_create(session: AsyncSession, *, for_update: bool = True) -> WalletRow:
         """Return the wallet row, creating it with the configured starting balance if absent.
 
         Also seeds today's PerformanceSnapshot so the equity curve always has
         a row for the current day even before the first trade closes.
+
+        Pass ``for_update=False`` from read-only callers so they do not take an
+        exclusive lock on the single wallet row — see ``_fetch``. The creation
+        branch below still takes the lock, because it writes.
         """
-        wallet = await VirtualWallet._fetch(session)
+        wallet = await VirtualWallet._fetch(session, for_update=for_update)
 
         if wallet is None:
             start = await VirtualWallet._start_balance(session)
@@ -330,8 +350,15 @@ class VirtualWallet:
 
     @staticmethod
     async def get_summary(session: AsyncSession) -> dict:
-        """Return the full wallet state as a JSON-serialisable dict."""
-        wallet = await VirtualWallet.get_or_create(session)
+        """Return the full wallet state as a JSON-serialisable dict.
+
+        Read-only: it computes derived percentages and returns them, and
+        mutates nothing. It therefore reads WITHOUT the row lock — this is the
+        call every API handler and the /ws/portfolio stream makes, and taking
+        an exclusive lock here is what put 40 read-only backends in the
+        2026-08-26 convoy.
+        """
+        wallet = await VirtualWallet.get_or_create(session, for_update=False)
         start  = await VirtualWallet._start_balance(session)
 
         win_rate = (

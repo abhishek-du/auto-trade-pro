@@ -91,6 +91,13 @@ async def ws_portfolio(ws: WebSocket, _ws_user: str | None = Depends(require_ws_
             }))
             await asyncio.sleep(10)
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        # get_summary() reads virtual_wallet, which is exactly the row that
+        # serialises under lock contention — so this handler is a prime
+        # candidate to die on something other than a clean disconnect.
+        logger.debug(f"[ws/portfolio] {exc}")
+    finally:
         broadcaster.disconnect("portfolio", ws)
 
 
@@ -107,11 +114,18 @@ async def ws_trades(ws: WebSocket, _ws_user: str | None = Depends(require_ws_aut
     _TRADE_EVENTS = {"TRADE_OPENED", "TRADE_CLOSED", "TRADE_STOPPED"}
     last_id = 0
 
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(func.max(SimulationLog.id)))
-        last_id = int(result.scalar() or 0)
-
+    # The socket is registered above, so EVERY exit path below has to
+    # unregister it. Until 2026-08-26 the seed query sat outside this try and
+    # cleanup only ran on WebSocketDisconnect, so any other failure — notably
+    # asyncpg's TooManyConnectionsError once the pool was exhausted — killed
+    # the handler with the socket still in the broadcaster list. The browser
+    # reconnects every ~3s, so the "trades" channel grew 4 → 125 entries in
+    # 12 minutes and push() then iterated 125 dead sockets per broadcast.
     try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(func.max(SimulationLog.id)))
+            last_id = int(result.scalar() or 0)
+
         while True:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
@@ -138,6 +152,10 @@ async def ws_trades(ws: WebSocket, _ws_user: str | None = Depends(require_ws_aut
 
             await asyncio.sleep(2)
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug(f"[ws/trades] {exc}")
+    finally:
         broadcaster.disconnect("trades", ws)
 
 
@@ -170,6 +188,10 @@ async def ws_prices(ws: WebSocket, _ws_user: str | None = Depends(require_ws_aut
             }))
             await asyncio.sleep(5)
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug(f"[ws/prices] {exc}")
+    finally:
         broadcaster.disconnect("prices", ws)
 
 
@@ -186,29 +208,31 @@ async def ws_logs(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)
     await broadcaster.connect("logs", ws)
     last_id = 0
 
-    async with AsyncSessionLocal() as session:
-        # Seed with last 10 entries
-        result = await session.execute(
-            select(SimulationLog)
-            .order_by(SimulationLog.id.desc())
-            .limit(10)
-        )
-        recent = list(reversed(result.scalars().all()))
-
-        if recent:
-            last_id = recent[-1].id
-            for log in recent:
-                await ws.send_text(json.dumps({
-                    "type":       "log_entry",
-                    "id":         log.id,
-                    "event_type": log.event_type,
-                    "symbol":     log.symbol,
-                    "message":    log.message,
-                    "data":       log.data,
-                    "timestamp":  log.timestamp.isoformat(),
-                }, default=str))
-
+    # Same shape as ws_trades: the seed query has to sit inside the try, or a
+    # DB failure here leaks the socket that was just registered above.
     try:
+        async with AsyncSessionLocal() as session:
+            # Seed with last 10 entries
+            result = await session.execute(
+                select(SimulationLog)
+                .order_by(SimulationLog.id.desc())
+                .limit(10)
+            )
+            recent = list(reversed(result.scalars().all()))
+
+            if recent:
+                last_id = recent[-1].id
+                for log in recent:
+                    await ws.send_text(json.dumps({
+                        "type":       "log_entry",
+                        "id":         log.id,
+                        "event_type": log.event_type,
+                        "symbol":     log.symbol,
+                        "message":    log.message,
+                        "data":       log.data,
+                        "timestamp":  log.timestamp.isoformat(),
+                    }, default=str))
+
         while True:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
@@ -233,6 +257,10 @@ async def ws_logs(ws: WebSocket, _ws_user: str | None = Depends(require_ws_auth)
 
             await asyncio.sleep(1)
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.debug(f"[ws/logs] {exc}")
+    finally:
         broadcaster.disconnect("logs", ws)
 
 
