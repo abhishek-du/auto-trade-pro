@@ -219,3 +219,147 @@ def test_instrumentation_does_not_branch_on_its_own_timing():
                 assert "elapsed" not in t and "_dyn_t0" not in t and "_llm_t0" not in t, (
                     f"{name} branches on instrumentation timing: {t}"
                 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 14 — the external-LLM deadline
+#
+# ROOT CAUSE: call_llm_chat takes a `timeout` that call_mantle_chat accepts and
+# never uses — signature and docstring only, nothing in the body. What actually
+# bounded a call was _acquire_llm_rate_slot (<=90s) + botocore read_timeout
+# (<=90s) = 180s per attempt, doubled by call_mantle_chat's one retry = 360s,
+# past the 300s Celery soft limit.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_the_ignored_timeout_parameter_is_still_ignored_upstream():
+    """Pins the root cause so the fix is not silently made redundant.
+
+    If call_mantle_chat ever starts honouring `timeout`, the wait_for below is
+    belt-and-braces rather than the only bound — worth knowing, and worth this
+    test failing so someone re-reads the arithmetic.
+    """
+    body = ast.unparse(_fn(Path("utils/llm.py"), "call_mantle_chat"))
+    uses = [n for n in ast.walk(_fn(Path("utils/llm.py"), "call_mantle_chat"))
+            if isinstance(n, ast.Name) and n.id == "timeout" and isinstance(n.ctx, ast.Load)]
+    assert not uses, (
+        "call_mantle_chat now reads `timeout` — re-check whether the phase-14 "
+        "deadline is still the binding constraint"
+    )
+
+
+def test_per_position_call_is_wrapped_in_a_bounded_wait_for():
+    """1 + 7: the network operation is bounded at the asyncio level."""
+    fn = _fn(DM, "llm_dynamic_sl_tp")
+    waits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", "") == "wait_for"]
+    assert waits, "the per-position LLM call is not wrapped in asyncio.wait_for"
+    inner = ast.unparse(waits[0].args[0]) if waits[0].args else ""
+    assert "call_llm_chat" in inner, "wait_for does not wrap the LLM call"
+    kw = {k.arg: ast.unparse(k.value) for k in waits[0].keywords}
+    assert "timeout" in kw and "_LLM_CALL_DEADLINE_SEC" in kw["timeout"]
+
+
+def test_overall_dynamic_management_is_bounded_too():
+    """The per-position bound alone is insufficient: positions are gathered but
+    contend for one shared rate slot, so N of them can serialise."""
+    fn = _fn(IT, "_india_trade_loop")
+    waits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "attr", "") == "wait_for"
+             and "llm_dynamic_sl_tp" in ast.unparse(n)]
+    assert waits, "llm_dynamic_sl_tp is not bounded at the call site"
+
+
+@pytest.mark.parametrize("name,path,fnname,lo,hi", [
+    ("per-position", DM, "llm_dynamic_sl_tp", 10, 90),
+    ("overall", IT, "_india_trade_loop", 30, 200),
+])
+def test_deadlines_leave_real_margin_under_the_celery_soft_limit(name, path, fnname, lo, hi):
+    """Not 299. The margin is the point."""
+    src = path.read_text()
+    val = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id.endswith("DEADLINE_SEC") for t in node.targets):
+            if isinstance(node.value, ast.Constant):
+                val = float(node.value.value)
+    assert val is not None, f"no *_DEADLINE_SEC constant found for {name}"
+    assert lo <= val <= hi, f"{name} deadline {val}s is outside the intended band"
+    assert val <= 200, f"{name} deadline {val}s leaves too little of the 300s soft limit"
+
+
+# ── runtime: a timeout must be safe, and must NOT look like a decision ───────
+
+@pytest.mark.asyncio
+async def test_llm_timeout_does_not_mutate_the_position():
+    """2 + 4 + 5: the critical safety property.
+
+    A timeout must not close a position, move SL/TP, place an order, or be
+    mistaken for an LLM decision.
+    """
+    import engine.agent.dynamic_management as dm
+
+    sym = "P14TIMEOUT.NS"
+    pos = _fake_position(sym)
+    sl_before, tp_before = pos.stop_loss, pos.take_profit
+    calls: list[str] = []
+
+    async def _never_returns(*a, **k):
+        await asyncio.sleep(3600)
+
+    dm._last_manage_ts = 0.0
+    with patch.object(dm, "_LLM_CALL_DEADLINE_SEC", 0.05), \
+         patch.object(dm, "call_llm_chat", _never_returns), \
+         patch.object(dm, "close_paper_trade", AsyncMock()) as closed, \
+         patch.object(dm.logger, "warning", MagicMock(side_effect=lambda m, *a, **k: calls.append(str(m)))):
+        # The test bounds itself too. Without this, deleting the production
+        # wait_for makes the suite HANG on the 3600s stub instead of failing —
+        # which is a caught mutation, but an unusable one.
+        try:
+            await asyncio.wait_for(dm.llm_dynamic_sl_tp(_fake_session(pos)), timeout=10)
+        except asyncio.TimeoutError:
+            pytest.fail("llm_dynamic_sl_tp did not bound its own LLM call")
+
+    assert pos.stop_loss == sl_before, "stop loss moved on a timeout"
+    assert pos.take_profit == tp_before, "take profit moved on a timeout"
+    closed.assert_not_called(), "a timeout closed a position"
+    assert any("BEDROCK_CALL_TIMEOUT" in c for c in calls), f"timeout not classified; got {calls}"
+    assert any(sym in c for c in calls), "the timeout log does not name the position"
+
+
+@pytest.mark.asyncio
+async def test_overall_timeout_is_caught_and_the_loop_would_continue():
+    """3 + 6: the outer deadline fails into the handler that already existed."""
+    src = IT.read_text()
+    fn = _fn(IT, "_india_trade_loop")
+    handlers = [h for n in ast.walk(fn) if isinstance(n, ast.Try) for h in n.handlers
+                if "LLM_DYNAMIC_SL_TP_TIMEOUT" in ast.unparse(h)]
+    assert handlers, "no distinct handler for the overall timeout"
+    h = handlers[0]
+    assert not any(isinstance(n, ast.Raise) for n in ast.walk(h)), (
+        "the overall timeout re-raises — that would abort the whole trade loop, "
+        "including exits and breakers"
+    )
+    # and the original catch-all must still be there, after it
+    assert 'logger.error(f"[india_trade_loop] Dynamic management failed: {e}")' in src
+
+
+def test_timeout_logs_carry_no_sensitive_data():
+    """13: same rule as the phase-13 boundaries."""
+    for path, fnname in ((DM, "llm_dynamic_sl_tp"), (IT, "_india_trade_loop")):
+        for node in ast.walk(_fn(path, fnname)):
+            if not isinstance(node, ast.Call):
+                continue
+            txt = ast.unparse(node)
+            if "TIMEOUT" not in txt:
+                continue
+            for banned in ("prompt", "{resp", "messages", "api_key", "authorization", "secret", "token"):
+                assert banned not in txt.lower(), f"a timeout log references {banned!r}"
+
+
+def test_phase13_instrumentation_survived_the_fix():
+    """12: the fix must not have displaced the observability."""
+    dm_src, it_src = DM.read_text(), IT.read_text()
+    for marker in ("BEDROCK_CALL_START", "BEDROCK_CALL_END"):
+        assert marker in dm_src, f"{marker} was lost"
+    for marker in ("LLM_DYNAMIC_SL_TP_START", "LLM_DYNAMIC_SL_TP_END", "LLM_DYNAMIC_SL_TP_ERROR"):
+        assert marker in it_src, f"{marker} was lost"

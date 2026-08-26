@@ -135,6 +135,13 @@ def clamp_sl_tp(
     return final_sl, final_tp, notes
 
 
+# Deadlines for the external LLM path (2026-08-26, phase 14). See the block at
+# the call site for the arithmetic these come from. Both fail into handlers that
+# already existed: a timeout means "dynamic management unavailable this cycle",
+# never an approval, a rejection, or a position change.
+_LLM_CALL_DEADLINE_SEC = 60.0     # one position's LLM call, end to end
+
+
 async def llm_dynamic_sl_tp(session: AsyncSession) -> None:
     """
     Dynamically analyze open positions and update Stop Loss & Take Profit based on
@@ -248,13 +255,41 @@ Respond ONLY with valid JSON:
         #
         # The symbol and the elapsed time are logged. The prompt, the response,
         # credentials and any order payload are NOT.
+        # Per-position deadline (2026-08-26, phase 14). ROOT CAUSE: call_llm_chat
+        # takes a `timeout` argument that call_mantle_chat accepts and NEVER
+        # USES — it appears in that function's signature and docstring and
+        # nowhere in its body, so the 60s this path thought it was requesting
+        # did not exist. What did exist:
+        #
+        #   _nova_completion_once = _acquire_llm_rate_slot (<=90s, its own
+        #       give-up loop) + asyncio.to_thread(client.converse) bounded by
+        #       botocore read_timeout=90  ->  <=180s per attempt
+        #   call_mantle_chat retries once, on a transient error OR on empty
+        #       content                                    ->  <=360s per call
+        #
+        # 360s is past the 300s Celery soft limit, which is how a cycle reached
+        # SoftTimeLimitExceeded and, with concurrent positions contending for the
+        # same rate slot, the 600s hard limit and a SIGKILL.
+        #
+        # 60s is chosen against a healthy call of a few seconds — 3-12x headroom
+        # — and it bounds the whole retry chain well inside one attempt's worst
+        # case. It is deliberately not near 299.
+        #
+        # HONEST LIMIT: asyncio.wait_for cancels the AWAIT, not the boto3 thread
+        # underneath asyncio.to_thread. That orphaned thread is still bounded on
+        # its own by botocore's read_timeout=90 / connect_timeout=10 with
+        # retries={"max_attempts": 0}, so it dies within ~90s and cannot
+        # accumulate. Nothing here claims to kill it.
         _llm_t0 = _time.monotonic()
         logger.info(f"[dynamic_mgmt] BEDROCK_CALL_START {pos.symbol}")
         try:
-            resp = await call_llm_chat(
-                [{"role": "system", "content": "You are an aggressive portfolio manager maintaining dynamic SL/TP using holistic data."},
-                 {"role": "user", "content": prompt}],
-                max_tokens=1000, temperature=0.2
+            resp = await asyncio.wait_for(
+                call_llm_chat(
+                    [{"role": "system", "content": "You are an aggressive portfolio manager maintaining dynamic SL/TP using holistic data."},
+                     {"role": "user", "content": prompt}],
+                    max_tokens=1000, temperature=0.2
+                ),
+                timeout=_LLM_CALL_DEADLINE_SEC,
             )
             logger.info(
                 f"[dynamic_mgmt] BEDROCK_CALL_END {pos.symbol} ok=True "
@@ -302,6 +337,16 @@ Respond ONLY with valid JSON:
                     if hasattr(pos, "trade") and pos.trade:
                         pos.trade.stop_loss = new_sl
                         pos.trade.take_profit = new_tp
+        except asyncio.TimeoutError:
+            # Distinct classification only. TimeoutError subclasses Exception, so
+            # this would have been caught below anyway; splitting it just makes
+            # the log searchable. No SL/TP is touched — the mutation block above
+            # is inside the try and after the call, so it is simply skipped.
+            logger.warning(
+                f"[dynamic_mgmt] BEDROCK_CALL_TIMEOUT {pos.symbol} "
+                f"elapsed_ms={int((_time.monotonic() - _llm_t0) * 1000)} "
+                f"deadline_s={_LLM_CALL_DEADLINE_SEC} — position left unchanged"
+            )
         except Exception as e:
             logger.debug(f"[dynamic_management] Failed for {pos.symbol}: {e}")
 

@@ -572,15 +572,44 @@ async def _india_trade_loop():
         #
         # A START with no END is itself the signal — that is what a SIGKILL at
         # the 600s hard limit looks like from the log.
+        # Overall deadline (2026-08-26, phase 14). The per-position 60s bound in
+        # dynamic_management is not sufficient on its own: :309 gathers every
+        # position concurrently, but they contend for ONE shared Redis rate slot,
+        # so a book of N positions can serialise into N x 60s. This second layer
+        # bounds the whole block regardless of how many positions there are.
+        #
+        # 120s leaves 180s of the 300s Celery soft limit for the DB session to
+        # unwind, the remaining exit-management work, exception handling and task
+        # acknowledgement. Deliberately not near 299.
+        #
+        # A timeout here is caught by the SAME `except Exception` that was always
+        # there — asyncio.TimeoutError subclasses OSError subclasses Exception —
+        # so the loop continues to its existing behaviour: exits, breakers and
+        # everything downstream still run. Dynamic management is simply
+        # unavailable for this cycle.
+        import asyncio as _aio14
         import time as _t13
+        _DYN_MGMT_DEADLINE_SEC = 120.0
         _dyn_t0 = _t13.monotonic()
         logger.info("[india_trade_loop] LLM_DYNAMIC_SL_TP_START")
         try:
             from engine.agent.dynamic_management import llm_dynamic_sl_tp
-            await llm_dynamic_sl_tp(session)
+            await _aio14.wait_for(
+                llm_dynamic_sl_tp(session), timeout=_DYN_MGMT_DEADLINE_SEC
+            )
             logger.info(
                 f"[india_trade_loop] LLM_DYNAMIC_SL_TP_END ok=True "
                 f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)}"
+            )
+        except _aio14.TimeoutError:
+            # Distinct classification. Would be caught by the handler below in any
+            # case; splitting it makes the log searchable and states plainly that
+            # no position was changed.
+            logger.error(
+                f"[india_trade_loop] LLM_DYNAMIC_SL_TP_TIMEOUT "
+                f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)} "
+                f"deadline_s={_DYN_MGMT_DEADLINE_SEC} — dynamic management "
+                f"unavailable this cycle, positions unchanged"
             )
         except Exception as e:
             logger.error(f"[india_trade_loop] Dynamic management failed: {e}")
