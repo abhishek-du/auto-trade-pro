@@ -33,7 +33,7 @@ The pipeline
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from celery.exceptions import SoftTimeLimitExceeded
@@ -83,6 +83,13 @@ def _execution_enabled() -> bool:
     return bool(_cfg("TACTICAL_EXECUTION_ENABLED", False))
 
 
+# Cap on how many dropped symbols one funnel row records. The list exists to
+# answer "was symbol X scanned"; it is not a data export, and an unbounded list
+# on a 1,476-symbol universe would put a large JSON blob in simulation_logs on
+# every scan.
+_FUNNEL_SYMBOL_CAP = 250
+
+
 @dataclass
 class ScanResult:
     sub_pipeline: str
@@ -107,6 +114,11 @@ class ScanResult:
     universe: int = 0
     no_price: int = 0
     no_candles: int = 0
+    # Which symbols died at each drop stage, so the funnel is answerable per
+    # symbol and not only in aggregate. Truncated to _FUNNEL_SYMBOL_CAP when
+    # persisted; the in-memory lists are per-scan and discarded with the object.
+    no_price_symbols: list = field(default_factory=list)
+    no_candles_symbols: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -227,6 +239,57 @@ class TacticalExecutor:
                 f"raw={result.raw_signals} "
                 f"kept={result.kept} persisted={result.persisted} skipped={result.skipped}"
             )
+
+            # Per-scan funnel row (2026-08-26, phase 21). The counters above say
+            # HOW MANY symbols died at each stage; this says WHICH, so a question
+            # like "was TVSSRICHAK scanned on 2026-08-27" becomes answerable.
+            #
+            # Bounded by construction: only the two drop lists are stored, each
+            # truncated to _FUNNEL_SYMBOL_CAP with a flag recording that it was.
+            # Per-symbol LOG lines were rejected outright — 1,476 symbols against
+            # a scan every 3 minutes is ~700k lines a day.
+            #
+            # Symbols and counts only. No prices, no payloads, no credentials.
+            # Failure here cannot affect the scan: the signals are already
+            # committed above, and this rolls back only itself.
+            # Written on its OWN session, never the scan's. The scan session is
+            # expected to contain nothing but TacticalSignal rows — an existing
+            # test asserts exactly that — and mixing a telemetry row into it
+            # would change what the trading path commits. A separate session
+            # also makes the failure isolation real rather than nominal.
+            try:
+                from db.database import AsyncSessionLocal as _ASL
+                from db.models import SimulationLog as _SimLog
+                _np = result.no_price_symbols[:_FUNNEL_SYMBOL_CAP]
+                _nc = result.no_candles_symbols[:_FUNNEL_SYMBOL_CAP]
+                async with _ASL() as _fsess:
+                    _fsess.add(_SimLog(
+                        event_type="TACTICAL_SCAN_FUNNEL",
+                        symbol=pipeline,
+                        message=(
+                            f"{pipeline}: universe={result.universe} "
+                            f"scanned={result.scanned} raw={result.raw_signals} "
+                            f"kept={result.kept} persisted={result.persisted}"
+                        ),
+                        data={
+                            **result.as_dict(),
+                            "no_price_symbols": _np,
+                            "no_candles_symbols": _nc,
+                            # Compare against the UNCAPPED counters. The lists
+                            # stop growing at the cap, so their own length can
+                            # never exceed it and would report False forever.
+                            "truncated": (
+                                result.no_price > _FUNNEL_SYMBOL_CAP
+                                or result.no_candles > _FUNNEL_SYMBOL_CAP
+                            ),
+                        },
+                    ))
+                    await _fsess.commit()
+            except Exception as _exc:
+                # Nothing to roll back on the scan's session — this never
+                # touched it. The telemetry session is closed by its own
+                # context manager.
+                logger.warning(f"[tactical:{pipeline}] funnel row failed: {type(_exc).__name__}")
             return result
 
         except SoftTimeLimitExceeded:
@@ -273,12 +336,16 @@ class TacticalExecutor:
                 price = prices.get(symbol)
                 if not price:
                     result.no_price += 1
+                    if len(result.no_price_symbols) < _FUNNEL_SYMBOL_CAP:
+                        result.no_price_symbols.append(symbol)
                     continue
 
                 if pipeline == "F1":
                     df_1m = await get_candles_df(symbol, "1m", 200, session)
                     if df_1m is None:
                         result.no_candles += 1
+                        if len(result.no_candles_symbols) < _FUNNEL_SYMBOL_CAP:
+                            result.no_candles_symbols.append(symbol)
                         continue
                     df_d = await get_candles_df(symbol, "1d", 30, session)
                     result.scanned += 1
