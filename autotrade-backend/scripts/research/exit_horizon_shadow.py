@@ -48,7 +48,9 @@ from db.database import AsyncSessionLocal
 IST = "at time zone 'UTC' at time zone 'Asia/Kolkata'"
 
 # Horizons measured from each position's ACTUAL exit, plus the session close.
-HORIZONS_MIN = (30, 60, 90, 120)
+# Extended to 150/180 in Phase 25 so the shadow set matches the horizons the V2
+# gate can be configured to (V2_MIN_HOLD_MINUTES).
+HORIZONS_MIN = (30, 60, 90, 120, 150, 180)
 
 # Corrected product-aware round-trip costs, as a fraction of notional.
 # Both scenarios pay the same round trip, so this cancels when comparing
@@ -109,6 +111,16 @@ async def run(day: dt.date) -> list[dict]:
         notional = units * entry
         actual_net = float(t.pnl or 0)          # already net in paper_trades
 
+        # Exit family and the mode the trade actually ran under, so tomorrow's
+        # comparison can be grouped by LAYER rather than by raw reason string.
+        _meta = {}
+        try:
+            from engine.exit_policy import classify as _classify
+
+            _meta = {"exit_family": _classify(t.exit_reason)}
+        except Exception:
+            pass
+
         rec = {
             "trade_id": t.id,
             "symbol": t.symbol,
@@ -116,6 +128,11 @@ async def run(day: dt.date) -> list[dict]:
             "exit_reason": t.exit_reason,
             "actual_exit_ist": str(t.closed_ist),
             "actual_net": round(actual_net, 2),
+            "held_minutes": (
+                round((t.closed_at - t.opened_at).total_seconds() / 60.0, 1)
+                if t.closed_at and t.opened_at else None
+            ),
+            **_meta,
         }
 
         async with AsyncSessionLocal() as s2:
@@ -185,7 +202,18 @@ def _report(rows: list[dict], day: dt.date) -> None:
     n, tot, med = agg("hold_close_net")
     print(f"  {'hold to session close':<26}{n:>5}{tot:>12,.0f}{med:>10,.0f}{tot - tot0:>13,.0f}")
 
-    print(f"\n  by exit family (total net, CONTROL vs hold-to-close)")
+    print(f"\n  by exit FAMILY (total net, CONTROL vs hold-to-close)")
+    lay: dict[str, list[dict]] = {}
+    for r in rows:
+        lay.setdefault(r.get("exit_family") or "-", []).append(r)
+    print(f"  {'family':<24}{'n':>5}{'CONTROL':>11}{'to close':>11}{'delta':>10}")
+    for f, rs in sorted(lay.items(), key=lambda kv: -len(kv[1])):
+        a = sum(r["actual_net"] for r in rs)
+        h = [r["hold_close_net"] for r in rs if r.get("hold_close_net") is not None]
+        hv = sum(h) if h else 0.0
+        print(f"  {f:<24}{len(rs):>5}{a:>11,.0f}{hv:>11,.0f}{hv - a:>10,.0f}")
+
+    print(f"\n  by exit REASON (total net, CONTROL vs hold-to-close)")
     fams: dict[str, list[dict]] = {}
     for r in rows:
         fams.setdefault(r["exit_reason"] or "-", []).append(r)

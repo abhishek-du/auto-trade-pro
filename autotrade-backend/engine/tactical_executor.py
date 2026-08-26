@@ -89,6 +89,18 @@ def _execution_enabled() -> bool:
 # every scan.
 _FUNNEL_SYMBOL_CAP = 250
 
+# How many below-the-cut signals one scan records for research. TACTICAL_TOP_N
+# is 5 and TACTICAL_MAX_SIGNALS_PER_CYCLE is 15, so ranks 1-15 already leave a
+# TacticalSignal row each and are researchable today. Ranks 16-40 leave nothing
+# at all — they are dropped inside score_and_filter. This capture exists to
+# answer ONE question: is the cut discarding signals that were worth taking?
+#
+# It is research-only. These rows are SimulationLog entries. No TacticalSignal
+# is created, no intent is built, no sizing is requested and no risk is booked,
+# so nothing here can reach an executor. tests/test_rank_overflow_capture.py
+# enforces that. TACTICAL_TOP_N is NOT changed by this.
+_RANK_OVERFLOW_CAP = 25
+
 
 @dataclass
 class ScanResult:
@@ -216,11 +228,13 @@ class TacticalExecutor:
                 result.reason = "no rule triggered"
                 return result
 
+            overflow: list = []
             scored = await score_and_filter(
                 signals,
                 session,
                 min_score=float(_cfg("TACTICAL_MIN_COMPOSITE_SCORE", 50.0)),
                 top_n=int(_cfg("TACTICAL_MAX_SIGNALS_PER_CYCLE", 15)),
+                overflow_out=overflow,
             )
             result.kept = len(scored)
             if not scored:
@@ -257,6 +271,8 @@ class TacticalExecutor:
             # test asserts exactly that — and mixing a telemetry row into it
             # would change what the trading path commits. A separate session
             # also makes the failure isolation real rather than nominal.
+            await self._capture_rank_overflow(pipeline, overflow, len(scored), ctx)
+
             try:
                 from db.database import AsyncSessionLocal as _ASL
                 from db.models import SimulationLog as _SimLog
@@ -310,6 +326,75 @@ class TacticalExecutor:
             except Exception:
                 pass
             return result
+
+    async def _capture_rank_overflow(
+        self, pipeline: str, overflow: list, kept_n: int, ctx: MarketContext
+    ) -> None:
+        """Record the signals that fell below the persist cut. NEVER executes.
+
+        Writes at most _RANK_OVERFLOW_CAP SimulationLog rows' worth of data as a
+        single row, on its OWN session — the scan's session is expected to
+        contain nothing but TacticalSignal rows and an existing test asserts
+        exactly that.
+
+        `entry_eligible` records whether the signal would have been allowed to
+        trade on its own merits (a real entry price, stop and target), which is
+        what makes the post-close return study meaningful: a signal with no
+        usable stop was never a candidate regardless of its rank.
+        """
+        if not overflow:
+            return
+        try:
+            from db.database import AsyncSessionLocal as _ASL
+            from db.models import SimulationLog as _SimLog
+
+            rows = []
+            for offset, (sig, score) in enumerate(overflow[:_RANK_OVERFLOW_CAP]):
+                eligible = bool(
+                    sig.entry_price and sig.entry_price > 0
+                    and sig.stop_loss and sig.stop_loss > 0
+                    and sig.target and sig.target > 0
+                    and sig.stop_loss != sig.entry_price
+                )
+                rows.append({
+                    "symbol": sig.symbol,
+                    "rank": kept_n + offset + 1,
+                    "score": round(float(score), 2),
+                    "signal_type": sig.side,
+                    "strategy": sig.strategy_name,
+                    "reference_price": round(float(sig.entry_price or 0), 2),
+                    "stop_loss": round(float(sig.stop_loss or 0), 2),
+                    "target": round(float(sig.target or 0), 2),
+                    "entry_eligible": eligible,
+                    "not_persisted_reason": (
+                        f"rank {kept_n + offset + 1} > TACTICAL_MAX_SIGNALS_PER_CYCLE "
+                        f"({kept_n}) — dropped inside score_and_filter"
+                    ),
+                })
+
+            async with _ASL() as _sess:
+                _sess.add(_SimLog(
+                    event_type="TACTICAL_RANK_OVERFLOW",
+                    symbol=pipeline,
+                    message=(
+                        f"{pipeline}: {len(overflow)} signals below the persist cut "
+                        f"of {kept_n}; recorded {len(rows)}"
+                    ),
+                    data={
+                        "sub_pipeline": pipeline,
+                        "timestamp": datetime.now().isoformat(),
+                        "kept_n": kept_n,
+                        "overflow_total": len(overflow),
+                        "recorded": len(rows),
+                        "truncated": len(overflow) > _RANK_OVERFLOW_CAP,
+                        "vix": ctx.vix,
+                        "signals": rows,
+                    },
+                ))
+                await _sess.commit()
+        except Exception as exc:
+            # Research capture. Losing it loses a measurement and nothing else.
+            logger.warning(f"[tactical:{pipeline}] rank overflow capture failed: {type(exc).__name__}")
 
     async def _collect(
         self,
@@ -586,6 +671,27 @@ class TacticalExecutor:
                     "vix": ctx.vix,
                     "would_trade": would_trade,
                     "rule_confidence": signal.confidence,
+                    # Entry-quality telemetry (Phase 25). Observational only —
+                    # nothing reads these back to make a decision.
+                    #
+                    # signal_ts is when the rule fired; entry_ts is when the
+                    # gate accepted the intent. The fill price is NOT known
+                    # here (the router owns it), so signal_to_entry slippage is
+                    # derived after the session by joining paper_trades on
+                    # order_ref. opportunity_ts — the moment the move began — has
+                    # no live definition and is reconstructed from candles by the
+                    # Phase-24 method; it is deliberately absent rather than
+                    # guessed at.
+                    "entry_quality": {
+                        "signal_ts": (signal.timestamp or datetime.now()).isoformat(),
+                        "entry_ts": executed_at.isoformat() if executed_at else None,
+                        "signal_price": round(float(signal.entry_price or 0), 4),
+                        "signal_to_entry_minutes": (
+                            round((executed_at - (signal.timestamp or executed_at)).total_seconds() / 60.0, 3)
+                            if executed_at else None
+                        ),
+                        "order_ref": order_ref,
+                    },
                 },
             )
         )

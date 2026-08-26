@@ -390,6 +390,19 @@ class Settings(BaseSettings):
     TACTICAL_SECTOR_VETO_MIN_PEERS: int  = 3
     TACTICAL_SECTOR_VETO_DOWN_FRAC: float = 0.70
     TACTICAL_SECTOR_VETO_LOOKBACK_H: int = 24
+    # ── Strategy mode (Phase 25, 2026-08-26) ─────────────────────────────
+    # CONTROL = every exit fires exactly as before. V2 = PROFIT_MANAGEMENT
+    # exits are deferred until V2_MIN_HOLD_MINUTES, because Phase 24 measured
+    # the signalled subset at net -0.052% (60m) / +0.054% (120m) / +0.342%
+    # (close). Signal generation is IDENTICAL in both modes.
+    #
+    # The code default is CONTROL on purpose: a process that cannot read .env
+    # must get the old behaviour, never the experiment. .env selects V2.
+    # engine/exit_policy.py owns the taxonomy and the gate.
+    TRADING_STRATEGY_MODE:         str   = "CONTROL"
+    # Configurable so 60/90/120/150/180 are testable without touching the exit
+    # engine. <= 0 disables the gate, making V2 behave as CONTROL.
+    V2_MIN_HOLD_MINUTES:           int   = 120
     ENABLE_TRAILING_STOP:          bool  = True
     TRAILING_STOP_ATR_MULT:        float = 2.5
     TRAILING_BREAKEVEN_TRIGGER_PCT: float = 2.0   # move stop to entry at +2%

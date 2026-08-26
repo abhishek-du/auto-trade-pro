@@ -309,7 +309,8 @@ class PositionTracker:
 # it could only end at breakeven or at the 15:10 squareoff.
 
 
-def update_trailing_stop(pos, current_price: float, atr: float) -> tuple[bool, str | None]:
+def update_trailing_stop(pos, current_price: float, atr: float,
+                         ratchet: bool = True) -> tuple[bool, str | None]:
     """Ratchet the stop up behind the peak. Returns (changed, note).
 
     Two stages, in order:
@@ -322,6 +323,14 @@ def update_trailing_stop(pos, current_price: float, atr: float) -> tuple[bool, s
     `min()` for a short. A trailing stop that can loosen is not a stop.
 
     Mutates `pos` but does not commit; the caller owns the transaction.
+
+    `ratchet=False` tracks the extreme (highest_high / lowest_low) but leaves
+    pos.stop_loss alone. V2 needs this: the ratchet and the hard stop share one
+    column, so a stop moved to breakeven at +2% IS a profit-management exit
+    wearing a STOP_LOSS label, and deferring the profit-management layer means
+    deferring the ratchet with it. The peak keeps being tracked throughout, so
+    when the minimum hold ends the chandelier applies from the true peak rather
+    than restarting from wherever price happens to be. See engine/exit_policy.py.
     """
     from utils.config import settings
 
@@ -375,6 +384,10 @@ def update_trailing_stop(pos, current_price: float, atr: float) -> tuple[bool, s
             new_sl, note = cand, f"trailed to {cand:.2f} (peak {peak:.2f})"
         elif (not is_long) and cand > current_price and cand < new_sl:
             new_sl, note = cand, f"trailed to {cand:.2f} (trough {peak:.2f})"
+
+    if not ratchet:
+        # Extreme tracked above; the stop is deliberately left where it is.
+        return False, None
 
     if new_sl != old_sl:
         pos.stop_loss = new_sl

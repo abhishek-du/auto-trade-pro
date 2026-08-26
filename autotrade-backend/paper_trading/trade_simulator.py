@@ -722,7 +722,7 @@ async def close_paper_trade(
     # all settled above, and nothing downstream reads mfe_pct to make a
     # decision. If the query fails or no candles exist, the tracker values are
     # kept, so behaviour degrades to exactly what it was before.
-    _mfe_src = "tracker"
+    _mfe_src = _mae_src = "tracker"
     try:
         _cd = await _candle_excursion(
             session, trade.symbol, position.opened_at, now,
@@ -731,7 +731,11 @@ async def close_paper_trade(
         )
         if _cd is not None:
             peak_upnl, trough_upnl = _cd
-            _mfe_src = "candles"
+            # One query yields both extremes, so the provenance is necessarily
+            # the same for each. They are recorded separately anyway because a
+            # report that prints only one of them must still be able to say
+            # where that one came from.
+            _mfe_src = _mae_src = "candles"
     except Exception as _exc:
         logger.debug(f"[mfe] candle excursion unavailable for {trade.symbol}: {_exc}")
 
@@ -744,6 +748,35 @@ async def close_paper_trade(
     if initial_r > 0:
         trade.mfe_r = round(peak_upnl   / initial_r, 3)
         trade.mae_r = round(trough_upnl / initial_r, 3)
+
+    # ── Exit taxonomy (Phase 25) ──────────────────────────────────────────────
+    # exit_reason keeps its existing value — no old reason is hidden or renamed.
+    # exit_family is the layer that reason belongs to, so tomorrow's attribution
+    # can ask "how much P&L did profit management cost us" without a hand-built
+    # mapping in the report.
+    #
+    # Stored in the existing indicator_snapshot JSON rather than a new column:
+    # PaperTrade.exit_reason is String(20) and adding columns means a migration
+    # on two schema sources (alembic AND the inline DDL in db/database.py), which
+    # is not worth it for an attribution label. The same blob carries the MFE/MAE
+    # provenance, which until now was computed and then thrown away.
+    try:
+        from engine.exit_policy import classify as _classify, strategy_mode as _mode
+
+        _existing = (trade.indicator_snapshot or {}) if trade.indicator_snapshot else {}
+        trade.indicator_snapshot = {
+            **_existing,
+            "exit_meta": {
+                "exit_family": _classify(reason),
+                "exit_reason": reason,
+                "strategy_mode": _mode(),
+                "held_minutes": round(duration_hours * 60.0, 1),
+                "mfe_src": _mfe_src,
+                "mae_src": _mae_src,
+            },
+        }
+    except Exception as _exc:
+        logger.debug(f"[exit_policy] attribution skipped for {trade.symbol}: {_exc}")
 
     # ── Step 3: Delete OpenPosition ───────────────────────────────────────────
     await session.execute(
@@ -775,6 +808,9 @@ async def close_paper_trade(
             "reason":            reason,
             "duration_hours":    round(duration_hours, 2),
             "opening_reasoning": trade.ai_reason,
+            "exit_family":       (trade.indicator_snapshot or {}).get("exit_meta", {}).get("exit_family"),
+            "strategy_mode":     (trade.indicator_snapshot or {}).get("exit_meta", {}).get("strategy_mode"),
+            "mfe_src":           _mfe_src,
         },
     )
 
@@ -1231,6 +1267,18 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
         trailed = False
         snap = (pos.trade.indicator_snapshot or {}) if pos.trade else {}
         tm   = snap.get("trade_mgmt") if isinstance(snap, dict) else None
+
+        # V2 profit-management gate (Phase 25). True for every position at every
+        # age under CONTROL, so everything below is unchanged in that mode.
+        # Under V2 it is False until V2_MIN_HOLD_MINUTES have elapsed, which
+        # defers the T1 partial, the T1 re-analysis, the trailing stop MOVE and
+        # TAKE_PROFIT. The peak keeps being tracked either way, so when the
+        # window opens the trail applies from the real high, not from wherever
+        # price happens to be at that moment.
+        from engine.exit_policy import exit_allowed as _exit_allowed
+        _opened_at = (pos.trade.opened_at if pos.trade else None) or getattr(pos, "opened_at", None)
+        _pm_ok, _, _pm_note = _exit_allowed("TAKE_PROFIT", _opened_at, now)
+
         if tm:
             t1         = tm.get("target_1")
             trail_dist = tm.get("trail_dist") or 0.0
@@ -1242,7 +1290,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
             if is_buy:
                 peak = max(peak, price)
                 # T1 hit: always book 50% regardless of exit policy
-                if not tm.get("partial_done") and t1 and price >= t1:
+                if _pm_ok and not tm.get("partial_done") and t1 and price >= t1:
                     # Fresh re-analysis right at the T1 tick (2026-07-22,
                     # user-requested) -- decide CONTINUE (existing mechanical
                     # partial+trail below) vs EXIT (reversal risk -> close
@@ -1280,7 +1328,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                     if exit_policy != "partial_fixed":
                         trailing = True
                 # Trailing stop ratchet — only for "current" policy
-                if exit_policy != "partial_fixed" and trailing and trail_dist > 0:
+                if _pm_ok and exit_policy != "partial_fixed" and trailing and trail_dist > 0:
                     new_stop = peak - trail_dist
                     if new_stop > pos.stop_loss:
                         pos.stop_loss = round(new_stop, 4)
@@ -1289,7 +1337,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         trailed = True
             else:  # SELL
                 peak = min(peak, price)
-                if not trailing and t1 and price <= t1:
+                if _pm_ok and not trailing and t1 and price <= t1:
                     from engine.agent.t1_reanalysis import analyze_t1_hit
                     t1_analysis = await analyze_t1_hit(
                         symbol=pos.symbol, direction="SELL", entry_price=pos.entry_price,
@@ -1301,7 +1349,7 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                         auto_closed.append(closed)
                         continue
                     trailing = True
-                if trailing and trail_dist > 0:
+                if _pm_ok and trailing and trail_dist > 0:
                     new_stop = peak + trail_dist
                     if new_stop < pos.stop_loss:
                         pos.stop_loss = round(new_stop, 4)
@@ -1336,6 +1384,19 @@ async def update_positions_with_current_prices(session: AsyncSession) -> list[di
                 "TRAIL_STOP" if hit_sl and is_trailing
                 else "STOP_LOSS" if hit_sl else "TAKE_PROFIT"
             )
+
+            # V2: a TAKE_PROFIT or a TRAIL_STOP is the profit-management layer
+            # and is deferred until the minimum hold. A STOP_LOSS is Layer 1
+            # and fires at any age, in both modes -- exit_allowed() classifies
+            # it as HARD_STOP and returns True unconditionally.
+            _sl_allowed, _sl_family, _sl_note = _exit_allowed(reason, _opened_at, now)
+            if not _sl_allowed:
+                logger.debug(f"[exit_policy] {pos.symbol} {reason}: {_sl_note}")
+                # Deliberately NOT `continue`: the unrealised-P&L and MFE
+                # tracker updates below must still run for a held position.
+                hit_sl = hit_tp = False
+
+        if hit_sl or hit_tp:
             try:
                 # SAVEPOINT: isolate this close so a deadlock/DB error here can't
                 # poison the shared session and silently break SL/TP monitoring

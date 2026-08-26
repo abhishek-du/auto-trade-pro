@@ -251,14 +251,39 @@ class TestExhaustionRespectsExitEligibility:
         i = src.index("if _adv_reason is None and _c5 is not None")
         assert "not _exit_blocked" in src[i:i + 220]
 
-    def test_trailing_is_NOT_gated_on_it(self):
+    def test_trailing_is_NOT_gated_on_the_swing_hold(self):
         """Tightening a stop is not an exit. The ratcheted level must still be
-        maintained through the hold window so it applies the moment that window
-        ends."""
+        maintained through the SWING hold window so it applies the moment that
+        window ends.
+
+        Phase 25 added a SECOND, unrelated condition on the ratchet — the V2
+        profit-management gate — which is asserted separately below. The SWING
+        bypass must still not touch it.
+        """
         src = self._src()
-        i = src.index("update_trailing_stop(pos, price, _atr)")
+        i = src.index("update_trailing_stop(pos, price, _atr")
         seg = src[i - 400:i]
         assert "not _exit_blocked" not in seg
+
+    def test_trailing_ratchet_carries_the_v2_gate(self):
+        """V2 defers the ratchet, because the ratchet and the hard stop share
+        pos.stop_loss.
+
+        A stop moved to breakeven at +2% closes the position at +0% and reports
+        itself as STOP_LOSS. That is the profit-management layer wearing Layer
+        1's label, so deferring profit management has to defer the move with it.
+        Tracking of the extreme continues regardless — see
+        paper_trading/position_tracker.py::update_trailing_stop(ratchet=False).
+        """
+        src = self._src()
+        i = src.index("update_trailing_stop(pos, price, _atr")
+        assert "ratchet=_pm_ok" in src[i:i + 120]
+
+    def test_the_v2_gate_is_computed_from_the_shared_policy_module(self):
+        """One classifier, not a threshold re-derived per call site."""
+        src = self._src()
+        i = src.index("_pm_ok = ")
+        assert "engine.exit_policy" in src[i - 400:i]
 
     def test_blocked_condition_matches_the_bypass_below(self):
         """If these two drift apart, the check is gated on the wrong thing."""

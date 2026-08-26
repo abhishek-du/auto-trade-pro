@@ -1610,6 +1610,15 @@ async def _fast_sl_check() -> None:
                 if _dt2.now(_ZI2("Asia/Kolkata")).replace(tzinfo=None) < pos.swing_min_hold:
                     _exit_blocked = True
 
+            # V2 profit-management gate (Phase 25). CONTROL leaves this True for
+            # every position at every age, so the branches below are byte-for-byte
+            # the old behaviour. Under V2 it is False until the position has had
+            # V2_MIN_HOLD_MINUTES to work, which defers EXHAUSTION, the T1/T2
+            # partials, TAKE_PROFIT and the trailing ratchet -- and NOTHING else.
+            # The fixed stop-loss below is untouched in both modes.
+            from engine.exit_policy import profit_management_allowed as _pm_allowed
+            _pm_ok = _pm_allowed(getattr(pos, "opened_at", None))
+
             try:
                 from paper_trading.position_tracker import update_trailing_stop
                 from utils.config import settings as _s
@@ -1630,7 +1639,12 @@ async def _fast_sl_check() -> None:
 
                 # 1. Ratchet the stop. Mutates pos.stop_loss; sl_hit below sees it.
                 if bool(getattr(_s, "ENABLE_TRAILING_STOP", True)):
-                    _moved, _note = update_trailing_stop(pos, price, _atr)
+                    # ratchet=_pm_ok: under V2, before the minimum hold, the peak
+                    # is still tracked but the stop is not moved. The ratchet and
+                    # the hard stop share pos.stop_loss, so trailing to breakeven
+                    # at +2% is a profit-management exit that would report itself
+                    # as STOP_LOSS. Deferring the layer means deferring the move.
+                    _moved, _note = update_trailing_stop(pos, price, _atr, ratchet=_pm_ok)
                     if _moved:
                         await session.commit()
                         logger.info(f"[fast_sl] TRAILING {pos.symbol}: {_note}")
@@ -1640,7 +1654,7 @@ async def _fast_sl_check() -> None:
                 # _exit_blocked above. Trailing still runs: tightening a stop is
                 # not an exit, and the ratcheted level applies the moment the
                 # hold window ends.
-                if _adv_reason is None and _c5 is not None and not _exit_blocked and \
+                if _adv_reason is None and _c5 is not None and not _exit_blocked and _pm_ok and \
                    bool(getattr(_s, "ENABLE_EXHAUSTION_EXIT", True)) and is_buy:
                     from engine.indicators import detect_exhaustion
                     _ex, _why = detect_exhaustion(_c5, _atr)
@@ -1674,7 +1688,7 @@ async def _fast_sl_check() -> None:
                         logger.info(f"[fast_sl] EXHAUSTION {pos.symbol}: {_why}")
 
                 # 3. T2 — book another 30% at +3%, then run the rest.
-                if _adv_reason is None and bool(getattr(_s, "ENABLE_PARTIAL_BOOKING_T2", True)) \
+                if _adv_reason is None and _pm_ok and bool(getattr(_s, "ENABLE_PARTIAL_BOOKING_T2", True)) \
                    and int(getattr(pos, "exit_tier", 1) or 1) == 2 and pos.entry_price > 0:
                     _t2_pct = float(getattr(_s, "PARTIAL_BOOKING_T2_PCT", 0.030))
                     _t2 = pos.entry_price * (1 + _t2_pct) if is_buy else pos.entry_price * (1 - _t2_pct)
@@ -1712,8 +1726,11 @@ async def _fast_sl_check() -> None:
                     sl_hit = False
             
             if not sl_hit:
-                # Also check take_profit for fast wins
-                if pos.take_profit:
+                # Also check take_profit for fast wins.
+                # Under V2, before the minimum hold, neither the T1 partial nor a
+                # full TAKE_PROFIT may fire -- Phase 24 measured the signalled
+                # subset still net-negative at 60 minutes and positive by 120.
+                if pos.take_profit and _pm_ok:
                     tp_hit = (is_buy and price >= pos.take_profit) or (
                         not is_buy and price <= pos.take_profit
                     )

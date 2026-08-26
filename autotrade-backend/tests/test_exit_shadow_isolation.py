@@ -82,15 +82,52 @@ class TestCannotTrade:
 
 
 class TestControlRemainsDefault:
-    def test_the_real_exit_stack_is_untouched(self):
-        """close_paper_trade must not know the experiment exists."""
+    """Phase 25 REPLACED this class's original assertion, deliberately.
+
+    It used to assert that no exit-mode switch existed anywhere in the trading
+    path, because on 2026-08-26 CONTROL was the only behaviour that existed and
+    the shadow script was the whole experiment. The V2 implementation makes that
+    assertion false on purpose: there is now a real mode, selected by
+    TRADING_STRATEGY_MODE.
+
+    What must remain true is narrower and more useful: the shadow research
+    module is still not reachable from the trading path, and the mode is decided
+    in exactly one place with CONTROL as the code-level default.
+    """
+
+    def test_the_trading_path_cannot_reach_the_research_script(self):
         import paper_trading.trade_simulator as ts
 
-        src = inspect.getsource(ts)
-        assert "exit_horizon_shadow" not in src
-        assert "EXIT_MODE" not in src, (
-            "no exit-mode switch may exist in the trading path; CONTROL is the "
-            "only behaviour"
+        assert "exit_horizon_shadow" not in inspect.getsource(ts)
+
+    def test_control_is_the_code_default(self):
+        """A process that cannot read .env must get the OLD behaviour."""
+        import utils.config as cfg
+
+        field = cfg.Settings.model_fields["TRADING_STRATEGY_MODE"]
+        assert field.default == "CONTROL", (
+            "the experiment must be opt-in; a missing .env may never silently "
+            "enable V2"
+        )
+
+    def test_the_mode_is_decided_in_one_place(self):
+        """No call site may re-derive the mode from settings itself."""
+        import pathlib as _pl
+
+        root = _pl.Path(shadow.__file__).parents[2]
+        offenders = []
+        for rel in ("paper_trading/trade_simulator.py", "tasks/india_tasks.py",
+                    "paper_trading/position_tracker.py"):
+            # Comments explain the gate and name the settings; only executable
+            # lines count as reading them.
+            code = "\n".join(
+                ln for ln in (root / rel).read_text().splitlines()
+                if not ln.strip().startswith("#")
+            )
+            if "TRADING_STRATEGY_MODE" in code or "V2_MIN_HOLD_MINUTES" in code:
+                offenders.append(rel)
+        assert not offenders, (
+            f"these read the mode directly instead of via engine.exit_policy: {offenders}"
         )
 
 

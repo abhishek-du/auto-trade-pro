@@ -143,3 +143,54 @@ class TestCallSitesPassTheProduct:
         assert 'getattr(trade, "product", None) or "CNC"' in src, (
             "the call sites must default a missing product to CNC"
         )
+
+class TestWalletReconciliation:
+    """The cost model is behaviour-affecting, not cosmetic.
+
+    The chain is real: close_paper_trade computes `pnl` net of cost ->
+    VirtualWallet.return_margin credits that pnl -> wallet_balance feeds
+    risk_manager sizing. A wrong cost silently resizes every later position, so
+    the arithmetic that reaches the wallet has to be pinned.
+    """
+
+    def test_the_pnl_that_reaches_the_wallet_is_net_of_cost(self):
+        import inspect
+        import paper_trading.trade_simulator as ts
+
+        src = inspect.getsource(ts.close_paper_trade)
+        assert "pnl = gross_pnl - cost + partial_pnl" in src
+        i = src.index("pnl = gross_pnl - cost")
+        j = src.index("VirtualWallet.return_margin")
+        assert i < j, "the wallet must be credited the NET figure"
+
+    def test_margin_returned_is_the_original_notional_not_the_net(self):
+        """Cost comes out of P&L, never out of the returned margin — double
+        counting it would drain the wallet by the cost on every close."""
+        import inspect
+        import paper_trading.trade_simulator as ts
+
+        src = inspect.getsource(ts.close_paper_trade)
+        assert "margin      = trade.size_usd" in src
+
+    def test_an_mis_round_trip_returns_more_than_a_cnc_one(self):
+        from paper_trading.trade_simulator import estimate_trade_cost
+
+        qty, px = 100, 500.0
+        mis = (estimate_trade_cost(qty, px, "BUY", "MIS")
+               + estimate_trade_cost(qty, px, "SELL", "MIS"))
+        cnc = (estimate_trade_cost(qty, px, "BUY", "CNC")
+               + estimate_trade_cost(qty, px, "SELL", "CNC"))
+        notional = qty * px
+        # Roughly 0.11% against 0.294%: about Rs.900 per Rs.50k of notional
+        # stays in the wallet that the flat delivery model used to remove.
+        assert cnc - mis > 0
+        assert 0.0015 < (cnc - mis) / notional < 0.0025
+
+    def test_the_two_implementations_cannot_drift(self):
+        """A replay that disagrees with the live simulator proves nothing."""
+        from paper_trading.trade_simulator import estimate_trade_cost as live
+        from engine.agent.backtester import estimate_trade_cost as bt
+
+        for product in ("MIS", "CNC", None):
+            for side in ("BUY", "SELL"):
+                assert live(77, 341.25, side, product) == bt(77, 341.25, side, product)
