@@ -556,11 +556,38 @@ async def _india_trade_loop():
                 ))
 
         # ── AI Dynamic Management: LLM manages SL/TP for open positions ────────
+        #
+        # Observability only (2026-08-26, phase 13). On 2026-08-26 this task ran
+        # to its Celery time limits 16 times between 10:18 and 12:03 IST —
+        # SoftTimeLimitExceeded at 300s, and 5 hard kills at 600s that SIGKILL
+        # the pool worker with no cleanup. The hang is an I/O wait somewhere in
+        # exit management, but three evidence sources cannot name it: the
+        # soft-limit traceback lands in the event loop's epoll.poll() rather
+        # than the awaiting coroutine, llm_dynamic_sl_tp logs nothing at all,
+        # and py-spy needs ptrace privileges this host does not grant.
+        #
+        # These two log lines close that gap. They are additive: the try/except
+        # below is byte-for-byte the original, the same exception is caught with
+        # the same message, and nothing branches on the timing.
+        #
+        # A START with no END is itself the signal — that is what a SIGKILL at
+        # the 600s hard limit looks like from the log.
+        import time as _t13
+        _dyn_t0 = _t13.monotonic()
+        logger.info("[india_trade_loop] LLM_DYNAMIC_SL_TP_START")
         try:
             from engine.agent.dynamic_management import llm_dynamic_sl_tp
             await llm_dynamic_sl_tp(session)
+            logger.info(
+                f"[india_trade_loop] LLM_DYNAMIC_SL_TP_END ok=True "
+                f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)}"
+            )
         except Exception as e:
             logger.error(f"[india_trade_loop] Dynamic management failed: {e}")
+            logger.info(
+                f"[india_trade_loop] LLM_DYNAMIC_SL_TP_ERROR exc={type(e).__name__} "
+                f"elapsed_ms={int((_t13.monotonic() - _dyn_t0) * 1000)}"
+            )
 
         # Circuit breaker + halt gate — AFTER exit management, BEFORE any entry.
         # check_drawdown_breakers trips the sticky trading_halted flag on a
