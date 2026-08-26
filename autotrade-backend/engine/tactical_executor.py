@@ -92,11 +92,29 @@ class ScanResult:
     persisted: int = 0
     skipped: int = 0
     reason: str = ""
+    # Why symbols never reached the rules (2026-08-26, phase 21).
+    #
+    # `scanned` is incremented AFTER the two `continue`s in _collect(), so a
+    # symbol dropped for a missing price or missing candles was counted
+    # nowhere at all. That is precisely the gap the 2026-08-26 opportunity
+    # audit could not close: for eight of the day's biggest movers, sitting
+    # inside the F1 universe and producing no signal, there was no way to tell
+    # whether the scanner processed them and the rules declined, or whether
+    # they never reached the rules. The first is a strategy question, the
+    # second is an engineering defect, and they need opposite responses.
+    #
+    # Counts only. universe = scanned + no_price + no_candles.
+    universe: int = 0
+    no_price: int = 0
+    no_candles: int = 0
 
     def as_dict(self) -> dict:
         return {
             "sub_pipeline": self.sub_pipeline,
+            "universe": self.universe,
             "scanned": self.scanned,
+            "no_price": self.no_price,
+            "no_candles": self.no_candles,
             "raw_signals": self.raw_signals,
             "kept": self.kept,
             "persisted": self.persisted,
@@ -204,7 +222,9 @@ class TacticalExecutor:
 
             await session.commit()
             logger.info(
-                f"[tactical:{pipeline}] scanned={result.scanned} raw={result.raw_signals} "
+                f"[tactical:{pipeline}] universe={result.universe} scanned={result.scanned} "
+                f"no_price={result.no_price} no_candles={result.no_candles} "
+                f"raw={result.raw_signals} "
                 f"kept={result.kept} persisted={result.persisted} skipped={result.skipped}"
             )
             return result
@@ -247,15 +267,18 @@ class TacticalExecutor:
             logger.warning(f"[tactical:{pipeline}] no prices returned for {len(universe)} symbols")
             return out
 
+        result.universe = len(universe)
         for symbol in universe:
             try:
                 price = prices.get(symbol)
                 if not price:
+                    result.no_price += 1
                     continue
 
                 if pipeline == "F1":
                     df_1m = await get_candles_df(symbol, "1m", 200, session)
                     if df_1m is None:
+                        result.no_candles += 1
                         continue
                     df_d = await get_candles_df(symbol, "1d", 30, session)
                     result.scanned += 1

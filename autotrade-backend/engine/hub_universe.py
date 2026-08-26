@@ -183,6 +183,41 @@ async def rebuild_hub_universe(
         ))
     await session.commit()
 
+    # Snapshot the universe before it is next destroyed (2026-08-26, phase 21).
+    #
+    # `delete(HubUniverse)` above rewrites this table wholesale on every
+    # rebuild, so only the CURRENT universe is ever knowable. The 2026-08-26
+    # opportunity audit hit exactly this wall: asked "was symbol X in the
+    # universe on 2026-08-14", the answer was unrecoverable, which made a
+    # historical opportunity-conversion funnel impossible to build for any day
+    # but today.
+    #
+    # Written into simulation_logs rather than a new table so this needs no
+    # schema change and no migration: one row per rebuild, symbol -> rank only.
+    # Failure here must never break the rebuild — the universe is already
+    # committed above, and a missing snapshot is a lost measurement, not a
+    # trading fault.
+    try:
+        from db.models import SimulationLog as _SimLog
+        _snap = {r.symbol: i for i, r in enumerate(rows, start=1)}
+        _snap.update({r.symbol: len(rows) + i for i, r in enumerate(extra, start=1)})
+        session.add(_SimLog(
+            event_type="HUB_UNIVERSE_SNAPSHOT",
+            symbol="—",
+            message=f"universe rebuilt: {len(_snap)} symbols",
+            data={
+                "universe_size": len(_snap),
+                "ranked": len(rows),
+                "fast_lane": len(extra),
+                "min_turnover_cr": min_turnover_cr,
+                "ranks": _snap,
+            },
+        ))
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        logger.warning(f"[hub_universe] snapshot failed (universe itself is committed): {exc}")
+
     summary = {
         "universe_size": len(rows) + len(extra),
         "ranked": len(rows),
