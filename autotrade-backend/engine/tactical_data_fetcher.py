@@ -495,11 +495,16 @@ async def get_f1_universe(session: AsyncSession) -> list[str]:
                         ORDER BY c.timestamp DESC LIMIT 1
                     ) l ON TRUE
                     WHERE h.rank > 0 AND h.turnover_cr >= :min_to
+                      -- NSE-only (2026-08-27). Defensive: hub_universe is
+                      -- rebuilt daily, so without this a stale .BO row would
+                      -- keep being scanned until the next rebuild lands.
+                      AND (NOT :nse_only OR h.symbol LIKE '%.NS')
                     ORDER BY h.turnover_cr DESC
                     LIMIT :cap
                     """
                 ),
-                {"min_to": min_to, "cap": cap},
+                {"min_to": min_to, "cap": cap,
+                 "nse_only": bool(getattr(_s, "NSE_ONLY_UNIVERSE", True))},
             )
         ).fetchall()
     except Exception as exc:

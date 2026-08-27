@@ -39,9 +39,16 @@ async def rebuild_hub_universe(
 
     min_turnover = min_turnover_cr * 1e7  # ₹ Cr → ₹
 
-    # Include both NSE (.NS) and BSE (.BO); exclude bonds/SME/illiquid.
-    _exclude = """
-        AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')
+    # Exchange scope. NSE-only by default (2026-08-27, operator decision) --
+    # see utils/config.py::NSE_ONLY_UNIVERSE for the evidence and the
+    # 10,559-BSE-only trade-off. Bonds/SME/illiquid are excluded either way.
+    from utils.config import settings as _cfg_s
+
+    _nse_only = bool(getattr(_cfg_s, "NSE_ONLY_UNIVERSE", True))
+    _scope = ("AND symbol LIKE '%.NS'" if _nse_only
+              else "AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')")
+    _exclude = f"""
+        {_scope}
         AND symbol !~ '[0-9]'
         AND symbol NOT LIKE '%-SG.NS'
         AND symbol NOT LIKE '%-SM.NS'
@@ -51,6 +58,7 @@ async def rebuild_hub_universe(
         AND symbol NOT LIKE '%-SG.BO'
         AND symbol NOT LIKE '%-SM.BO'
     """
+    logger.info(f"[hub_universe] exchange scope: {'NSE only' if _nse_only else 'NSE + BSE'}")
 
     # Primary: 1d candles (most accurate for daily turnover).
     #

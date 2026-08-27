@@ -414,6 +414,20 @@ class Settings(BaseSettings):
     # SETUP_INVALIDATION is NOT gated -- no same-bar case was observed there.
     MIN_COMPLETED_BARS_BEFORE_PROFIT_EXIT: int = 1
     PROFIT_EXIT_BAR_MINUTES:               int = 5   # the frame detect_exhaustion reads
+    # ── NSE-only universe (2026-08-27, operator decision) ────────────────
+    # BSE is excluded entirely. Evidence: 807 .BO symbols carry ZERO intraday
+    # data while an NSE twin exists, and 29 of 136 LLM evaluations on
+    # 2026-08-27 were .BO symbols structurally incapable of price/volume
+    # validation -- they consumed a decision slot and could never produce a
+    # verifiable signal.
+    #
+    # 2,476 BSE listings have an NSE twin (no loss). 10,559 are BSE-only and
+    # leave the universe as a direct consequence of this flag. That is the
+    # intended trade-off, not an accident.
+    #
+    # Set False to restore dual-exchange scanning; the universe rebuild picks
+    # it up on its next run.
+    NSE_ONLY_UNIVERSE:             bool  = True
     TRADING_STRATEGY_MODE:         str   = "CONTROL"
     # Configurable so 60/90/120/150/180 are testable without touching the exit
     # engine. <= 0 disables the gate, making V2 behave as CONTROL.
