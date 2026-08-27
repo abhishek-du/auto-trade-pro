@@ -396,37 +396,82 @@ async def fetch_nse_corporate_announcements(limit: int = 50) -> list[dict]:
     routine filing NSE publishes.
     """
     from crawler.fii_dii_crawler import BROWSER_HEADERS
+    from utils.symbols import normalize as _norm_symbol
 
-    url = "https://www.nseindia.com/api/corporate-announcements?index=equities"
-    try:
+    # DATE SCOPING (2026-08-27, Phase 27 F1).
+    #
+    # The unscoped endpoint returns a rolling window of roughly the last 20
+    # filings. Measured that morning: NSE's date-scoped feed carried 79
+    # announcements / 17 high-impact for the session while our DB held 2
+    # high-impact. The crawler was not slow, it was reading a keyhole.
+    #
+    # NSE expects DD-MM-YYYY. Scope is a single trading date -- today -- so a
+    # previous session's filings cannot leak into today's candidate stream.
+    _today = datetime.now(_IST_TZ).date()
+    _scope = _today.strftime("%d-%m-%Y")
+    base = "https://www.nseindia.com/api/corporate-announcements?index=equities"
+    url = f"{base}&from_date={_scope}&to_date={_scope}"
+
+    async def _fetch(target: str):
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             await client.get("https://www.nseindia.com", headers=BROWSER_HEADERS)
             await asyncio.sleep(1.5)
-            r = await client.get(url, headers={
+            r = await client.get(target, headers={
                 **BROWSER_HEADERS,
                 "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
             })
             if r.status_code != 200:
-                logger.debug(f"[news] NSE corporate-announcements returned {r.status_code}")
+                return None, r.status_code
+            return r.json(), 200
+
+    date_scoped = True
+    try:
+        data, status = await _fetch(url)
+        if data is None:
+            # Fall back to the old unscoped call rather than returning nothing --
+            # but NEVER report that as healthy recall.
+            date_scoped = False
+            logger.error(
+                f"[news] NSE date-scoped announcements returned {status} for "
+                f"scope={_scope} — FALLING BACK to the unscoped rolling window. "
+                f"Recall is DEGRADED: expect ~20 items instead of the full day."
+            )
+            data, status = await _fetch(base)
+            if data is None:
+                logger.error(f"[news] NSE announcements unscoped fallback also returned {status}")
                 return []
-            data = r.json()
     except Exception as exc:
-        logger.warning(f"[news] NSE corporate-announcements fetch failed: {exc}")
+        logger.error(f"[news] NSE corporate-announcements fetch failed (scope={_scope}): {exc}")
         return []
 
-    results: list[dict] = []
-    for item in (data or [])[:limit]:
+    # FILTER FIRST, LIMIT AFTER (Phase 27 F1).
+    #
+    # This previously read `for item in (data or [])[:limit]`, taking the first
+    # `limit` raw rows and only then discarding the non-high-impact ones. With a
+    # feed ordered by time that silently throws away high-impact filings sitting
+    # below the cut. The category filter is the selective step and must run on
+    # the whole payload.
+    filtered: list[dict] = []
+    seen_seq: set[str] = set()
+    duplicates = 0
+    for item in (data or []):
         symbol = (item.get("symbol") or "").strip()
         category = (item.get("desc") or "").strip()
         if not symbol or not category:
             continue
         if not any(kw in category.lower() for kw in _HIGH_IMPACT_ANNOUNCEMENT_CATEGORIES):
             continue
+        seq = str(item.get("seq_id") or "")
+        if seq and seq in seen_seq:
+            duplicates += 1
+            continue
+        if seq:
+            seen_seq.add(seq)
         company = item.get("sm_name", "") or symbol
         summary = (item.get("attchmntText") or "").strip()
-        results.append({
-            "seq_id":       str(item.get("seq_id") or ""),
-            "symbol":       f"{symbol}.NS",
+        filtered.append({
+            "seq_id":       seq,
+            "symbol":       _norm_symbol(symbol),
             "company":      company,
             "category":     category,
             "summary":      summary,
@@ -436,7 +481,20 @@ async def fetch_nse_corporate_announcements(limit: int = 50) -> list[dict]:
             "source":       "NSE-Announcements",
         })
 
-    logger.info(f"[news] NSE corporate-announcements: {len(results)}/{len(data or [])} high-impact")
+    results = filtered[:limit]
+
+    logger.info(
+        f"[news] NSE_ANNOUNCEMENT_POLL date_scope={_scope} date_scoped={date_scoped} "
+        f"nse_total={len(data or [])} nse_high_impact={len(filtered)} "
+        f"returned={len(results)} limit={limit} duplicates_in_payload={duplicates} "
+        f"truncated_by_limit={max(0, len(filtered) - len(results))} "
+        f"poll_ts={datetime.now(_IST_TZ).isoformat(timespec='seconds')}"
+    )
+    if len(filtered) > len(results):
+        logger.warning(
+            f"[news] NSE announcements: {len(filtered) - len(results)} high-impact "
+            f"filings dropped by limit={limit} — raise the limit or recall stays capped"
+        )
     return results
 
 

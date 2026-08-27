@@ -251,28 +251,55 @@ async def maybe_direct_trade(ticker: str, side: str, event_id: int | None, evide
             return False
 
         # Technical Trend & Volume Confirmation (Added 2026-07-30)
+        #
+        # 2026-08-27 (Phase 27, F3): this used f"{ticker}.NS" on a ticker that
+        # ALREADY carried a suffix, so GKENERGY.NS became GKENERGY.NS.NS. That
+        # symbol has no candles, hist_df came back None, and the entire block
+        # below -- the 20-EMA trend filter AND the volume-confirmation filter --
+        # was skipped for every such trade. The filters were not failing; they
+        # were never running. Thresholds are UNCHANGED; only the lookup symbol
+        # is corrected.
         import pandas as pd
         import asyncio
         from crawler.india_price_feed import fetch_nse_candles
-        candles = await asyncio.to_thread(fetch_nse_candles, f"{ticker}.NS", "1d", "60d")
+        from utils.symbols import resolve as _resolve_symbol
+
+        _res = await _resolve_symbol(ticker)
+        _canon = _res.canonical_trade_symbol
+        candles = await asyncio.to_thread(fetch_nse_candles, _canon, "1d", "60d")
         hist_df = pd.DataFrame(candles) if candles else None
-        
+
+        # F3 telemetry: whether the filters below could run at all. A silent
+        # lookup failure is what hid this bug for four weeks.
+        logger.info(
+            f"[direct_news] {ticker}: candle_lookup="
+            f"{'success' if (hist_df is not None and not hist_df.empty) else 'failure'} "
+            f"canonical_symbol={_canon} source_symbol={_res.source_symbol} "
+            f"exchange_resolution={_res.exchange_resolution} bars={0 if hist_df is None else len(hist_df)}"
+        )
+        if hist_df is None or hist_df.empty or len(hist_df) <= 20:
+            logger.warning(
+                f"[direct_news] {ticker}: technical/volume filters UNAVAILABLE "
+                f"(canonical={_canon}, bars={0 if hist_df is None else len(hist_df)}) "
+                f"— trade proceeds on news evidence alone, as before this fix"
+            )
+
         if hist_df is not None and not hist_df.empty and len(hist_df) > 20:
             close_price = hist_df["close"].iloc[-1]
             ema_20 = hist_df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
             
             if side == "BUY" and close_price < ema_20:
-                logger.info(f"[direct_news] {ticker}: TECHNICAL REJECT — Price (₹{close_price:.2f}) below 20 EMA (₹{ema_20:.2f}), downtrend despite bullish news")
+                logger.info(f"[direct_news] {ticker}: technical_reject=1 TECHNICAL REJECT — Price (₹{close_price:.2f}) below 20 EMA (₹{ema_20:.2f}), downtrend despite bullish news")
                 return False
             if side == "SELL" and close_price > ema_20:
-                logger.info(f"[direct_news] {ticker}: TECHNICAL REJECT — Price (₹{close_price:.2f}) above 20 EMA (₹{ema_20:.2f}), uptrend despite bearish news")
+                logger.info(f"[direct_news] {ticker}: technical_reject=1 TECHNICAL REJECT — Price (₹{close_price:.2f}) above 20 EMA (₹{ema_20:.2f}), uptrend despite bearish news")
                 return False
                 
             if "volume" in hist_df.columns:
                 avg_vol = hist_df["volume"].rolling(window=20).mean().iloc[-2]
                 today_vol = getattr(snap, "volume", None) or hist_df["volume"].iloc[-1]
                 if avg_vol > 0 and today_vol < (avg_vol * 0.5):
-                    logger.info(f"[direct_news] {ticker}: VOLUME REJECT — Today's volume is below 50% of 20-day average, lacking follow-through")
+                    logger.info(f"[direct_news] {ticker}: volume_reject=1 VOLUME REJECT — Today's volume is below 50% of 20-day average, lacking follow-through")
                     return False
 
         levels = await _compute_news_trade_levels(ticker, side, entry_price)

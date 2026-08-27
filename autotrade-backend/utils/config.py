@@ -399,6 +399,21 @@ class Settings(BaseSettings):
     # The code default is CONTROL on purpose: a process that cannot read .env
     # must get the old behaviour, never the experiment. .env selects V2.
     # engine/exit_policy.py owns the taxonomy and the gate.
+    # ── Same-bar exit protection (Phase 27, F4, 2026-08-27) ──────────────
+    # Nine historical trades closed within 1-9 seconds of entry for a combined
+    # -Rs1,776. Eight were EXHAUSTION firing against the SAME 5m bar the entry
+    # was priced from -- entry and exit reading one frame, so the "reversal"
+    # never existed. This requires at least one COMPLETED bar before a
+    # profit-management exit may fire.
+    #
+    # Deliberately mode-INDEPENDENT: it applies under CONTROL as well as V2,
+    # because V2's 120-minute gate would otherwise be the only thing preventing
+    # it and a rollback to CONTROL would reopen the hole.
+    #
+    # HARD_STOP and MARKET_SHOCK_FLATTEN are NEVER delayed by this.
+    # SETUP_INVALIDATION is NOT gated -- no same-bar case was observed there.
+    MIN_COMPLETED_BARS_BEFORE_PROFIT_EXIT: int = 1
+    PROFIT_EXIT_BAR_MINUTES:               int = 5   # the frame detect_exhaustion reads
     TRADING_STRATEGY_MODE:         str   = "CONTROL"
     # Configurable so 60/90/120/150/180 are testable without touching the exit
     # engine. <= 0 disables the gate, making V2 behave as CONTROL.

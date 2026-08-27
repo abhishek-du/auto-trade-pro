@@ -616,6 +616,11 @@ class TacticalExecutor:
         """Record the signal and why it was (not) taken. Never executes."""
         reasons: list[str] = []
 
+        # Canonical symbol for auditability (Phase 27, F2). Recorded, never
+        # substituted -- changing what the scanner trades is out of scope here.
+        from utils.symbols import normalize as _norm
+        _canon_sym = _norm(signal.symbol)
+
         dupe, dupe_reason = is_duplicate(signal.symbol, open_map)
         if dupe:
             reasons.append(dupe_reason)
@@ -667,6 +672,31 @@ class TacticalExecutor:
         else:
             reason_text = f"not executed | {'; '.join(reasons) or exec_note}"
 
+        # CAPITAL-REJECTION TELEMETRY (Phase 27).
+        #
+        # On 2026-08-27, 398 of 512 rejections (77.7%) were the cash buffer and
+        # the book was full by 10:06. That makes capital the binding constraint
+        # -- but nothing recorded enough about a refused candidate to ask the
+        # only question that matters: did the 398 refused outperform the 14
+        # taken? This persists exactly the fields that question needs.
+        #
+        # OBSERVATIONAL. No limit is changed, no sizing is changed, nothing here
+        # is read back by a decision. See scripts/research/capital_rejection_study.py.
+        _rej_reason = None
+        if not would_trade or (not executed and _execution_enabled()):
+            _joined = "; ".join(reasons).lower()
+            _rej_reason = (
+                "CAPITAL" if ("cash buffer" in _joined or "capital" in _joined
+                              or "margin" in _joined)
+                else "SECTOR_CAP" if "sector cap" in _joined
+                else "SECTOR_BREADTH" if "breadth" in _joined
+                else "STRATEGY_CAP" if "allocation cap" in _joined
+                else "DUPLICATE" if "already open" in _joined or "already have" in _joined
+                else "RISK_RR" if "r:r" in _joined or "ratio" in _joined
+                else "LLM_VETO" if "veto" in _joined
+                else "OTHER"
+            )
+
         session.add(
             TacticalSignal(
                 symbol=signal.symbol,
@@ -702,6 +732,25 @@ class TacticalExecutor:
                     # no live definition and is reconstructed from candles by the
                     # Phase-24 method; it is deliberately absent rather than
                     # guessed at.
+                    # Everything the post-close forward-return study needs,
+                    # on the row that already exists for this candidate.
+                    "rejection": None if _rej_reason is None else {
+                        "reason_class": _rej_reason,
+                        "reason_text": "; ".join(reasons)[:300],
+                        "rank_in_scan": result.persisted + 1,
+                        "score": round(float(composite), 2),
+                        "signal_type": signal.side,
+                        "strategy": signal.strategy_name,
+                        "reference_price": round(float(signal.entry_price or 0), 4),
+                        "stop_loss": round(float(signal.stop_loss or 0), 4),
+                        "target": round(float(signal.target or 0), 4),
+                        "entry_eligible": bool(
+                            signal.entry_price and signal.stop_loss and signal.target
+                            and signal.stop_loss != signal.entry_price),
+                        "canonical_symbol": _canon_sym,
+                        "sector": (signal.meta or {}).get("sector"),
+                        "ts_utc": datetime.utcnow().isoformat(),
+                    },
                     "entry_quality": {
                         "signal_ts": (signal.timestamp or datetime.now()).isoformat(),
                         "entry_ts": executed_at.isoformat() if executed_at else None,

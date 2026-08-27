@@ -154,6 +154,76 @@ def held_minutes(opened_at, now=None) -> float | None:
         return None
 
 
+def min_completed_bars() -> int:
+    """Completed bars required before a PROFIT_MANAGEMENT exit may fire."""
+    try:
+        from utils.config import settings
+
+        return int(getattr(settings, "MIN_COMPLETED_BARS_BEFORE_PROFIT_EXIT", 1) or 0)
+    except Exception:
+        return 0
+
+
+def _bar_minutes() -> int:
+    try:
+        from utils.config import settings
+
+        return int(getattr(settings, "PROFIT_EXIT_BAR_MINUTES", 5) or 5)
+    except Exception:
+        return 5
+
+
+def completed_bars_since(opened_at, now=None) -> int | None:
+    """How many bar BOUNDARIES have been crossed since entry.
+
+    Counting boundaries, not elapsed minutes, is the point: a position opened at
+    09:19:58 has seen the 09:15 bar complete by 09:20:00 even though only two
+    seconds passed. Conversely one opened at 09:15:01 has seen nothing complete
+    at 09:19:59. Elapsed time cannot distinguish those; bar alignment can.
+    """
+    if opened_at is None:
+        return None
+    now = now or _dt.datetime.utcnow()
+    try:
+        if getattr(opened_at, "tzinfo", None) is not None:
+            opened_at = opened_at.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        if getattr(now, "tzinfo", None) is not None:
+            now = now.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        m = _bar_minutes()
+        if m <= 0:
+            return None
+        secs = m * 60
+        o = int(opened_at.timestamp()) // secs
+        n = int(now.timestamp()) // secs
+        return max(0, n - o)
+    except Exception:
+        return None
+
+
+def same_bar_block(reason: str | None, opened_at, now=None) -> tuple[bool, str]:
+    """(blocked, note) for the same-bar protection. Independent of V2.
+
+    Applies ONLY to PROFIT_MANAGEMENT. Hard stops and shock flattens are never
+    delayed; setup invalidation is untouched because no same-bar case was
+    measured there.
+    """
+    try:
+        if classify(reason) != _GATED_FAMILY:
+            return False, ""
+        need = min_completed_bars()
+        if need <= 0:
+            return False, ""
+        bars = completed_bars_since(opened_at, now)
+        if bars is None or bars >= need:
+            return False, ""
+        return True, (
+            f"same-bar protection: {bars} completed {_bar_minutes()}m bar(s) "
+            f"since entry, need {need}"
+        )
+    except Exception:
+        return False, ""
+
+
 def exit_allowed(reason: str | None, opened_at, now=None) -> tuple[bool, str, str]:
     """May this exit fire right now?
 
@@ -169,6 +239,14 @@ def exit_allowed(reason: str | None, opened_at, now=None) -> tuple[bool, str, st
     """
     family = classify(reason)
     try:
+        # Same-bar protection runs FIRST and in BOTH modes (Phase 27, F4).
+        # It is not part of the V2 experiment: a rollback to CONTROL must not
+        # reopen the hole that cost -Rs1,608 across eight same-bar EXHAUSTION
+        # exits. Only PROFIT_MANAGEMENT is affected.
+        blocked, note = same_bar_block(reason, opened_at, now)
+        if blocked:
+            return False, family, note
+
         if not is_v2():
             return True, family, ""
         if family != _GATED_FAMILY:
