@@ -1622,6 +1622,156 @@ async def run_news_discovery_loop():
         logger.info("[news_engine] NSE announcement poller stopped")
 
 
+async def _process_nse_announcements(market_open: bool) -> int:
+    """Drain and process the NSE announcement queue. Returns items handled.
+
+    MOVED TO THE TOP OF THE CYCLE (2026-08-27). It previously sat AFTER the RSS
+    section, whose own comment already recorded the hazard: "this block sits
+    after section 1 and section 1 awaits an LLM ReAct loop per article". The
+    FETCH was moved out to _nse_announcement_poller() for exactly that reason —
+    but the CONSUMER was left behind it, so the fix was only half applied.
+
+    MEASURED 2026-08-27: 203 filings fetched, 33 high-impact, queue depth static
+    at 33/200 across polls 62/63/64, and 3 rows stored. The consumer ran twice
+    all day, at 08:30 and 08:54 — both BEFORE the open, when section 1 does no
+    LLM work because market_open is False. From 09:15 onward section 1 never
+    finished and this block was never reached.
+
+    Announcements go first because the exchange's own category is the better
+    signal: engine/event_classifier.py records ORDER_WIN at +1.053% mean excess
+    under NSE's label versus -0.245% under our classifier, over 4,309 filings.
+    The RSS section that used to precede it carries the weaker label.
+    """
+    now = datetime.now()
+    # 2. Process NSE corporate announcements (financial results, M&A,
+    #    dividends, credit-rating actions, buybacks, resignations…).
+    #
+    #    The FETCH no longer happens here — _nse_announcement_poller()
+    #    owns it and runs as an independent task, because this block
+    #    sits after section 1 and section 1 awaits an LLM ReAct loop per
+    #    article. See the comment on _NSE_QUEUE for the measurement.
+    #    Everything below this point is unchanged: same enrichment, same
+    #    persistence, same direction resolution, same dispatch.
+    new_announcements = _drain_nse_queue()
+    if new_announcements:
+        logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
+        from db.models import NewsItem
+        from crawler.pdf_parser import process_nse_announcement
+        from engine.sector_graph import get_second_order_trades
+
+        ann_sentiments = []
+        for ann in new_announcements:
+            try:
+                # 1. Download PDF -> 2. OCR -> 3. LLM Analysis
+                llm_res = await process_nse_announcement(ann["symbol"], ann["headline"], ann["pdf_url"])
+
+                # Map signal to sentiment for DB
+                sig = llm_res.get("trading_signal", "HOLD")
+                sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
+                score = llm_res.get("impact_score", 0) / 100.0
+
+                # Update headline with deep LLM summary
+                ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
+
+                ann_sentiments.append({"sentiment": sent, "score": score})
+            except Exception as exc:
+                logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
+                ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
+
+        # Same duplicate-tolerant insert as the RSS block above, and
+        # for the same reason — but this one is worse if it raises.
+        # A UniqueViolationError here aborts the announcement
+        # section AFTER the PDF has been downloaded, OCR'd and sent
+        # to the LLM, so the expensive work is thrown away and the
+        # seq_ids below are never marked processed. The next cycle
+        # then re-fetches the same filings and repeats the whole
+        # cost, indefinitely.
+        from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+        # headline -> NewsItem.id, same purpose as the RSS map above.
+        _ann_news_ids: dict[str, int] = {}
+        async with AsyncSessionLocal() as session:
+            for ann, sent in zip(new_announcements, ann_sentiments):
+                _ann_id = (await session.execute(
+                    _pg_insert(NewsItem.__table__)
+                    .values(
+                        headline=ann["headline"],
+                        source=ann["source"],
+                        url=ann["pdf_url"],
+                        published_at=ann["published_at"],
+                        sentiment=sent.get("sentiment", "neutral"),
+                        score=sent.get("score", 0.0),
+                        tickers_affected=[ann["symbol"]],
+                        category=ann["category"],
+                        company=ann["company"],
+                    )
+                    .on_conflict_do_nothing()
+                    .returning(NewsItem.__table__.c.id)
+                )).scalar()
+                if _ann_id is None:
+                    _ann_id = await _resolve_news_id(
+                        session, ann["headline"], ann["published_at"])
+                if _ann_id is not None:
+                    _ann_news_ids[ann["headline"]] = int(_ann_id)
+            await session.commit()
+            _NSE_POLL_STATS["nse_items_inserted"] += len(new_announcements)
+
+        for ann in new_announcements:
+            _processed_seq_ids.add(ann["seq_id"])
+            ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
+            text = f"{ann['category']} {ann['summary']}".lower()
+
+            # NSE's own filing category decides whether this is a
+            # trade candidate at all (2026-08-24).
+            #
+            # The keyword scan below defaults to BUY, so EVERY
+            # routine filing became a bullish candidate. Replayed
+            # over 4,500 historical announcements it agreed with the
+            # exchange category on direction almost always — 9
+            # disagreements, 0.2% — but it also turned 3,504 of them
+            # (77.9%) into BUY/SELL candidates that the category says
+            # carry no direction at all.
+            #
+            # That is where the damage was. Those are NSE's routine
+            # categories, dominated by "Outcome of Board Meeting",
+            # measured at -0.737% mean excess return with a 36.3% win
+            # rate over 1,169 observations
+            # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md).
+            # Acting on them lost money; the fix is to not act.
+            #
+            # So the value here is suppression, not direction
+            # correction. The keyword scan survives only as the
+            # fallback for categories the table does not know.
+            _res = resolve_nse_direction(ann["category"], text)
+            if _res is not None and _res[0] == "NEUTRAL":
+                logger.info(
+                    f"⏭️  NSE category '{ann['category']}' carries no direction "
+                    f"— not a trade candidate: {ticker}"
+                )
+                continue
+            if _res is not None:
+                side = "BUY" if _res[0] == "LONG" else "SELL"
+            else:
+                # Unmapped category: no exchange opinion, keep the
+                # old heuristic rather than inventing a direction.
+                side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
+
+            logger.info(f"🔍 Analyzing NSE announcement: {headline}")
+            if market_open:
+                await process_ticker(ticker, side, headline, summary,
+                                     news_id=_ann_news_ids.get(ann['headline']))
+            else:
+                logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
+                async with AsyncSessionLocal() as session:
+                    session.add(PreMarketNewsQueue(
+                        symbol=ticker, side=side, headline=headline,
+                        summary=summary, status="PENDING",
+                    ))
+                    await session.commit()
+
+    return len(new_announcements) if new_announcements else 0
+
+
 async def _news_discovery_cycles():
     """The main loop body. Split out so run_news_discovery_loop() owns only
     task lifecycle — start, run, cancel — and the shutdown path stays readable."""
@@ -1642,6 +1792,28 @@ async def _news_discovery_cycles():
             # (engine.decision_router.authorize_trade_intent) also enforces
             # this independently now, as a backstop for any other caller.
             market_open = is_nse_market_open()
+
+            # 0a. NSE ANNOUNCEMENTS FIRST (2026-08-27).
+            #
+            # This call used to sit AFTER the RSS section, behind an unbounded
+            # `for article in new_articles: await process_ticker(...)` loop
+            # where each iteration is a full LLM ReAct loop. Measured that day:
+            # 33 high-impact filings fetched, queue depth static at 33/200
+            # across consecutive polls, 3 rows stored. The consumer ran twice
+            # all day -- 08:30 and 08:54, both BEFORE the open, when section 1
+            # does no LLM work. From 09:15 it was never reached again.
+            #
+            # Exchange-filed announcements are also the better-measured signal
+            # (see _process_nse_announcements' docstring), so they get the head
+            # of the cycle rather than the tail.
+            #
+            # Failure here must not cost us the rest of the cycle.
+            try:
+                _ann_done = await _process_nse_announcements(market_open)
+                if _ann_done:
+                    logger.info(f"[nse_consumer] processed {_ann_done} announcement(s) this cycle")
+            except Exception as _ann_exc:
+                logger.error(f"[nse_consumer] announcement processing failed: {_ann_exc}")
 
             # 0. If Market is Open, Process DB Queue First
             #
@@ -1872,132 +2044,9 @@ async def _news_discovery_cycles():
                     f'the announcement feed: {_rss_exc}'
                 )
 
-            # 2. Process NSE corporate announcements (financial results, M&A,
-            #    dividends, credit-rating actions, buybacks, resignations…).
-            #
-            #    The FETCH no longer happens here — _nse_announcement_poller()
-            #    owns it and runs as an independent task, because this block
-            #    sits after section 1 and section 1 awaits an LLM ReAct loop per
-            #    article. See the comment on _NSE_QUEUE for the measurement.
-            #    Everything below this point is unchanged: same enrichment, same
-            #    persistence, same direction resolution, same dispatch.
-            now = datetime.now()
-            new_announcements = _drain_nse_queue()
-            if new_announcements:
-                logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
-                from db.models import NewsItem
-                from crawler.pdf_parser import process_nse_announcement
-                from engine.sector_graph import get_second_order_trades
-
-                ann_sentiments = []
-                for ann in new_announcements:
-                    try:
-                        # 1. Download PDF -> 2. OCR -> 3. LLM Analysis
-                        llm_res = await process_nse_announcement(ann["symbol"], ann["headline"], ann["pdf_url"])
-
-                        # Map signal to sentiment for DB
-                        sig = llm_res.get("trading_signal", "HOLD")
-                        sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
-                        score = llm_res.get("impact_score", 0) / 100.0
-
-                        # Update headline with deep LLM summary
-                        ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
-
-                        ann_sentiments.append({"sentiment": sent, "score": score})
-                    except Exception as exc:
-                        logger.error(f"[news_engine] PDF LLM analysis failed for {ann['symbol']}: {exc}")
-                        ann_sentiments.append({"sentiment": "neutral", "score": 0.0})
-
-                # Same duplicate-tolerant insert as the RSS block above, and
-                # for the same reason — but this one is worse if it raises.
-                # A UniqueViolationError here aborts the announcement
-                # section AFTER the PDF has been downloaded, OCR'd and sent
-                # to the LLM, so the expensive work is thrown away and the
-                # seq_ids below are never marked processed. The next cycle
-                # then re-fetches the same filings and repeats the whole
-                # cost, indefinitely.
-                from sqlalchemy.dialects.postgresql import insert as _pg_insert
-
-                # headline -> NewsItem.id, same purpose as the RSS map above.
-                _ann_news_ids: dict[str, int] = {}
-                async with AsyncSessionLocal() as session:
-                    for ann, sent in zip(new_announcements, ann_sentiments):
-                        _ann_id = (await session.execute(
-                            _pg_insert(NewsItem.__table__)
-                            .values(
-                                headline=ann["headline"],
-                                source=ann["source"],
-                                url=ann["pdf_url"],
-                                published_at=ann["published_at"],
-                                sentiment=sent.get("sentiment", "neutral"),
-                                score=sent.get("score", 0.0),
-                                tickers_affected=[ann["symbol"]],
-                                category=ann["category"],
-                                company=ann["company"],
-                            )
-                            .on_conflict_do_nothing()
-                            .returning(NewsItem.__table__.c.id)
-                        )).scalar()
-                        if _ann_id is None:
-                            _ann_id = await _resolve_news_id(
-                                session, ann["headline"], ann["published_at"])
-                        if _ann_id is not None:
-                            _ann_news_ids[ann["headline"]] = int(_ann_id)
-                    await session.commit()
-                    _NSE_POLL_STATS["nse_items_inserted"] += len(new_announcements)
-
-                for ann in new_announcements:
-                    _processed_seq_ids.add(ann["seq_id"])
-                    ticker, headline, summary = ann["symbol"], ann["headline"], ann["summary"] or ann["category"]
-                    text = f"{ann['category']} {ann['summary']}".lower()
-
-                    # NSE's own filing category decides whether this is a
-                    # trade candidate at all (2026-08-24).
-                    #
-                    # The keyword scan below defaults to BUY, so EVERY
-                    # routine filing became a bullish candidate. Replayed
-                    # over 4,500 historical announcements it agreed with the
-                    # exchange category on direction almost always — 9
-                    # disagreements, 0.2% — but it also turned 3,504 of them
-                    # (77.9%) into BUY/SELL candidates that the category says
-                    # carry no direction at all.
-                    #
-                    # That is where the damage was. Those are NSE's routine
-                    # categories, dominated by "Outcome of Board Meeting",
-                    # measured at -0.737% mean excess return with a 36.3% win
-                    # rate over 1,169 observations
-                    # (docs/2026-08-24_PHASE3_GROUND_TRUTH_NEWS_ALPHA.md).
-                    # Acting on them lost money; the fix is to not act.
-                    #
-                    # So the value here is suppression, not direction
-                    # correction. The keyword scan survives only as the
-                    # fallback for categories the table does not know.
-                    _res = resolve_nse_direction(ann["category"], text)
-                    if _res is not None and _res[0] == "NEUTRAL":
-                        logger.info(
-                            f"⏭️  NSE category '{ann['category']}' carries no direction "
-                            f"— not a trade candidate: {ticker}"
-                        )
-                        continue
-                    if _res is not None:
-                        side = "BUY" if _res[0] == "LONG" else "SELL"
-                    else:
-                        # Unmapped category: no exchange opinion, keep the
-                        # old heuristic rather than inventing a direction.
-                        side = "SELL" if any(w in text for w in _ANNOUNCEMENT_BEARISH_KEYWORDS) else "BUY"
-
-                    logger.info(f"🔍 Analyzing NSE announcement: {headline}")
-                    if market_open:
-                        await process_ticker(ticker, side, headline, summary,
-                                             news_id=_ann_news_ids.get(ann['headline']))
-                    else:
-                        logger.info(f"🌙 Market CLOSED. Adding {ticker} to DB Pre-Market Queue for tomorrow morning.")
-                        async with AsyncSessionLocal() as session:
-                            session.add(PreMarketNewsQueue(
-                                symbol=ticker, side=side, headline=headline,
-                                summary=summary, status="PENDING",
-                            ))
-                            await session.commit()
+            # (NSE announcements are handled at the TOP of this cycle now —
+            #  see the _process_nse_announcements() call above and its
+            #  docstring for the starvation this fixes.)
 
             # 2b. Pre-event anomaly scan (2026-07-23, Phase 1): abnormal
             #     price/volume behaviour can precede the official filing by
