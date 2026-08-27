@@ -23,24 +23,35 @@ SRC = Path(__file__).resolve().parents[1] / "news_discovery_engine.py"
 
 # The cycle body was split out of run_news_discovery_loop() on 2026-08-25
 # (Phase 1B task A) so that run_news_discovery_loop() owns only task lifecycle —
-# start the NSE poller, run the cycles, cancel the poller. The guarantees below
-# are about the CYCLE BODY, so they follow it to _news_discovery_cycles().
-_CYCLE_FN = "_news_discovery_cycles"
+# start the NSE poller, run the cycles, cancel the poller.
+#
+# On 2026-08-27 the announcement half was split out AGAIN, into
+# _process_nse_announcements(), and moved to the head of the cycle. It had been
+# sitting behind an unbounded `for article in new_articles: await
+# process_ticker(...)` loop where each iteration is a full LLM ReAct pass:
+# measured that day, 33 filings fetched, queue static at 33/200, 3 stored, and
+# the consumer ran twice — both before the open, when the RSS section does no
+# LLM work.
+#
+# NONE of the guarantees below changed. Only their address did. So the anchor
+# spans BOTH functions, exactly as this helper's own assertion message asked
+# for: keep checking them somewhere rather than deleting them.
+_CYCLE_FNS = ("_news_discovery_cycles", "_process_nse_announcements")
 
 
-def _loop_fn() -> ast.AsyncFunctionDef:
+def _loop_fn() -> ast.Module:
+    """The cycle body and the announcement consumer, as one walkable unit."""
     tree = ast.parse(SRC.read_text())
-    fn = next(
-        (n for n in ast.walk(tree)
-         if isinstance(n, ast.AsyncFunctionDef) and n.name == _CYCLE_FN),
-        None,
+    found = [n for n in ast.walk(tree)
+             if isinstance(n, ast.AsyncFunctionDef) and n.name in _CYCLE_FNS]
+    names = {n.name for n in found}
+    missing = set(_CYCLE_FNS) - names
+    assert not missing, (
+        f"{sorted(missing)} not found — if the loop body was renamed or "
+        f"re-merged, point _CYCLE_FNS at it so these reachability guarantees "
+        f"keep being checked somewhere"
     )
-    assert fn is not None, (
-        f"{_CYCLE_FN}() not found — if the loop body was renamed or re-merged "
-        f"into run_news_discovery_loop(), point _CYCLE_FN at it so these "
-        f"reachability guarantees keep being checked somewhere"
-    )
-    return fn
+    return ast.Module(body=found, type_ignores=[])
 
 
 def test_rss_insert_tolerates_duplicate_headlines():
