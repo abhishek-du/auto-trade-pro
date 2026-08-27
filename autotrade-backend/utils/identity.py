@@ -61,6 +61,7 @@ class Resolution(str, Enum):
     ALIAS = "ALIAS"
     EXACT_NAME = "EXACT_NAME"
     UNIQUE_PREFIX = "UNIQUE_PREFIX"
+    ALL_TOKENS = "ALL_TOKENS"
     AMBIGUOUS = "AMBIGUOUS"        # >1 candidate -> REJECT, needs review
     UNRESOLVED = "UNRESOLVED"      # 0 candidates -> REJECT
     INVALID = "INVALID"            # empty / unusable input
@@ -68,7 +69,14 @@ class Resolution(str, Enum):
 
 # Tiers that produce a usable symbol. Everything else is a refusal.
 _RESOLVED = (Resolution.EXACT_SYMBOL, Resolution.ALIAS,
-             Resolution.EXACT_NAME, Resolution.UNIQUE_PREFIX)
+             Resolution.EXACT_NAME, Resolution.UNIQUE_PREFIX, Resolution.ALL_TOKENS)
+
+# Words that carry no identifying information in an Indian listed-company name.
+# Removing them stops "INDIA" or "LIMITED" from doing any matching work.
+_STOPWORDS = frozenset({
+    "LIMITED", "LTD", "INDIA", "THE", "AND", "CO", "COMPANY", "PVT", "PRIVATE",
+    "INC", "CORP", "CORPORATION", "PLC",
+})
 
 # Curated aliases. Hand-verified only; this file is the review queue's output,
 # never a place to dump guesses. Keys are normalised by _key().
@@ -161,6 +169,12 @@ def _key(text: str) -> str:
     return k
 
 
+def _tokens(text: str) -> frozenset:
+    """Significant, identifying tokens of a company name."""
+    raw = re.split(r"[^A-Za-z0-9]+", (text or "").upper())
+    return frozenset(t for t in raw if len(t) >= 3 and t not in _STOPWORDS)
+
+
 def is_non_equity_symbol(tradingsymbol: str) -> bool:
     """Bonds, SGBs, G-secs, INAV feeds — never event candidates."""
     return bool(_NON_EQUITY_SYMBOL.search((tradingsymbol or "").upper()))
@@ -178,6 +192,7 @@ class IdentityIndex:
         self.by_symbol: dict[str, str] = {}
         self.by_name: dict[str, list[str]] = {}
         self._name_keys: list[tuple[str, str]] = []   # (key, symbol), sorted
+        self._name_tokens: list[tuple[frozenset, str]] = []   # (tokens, symbol)
         self.built = False
 
     def add(self, tradingsymbol: str, name: str | None) -> None:
@@ -192,12 +207,33 @@ class IdentityIndex:
             self.by_name.setdefault(nk, [])
             if ts not in self.by_name[nk]:
                 self.by_name[nk].append(ts)
+        tk = _tokens(name or "")
+        if tk:
+            self._name_tokens.append((tk, ts))
 
     def finalise(self) -> "IdentityIndex":
         self._name_keys = sorted(
             (k, s) for k, syms in self.by_name.items() for s in syms)
         self.built = True
         return self
+
+    def all_token_candidates(self, query: str, cap: int = 8) -> list[str]:
+        """Instruments whose name contains EVERY significant token of `query`.
+
+        Set containment, not similarity: a token is present or it is not. There
+        is no score, no threshold and no ordering by closeness. More than one
+        hit is ambiguity and is refused by the caller.
+        """
+        q = _tokens(query)
+        if not q:
+            return []
+        out: list[str] = []
+        for name_toks, sym in self._name_tokens:
+            if q <= name_toks and sym not in out:
+                out.append(sym)
+                if len(out) > cap:
+                    break
+        return out
 
     def prefix_candidates(self, key: str, cap: int = 8) -> list[str]:
         """Names that START WITH key. Exact, not fuzzy — a prefix either holds
@@ -288,5 +324,42 @@ def resolve_identity(raw: str, index: IdentityIndex) -> IdentityResult:
                               f"{len(pref)} names start with this key",
                               tuple(pref[:8]))
 
+    # 5 — every significant token of the query present in exactly one name.
+    #
+    # Covers abbreviated exchange names the earlier tiers cannot reach:
+    # "Automobile Corporation Of Goa" -> ACGL, "FSN" -> NYKAA,
+    # "CCL Products (India) Limited" -> CCL. Stopwords are removed first so
+    # "INDIA" and "LIMITED" do no matching work.
+    #
+    # This is set CONTAINMENT, not similarity -- a token is present or it is
+    # not. Measured on 543 unresolved symbols: 72 resolved uniquely, 28 were
+    # ambiguous and refused, 443 matched nothing (they are not NSE-listed).
+    # A 14-case hand spot-check against kite_instruments was 14/14 correct.
+    tok = index.all_token_candidates(bare)
+    if len(tok) == 1:
+        return IdentityResult(src, normalize(tok[0]), Resolution.ALL_TOKENS,
+                              f"all name tokens matched exactly one instrument -> {tok[0]}")
+    if len(tok) > 1:
+        return IdentityResult(src, None, Resolution.AMBIGUOUS,
+                              f"{len(tok)} instruments contain every token",
+                              tuple(tok[:8]))
+
     return IdentityResult(src, None, Resolution.UNRESOLVED,
-                          "no instrument matched by symbol, alias, name or prefix")
+                          "no instrument matched by symbol, alias, name, prefix or tokens")
+
+
+def is_nse_eligible(raw: str, index: IdentityIndex) -> bool:
+    """Could this identifier POSSIBLY denote an NSE-listed equity?
+
+    The denominator for a recall figure. A name that matches no NSE instrument
+    on any tier is not a resolution failure -- it is a BSE-only listing, a
+    delisted name, or not an equity at all. Counting those against recall makes
+    the number meaningless.
+
+    Measured 2026-08-27: 443 of 543 unresolved symbols (81.6%) matched nothing,
+    which is why the naive "recall" of 68.5% understated the resolver badly.
+    """
+    r = resolve_identity(raw, index)
+    if r.ok or r.needs_review:
+        return True
+    return bool(index.all_token_candidates(strip_suffix(raw).upper()))
