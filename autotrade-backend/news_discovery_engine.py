@@ -4,6 +4,7 @@ import re
 import time as _time
 from datetime import datetime, timedelta
 from db.database import AsyncSessionLocal
+from sqlalchemy import text as _sa_text
 from db.models import PreMarketNewsQueue
 from sqlalchemy import select, update as sa_update
 from crawler.news_crawler import (
@@ -1653,6 +1654,49 @@ async def _process_nse_announcements(market_open: bool) -> int:
     #    Everything below this point is unchanged: same enrichment, same
     #    persistence, same direction resolution, same dispatch.
     new_announcements = _drain_nse_queue()
+
+    # Skip filings we have ALREADY persisted, before spending anything on them.
+    #
+    # _processed_seq_ids is in-memory and resets on every restart -- and
+    # watchmedo restarts this process on any .py write. Without a durable
+    # check, a restart re-downloads the PDF, re-runs OCR and re-calls the LLM
+    # for every filing already in the database. Measured 2026-08-27: five
+    # restarts in six minutes, and the same Juniper Green filing processed
+    # three times.
+    #
+    # One indexed query against seq_ids we are about to process. Failure here
+    # is non-fatal: we fall through and re-process, which is what happened
+    # before this existed.
+    if new_announcements:
+        try:
+            _seqs = [a.get("seq_id") for a in new_announcements if a.get("seq_id")]
+            if _seqs:
+                async with AsyncSessionLocal() as _dedup_s:
+                    _known = {
+                        r[0] for r in (await _dedup_s.execute(
+                            _sa_text(
+                                "SELECT news_metadata->>'seq_id' FROM news_items "
+                                "WHERE source = 'NSE-Announcements' "
+                                "AND news_metadata->>'seq_id' = ANY(:s)"),
+                            {"s": _seqs},
+                        )).all() if r[0]
+                    }
+                if _known:
+                    _before = len(new_announcements)
+                    new_announcements = [
+                        a for a in new_announcements if a.get("seq_id") not in _known
+                    ]
+                    logger.info(
+                        f"[nse_consumer] skipped {_before - len(new_announcements)} "
+                        f"already-persisted filing(s) before PDF/OCR/LLM"
+                    )
+                    for _sq in _known:
+                        _processed_seq_ids.add(_sq)
+        except Exception as _dd_exc:
+            logger.warning(
+                f"[nse_consumer] durable dedup check failed ({type(_dd_exc).__name__}) "
+                f"— proceeding without it")
+
     if new_announcements:
         logger.info(f"📋 Found {len(new_announcements)} new high-impact NSE corporate announcements.")
         from db.models import NewsItem
@@ -1670,8 +1714,26 @@ async def _process_nse_announcements(market_open: bool) -> int:
                 sent = "positive" if sig == "BUY" else ("negative" if sig == "SELL" else "neutral")
                 score = llm_res.get("impact_score", 0) / 100.0
 
-                # Update headline with deep LLM summary
-                ann["headline"] = f"{ann['headline']} | [LLM Summary: {llm_res.get('summary', '')}]"
+                # The LLM summary goes in METADATA, never in the headline.
+                #
+                # 2026-08-27: this used to append "| [LLM Summary: ...]" to
+                # ann["headline"] BEFORE the insert below. The unique index is
+                # uq_news_items_headline_day on (md5(headline), date), and the
+                # summary is non-deterministic -- the same Juniper Green filing
+                # produced md5 9a401c85 / 3eceb972 / 7b3dd191 on three passes.
+                # Different hash every time, so ON CONFLICT DO NOTHING could
+                # NEVER fire and every re-drain inserted a fresh row: 367
+                # duplicates in 4,770 stored announcements (7.7%), 49% on
+                # 2026-08-27 alone once the consumer started keeping up. Each
+                # duplicate also costs a PDF download, an OCR pass and an LLM
+                # call.
+                #
+                # The headline now stays exactly as the crawler built it, so
+                # the dedup key is stable. Nothing is lost -- the summary is
+                # more useful in news_metadata than concatenated into text.
+                ann["llm_summary"] = llm_res.get("summary", "")
+                ann["llm_signal"] = sig
+                ann["llm_impact_score"] = llm_res.get("impact_score", 0)
 
                 ann_sentiments.append({"sentiment": sent, "score": score})
             except Exception as exc:
@@ -1704,6 +1766,18 @@ async def _process_nse_announcements(market_open: bool) -> int:
                         tickers_affected=[ann["symbol"]],
                         category=ann["category"],
                         company=ann["company"],
+                        # Provenance. seq_id is NSE's own identifier for the
+                        # filing and was previously discarded entirely, leaving
+                        # `url` and a mutated headline as the only ways to
+                        # recognise a filing we already held.
+                        news_metadata={
+                            "seq_id": ann.get("seq_id"),
+                            "llm_summary": ann.get("llm_summary"),
+                            "llm_signal": ann.get("llm_signal"),
+                            "llm_impact_score": ann.get("llm_impact_score"),
+                            "source_symbol": ann.get("symbol"),
+                            "pdf_url": ann.get("pdf_url"),
+                        },
                     )
                     .on_conflict_do_nothing()
                     .returning(NewsItem.__table__.c.id)
@@ -1865,7 +1939,7 @@ async def _news_discovery_cycles():
                     # Detach to plain values: the ORM instances die with the
                     # session below, and nothing here needs them to stay live.
                     queued_items = [
-                        (i.id, i.symbol, i.side, i.headline, i.summary)
+                        (i.id, i.symbol, i.side, i.headline, i.summary, i.captured_at)
                         for i in res.scalars().all()
                     ]
 
@@ -1878,8 +1952,42 @@ async def _news_discovery_cycles():
                     # indistinguishable from one that finished. Counts only.
                     _drain_t0 = _time.monotonic()
                     _drain_done = 0
-                    for item_id, symbol, side, headline, summary in queued_items:
-                        await process_ticker(symbol, side, headline, summary)
+                    for item_id, symbol, side, headline, summary, captured_at in queued_items:
+                        # Recover provenance (2026-08-27). This drain called
+                        # process_ticker() with no news_id, so every event it
+                        # created carried news_id=NULL. Measured: the premarket
+                        # drain was the DOMINANT event source -- 262 items on
+                        # 2026-08-27 producing 247 events, all unlinked -- and
+                        # causal_events.news_id has been 0% populated since
+                        # 2026-07-21, when origination moved off
+                        # crawler/event_pipeline.py (which did set it, and is
+                        # no longer in the beat schedule).
+                        #
+                        # The queued headline is the SAME text the RSS path
+                        # inserted into news_items, so the id is recoverable by
+                        # the existing resolver. Best-effort: an unresolved
+                        # lookup yields None, which is exactly today's
+                        # behaviour, so this can only add linkage.
+                        _pm_news_id = None
+                        try:
+                            async with AsyncSessionLocal() as _pm_s:
+                                # captured_at, NOT None. _resolve_news_id keys on
+                                # (md5(headline), COALESCE(published_at, now())::date),
+                                # so passing None would key on TODAY while the
+                                # queued row was inserted on its capture date --
+                                # the lookup would never match and this fix would
+                                # be a silent no-op that looked like a fix.
+                                # captured_at is tz-aware (the only such column in
+                                # this schema); the resolver compares ::date, and
+                                # a UTC-vs-IST date boundary can still miss for an
+                                # item captured after 18:30 UTC. That residual is
+                                # recorded rather than papered over.
+                                _pm_news_id = await _resolve_news_id(
+                                    _pm_s, headline, captured_at)
+                        except Exception as _pm_exc:
+                            logger.debug(f"[premarket_drain] news_id lookup failed: {_pm_exc}")
+                        await process_ticker(symbol, side, headline, summary,
+                                             news_id=_pm_news_id)
                         async with AsyncSessionLocal() as mark_session:
                             await mark_session.execute(
                                 sa_update(PreMarketNewsQueue)

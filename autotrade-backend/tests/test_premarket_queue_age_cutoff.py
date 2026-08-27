@@ -110,7 +110,21 @@ class TestProcessedMarking:
     """
 
     def test_each_item_is_committed_individually(self):
-        src = inspect.getsource(nde._news_discovery_cycles)
+        """Comment-proof. A fixed character window silently broke when a
+        provenance comment was added above the marking on 2026-08-27 — the
+        invariant held, the window just stopped reaching it. Comments and
+        docstrings are stripped so only executable code is measured."""
+        import ast
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(nde._news_discovery_cycles)))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                b = node.body
+                if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                        and isinstance(b[0].value.value, str):
+                    node.body = b[1:] or [ast.Pass()]
+        src = ast.unparse(tree)
         drain_idx = src.find("queued night/pre-market")
         assert drain_idx > 0, "drain log line not found"
         window = src[drain_idx: drain_idx + 2000]

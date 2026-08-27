@@ -86,7 +86,27 @@ _ALIASES: dict[str, str] = {
     "BHARATHEAVYELECTRICALS": "BHEL",
     "HINDUSTANAERONAUTICS": "HAL",
     "LIFEINSURANCECORPORATIONOFINDIA": "LICI",
+    # Short forms the wires use that are too brief for prefix matching (the
+    # prefix tier needs >=6 chars to be discriminating). Each hand-verified
+    # against kite_instruments on 2026-08-27.
+    "LIC": "LICI",
+    "SBI": "SBIN",
+    "AKCAPFIN": "AKCAPIT",
+    "LALITHAJEWELLERY": "LALITHAA",
+    "AHLUWALIACONTRACTSINDIA": "AHLUCONT",
+    "AHLUWALIACONTRACTS": "AHLUCONT",
 }
+
+# A DELIBERATE NON-FEATURE: first-token matching.
+#
+# Measured 2026-08-27: keying on a company name's first token (>=7 chars) gives
+# 999 unique tokens out of 1,149 -- but it rescued only ONE of five real
+# unresolved cases (AHLUWALIA CONTRACTS) while introducing a collision class
+# where two unrelated companies share a first word. The single case it rescued
+# is now a curated alias above, which is exact.
+#
+# Unresolved names are routed to review, not guessed. That is the trade this
+# module exists to make.
 
 # Corporate suffixes stripped before comparison. Order matters: longest first,
 # and they are removed repeatedly so "X LIMITED LTD" collapses correctly.
