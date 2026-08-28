@@ -170,3 +170,145 @@ async def resolve(symbol: str, session=None) -> SymbolResolution:
             "dual-listed; resolved to the NSE twin (BSE has no intraday data here)",
         )
     return SymbolResolution(src, f"{bare}{BSE}", "BSE", "BSE-only listing; kept BSE")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NSE-ONLY EXCHANGE GATE (Step 2A, 2026-08-28)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE INVARIANT: no BSE instrument may enter an ACTIVE path.
+#
+# "Active" means anything that can become a price request, a candidate, a
+# signal, an order or a position. Historical and audit rows are untouched --
+# 5 closed .BO paper_trades and 7 .BO tactical_signals remain queryable, and
+# deleting them would rewrite forensic history.
+#
+# WHY THIS EXISTS. BSE was purged from kite_instruments and hub_universe on
+# 2026-08-27, and NSE_ONLY_UNIVERSE=True was added. Neither stopped BSE:
+#
+#   * crawler/india_price_feed.py forced 45 hardcoded .BO symbols into every
+#     crawl as "mandatory", producing 4,659 fresh .BO candle rows in two days
+#     AFTER the purge.
+#   * 474 .BO items sit in premarket_news_queue, 109 inside the drain window.
+#   * decision_router, risk_manager and execution only STRIP the suffix. None
+#     rejects on exchange, and 5 .BO trades have already executed.
+#
+# SCOPE BOUNDARY, stated precisely: this gate enforces EXCHANGE safety only.
+# It deliberately does NOT decide whether an NSE symbol is a tradeable EQUITY.
+# hub_universe still contains InvITs (-IV), rights entitlements (-RR), SME
+# (-SM), trade-to-trade (-BE/-BZ/-ST). Excluding those is the master-equity
+# redesign (Step 2B) and is out of scope here. A -RR symbol passes this gate.
+#
+# FAIL-CLOSED. Every ambiguity rejects. A false negative (refusing a
+# questionable symbol) costs one missed candidate; a false positive puts a BSE
+# instrument into the trading path.
+
+class ExchangeRejection:
+    """Telemetry reasons. Stable strings -- they are aggregated in counters."""
+
+    BSE_SYMBOL = "BSE_SYMBOL"
+    UNKNOWN_EXCHANGE = "UNKNOWN_EXCHANGE"
+    NON_EQUITY_INSTRUMENT = "NON_EQUITY_INSTRUMENT"
+    UNRESOLVED_BARE_SYMBOL = "UNRESOLVED_BARE_SYMBOL"
+    AMBIGUOUS_IDENTITY = "AMBIGUOUS_IDENTITY"
+    EMPTY_SYMBOL = "EMPTY_SYMBOL"
+
+
+# Exchange-qualified prefixes seen in this codebase ("NSE:RELIANCE" from Kite,
+# "BSE:RELIANCE" from the live-price cache).
+_PREFIX_NSE = "NSE:"
+_PREFIX_BSE = "BSE:"
+
+
+def nse_gate(symbol: str | None, *, allow_bare: bool = False) -> tuple[bool, str | None]:
+    """Exchange-safety gate. Returns (allowed, rejection_reason).
+
+    SYNCHRONOUS and database-free, so it is safe on per-tick paths.
+
+    `allow_bare=False` (the default) rejects a suffix-less symbol, because
+    "RELIANCE" does not say which exchange it means and normalize() would
+    silently make it NSE. A caller that has ALREADY resolved the symbol through
+    the authoritative resolver may pass allow_bare=True.
+    """
+    if symbol is None:
+        return False, ExchangeRejection.EMPTY_SYMBOL
+    s = str(symbol).strip().upper()
+    if not s:
+        return False, ExchangeRejection.EMPTY_SYMBOL
+
+    # Exchange-qualified forms resolve on their prefix, before suffix logic.
+    if s.startswith(_PREFIX_BSE):
+        return False, ExchangeRejection.BSE_SYMBOL
+    if s.startswith(_PREFIX_NSE):
+        return True, None
+
+    # Indices (^NSEI), FX (USDINR=X), commodities (GC=F) are not equities and
+    # must never reach a candidate path, whatever their exchange.
+    if is_non_equity(s):
+        return False, ExchangeRejection.NON_EQUITY_INSTRUMENT
+
+    if s.endswith(BSE):
+        return False, ExchangeRejection.BSE_SYMBOL
+    if s.endswith(NSE):
+        # A repaired double suffix is still NSE; strip_suffix handles it.
+        return True, None
+
+    # Some other dotted suffix -- .BS, .NSE, anything unrecognised.
+    if "." in s:
+        return False, ExchangeRejection.UNKNOWN_EXCHANGE
+
+    if allow_bare:
+        return True, None
+    return False, ExchangeRejection.UNRESOLVED_BARE_SYMBOL
+
+
+def is_nse_tradeable(symbol: str | None, *, allow_bare: bool = False) -> bool:
+    """Boolean form of nse_gate() for filter expressions."""
+    return nse_gate(symbol, allow_bare=allow_bare)[0]
+
+
+def filter_nse_only(symbols, *, allow_bare: bool = False) -> tuple[list, dict]:
+    """Split an iterable into (kept, {reason: count}).
+
+    Counters rather than per-symbol logs: the price feed runs on a 30-second
+    cadence over ~1,500 symbols, and a line each would be ~700k lines a day.
+    """
+    kept, rejected = [], {}
+    for sym in symbols or []:
+        ok, reason = nse_gate(sym, allow_bare=allow_bare)
+        if ok:
+            kept.append(sym)
+        else:
+            rejected[reason] = rejected.get(reason, 0) + 1
+    return kept, rejected
+
+
+async def resolve_nse_tradeable(symbol: str | None, session=None) -> tuple[bool, str | None, str | None]:
+    """Async gate that CAN accept a bare symbol, by resolving it authoritatively.
+
+    Returns (allowed, canonical_symbol, rejection_reason).
+
+    A bare symbol is admitted only if utils.identity resolves it to exactly one
+    NSE instrument. Ambiguity rejects -- never a guess. Everything else defers
+    to the synchronous gate.
+    """
+    ok, reason = nse_gate(symbol, allow_bare=False)
+    if ok:
+        return True, normalize(symbol), None
+    if reason != ExchangeRejection.UNRESOLVED_BARE_SYMBOL:
+        return False, None, reason
+
+    try:
+        from utils.identity import build_index, resolve_identity
+
+        idx = await build_index(session)
+        r = resolve_identity(str(symbol), idx)
+        if r.ok:
+            return True, r.symbol, None
+        if r.needs_review:
+            return False, None, ExchangeRejection.AMBIGUOUS_IDENTITY
+        return False, None, ExchangeRejection.UNRESOLVED_BARE_SYMBOL
+    except Exception:
+        # Fail CLOSED: an unreachable instrument table must not admit a symbol
+        # whose exchange we cannot establish.
+        return False, None, ExchangeRejection.UNRESOLVED_BARE_SYMBOL
+

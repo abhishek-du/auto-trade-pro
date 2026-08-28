@@ -254,6 +254,12 @@ async def get_hub_universe(session: AsyncSession) -> list[str]:
     if rows:
         return list(rows)
 
-    # 3. Legacy fallback — include BSE watchlist alongside NSE
-    logger.warning("[hub_universe] empty — falling back to settings watchlists")
-    return settings.nse_symbols + settings.bse_symbols
+    # 3. Legacy fallback — NSE watchlist ONLY (Step 2A, 2026-08-28).
+    #
+    # This returned settings.nse_symbols + settings.bse_symbols. get_hub_universe()
+    # is consumed by the tactical scanner, the pre-event gap scan and the
+    # long-tail candle sync, so an empty hub_universe table would have injected
+    # 30 hardcoded .BO symbols straight into three candidate paths -- exactly
+    # the failure mode the rest of this step closes.
+    logger.warning("[hub_universe] empty — falling back to the NSE settings watchlist")
+    return settings.nse_symbols

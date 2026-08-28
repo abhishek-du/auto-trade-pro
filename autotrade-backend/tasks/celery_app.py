@@ -265,10 +265,16 @@ celery_app.conf.beat_schedule = {
     # 03:00 UTC matches sync-nse-eq-instruments-daily below, which has been
     # authenticating fine at this hour the whole time — same 30-min safety
     # margin after the token refresh.
-    "full-bse-candles-daily": {
-        "task":     "tasks.refresh_full_bse_candles",
-        "schedule": crontab(hour=2, minute=15),
-    },
+    # DISABLED 2026-08-28 (Step 2A). This refreshed daily candles for EVERY
+    # BSE EQ symbol. BSE is out of scope for the strategy, kite_instruments
+    # holds zero BSE rows, and leaving the schedule live meant BSE would
+    # silently resurrect the moment an instrument sync repopulated it.
+    # The task function is retained (not deleted) so historical BSE data stays
+    # explicable and the entry can be restored by uncommenting.
+    # "full-bse-candles-daily": {
+    #     "task":     "tasks.refresh_full_bse_candles",
+    #     "schedule": crontab(hour=2, minute=15),
+    # },
 
     # Daily 03:00 UTC (08:30 IST): sync ALL NSE+BSE EQ instruments from Zerodha's
     # full instrument master. This populates ~9,600 NSE EQ stocks into kite_instruments

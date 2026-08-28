@@ -50,6 +50,7 @@ class RoutingOutcome(str, Enum):
     BLOCKED_CONFIDENCE_INTEGRITY = "BLOCKED_CONFIDENCE_INTEGRITY"
     BLOCKED_SECOND_ORDER         = "BLOCKED_SECOND_ORDER_CONFIDENCE"
     BLOCKED_NO_EVENT             = "BLOCKED_NO_EVENT"              # NO EVENT -> NO TRADE
+    BLOCKED_NON_NSE              = "BLOCKED_NON_NSE_EXCHANGE"      # NSE ONLY (Step 2A)
     BLOCKED_EVIDENCE_DRIFT       = "BLOCKED_EVIDENCE_DRIFT"        # snapshot disagrees with canonical CausalEvent
     BLOCKED_TECHNICAL_ORIGIN     = "BLOCKED_TECHNICAL_ORIGIN"      # News-Only hard-block: TECHNICAL may not originate trades (2026-07-21)
     BLOCKED_SHORT                = "BLOCKED_SHORT"                 # short leg refused: VIX panic, or shorting switched off (2026-08-20)
@@ -547,7 +548,37 @@ async def authorize_trade_intent(intent: TradeIntent, session: AsyncSession) -> 
     Call authorize_trade_intent() first; only proceed with your own executor
     if `approved` is True. Rejections are still centrally audit-logged here.
     """
+    # ── NSE-ONLY EXCHANGE GATE (Step 2A, 2026-08-28) ────────────────────────────
+    #
+    # FIRST check in the gate, before mode resolution, market hours or risk.
+    # This is the last line of defence: every intent from every family passes
+    # through authorize_trade_intent(), so a BSE symbol that slipped every
+    # upstream filter still cannot open a position.
+    #
+    # It was needed. Before this, decision_router, risk_manager and execution
+    # ALL merely stripped the suffix (`.replace(".BO","")`) and none rejected on
+    # exchange -- five .BO trades executed through DIRECT_NEWS on 2026-08-20/21.
+    #
+    # EXCHANGE safety only. It does NOT decide whether an NSE symbol is a
+    # tradeable equity; hub_universe still admits InvITs, rights entitlements
+    # and SME series, and excluding those is the Step 2B master-equity work.
+    #
+    # allow_bare=False: a suffix-less symbol never reaches execution in this
+    # codebase (every paper_trades row carries .NS or .BO), so requiring the
+    # suffix here costs nothing and closes the ambiguity.
+    from utils.symbols import nse_gate as _nse_gate
+
     mode = await resolve_mode(session)
+
+    _ex_ok, _ex_reason = _nse_gate(intent.symbol, allow_bare=False)
+    if not _ex_ok:
+        reason = (f"NSE-only: {intent.symbol} rejected ({_ex_reason}). BSE and "
+                  f"exchange-ambiguous instruments may not open a position.")
+        result = RoutingResult(outcome=RoutingOutcome.BLOCKED_NON_NSE, mode=mode, reason=reason,
+                               metadata={"strategy": intent.strategy, "exchange_reason": _ex_reason})
+        logger.warning(f"[execution_gate] BLOCKED_NON_NSE {intent.symbol}: {_ex_reason}")
+        await _log_intent_audit(intent, mode, result, session)
+        return AuthorizationResult(approved=False, mode=mode, reason=reason, outcome=result.outcome)
 
     # ── Market-hours gate (2026-07-27) ──────────────────────────────────────────
     # New positions may ONLY open while NSE is actually open for trading

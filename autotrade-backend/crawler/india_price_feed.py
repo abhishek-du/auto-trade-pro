@@ -866,8 +866,24 @@ async def run_india_price_crawl(
     from sqlalchemy import select as _sel, text as _text
     from db.models import MarketShortlist, KiteInstrument
 
-    # 1. Mandatory: indices + VIX + BSE watchlist (always crawled regardless of shortlist)
-    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES) + settings.bse_symbols + settings.bse_mid_symbols
+    # 1. Mandatory: indices + VIX ONLY.
+    #
+    # settings.bse_symbols and settings.bse_mid_symbols were here (Step 2A,
+    # 2026-08-28). They are config properties that append ".BO" to
+    # WATCHLIST_BSE_LARGE_CAP / _MID_CAP -- 45 hardcoded BSE symbols, crawled
+    # unconditionally as "mandatory", bypassing NSE_ONLY_UNIVERSE entirely.
+    #
+    # Measured: BSE was purged from kite_instruments and hub_universe on
+    # 2026-08-27, yet 4,659 fresh .BO candle rows were written in the two days
+    # AFTER that purge, all from this list. The purge could never hold while
+    # this line existed.
+    #
+    # The indices stay: market_regime.py's 5-state engine and intelligence_hub's
+    # macro context both read them, and they are index instruments, not BSE
+    # equities. ^BSESN is the Sensex INDEX -- a market-context reading, not a
+    # tradeable BSE instrument -- and it is filtered out of the equity path by
+    # the NON_EQUITY_INSTRUMENT rule wherever an equity is required.
+    mandatory: list[str] = list(settings.WATCHLIST_NIFTY_INDICES)
 
     # 2. Dynamic equity universe from market_shortlist
     sl_result = await session.execute(
@@ -913,11 +929,12 @@ async def run_india_price_crawl(
             .order_by(KiteInstrument.tradingsymbol)
             .limit(30)
         )
-        equity_syms = (
-            [f"{r.tradingsymbol}.NS" for r in ki_nse.all()] +
-            [f"{r.tradingsymbol}.BO" for r in ki_bse.all()]
-        )
-        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols, NSE+BSE)"
+        # NSE only (Step 2A). The BSE arm of this bootstrap is removed rather
+        # than filtered later, so the query result can never be turned into a
+        # .BO string in the first place. ki_bse is left bound above because
+        # removing it is a wider refactor; it is simply not consumed.
+        equity_syms = [f"{r.tradingsymbol}.NS" for r in ki_nse.all()]
+        source = f"kite_instruments bootstrap ({len(equity_syms)} symbols, NSE only)"
 
     # 3. User watchlist additions
     from db.models import UserWatchlist
@@ -926,7 +943,23 @@ async def run_india_price_crawl(
     )
     user_syms = [s for s in wl_result.scalars().all() if s not in equity_syms]
 
-    all_symbols: list[str] = mandatory + equity_syms + user_syms
+    # FINAL EXCHANGE GATE (Step 2A). Defence in depth: even if a BSE symbol
+    # reaches here through market_shortlist, a user watchlist row or a future
+    # code path, it is dropped before a single price request is made.
+    #
+    # Indices are exempt -- they are the mandatory market-context reads above
+    # and are not equity candidates. Counters, not per-symbol logs: this runs
+    # on a 30-second cadence over ~1,500 symbols.
+    from utils.symbols import filter_nse_only as _filter_nse
+
+    _equity_in = equity_syms + user_syms
+    _equity_ok, _rejected = _filter_nse(_equity_in, allow_bare=False)
+    if _rejected:
+        logger.warning(
+            f"[india_price_feed] NSE-ONLY GATE dropped {sum(_rejected.values())} "
+            f"of {len(_equity_in)} symbols: {_rejected}"
+        )
+    all_symbols: list[str] = mandatory + _equity_ok
 
     logger.info(
         f"━━ India price crawl START ━━  {len(all_symbols)} symbols  "

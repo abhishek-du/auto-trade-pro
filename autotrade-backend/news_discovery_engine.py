@@ -5,6 +5,7 @@ import time as _time
 from datetime import datetime, timedelta
 from db.database import AsyncSessionLocal
 from sqlalchemy import text as _sa_text
+from utils.symbols import resolve_nse_tradeable as _resolve_nse_tradeable
 from db.models import PreMarketNewsQueue
 from sqlalchemy import select, update as sa_update
 from crawler.news_crawler import (
@@ -1393,7 +1394,39 @@ async def _persist_news_decision(
         logger.debug(f"[news_engine] persist decision failed for {ticker}: {exc}")
 
 
+# Aggregated NSE-gate rejections. Counters, not per-call logs: this path can
+# fire hundreds of times per drain and a line each would bury the real signal.
+_NSE_GATE_REJECTS: dict[str, int] = {}
+
+
+def nse_gate_reject_counts() -> dict:
+    """Read-only snapshot for telemetry and monitoring. Never mutated by callers."""
+    return dict(_NSE_GATE_REJECTS)
+
+
 async def process_ticker(ticker, side, headline, summary, news_id=None):
+    # NSE-ONLY GATE (Step 2A, 2026-08-28).
+    #
+    # process_ticker() is the SINGLE common entry point for every news-driven
+    # candidate -- the RSS section, the NSE announcement consumer, the
+    # premarket drain and the anomaly-catalyst path all funnel through here.
+    # Gating once, here, covers all four rather than four separate checks that
+    # can drift apart.
+    #
+    # Evidence this is needed: 5 .BO trades executed through DIRECT_NEWS
+    # (VIPULORG, RAILTEL, INDOBORAX, ZAGGLE), and neither decision_router nor
+    # risk_manager nor execution rejects on exchange -- all three only strip
+    # the suffix.
+    #
+    # Fail-closed. A bare ticker is admitted ONLY if the authoritative resolver
+    # maps it to exactly one NSE instrument; ambiguity rejects.
+    _ok, _canon, _why = await _resolve_nse_tradeable(ticker)
+    if not _ok:
+        _NSE_GATE_REJECTS[_why] = _NSE_GATE_REJECTS.get(_why, 0) + 1
+        logger.debug(f"[nse_gate] {ticker}: rejected ({_why})")
+        return False
+    ticker = _canon or ticker
+
     logger.info(f"⚡ Processing Ticker: {ticker} (Side: {side}) - Multi-Agent LLM Debate")
     cand = NewsCandidate(side, headline, summary)
     dec = NewsDecision(side)
@@ -1952,7 +1985,24 @@ async def _news_discovery_cycles():
                     # indistinguishable from one that finished. Counts only.
                     _drain_t0 = _time.monotonic()
                     _drain_done = 0
+                    _pm_rejected: dict[str, int] = {}
                     for item_id, symbol, side, headline, summary, captured_at in queued_items:
+                        # NSE-ONLY GATE (Step 2A, 2026-08-28).
+                        #
+                        # 474 .BO rows sit in this queue, 109 of them inside the
+                        # 3-day drain window, and 5 .BO trades have already
+                        # executed through DIRECT_NEWS. The rows are NOT deleted
+                        # -- they stay for audit -- but they may not become
+                        # active candidates.
+                        #
+                        # A BSE-only company is NOT silently converted to NSE.
+                        # Only the authoritative resolver may map a name to an
+                        # NSE instrument, and ambiguity rejects.
+                        _gate_ok, _canon, _why = await _resolve_nse_tradeable(symbol)
+                        if not _gate_ok:
+                            _pm_rejected[_why] = _pm_rejected.get(_why, 0) + 1
+                            continue
+                        symbol = _canon or symbol
                         # Recover provenance (2026-08-27). This drain called
                         # process_ticker() with no news_id, so every event it
                         # created carried news_id=NULL. Measured: the premarket

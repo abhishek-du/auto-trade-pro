@@ -135,8 +135,9 @@ async def sync_long_tail_intraday_upstox(
     from crawler.price_feed import save_candles_to_db
 
     rows = (await session.execute(_text("""
+        -- NSE ONLY (Step 2A, 2026-08-28). BSE is out of scope for the strategy. Restricting the QUERY rather than filtering afterwards means a .BO string is never constructed, so it cannot leak through a later branch.
         SELECT tradingsymbol, segment FROM kite_instruments
-        WHERE segment IN ('NSE', 'BSE') AND instrument_type = 'EQ'
+        WHERE segment = 'NSE' AND instrument_type = 'EQ'
           AND name != '' AND instrument_token > 0
           AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
         ORDER BY tradingsymbol
@@ -153,10 +154,12 @@ async def sync_long_tail_intraday_upstox(
         ))).scalars().all()
     )
 
-    universe = [
-        f"{sym}.NS" if segment == "NSE" else f"{sym}.BO"
-        for sym, segment in rows
-    ]
+    # NSE ONLY (Step 2A). DROPS any non-NSE row rather than relabelling it:
+    # mapping a BSE row to ".NS" would make it look like an NSE instrument and
+    # pass the exchange gate, which is strictly worse than the ".BO" it
+    # replaced. The query above is already NSE-restricted; this is defence in
+    # depth against a future widening of it.
+    universe = [f"{sym}.NS" for sym, segment in rows if segment == "NSE"]
     long_tail = [s for s in universe if s not in hub_symbols and s in known_tradeable]
 
     # Time-boxed rotation (2026-08-03) -- walking the full ~7,672-symbol long

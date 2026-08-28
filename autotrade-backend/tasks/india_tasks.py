@@ -4183,7 +4183,8 @@ async def _backfill_hub_1d_candles():
         rows = (await session.execute(_text("""
             SELECT tradingsymbol, segment
             FROM kite_instruments
-            WHERE segment IN ('NSE', 'BSE') AND instrument_type = 'EQ'
+            -- NSE ONLY (Step 2A, 2026-08-28). BSE is out of scope for the strategy. Restricting the QUERY rather than filtering afterwards means a .BO string is never constructed, so it cannot leak through a later branch.
+            WHERE segment = 'NSE' AND instrument_type = 'EQ'
               AND name != '' AND instrument_token > 0
               AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
               -- Bonds/SDLs also appear with numeric-coded tradingsymbols that
@@ -4195,8 +4196,20 @@ async def _backfill_hub_1d_candles():
               AND tradingsymbol !~ '^[0-9]'
             ORDER BY tradingsymbol
         """))).all()
-        _suffix = {"NSE": ".NS", "BSE": ".BO"}
-        all_symbols = [f"{sym}{_suffix[segment]}" for sym, segment in rows]
+        # NSE ONLY (Step 2A, 2026-08-28). The query above is already
+        # NSE-restricted; this DROPS any non-NSE row rather than relabelling it.
+        #
+        # That distinction matters. An earlier version of this fix mapped every
+        # row to ".NS" unconditionally, which would have turned a BSE row into
+        # something that LOOKS like an NSE symbol and therefore passes the
+        # exchange gate -- strictly worse than the ".BO" it replaced. Dropping
+        # is the only safe response to an unexpected segment.
+        all_symbols = [f"{sym}.NS" for sym, segment in rows if segment == "NSE"]
+        _dropped = len(rows) - len(all_symbols)
+        if _dropped:
+            logger.warning(
+                f"[backfill_hub_1d] dropped {_dropped} non-NSE instrument row(s) "
+                f"— BSE is out of scope and must not be relabelled as NSE")
 
         # Also include hub_universe symbols (extras not yet in kite_instruments)
         from engine.hub_universe import get_hub_universe

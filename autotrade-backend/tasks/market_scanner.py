@@ -77,10 +77,11 @@ async def _run_market_scanner(force: bool = False):
                 MasterIntelligenceScore.is_blocked,
             )
             .distinct(MasterIntelligenceScore.symbol)
-            .where(
-                MasterIntelligenceScore.symbol.like("%.NS") |
-                MasterIntelligenceScore.symbol.like("%.BO")
-            )
+            # NSE ONLY (Step 2A, 2026-08-28). BSE is out of scope for the strategy. Restricting the QUERY rather than filtering afterwards means a .BO string is never constructed, so it cannot leak through a later branch.
+            # This is the PRIMARY hub path (the fallback below was fixed too);
+            # its output becomes scan_syms -> market_shortlist -> the price
+            # feed's equity universe.
+            .where(MasterIntelligenceScore.symbol.like("%.NS"))
             .order_by(MasterIntelligenceScore.symbol, MasterIntelligenceScore.scored_at.desc())
         ).subquery()
         hub_rows = (await session.execute(select(hub_subq))).all()
@@ -94,7 +95,13 @@ async def _run_market_scanner(force: bool = False):
             scan_syms = list(hub_map.keys())
         else:
             res = await session.execute(
-                text("SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND (symbol LIKE '%.NS' OR symbol LIKE '%.BO')")
+                # NSE ONLY (Step 2A, 2026-08-28). This fallback fires when Hub
+                # coverage is thin, and it fed market_shortlist -- which
+                # crawler/india_price_feed.py then uses as its equity universe.
+                # With '%.BO' included that was a FEEDBACK LOOP: BSE candles
+                # written by the old mandatory watchlist would be scanned into
+                # the shortlist and crawled again on the next pass.
+                text("SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND symbol LIKE '%.NS'")
             )
             scan_syms = [r.symbol for r in res.all()]
         logger.info(

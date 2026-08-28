@@ -1943,10 +1943,17 @@ class TestBackfillTask:
         assert result == {"skipped": True, "reason": "not_authenticated"}
 
     @pytest.mark.asyncio
-    async def test_bse_rows_get_bo_suffix_not_ns(self):
-        """2026-07-28 regression guard: a BSE-segment kite_instruments row must
-        become SYMBOL.BO, never SYMBOL.NS -- the whole point of the fix that
-        closed the ASIIL.BO/MOLDTKPAC.NS zero-candle-coverage gap."""
+    async def test_bse_rows_are_dropped_not_relabelled_as_nse(self):
+        """REPLACED 2026-08-28 (Step 2A). This asserted BSE -> SYMBOL.BO, from
+        the 2026-07-28 fix that closed the ASIIL.BO zero-coverage gap. BSE is
+        now out of scope for the strategy, so backfilling it is no longer
+        wanted -- the query is NSE-only and this is defence in depth.
+
+        The invariant that REPLACES it is stricter, not weaker: a non-NSE row
+        must be DROPPED, never relabelled. Relabelling BSESYM as BSESYM.NS
+        would make a BSE instrument look like an NSE one and pass the exchange
+        gate -- worse than the .BO it replaced. That is the regression this
+        now guards."""
         kite_syms_result = MagicMock()
         kite_syms_result.all.return_value = [("NSESYM", "NSE"), ("BSESYM", "BSE")]
         fresh_result = MagicMock()
@@ -1990,7 +1997,11 @@ class TestBackfillTask:
             from tasks.india_tasks import _backfill_hub_1d_candles
             await _backfill_hub_1d_candles()
 
-        assert sorted(fetch_calls) == ["BSESYM.BO", "NSESYM.NS"]
+        assert sorted(fetch_calls) == ["NSESYM.NS"], (
+            "the BSE row must be dropped entirely; relabelling it .NS would "
+            "smuggle a BSE instrument past the exchange gate"
+        )
+        assert "BSESYM.NS" not in fetch_calls
 
 
 # ══════════════════════════════════════════════════════════════════════════════
