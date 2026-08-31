@@ -500,6 +500,19 @@ class Settings(BaseSettings):
     # concurrently from separate processes. See crawler/zerodha_kite_limiter.py.
     # KITE_EXIT_RPS is a RESERVED bucket for stop-loss/exit price reads so a
     # quote flood can never delay an exit — do not merge it into KITE_QUOTE_RPS.
+    # ── Upstox rate limits (2026-08-31, Kite replacement) ────────────────
+    # Upstox documents 50/sec + 500/min for standard APIs and 10/sec for
+    # orders — far more headroom than Kite's 1/sec quotes. QUOTE is set to 40
+    # rather than 50 to leave room for the WebSocket handshake and the
+    # instrument sync sharing the same per-minute budget.
+    #
+    # EXIT is a RESERVED bucket, kept deliberately separate exactly as
+    # KITE_EXIT_RPS was: a quote flood must never delay a stop-loss read.
+    UPSTOX_LIMITER_ENABLED:  bool  = True
+    UPSTOX_QUOTE_RPS:        int   = 8    # 500/min sustained cap, not the 50/s burst
+    UPSTOX_ORDER_RPS:        int   = 10
+    UPSTOX_EXIT_RPS:         int   = 10
+    UPSTOX_LIMITER_MAX_WAIT: float = 5.0   # then fail open rather than wedge
     KITE_LIMITER_ENABLED:  bool  = True
     KITE_QUOTE_RPS:        int   = 1
     KITE_ORDER_RPS:        int   = 10

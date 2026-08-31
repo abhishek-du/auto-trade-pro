@@ -50,7 +50,24 @@ async def get_kite_candles_for_range(
     """Fetch raw candles for a symbol over [from_date, to_date].
 
     Returns a list of dicts in save_candles_to_db format.
+
+    UPSTOX-BACKED since 2026-08-31. Kite Connect's token expired; this keeps
+    its name, signature and return shape so the candle pipeline, the 1m->5m/
+    15m/1h resampler and every backfill task are untouched.
+
+    Verified on migration: 1m bars start at 03:45 UTC (09:15 IST) and daily
+    bars land on 18:30 UTC -- the same live daily series the Step 2 audit
+    identified, so no existing query needs re-pointing.
     """
+    from crawler.upstox_candles import get_upstox_candles_for_range
+
+    out = await get_upstox_candles_for_range(symbol, from_date, to_date,
+                                             interval=interval, oi=oi)
+    if out:
+        return out
+    # Fall through to the Kite path only if it is somehow authenticated again.
+    # With the token expired this returns [] immediately, which is the same
+    # answer the caller already handles.
     token = get_token(symbol)
     if token is None:
         logger.debug(f"[zerodha_historical] No instrument token for {symbol}")

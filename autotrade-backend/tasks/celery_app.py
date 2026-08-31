@@ -280,6 +280,15 @@ celery_app.conf.beat_schedule = {
     # full instrument master. This populates ~9,600 NSE EQ stocks into kite_instruments
     # so EVERY stock gets automatic candle ingestion — not just the 30 hardcoded ones.
     # Root fix: small-caps (JTEKTINDIA, SAKSOFT, SIGNPOST etc.) are now auto-tracked.
+    # Upstox migration (2026-08-31): resolve instrument_key/isin for the NSE
+    # universe right after the instrument master lands. 03:05 UTC = 08:35 IST,
+    # five minutes after sync-nse-eq-instruments-daily and before the hub
+    # rebuild, so the scanner always sees keys for whatever it is about to
+    # trade. Incremental, so a rate-limited run resumes on the next day.
+    "sync-upstox-instrument-keys-daily": {
+        "task":     "tasks.sync_upstox_instrument_keys",
+        "schedule": crontab(hour=3, minute=5),
+    },
     "sync-nse-eq-instruments-daily": {
         "task":     "tasks.sync_nse_eq_instruments",
         "schedule": crontab(hour=2, minute=0),

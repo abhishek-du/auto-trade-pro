@@ -3584,17 +3584,41 @@ def kite_start_ticker_task():
     'already running' is exactly what kept the feed frozen, so we tear any existing
     ticker down and rebuild it on the current token.
     """
-    from utils.config import settings
-    if not settings.ZERODHA_ENABLED:
-        return {"skipped": "zerodha_disabled"}
-    from crawler.zerodha_ticker import start_kite_ticker, stop_kite_ticker
     from crawler.india_price_feed import is_nse_market_open
+
     if not is_nse_market_open():
         return {"skipped": "market_closed"}
-    stop_kite_ticker()             # kill any stale-token ticker (no-op if none)
-    started = start_kite_ticker()  # rebuild on the current token
-    logger.info(f"[kite_start_ticker] (re)built ticker on current token: {started}")
-    return {"started": bool(started)}
+
+    # UPSTOX since 2026-08-31. Kite Connect's token expired; the task name and
+    # its 03:45 UTC beat slot are kept so the schedule and any operator runbook
+    # still work, but the feed underneath is Upstox Market Data Feed V3.
+    #
+    # Priority set gets "full" (depth + volume + OHLC), the rest "ltpc" --
+    # the same budgeting KiteTicker's MODE_QUOTE/MODE_LTP split provided.
+    from crawler.upstox_instruments import build_key_maps
+    from crawler.upstox_websocket import start_upstox_websocket
+
+    async def _collect():
+        async with celery_session() as session:
+            fwd, _rev = await build_key_maps(session)
+            # Priority: anything we hold, plus the hub's top ranks. Open
+            # positions matter most -- a stale tick on a held position is what
+            # delays a stop-loss.
+            held = {r.symbol for r in (await session.execute(
+                _text("SELECT symbol FROM open_positions"))).all()}
+            top = {r.symbol for r in (await session.execute(
+                _text("SELECT symbol FROM hub_universe ORDER BY rank LIMIT 500"))).all()}
+            return fwd, (held | top)
+
+    fwd, prio = _run_async(_collect())
+    if not fwd:
+        logger.error("[start_ticker] no instrument_key map — run sync_upstox_instrument_keys first")
+        return {"started": False, "reason": "no_instrument_keys"}
+
+    started = start_upstox_websocket(fwd, priority_symbols=prio)
+    logger.info(f"[start_ticker] Upstox V3 feed started={started} "
+                f"symbols={len(fwd)} priority={len(prio)}")
+    return {"started": bool(started), "symbols": len(fwd), "priority": len(prio)}
 
 
 # ── Price-feed watchdog: alert if candles stop being written during market hours ──
@@ -3877,6 +3901,29 @@ def purge_old_news_task(days: int = 60):
 
 
 # ── Daily NSE+BSE EQ instrument sync (Zerodha full dump) ────────────────────
+
+async def _sync_upstox_instrument_keys():
+    """Daily: populate instrument_key/isin on NSE rows (Upstox migration).
+
+    Kite Connect's token expired 2026-08-31 and Upstox addresses instruments by
+    a STRING key ("NSE_EQ|INE002A01018"), not Kite's numeric token. Nothing can
+    call Upstox without it, so this runs right after the instrument master
+    refresh and before the hub rebuild.
+
+    Incremental (only_missing=True) so an interrupted or rate-limited run is
+    simply resumed by the next one rather than restarting from zero.
+    """
+    from crawler.upstox_instruments import sync_upstox_instrument_keys
+
+    async with celery_session() as session:
+        return await sync_upstox_instrument_keys(session)
+
+
+@celery_app.task(name="tasks.sync_upstox_instrument_keys")
+def sync_upstox_instrument_keys_task():
+    """Daily 03:05 UTC (08:35 IST) — right after the instrument master sync."""
+    return _run_async(_sync_upstox_instrument_keys())
+
 
 async def _sync_nse_eq_instruments():
     """Download ALL NSE+BSE equity instruments from Zerodha and upsert into kite_instruments.

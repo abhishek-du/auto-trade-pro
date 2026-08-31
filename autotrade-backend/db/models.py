@@ -650,6 +650,19 @@ class KiteInstrument(Base):
     instrument_token: Mapped[int]          = mapped_column(Integer,     nullable=False)
     exchange_token:   Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
     tradingsymbol:    Mapped[str]          = mapped_column(String(30),  nullable=False)
+    # ── Upstox migration (2026-08-31) ────────────────────────────────────────
+    # Kite Connect's token expired and Upstox is now the sole broker backend.
+    # Upstox addresses instruments by a STRING key, "NSE_EQ|INE002A01018", not
+    # by Kite's numeric instrument_token. Both are kept during (and after) the
+    # transition: instrument_token stays because ~50 existing call sites and
+    # the historical candle rows reference it, while instrument_key is what
+    # every Upstox request actually needs.
+    #
+    # instrument_key is derivable as f"{segment}|{isin}" for equities, but it
+    # is STORED rather than derived so a segment/ISIN edge case cannot silently
+    # produce a key that addresses the wrong instrument.
+    instrument_key:   Mapped[str | None]   = mapped_column(String(64),  nullable=True, index=True)
+    isin:             Mapped[str | None]   = mapped_column(String(20),  nullable=True, index=True)
     name:             Mapped[str]          = mapped_column(String(200), nullable=False, default="")
     last_price:       Mapped[float]        = mapped_column(Float,       nullable=False, default=0.0)
     expiry:           Mapped[str]          = mapped_column(String(20),  nullable=False, default="")

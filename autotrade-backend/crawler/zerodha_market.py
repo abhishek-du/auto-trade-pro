@@ -524,7 +524,28 @@ def _get_token(symbol: str) -> int | None:
 # ── 1. Live prices (LTP) ──────────────────────────────────────────────────────
 
 async def get_live_prices(symbols: list[str], *, exit_bucket: bool = False) -> dict[str, dict]:
-    """Fetch last traded price for a list of .NS symbols via Kite LTP endpoint.
+    """Fetch last traded price for a list of .NS symbols.
+
+    UPSTOX-BACKED since 2026-08-31. Kite Connect's token expired and Upstox is
+    now the sole broker backend. This function keeps its name, signature and
+    return shape so the ~12 call sites (price feed, exit loop, snapshots, news
+    engine) need no change; the implementation simply moved.
+
+    The `exit_bucket` flag still routes through the RESERVED exit quota, the
+    same isolation KITE_EXIT_RPS provided: a universe scan must never make a
+    stop-loss read queue behind it.
+
+    The Kite implementation below is retained, unreachable, purely so the
+    request/response contract it defined stays readable next to the adapter
+    that replaced it. It cannot run: get_kite_client() has no access token.
+    """
+    from crawler.upstox_quotes import get_live_prices as _upstox_ltp
+
+    return await _upstox_ltp(symbols, exit_bucket=exit_bucket)
+
+
+async def _kite_get_live_prices_DEPRECATED(symbols: list[str], *, exit_bucket: bool = False) -> dict[str, dict]:
+    """DEAD as of 2026-08-31 — Kite token expired. Kept for contract reference.
 
     Returns {symbol: {price, last_price, change, change_pct}}.
 
@@ -592,7 +613,17 @@ async def get_live_prices(symbols: list[str], *, exit_bucket: bool = False) -> d
 # ── 2. Full quote ─────────────────────────────────────────────────────────────
 
 async def get_full_quote(symbol: str) -> dict:
-    """Full quote for one symbol — includes OHLC, volume, bid/ask, OI."""
+    """Full quote for one symbol — OHLC, volume, bid/ask, OI, 5-level depth.
+
+    UPSTOX-BACKED since 2026-08-31. Same return shape as the Kite original.
+    """
+    from crawler.upstox_quotes import get_full_quote as _upstox_full
+
+    return await _upstox_full(symbol)
+
+
+async def _kite_get_full_quote_DEPRECATED(symbol: str) -> dict:
+    """DEAD as of 2026-08-31 — Kite token expired. Kept for contract reference."""
     kite = get_kite_client()
     if not kite.access_token or not _kite_quotes_available():
         return {}
