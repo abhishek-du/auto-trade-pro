@@ -11,6 +11,7 @@ import UpcomingEventsWidget from '../components/calendar/UpcomingEventsWidget';
 import { usePortfolio } from '../hooks/usePortfolio';
 import { useAgent } from '../hooks/useAgent';
 import { apiFetch } from '../api/client';
+import { useBroker } from '../hooks/useBroker';
 
 /* ──────────────────────────────────────────────────────────────────────────
    Formatting helpers
@@ -139,6 +140,8 @@ function IndexStrip() {
     '/api/v1/india/market-status', 3000, 30000, (d) => !!d?.nse_open,
   );
   const nseOpen = mkt?.nse_open;
+  // Name the actual price source rather than asserting a broker. See useBroker.
+  const { name: brokerName, state: brokerState } = useBroker();
   return (
     <div>
       <div className="flex items-center gap-2 mb-2 px-0.5">
@@ -151,7 +154,11 @@ function IndexStrip() {
           NSE <span className={nseOpen ? 'text-profit font-semibold' : 'text-loss font-semibold'}>{nseOpen ? 'OPEN' : 'CLOSED'}</span>
           {mkt?.ist_time && <span className="text-muted/70"> · {mkt.ist_time.split(' ')[1]} IST</span>}
           {nseOpen
-            ? <span className="text-muted/60"> · streaming from Zerodha</span>
+            ? <span className="text-muted/60"> · {brokerState === 'connected'
+                  ? `streaming from ${brokerName}`
+                  : brokerState === 'degraded'
+                    ? `polling ${brokerName}`
+                    : 'no live price source'}</span>
             : <span className="text-muted/60"> · showing last close</span>}
         </span>
       </div>

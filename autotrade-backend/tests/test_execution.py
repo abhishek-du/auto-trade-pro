@@ -42,29 +42,34 @@ def _clear_snapshot_cache():
 # ── crawler/market_snapshot.py::get_market_snapshot ────────────────────────────
 
 class TestMarketSnapshotPriorityChain:
+    # UPSTOX-BACKED since 2026-08-31. Tier 1 patches upstox_websocket, since
+    # market_snapshot no longer reads the Kite ticker. Tier 2 still patches
+    # zerodha_market.get_full_quote — that function kept its name and is the
+    # real seam; it delegates to Upstox internally, which is why the recorded
+    # source now reads upstox_rest.
     @pytest.mark.asyncio
     async def test_websocket_tick_used_when_available(self):
-        with patch("crawler.zerodha_ticker.get_live_tick",
+        with patch("crawler.upstox_websocket.get_live_tick",
                    MagicMock(return_value={"last_price": 100.0, "ohlc": {"close": 98.0}})), \
              patch("crawler.zerodha_market.get_full_quote", AsyncMock()) as mock_rest, \
              patch("crawler.live_prices.yfinance_ltp_batch", AsyncMock()) as mock_yf:
             snap = await get_market_snapshot("TESTCO.NS")
         assert snap is not None
         assert snap.ltp == 100.0
-        assert snap.source == "zerodha_ws"
+        assert snap.source == "upstox_ws"
         mock_rest.assert_not_called()
         mock_yf.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_falls_back_to_rest_when_no_websocket_tick(self):
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote",
                    AsyncMock(return_value={"last_price": 200.0, "ohlc": {}, "volume": 1000})), \
              patch("crawler.live_prices.yfinance_ltp_batch", AsyncMock()) as mock_yf:
             snap = await get_market_snapshot("TESTCO.NS")
         assert snap is not None
         assert snap.ltp == 200.0
-        assert snap.source == "zerodha_rest"
+        assert snap.source == "upstox_rest"
         mock_yf.assert_not_called()
 
     @pytest.mark.asyncio
@@ -74,7 +79,7 @@ class TestMarketSnapshotPriorityChain:
         # REST fallback either. Confirms yfinance is now a real third leg,
         # not that the bug is reproduced -- REST failing here to prove the
         # chain still resolves via yfinance.
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", AsyncMock(return_value={})), \
              patch("crawler.live_prices.yfinance_ltp_batch", AsyncMock(return_value={"TESTCO.NS": 150.0})):
             snap = await get_market_snapshot("TESTCO.NS")
@@ -84,7 +89,7 @@ class TestMarketSnapshotPriorityChain:
 
     @pytest.mark.asyncio
     async def test_all_sources_exhausted_returns_none(self):
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", AsyncMock(return_value={})), \
              patch("crawler.live_prices.yfinance_ltp_batch", AsyncMock(return_value={})):
             snap = await get_market_snapshot("TESTCO.NS")
@@ -92,7 +97,7 @@ class TestMarketSnapshotPriorityChain:
 
     @pytest.mark.asyncio
     async def test_zero_or_negative_price_treated_as_unavailable(self):
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", AsyncMock(return_value={"last_price": 0.0})), \
              patch("crawler.live_prices.yfinance_ltp_batch", AsyncMock(return_value={"TESTCO.NS": 0.0})):
             snap = await get_market_snapshot("TESTCO.NS")
@@ -103,7 +108,7 @@ class TestMarketSnapshotCaching:
     @pytest.mark.asyncio
     async def test_second_call_within_ttl_uses_cache_not_refetch(self):
         rest_mock = AsyncMock(return_value={"last_price": 300.0, "ohlc": {}, "volume": 0})
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", rest_mock):
             snap1 = await get_market_snapshot("TESTCO.NS")
             snap2 = await get_market_snapshot("TESTCO.NS")
@@ -116,7 +121,7 @@ class TestMarketSnapshotCaching:
             {"last_price": 100.0, "ohlc": {}, "volume": 0},
             {"last_price": 200.0, "ohlc": {}, "volume": 0},
         ])
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", rest_mock):
             snap_a = await get_market_snapshot("AAA.NS")
             snap_b = await get_market_snapshot("BBB.NS")
@@ -127,7 +132,7 @@ class TestMarketSnapshotCaching:
     @pytest.mark.asyncio
     async def test_expired_ttl_triggers_refetch(self):
         rest_mock = AsyncMock(return_value={"last_price": 400.0, "ohlc": {}, "volume": 0})
-        with patch("crawler.zerodha_ticker.get_live_tick", MagicMock(return_value=None)), \
+        with patch("crawler.upstox_websocket.get_live_tick", MagicMock(return_value=None)), \
              patch("crawler.zerodha_market.get_full_quote", rest_mock):
             await get_market_snapshot("TESTCO.NS")
             await get_market_snapshot("TESTCO.NS", max_age_sec=0.0)  # force immediate expiry

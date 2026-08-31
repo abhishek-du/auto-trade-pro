@@ -309,16 +309,28 @@ async def route_decision(
         )
 
     # ── LIVE — Zerodha execution ──────────────────────────────────────────────
+    #
+    # DELIBERATELY NOT MIGRATED to Upstox (2026-08-31). Market DATA moved to
+    # Upstox; ORDER PLACEMENT did not, because no Upstox order executor exists —
+    # engine/zerodha_executor.py and its 10 safety rules are still the only
+    # execution path. So this token check stays, and it is load-bearing: with
+    # Kite's token expired it blocks live orders outright, which is the correct
+    # and safe outcome. The message says so, rather than implying that
+    # refreshing a token would make live trading work.
     if mode == TradeMode.LIVE:
-        # Verify token validity before attempting live
         from crawler.zerodha_client import get_kite_client
         kite = get_kite_client()
         if not kite.access_token:
-            logger.warning(f"[decision_router] LIVE blocked: no Zerodha token")
+            logger.warning(
+                "[decision_router] LIVE blocked: no Zerodha token. Order placement "
+                "still runs through Zerodha; only market data moved to Upstox."
+            )
             return RoutingResult(
                 outcome=RoutingOutcome.BLOCKED_NO_TOKEN,
                 mode=mode,
-                reason="Zerodha access token missing or expired",
+                reason=("Zerodha access token missing or expired — live order placement "
+                        "is unavailable. Market data comes from Upstox, but there is no "
+                        "Upstox order executor, so LIVE mode cannot execute."),
                 metadata={"source": source},
             )
 

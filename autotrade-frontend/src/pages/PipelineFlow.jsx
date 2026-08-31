@@ -357,7 +357,7 @@ export default function PipelineFlow() {
             Icon={TrendingUp}
             accent="cyan"
             title="Price Scan"
-            subtitle="OHLCV candles + NIFTY/SENSEX/BANKNIFTY/VIX snapshots via Zerodha Kite + yfinance backstop"
+            subtitle="OHLCV candles + NIFTY/BANKNIFTY/VIX snapshots via Upstox + yfinance backstop"
             timing="every 5 min"
           />
           <SmallNode
@@ -715,7 +715,7 @@ export default function PipelineFlow() {
             <span className="text-sm font-semibold text-emerald-300">BUY Order</span>
           </div>
           <div className="text-[10px] text-muted text-center max-w-[140px]">
-            AgentExecutionManager / trade_simulator.open_paper_trade — Zerodha Kite live, or Paper DB in paper mode
+            AgentExecutionManager / trade_simulator.open_paper_trade — active broker when live, or Paper DB in paper mode
           </div>
         </div>
 

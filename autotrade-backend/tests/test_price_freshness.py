@@ -93,9 +93,15 @@ class TestMarketSnapshotHonoursAge:
         stale = {"last_price": 42.0, "_age_seconds": 999.0, "ohlc": {"close": 40.0}}
         fresh = {"last_price": 42.0, "_age_seconds": 1.0, "ohlc": {"close": 40.0}}
 
+        # Patched at upstox_websocket since 2026-08-31: the tier-1 tick source
+        # moved off the Kite ticker. Patching the old module would leave the
+        # real (empty) Upstox tick store in place and the test would pass for
+        # the wrong reason — both branches returning None.
         import unittest.mock as m
-        with m.patch("crawler.zerodha_ticker.get_live_tick", return_value=stale):
+        with m.patch("crawler.upstox_websocket.get_live_tick", return_value=stale):
             assert ms._from_websocket_tick("TESTCO.NS") is None
-        with m.patch("crawler.zerodha_ticker.get_live_tick", return_value=fresh):
+        with m.patch("crawler.upstox_websocket.get_live_tick", return_value=fresh):
             snap = ms._from_websocket_tick("TESTCO.NS")
             assert snap is not None and snap.ltp == 42.0
+            # The recorded source must name the broker that actually served it.
+            assert snap.source == "upstox_ws"

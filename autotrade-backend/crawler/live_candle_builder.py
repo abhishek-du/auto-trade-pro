@@ -168,17 +168,21 @@ class LiveCandleBuilder:
             return False
 
     async def sample_once(self, symbols: list[str]) -> dict[str, int]:
-        """One sampling pass over the universe. Never raises."""
-        from crawler.zerodha_ticker import LIVE_TICKS
-        from crawler.zerodha_market import INDEX_TOKENS, NSE_TOKENS
+        """One sampling pass over the universe. Never raises.
+
+        UPSTOX-BACKED since 2026-08-31. This read the Kite ticker's LIVE_TICKS
+        dict, keyed by instrument token. That dict stopped being written when
+        Kite's token expired, so every pass found nothing and the whole
+        tick-built fast-candle series went silently empty — the loop kept
+        running, logged nothing, and published zero bars. Upstox's tick store is
+        keyed by SYMBOL, so the token lookup is gone entirely.
+        """
+        from crawler.upstox_websocket import get_live_tick
 
         observed = published = 0
         for symbol in symbols:
             try:
-                token = NSE_TOKENS.get(symbol) or INDEX_TOKENS.get(symbol)
-                if token is None:
-                    continue
-                tick = LIVE_TICKS.get(int(token))
+                tick = get_live_tick(symbol)
                 if not tick:
                     continue
                 price = float(tick.get("last_price") or 0.0)

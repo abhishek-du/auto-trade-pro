@@ -13,6 +13,7 @@ import SellModal from '../components/portfolio/SellModal'
 import AllocationCharts from '../components/portfolio/AllocationCharts'
 import TransactionsTab from '../components/portfolio/TransactionsTab'
 import { formatINR } from '../utils/indianFormat'
+import { useBroker } from '../hooks/useBroker'
 import { apiFetch, getZerodhaLoginUrl, getZerodhaStatus, getUpstoxLoginUrl, getUpstoxStatus, getUpstoxMargins, getUpstoxHoldings, autoLoginUpstox, syncUpstoxHoldings } from '../api/client'
 
 /* ── Agent activity strip ──────────────────────────────────────────────────
@@ -93,7 +94,7 @@ function AgentActivityPanel() {
       {!isPaper && (
         <div className="flex items-center gap-2 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
           <AlertTriangle size={13} />
-          Live mode: the agent's next BUY will hit your real Zerodha account. Confirm before leaving this page.
+          Live mode: the agent's next BUY will hit your real broker account. Confirm before leaving this page.
         </div>
       )}
 
@@ -304,8 +305,15 @@ function AgentWatchlistPanel() {
 function RealZerodhaAccountPanel() {
   const [margins, setMargins] = useState(null)
   const [mf, setMf] = useState([])
+  // Zerodha is a toggle now, and off by default. Polling a disabled backend
+  // returns 409 twice every 30 s and leaves this panel showing a zeroed
+  // account — which reads as "your broker holds nothing" rather than "we are
+  // not talking to this broker". Don't poll it, and don't render it.
+  const { broker } = useBroker()
+  const zEnabled = (broker?.brokers ?? []).some(b => b.id === 'zerodha' && b.enabled)
 
   useEffect(() => {
+    if (!zEnabled) return undefined
     const load = () => {
       apiFetch('/api/v1/zerodha/margins').then(setMargins).catch(() => {})
       apiFetch('/api/v1/zerodha/mf/holdings').then((d) => setMf(d?.holdings ?? [])).catch(() => {})
@@ -313,7 +321,9 @@ function RealZerodhaAccountPanel() {
     load()
     const id = setInterval(load, 30000)
     return () => clearInterval(id)
-  }, [])
+  }, [zEnabled])
+
+  if (!zEnabled) return null
 
   const eq = margins?.equity
   const fmt = (n) => formatINR(n ?? 0)
@@ -540,6 +550,11 @@ export default function PortfolioTracker() {
     searchStocks, getTransactions,
   } = usePortfolioTracker()
 
+  // Which broker backends are actually switched on. Drives every Zerodha
+  // control on this page, so none of them offers an action that cannot work.
+  const { broker } = useBroker()
+  const zEnabled = (broker?.brokers ?? []).some(b => b.id === 'zerodha' && b.enabled)
+
   const [tab,            setTab]            = useState('holdings')
   const [showAdd,        setShowAdd]        = useState(false)
   const [sellTarget,     setSellTarget]     = useState(null)
@@ -706,7 +721,7 @@ export default function PortfolioTracker() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               Zerodha · {zStatus.user_name?.split(' ')[0] || 'Connected'}
             </span>
-          ) : (
+          ) : zEnabled ? (
             <button
               onClick={handleConnectZerodha}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-blue-500/30 bg-blue-500/8 text-blue-400 text-xs font-semibold hover:bg-blue-500/15 hover:border-blue-500/50 transition-colors"
@@ -714,7 +729,7 @@ export default function PortfolioTracker() {
             >
               Connect / Login Zerodha <ExternalLink size={11} />
             </button>
-          )}
+          ) : null}
 
           {/* Upstox Connect / Login */}
           {uStatus?.authenticated ? (

@@ -1,3 +1,15 @@
+// useZerodha — DEPRECATED (2026-08-31), and currently imported by nothing.
+//
+// Every endpoint below lives under /api/v1/zerodha, which now returns HTTP 409
+// whenever the Zerodha toggle is off — which is its default state since Upstox
+// became the sole broker backend. Wiring a new page to this hook would give you
+// nine failing requests every 30 seconds.
+//
+// For connection state use hooks/useBroker.js (broker-agnostic). For portfolio
+// data use the /api/v1/portfolio endpoints. Kept only so that re-enabling
+// Zerodha does not require rewriting it from scratch.
+//
+// Original description:
 // useZerodha — central Zerodha state hook used by the new Zerodha pages.
 //
 // Returns connection status, holdings, positions, orders, GTTs, P&L,

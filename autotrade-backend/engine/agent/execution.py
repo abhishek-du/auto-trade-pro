@@ -160,13 +160,31 @@ class AgentExecutionManager:
             f"conf={decision.confidence}% RR={decision.risk_reward} | {decision.strategy}"
         )
 
-        # Subscribe the new position to the Zerodha live ticker immediately so
-        # PnL starts updating from Kite ticks rather than waiting for next reconnect.
+        # Subscribe the new position to the live tick feed immediately so PnL
+        # starts updating from ticks rather than waiting for the next reconnect.
+        #
+        # UPSTOX-BACKED since 2026-08-31. The old call went to the Kite ticker,
+        # which has not accepted a subscription since its token expired — every
+        # freshly opened position was silently left off the feed, so its PnL
+        # only moved when the 60s polling loop happened to refresh it.
         try:
-            from crawler.zerodha_ticker import subscribe_open_position
-            subscribe_open_position(decision.symbol)
-        except Exception:
-            pass  # non-critical — ticker may not be running
+            from crawler.upstox_instruments import get_instrument_key
+            from crawler.upstox_websocket import subscribe_symbol
+
+            ikey = await get_instrument_key(session, decision.symbol)
+            if ikey:
+                subscribe_symbol(decision.symbol, ikey)
+            else:
+                # No instrument key means no way to quote it on the socket. Say
+                # so — a position tracked only by the slow loop is worth knowing
+                # about, and silence here is what hid the Kite failure.
+                logger.warning(
+                    f"[agent] {decision.symbol}: no Upstox instrument_key — "
+                    "position will not stream; PnL falls back to the 60s loop"
+                )
+        except Exception as exc:
+            # Non-critical: the feed may simply not be running.
+            logger.debug(f"[agent] live-feed subscribe failed for {decision.symbol}: {exc}")
 
         return order_id
 

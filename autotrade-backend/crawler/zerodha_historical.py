@@ -210,7 +210,14 @@ async def sync_full_nse_universe(
     watchlist) so the agent's full-market universe stays current. Designed for
     the weekly beat task: ``days_back=7`` keeps the latest week of bars fresh.
 
-    Idempotent (ON CONFLICT DO NOTHING). Skips symbols whose token is missing.
+    Idempotent (ON CONFLICT DO NOTHING). Skips symbols with no instrument key.
+
+    UPSTOX-BACKED since 2026-08-31. This ran on Kite and opened with a
+    `kite.profile()` token probe; once that token expired the probe raised, the
+    function returned {"error": "not_authenticated"} in under a second, and the
+    weekly whole-market daily-candle refresh silently stopped happening — the
+    beat entry kept firing and kept "succeeding". Now selects `instrument_key`
+    instead of `instrument_token` and fetches through the Upstox range API.
     """
     import datetime as _d
     from sqlalchemy import text as _text
@@ -222,23 +229,25 @@ async def sync_full_nse_universe(
     # every real ticker — wasting the bulk of this rate-limited Kite historical
     # API budget on non-equity instruments. See _backfill_hub_1d_candles for
     # the full writeup (same bug, found in production 2026-07-06).
+    # instrument_key IS NOT NULL is the Upstox equivalent of the old
+    # `instrument_token > 0` guard: a row without a key cannot be quoted, so
+    # including it would only burn a request per symbol to get nothing back.
     rows = (await session.execute(_text("""
-        SELECT tradingsymbol, instrument_token
+        SELECT tradingsymbol
         FROM kite_instruments
         WHERE segment='NSE' AND instrument_type='EQ'
-          AND name != '' AND instrument_token > 0
+          AND name != '' AND instrument_key IS NOT NULL
           AND name NOT ILIKE 'GOI %' AND name NOT ILIKE 'SDL %'
         ORDER BY tradingsymbol
     """))).all()
 
-    kite = None
-    try:
-        from crawler.zerodha_kite_lib import get_kite
-        kite = get_kite()
-        kite.profile()  # verify token before the long loop
-    except Exception as exc:
-        logger.warning(f"[sync_full_nse_universe] Zerodha not authenticated: {exc}")
-        return {"symbols": 0, "saved": 0, "error": "not_authenticated"}
+    if not rows:
+        # Coverage, not authentication, is the failure mode now. Say which.
+        logger.warning("[sync_full_nse_universe] no NSE EQ rows carry an "
+                       "instrument_key — run the Upstox instrument sync first")
+        return {"symbols": 0, "saved": 0, "error": "no_instrument_keys"}
+
+    from crawler.upstox_candles import get_upstox_candles_for_range
 
     to_date   = _d.date.today()
     from_date = to_date - _d.timedelta(days=int(days_back * 1.6) + 3)
@@ -246,29 +255,18 @@ async def sync_full_nse_universe(
     total_saved = ok = empty = 0
     pending: list[dict] = []
 
-    for sym, token in rows:
+    for (sym,) in rows:
         try:
-            raw = await asyncio.to_thread(
-                kite.historical_data,
-                instrument_token=token, from_date=from_date,
-                to_date=to_date, interval="day",
+            # Returns rows already shaped for save_candles_to_db, with naive-UTC
+            # timestamps — the +05:30 → UTC conversion lives in upstox_candles.
+            raw = await get_upstox_candles_for_range(
+                f"{sym}.NS", from_date.isoformat(), to_date.isoformat(), interval="1d",
             )
         except Exception:
             raw = []
         if raw:
             ok += 1
-            for c in raw:
-                ts = c.get("date")
-                if ts is None:
-                    continue
-                if isinstance(ts, _d.datetime) and ts.tzinfo is not None:
-                    ts = ts.astimezone(_d.timezone.utc).replace(tzinfo=None)
-                pending.append({
-                    "symbol": f"{sym}.NS", "timeframe": "1d",
-                    "open": float(c.get("open", 0.0)), "high": float(c.get("high", 0.0)),
-                    "low": float(c.get("low", 0.0)), "close": float(c.get("close", 0.0)),
-                    "volume": float(c.get("volume", 0) or 0), "timestamp": ts,
-                })
+            pending.extend(raw)
         else:
             empty += 1
 
@@ -289,6 +287,19 @@ async def sync_full_nse_universe(
             await session.rollback()
 
     summary = {"symbols": len(rows), "fetched_ok": ok, "empty": empty, "saved": total_saved}
+    # Report the denominator too. Instrument-key coverage is materially smaller
+    # than the old instrument_token coverage (~2.1k vs ~9.6k rows as of
+    # 2026-08-31), so "symbols" alone would overstate how much of NSE this pass
+    # actually touched. The daily Upstox instrument sync grows the key set
+    # incrementally; this number should climb week over week.
+    try:
+        total_nse = (await session.execute(_text(
+            "SELECT count(*) FROM kite_instruments "
+            "WHERE segment='NSE' AND instrument_type='EQ' AND name != ''"))).scalar() or 0
+    except Exception:
+        total_nse = 0
+    summary["nse_eq_rows"] = int(total_nse)
+    summary["key_coverage_pct"] = round(len(rows) / total_nse * 100, 1) if total_nse else None
     logger.info(f"[sync_full_nse_universe] → {summary}")
     return summary
 

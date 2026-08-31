@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle, TrendingUp, TrendingDown, Zap, Search, LogOut } from 'lucide-react';
 import { usePortfolio } from '../hooks/usePortfolio';
-import { getZerodhaTokenStatus, getZerodhaLoginUrl, apiFetch } from '../api/client';
+import { getZerodhaLoginUrl, apiFetch } from '../api/client';
 import ExpiryCountdown from './calendar/ExpiryCountdown';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -19,7 +19,8 @@ const PAGE_TITLES = {
   '/fundamentals':     'Fundamentals',
   '/backtest':         'Backtest',
   '/portfolio':        'Simulator',
-  '/zerodha':          'Zerodha KiteConnect',
+  '/zerodha':          'Portfolio',
+  '/zerodha/connect':  'Broker Connection (legacy Kite)',
   '/calendar':          'Market Calendar',
   '/portfolio-tracker': 'My Portfolio',
   '/doctor':            'Portfolio Doctor',
@@ -148,55 +149,63 @@ function BalanceTicker({ portfolio }) {
   );
 }
 
-// ── Zerodha token expiry warning ──────────────────────────────────────────────
-
-function ZerodhaTokenBanner() {
-  const [token, setToken] = useState(null);
+// ── Broker token warning ─────────────────────────────────────────────────────
+//
+// Was ZerodhaTokenBanner: it polled Kite's token on every page and, once that
+// token expired for good, showed a permanent red "Zerodha token expired —
+// click to refresh" nag. After the Upstox migration that nag was both wrong
+// (Zerodha is off; nothing is broken) and useless (re-login could not fix a
+// backend the system no longer calls).
+//
+// It now warns about the broker that is ACTUALLY enabled, and stays silent
+// about disabled ones. A disabled broker having no token is the intended
+// state, not a fault.
+function BrokerTokenBanner() {
+  const [st, setSt] = useState(null);
 
   useEffect(() => {
+    let alive = true;
     const check = () =>
-      getZerodhaTokenStatus()
-        .then(setToken)
-        .catch(() => setToken(null));
+      apiFetch('/api/v1/broker/status')
+        .then(d => { if (alive) setSt(d); })
+        .catch(() => { if (alive) setSt(null); });
     check();
-    const id = setInterval(check, 5 * 60 * 1000); // every 5 min
-    return () => clearInterval(id);
+    const id = setInterval(check, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(id); };
   }, []);
 
-  if (!token) return null;
+  if (!st) return null;
 
-  const expired = !token.valid;
-  const nearExpiry = token.valid && token.hours_remaining <= 1;
-  if (!expired && !nearExpiry) return null;
+  // Only an ENABLED broker missing its token is a fault worth interrupting for.
+  const broken = (st.brokers || []).filter(b => b.enabled && !b.token_present);
+  if (!broken.length) return null;
 
-  const mins = token.valid ? Math.round(token.hours_remaining * 60) : 0;
+  const isZerodha = broken.some(b => b.id === 'zerodha');
 
   async function handleClick() {
+    if (!isZerodha) return;
     try {
       const { url } = await getZerodhaLoginUrl();
       window.open(url, '_blank', 'noopener');
     } catch { /* ignore */ }
   }
 
-  if (expired) {
-    return (
-      <button
-        onClick={handleClick}
-        className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-red-500/50 bg-red-500/10 text-red-400 text-xs font-semibold hover:bg-red-500/20 transition-all animate-pulse"
-      >
-        <Zap size={12} />
-        Zerodha token expired — click to refresh
-      </button>
-    );
-  }
+  const label = broken.map(b => b.name).join(' + ')
+    + (broken.length > 1 ? ' tokens missing' : ' token missing')
+    + (isZerodha ? ' — click to re-login' : '');
 
   return (
     <button
       onClick={handleClick}
-      className="flex items-center gap-1.5 px-3 py-1 rounded-lg border border-amber-500/30 text-amber-400 text-xs font-semibold hover:bg-amber-500/10 transition-all"
+      disabled={!isZerodha}
+      title={st.note}
+      className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border text-xs font-semibold transition-all
+        ${isZerodha
+          ? 'border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 animate-pulse'
+          : 'border-amber-500/40 bg-amber-500/10 text-amber-400 cursor-default'}`}
     >
       <Zap size={12} />
-      Zerodha token expires in {mins} min — re-login
+      {label}
     </button>
   );
 }
@@ -233,7 +242,7 @@ function TradeModeBadge() {
       return;
     }
     // Going LIVE — double confirm
-    if (!confirm('Switch to LIVE mode? Real orders will be placed on Zerodha with REAL money.')) return;
+    if (!confirm('Switch to LIVE mode? Real orders will be placed through the active broker with REAL money.')) return;
     if (!confirm('Are you absolutely sure? Type-confirm in next prompt is locked.')) return;
     try {
       await apiFetch('/api/v1/settings/mode', {
@@ -320,7 +329,7 @@ export default function Navbar({ onSearchOpen }) {
             </button>
           )}
           {/* Token warning — always visible when expired, hidden on xs when near-expiry only */}
-          <ZerodhaTokenBanner />
+          <BrokerTokenBanner />
 
           {/* Secondary status cluster — grouped, muted, no internal dividers.
               All members now share the same lg: breakpoint (LiveClock was

@@ -180,6 +180,10 @@ def fetch_nse_candles(
         return []
         
     from utils.config import settings as _s
+    # Kite branch: dead in practice since 2026-08-31 — ZERODHA_ENABLED is false
+    # and the token is expired, so this whole block is skipped and the Upstox
+    # branch below is what actually serves. Left in place (rather than deleted)
+    # because it is correctly guarded and costs nothing when Zerodha is off.
     if getattr(_s, "ZERODHA_ENABLED", False) and getattr(_s, "ZERODHA_ACCESS_TOKEN", ""):
         try:
             import datetime as _dt
@@ -256,9 +260,13 @@ def fetch_nse_candles(
                         logger.info(f"Kite NSE  ✓  {symbol:<15}  {len(rows):4d} candles  interval={interval}  latest={rows[-1]['timestamp'].strftime('%Y-%m-%d %H:%M')}")
                         return rows
         except Exception as e:
-            pass
+            # Kite path is dead anyway; log at debug so a future re-enable is
+            # not silent about why it produced nothing.
+            logger.debug(f"[india_price_feed] Kite branch failed for {symbol}: {e}")
 
-    # Upstox Fallback
+    # Upstox — the PRIMARY source since 2026-08-31, despite its position in the
+    # file. It is reached first in practice because the Kite branch above is
+    # switched off; yfinance below it remains the genuine fallback.
     if getattr(_s, "UPSTOX_ENABLED", False) and getattr(_s, "UPSTOX_ACCESS_TOKEN", ""):
         try:
             import datetime as _dt

@@ -944,7 +944,7 @@ export default function Settings() {
             </div>
             <div className="bg-surface/50 rounded-lg px-3 py-2">
               <p className="font-semibold text-slate-400 mb-1">MIS Intraday</p>
-              <p>Short sell allowed. Up to 5× leverage. Zerodha auto-squares at 3:20 PM.</p>
+              <p>Short sell allowed. Up to 5× leverage. The broker auto-squares at 3:20 PM.</p>
             </div>
             <div className="bg-surface/50 rounded-lg px-3 py-2">
               <p className="font-semibold text-slate-400 mb-1">NRML F&O</p>

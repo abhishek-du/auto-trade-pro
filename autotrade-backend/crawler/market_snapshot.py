@@ -21,7 +21,7 @@ reported "no live price available").
 
 Priority, matching what _tool_price_action/_tool_market_depth already use
 successfully:
-  1. Zerodha WebSocket tick (crawler.zerodha_ticker) — sub-second, but only
+  1. Upstox WebSocket tick (crawler.upstox_websocket) — sub-second, but only
      populated if an active ticker connection is running in THIS process.
   2. Zerodha REST full quote (crawler.zerodha_market.get_full_quote) —
      needs only kite.access_token, no WebSocket; proven reliable even from
@@ -52,7 +52,7 @@ _snapshot_cache: dict[str, "MarketSnapshot"] = {}
 class MarketSnapshot:
     symbol: str
     ltp: float
-    source: str  # "zerodha_ws" | "zerodha_rest" | "yfinance"
+    source: str  # "upstox_ws" | "upstox_rest" | "yfinance"
     fetched_at: float  # time.monotonic(), for TTL comparisons only
     fetched_at_ist: str
     ohlc: dict = field(default_factory=dict)
@@ -105,7 +105,12 @@ async def _fetch_fresh(symbol: str) -> MarketSnapshot | None:
 
 
 def _from_websocket_tick(symbol: str) -> MarketSnapshot | None:
-    from crawler.zerodha_ticker import get_live_tick
+    # UPSTOX-BACKED since 2026-08-31. This read the Kite ticker's LIVE_TICKS,
+    # which stopped being written when Kite's token expired — so this tier
+    # silently returned None on every call and every entry price came from the
+    # REST tier one rung down. Same dict contract (`last_price`, `ohlc`,
+    # `depth`, `_age_seconds`), so only the import changes.
+    from crawler.upstox_websocket import get_live_tick
 
     tick = get_live_tick(symbol)
     if not tick or not tick.get("last_price"):
@@ -113,11 +118,14 @@ def _from_websocket_tick(symbol: str) -> MarketSnapshot | None:
 
     # D3 (audit 2026-08-19): get_live_tick() already computes _age_seconds and
     # this function used to throw it away, returning ANY tick with a non-zero
-    # last_price as source="zerodha_ws". If the KiteTicker dropped, or an
+    # last_price as source="upstox_ws". If the KiteTicker dropped, or an
     # illiquid mid-cap simply stopped printing, _fetch_fresh() never fell
     # through to REST -- and this is the entry-price source for every live news
     # trade (news_discovery_engine.py:392). Honour the age instead: past the
     # threshold, return None so the caller falls through to the REST quote.
+    # The age check matters more, not less, on Upstox: while the corporate
+    # firewall blocks wsfeeder-api.upstox.com the feed never connects, and a
+    # stale tick left over from a working session must not price a trade.
     age = float(tick.get("_age_seconds") or 0.0)
     if age > _WS_TICK_MAX_AGE_SEC:
         logger.debug(
@@ -132,7 +140,7 @@ def _from_websocket_tick(symbol: str) -> MarketSnapshot | None:
     prev_close = float(ohlc.get("close") or 0.0)
     change_pct = ((ltp - prev_close) / prev_close * 100) if prev_close else None
     return MarketSnapshot(
-        symbol=symbol, ltp=ltp, source="zerodha_ws",
+        symbol=symbol, ltp=ltp, source="upstox_ws",
         fetched_at=time.monotonic(), fetched_at_ist=_now_ist(),
         ohlc=ohlc, volume=tick.get("volume_traded") or tick.get("volume"),
         change_pct=change_pct,
@@ -144,13 +152,16 @@ def _from_websocket_tick(symbol: str) -> MarketSnapshot | None:
 
 
 async def _from_zerodha_rest(symbol: str) -> MarketSnapshot | None:
+    # Name kept so every caller and test keeps working; the quote underneath is
+    # Upstox (zerodha_market.get_full_quote delegates there since 2026-08-31),
+    # which is why the recorded source now says upstox_rest.
     from crawler.zerodha_market import get_full_quote
 
     data = await get_full_quote(symbol)
     if not data or not data.get("last_price"):
         return None
     return MarketSnapshot(
-        symbol=symbol, ltp=float(data["last_price"]), source="zerodha_rest",
+        symbol=symbol, ltp=float(data["last_price"]), source="upstox_rest",
         fetched_at=time.monotonic(), fetched_at_ist=_now_ist(),
         ohlc=data.get("ohlc") or {}, volume=data.get("volume"),
         change_pct=data.get("change_pct"), bid=data.get("bid"), ask=data.get("ask"),

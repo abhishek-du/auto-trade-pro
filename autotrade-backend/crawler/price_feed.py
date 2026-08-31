@@ -304,32 +304,36 @@ async def fetch_candles_alphavantage(
 # ── 3. Unified fetcher ────────────────────────────────────────────────────────
 
 async def fetch_candles(symbol: str, timeframe: str = "1h") -> list[dict]:
-    """Fetch OHLCV candles with a 3-tier priority: Kite → yfinance → Alpha Vantage.
+    """Fetch OHLCV candles with a 3-tier priority: Upstox → yfinance → Alpha Vantage.
 
-    Kite (Zerodha) is tried first when an access token is available — it returns
-    official NSE data with exact IST timestamps and no rate-limiting issues.
-    yfinance is the fallback for when Kite is not connected (token expired etc.).
+    Upstox is tried first — it returns official NSE data with exact IST
+    timestamps and no rate-limiting issues. yfinance is the fallback for when
+    the broker returns nothing (no instrument key, API down).
     Alpha Vantage is the last resort if both above return nothing.
     """
-    # ── Tier 1: Kite Connect (official NSE data) ──────────────────────────────
+    # ── Tier 1: broker historical (official NSE data) ─────────────────────────
+    #
+    # UPSTOX-BACKED since 2026-08-31. This tier was gated on
+    # `kite.access_token`, which has been empty since Kite's token expired, so
+    # it fell straight through to yfinance for every symbol and every
+    # timeframe — quietly downgrading the whole candle pipeline from exchange
+    # data with exact IST stamps to a scraped free feed. Upstox needs no token
+    # check here: get_upstox_candles_for_range() resolves the instrument key
+    # itself and returns [] when it cannot.
     try:
-        from crawler.zerodha_client import get_kite_client
-        from crawler.zerodha_instruments import get_token
-        kite = get_kite_client()
-        if kite.access_token:
-            token = get_token(symbol)
-            if token:
-                import datetime as _dt2
-                days_back = {"1m": 5, "5m": 30, "15m": 60, "1h": 400, "1d": 1825}.get(timeframe, 60)
-                from_date = (_dt2.date.today() - _dt2.timedelta(days=days_back)).isoformat()
-                to_date   = _dt2.date.today().isoformat()
-                from crawler.zerodha_historical import get_kite_candles_for_range
-                candles = await get_kite_candles_for_range(symbol, from_date, to_date, interval=timeframe)
-                if candles:
-                    logger.debug(f"[price_feed] {symbol}/{timeframe}: Kite ✓ {len(candles)} bars")
-                    return candles
-    except Exception as _kite_exc:
-        logger.debug(f"[price_feed] Kite fetch skipped for {symbol}: {_kite_exc}")
+        import datetime as _dt2
+
+        from crawler.upstox_candles import get_upstox_candles_for_range
+
+        days_back = {"1m": 5, "5m": 30, "15m": 60, "1h": 400, "1d": 1825}.get(timeframe, 60)
+        from_date = (_dt2.date.today() - _dt2.timedelta(days=days_back)).isoformat()
+        to_date   = _dt2.date.today().isoformat()
+        candles = await get_upstox_candles_for_range(symbol, from_date, to_date, interval=timeframe)
+        if candles:
+            logger.debug(f"[price_feed] {symbol}/{timeframe}: Upstox ✓ {len(candles)} bars")
+            return candles
+    except Exception as _bkr_exc:
+        logger.debug(f"[price_feed] Upstox fetch skipped for {symbol}: {_bkr_exc}")
 
     # ── Tier 2: yfinance ─────────────────────────────────────────────────────
     period  = _YF_PERIOD.get(timeframe, "60d")

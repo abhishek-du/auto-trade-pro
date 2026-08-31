@@ -48,6 +48,29 @@ function PctBadge({ value }) {
 function ConnectionBanner({ status, onConnect, onSync, onDisconnect, syncing }) {
   if (!status) return null;
 
+  // Third state, added with the broker toggle: Zerodha is switched off. Not
+  // "disconnected" — there is nothing to reconnect, and offering a login button
+  // here sends the operator to an OAuth flow the backend refuses with 409.
+  if (status.broker_enabled === false) {
+    return (
+      <div className="flex items-start gap-3 p-4 rounded-xl border border-slate-500/25"
+        style={{ background: 'rgba(100,116,139,0.06)' }}>
+        <Unlink size={14} className="text-slate-400 mt-0.5 shrink-0" />
+        <div>
+          <p className="text-slate-300 font-semibold text-sm">Zerodha is switched off</p>
+          <p className="text-muted text-xs mt-0.5">
+            Upstox is the active broker backend. The {status.holdings_count} holdings below are
+            the last synced snapshot, kept as a record — they are no longer refreshed.
+            {status.session_valid && ' A valid Kite session is still stored, so re-enabling needs no new login.'}
+          </p>
+          <p className="text-muted/70 text-xs mt-1">
+            Re-enable under <span className="text-slate-300">Settings → Broker Backend</span>.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (status.connected) {
     return (
       <div className="flex items-center justify-between p-4 rounded-xl border border-emerald-500/20"
@@ -103,7 +126,7 @@ function ConnectionBanner({ status, onConnect, onSync, onDisconnect, syncing }) 
           Login with Kite
         </button>
       ) : (
-        <p className="text-muted text-xs">Set KITE_API_KEY + KITE_API_SECRET in .env</p>
+        <p className="text-muted text-xs">Set ZERODHA_API_KEY + ZERODHA_API_SECRET (or the legacy KITE_* pair) in .env</p>
       )}
     </div>
   );
@@ -149,7 +172,7 @@ function HoldingsTable({ holdings }) {
       <div className="card p-10 text-center">
         <Briefcase size={32} className="mx-auto text-muted mb-3" />
         <p className="text-muted text-sm">No holdings synced yet.</p>
-        <p className="text-muted/60 text-xs mt-1">Connect Kite or add holdings manually.</p>
+        <p className="text-muted/60 text-xs mt-1">Add holdings manually, or connect a broker from Settings.</p>
       </div>
     );
   }

@@ -113,7 +113,7 @@ export default function HoldingsTable({ holdings, onSell, onDelete }) {
                       {h.display_symbol || (h.symbol?.startsWith('MF:') ? h.symbol.slice(3) : h.symbol?.replace('.NS', ''))}
                     </p>
                     {h.source === 'ZERODHA' && (
-                      <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30 shrink-0" title="Synced from Zerodha Demat">Z</span>
+                      <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30 shrink-0" title="Synced from the Zerodha demat account (historical import; Zerodha sync is disabled)">Z</span>
                     )}
                     {h.source === 'MUTUAL_FUND' && (
                       <span className="text-[8px] font-bold uppercase px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 shrink-0">MF</span>

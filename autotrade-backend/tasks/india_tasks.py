@@ -4032,8 +4032,10 @@ async def _refresh_full_nse_candles(days_back: int = 7):
     time_limit=7800,
 )
 def refresh_full_nse_candles_task(days_back: int = 7):
-    """Weekly: refresh the last ~week of daily candles for EVERY NSE EQ symbol
-    via Zerodha Kite, keeping the agent's full-market universe fresh.
+    """Weekly: refresh the last ~week of daily candles for every NSE EQ symbol
+    that has an Upstox instrument_key, keeping the agent's full-market universe
+    fresh. UPSTOX-BACKED since 2026-08-31 (it was Kite, and had been failing
+    closed with "not_authenticated" since that token expired).
     PAPER TRADING — read-only market data, no orders."""
     logger.info("[refresh_full_nse_candles] starting weekly full-universe refresh")
     return _run_async(_refresh_full_nse_candles(days_back))

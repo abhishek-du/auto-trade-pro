@@ -1,7 +1,8 @@
 /**
  * GlobalSearch — ⌘K command palette
  *
- * Searches the full NSE equity universe (kite_instruments, ~9 600 EQ symbols)
+ * Searches the full NSE equity universe (the kite_instruments table — legacy
+ * name, now populated with Upstox instrument keys; ~9 600 EQ symbols)
  * and mutual funds simultaneously.  Keyboards: ↑↓ navigate, ↵ open,
  * ⌘+↵ AI analysis, Esc close, ⌘K toggle from anywhere.
  *

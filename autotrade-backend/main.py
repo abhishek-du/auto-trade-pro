@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import agent, allocation, analytics, attribution, auth, buyback, earnings, india, intelligence, ipo_tracker, kite, mf_tracker, news, portfolio, portfolio_doctor, portfolio_tracker, settings as settings_api, signals, simulation, sip_tracker, stock_chat, tax_calculator, trades, upstox, websocket, zerodha
+from api import broker as broker_api
 import db.models  # noqa: F401 — registers all ORM models on Base.metadata
 from db.database import engine, init_db
 from utils.config import settings
@@ -389,6 +390,10 @@ app.include_router(settings_api.router, prefix="/api/v1/settings")
 app.include_router(websocket.router,    prefix="/ws")
 app.include_router(india.router,        prefix="/api/v1/india")
 app.include_router(kite.router,         prefix="/api/v1/kite")
+# Broker-agnostic status (2026-08-31). The UI reads this instead of the
+# Zerodha-specific endpoints, so a broker change never leaves the interface
+# reporting on a backend the system no longer uses.
+app.include_router(broker_api.router,   prefix="/api/v1")
 app.include_router(zerodha.router,      prefix="/api/v1/zerodha")
 app.include_router(auth.router,         prefix="/api/v1/auth")
 app.include_router(buyback.router,      prefix="/api/v1/buyback")

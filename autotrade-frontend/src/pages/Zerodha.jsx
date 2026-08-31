@@ -10,6 +10,7 @@ import {
   getZerodhaHoldings, getZerodhaOrders, getZerodhaTrades,
   getZerodhaPnl, getZerodhaLivePrices, getZerodhaWatchlistAnalysis,
   getZerodhaDeepAnalysis, getZerodhaAutoScan, getZerodhaMfAnalysis,
+  apiFetch,
 } from '../api/client';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -64,6 +65,59 @@ function Badge({ status }) {
 }
 
 // ── Section 1 — Connection Status ─────────────────────────────────────────────
+
+// Broker reality banner (2026-08-31).
+//
+// This page is Zerodha-specific and predates the Upstox migration. Kite
+// Connect's token expired and Upstox now serves all market data, so the page's
+// own "Zerodha Connected / Not Connected" card no longer describes the system
+// — it describes one disabled legacy backend.
+//
+// Rather than delete a working 1,300-line portfolio view, this banner states
+// which broker is ACTUALLY active before anything below it is read, so the
+// operator is never misled about where their prices come from.
+function ActiveBrokerBanner() {
+  const [b, setB] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const d = await apiFetch('/api/v1/broker/status');
+        if (alive) setB(d);
+      } catch { /* banner is informational; silence is better than a false claim */ }
+    })();
+  }, []);
+
+  if (!b) return null;
+
+  const zerodha = (b.brokers || []).find(x => x.id === 'zerodha');
+  const tone =
+    b.state === 'connected' ? { box: 'bg-emerald-500/10 border-emerald-500/25', text: 'text-emerald-300', Icon: Wifi }
+    : b.state === 'degraded' ? { box: 'bg-amber-500/10 border-amber-500/25',   text: 'text-amber-300',   Icon: AlertTriangle }
+    : { box: 'bg-rose-500/10 border-rose-500/25', text: 'text-rose-300', Icon: AlertTriangle };
+  const { Icon } = tone;
+
+  return (
+    <div className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 mb-4 ${tone.box}`}>
+      <Icon size={14} className={`${tone.text} mt-0.5 shrink-0`} />
+      <div className={`text-[11px] leading-relaxed ${tone.text}`}>
+        <p>
+          <strong>Active broker: {b.active_name || 'none'}</strong>
+          {b.state === 'degraded' && ' — serving prices by polling; live tick feed is not connected.'}
+          {b.state === 'down' && ' — no usable broker, there is no live price source.'}
+        </p>
+        {zerodha && !zerodha.enabled && (
+          <p className="mt-1 opacity-90">
+            Zerodha is <strong>disabled</strong>
+            {!zerodha.token_present && ' and has no valid token'}. The panels below will not load
+            until it is re-enabled under <em>Settings → Broker Backend</em>.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ConnectionCard({ status, onConnect, onDisconnect, redirectUrl }) {
   const [showDebug, setShowDebug] = useState(false);
@@ -1318,6 +1372,8 @@ export default function Zerodha() {
       <PaperModeBanner />
 
       {/* Section 1 — Connection card */}
+      <ActiveBrokerBanner />
+
       <ConnectionCard
         status={status}
         onConnect={handleConnect}

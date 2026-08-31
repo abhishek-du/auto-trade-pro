@@ -2389,7 +2389,7 @@ export default function StockDetail() {
               )}
 
               <div className="text-muted text-[10px] pt-1 border-t border-border">
-                Source: Upstox API v2 · Data cached · Zerodha is primary for all trading operations
+                Source: Upstox API v2 · Data cached · Upstox is the primary broker backend
               </div>
             </div>
           )}

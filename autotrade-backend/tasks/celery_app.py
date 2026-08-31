@@ -247,8 +247,10 @@ celery_app.conf.beat_schedule = {
     },
 
     # Weekly Sunday 01:00 UTC (06:30 IST, before market open): refresh last week
-    # of daily candles for the FULL NSE universe via Zerodha Kite. Keeps every
-    # symbol's bars current so the scanner/agent cover the whole market.
+    # of daily candles for the FULL NSE universe via Upstox (was Zerodha Kite
+    # until 2026-08-31). Keeps every symbol's bars current so the scanner/agent
+    # cover the whole market. Scope is bounded by instrument_key coverage — the
+    # task logs key_coverage_pct so a shrinking denominator is visible.
     "full-nse-candles-weekly": {
         "task":     "tasks.refresh_full_nse_candles",
         "schedule": crontab(day_of_week="sunday", hour=1, minute=0),

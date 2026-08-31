@@ -9,6 +9,19 @@ Endpoints:
   POST /disconnect      — deactivates the current Kite session
 
 PAPER TRADING ONLY — no orders are placed through these endpoints.
+
+BROKER TOGGLE (2026-08-31)
+--------------------------
+Zerodha is now one of two selectable broker backends and ships disabled;
+Upstox serves market data. Every route here that reaches out to Kite is gated
+on that toggle and answers 409 when it is off, so the UI cannot offer a login
+that has no chance of completing.
+
+`GET /holdings` is deliberately NOT gated: it reads the local
+`portfolio_holdings` table, which keeps its value as a historical record long
+after the broker that produced it was switched off. `GET /status` is not gated
+either — its whole job is to report the connection state, and refusing to
+answer would leave the caller unable to distinguish "disabled" from "down".
 """
 
 import datetime
@@ -26,6 +39,31 @@ from utils.logger import logger
 from api.auth import require_auth   # D4: mutating routes require admin JWT
 
 router = APIRouter(tags=["Kite Portfolio"])
+
+
+async def _require_zerodha_enabled() -> None:
+    """409 unless the Zerodha broker toggle is on.
+
+    Fails CLOSED — unlike the strategy toggles, which fail open so a database
+    blip cannot halt trading. Here the safe default is to refuse: an unreadable
+    toggle must not silently reopen a broker the operator switched off.
+    """
+    from utils.runtime_config import broker_enabled
+
+    try:
+        enabled = await broker_enabled("zerodha")
+    except Exception as exc:
+        logger.warning(f"[Kite] broker toggle unreadable ({type(exc).__name__}) — refusing")
+        enabled = False
+    if not enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Zerodha is disabled. Upstox is the active broker backend — see "
+                "GET /api/v1/broker/status. Enable Zerodha under Settings → Broker "
+                "Backend (POST /api/v1/settings/brokers) if you need these routes."
+            ),
+        )
 
 
 # ── Zerodha v3 fallback helpers ──────────────────────────────────────────────
@@ -79,7 +117,7 @@ async def _zerodha_v3_status() -> dict | None:
 
 # ── 1. Login URL ──────────────────────────────────────────────────────────────
 
-@router.get("/login-url")
+@router.get("/login-url", dependencies=[Depends(_require_zerodha_enabled)])
 async def get_login_url():
     """Return the Zerodha login URL.  Frontend opens this in a new tab.
 
@@ -98,7 +136,7 @@ async def get_login_url():
 
 # ── 2. OAuth Callback ─────────────────────────────────────────────────────────
 
-@router.get("/callback")
+@router.get("/callback", dependencies=[Depends(_require_zerodha_enabled)])
 async def kite_callback(
     request_token: str = Query(..., alias="request_token"),
     db: AsyncSession = Depends(get_db),
@@ -138,6 +176,18 @@ async def get_kite_status(db: AsyncSession = Depends(get_db)):
       1. Legacy KiteSession DB row (KITE_API_KEY integration)
       2. Zerodha v3 access token in .env (ZERODHA_API_KEY integration)
     """
+    # 0. The broker toggle outranks every credential below it. A stored Kite
+    #    session does not mean the system is using Kite — the operator can
+    #    switch the whole backend off while the session row sits there valid.
+    #    Reporting connected:true in that state is exactly the lie this whole
+    #    change set exists to remove.
+    from utils.runtime_config import broker_enabled
+
+    try:
+        z_enabled = await broker_enabled("zerodha")
+    except Exception:
+        z_enabled = False
+
     # 1. Check legacy KiteSession first
     result = await db.execute(
         select(KiteSession)
@@ -156,9 +206,24 @@ async def get_kite_status(db: AsyncSession = Depends(get_db)):
     now_utc = datetime.datetime.utcnow()
     legacy_active = bool(row and row.is_active and row.expires_at > now_utc)
 
+    if not z_enabled:
+        return {
+            "connected":              False,
+            "broker_enabled":         False,
+            "credentials_configured": settings.kite_available or settings.zerodha_available,
+            # A session may still be valid; say so, so re-enabling is not
+            # mistaken for needing a fresh login.
+            "session_valid":          legacy_active,
+            "holdings_count":         holdings_count,
+            "login_url":              None,
+            "reason": ("Zerodha is switched off. Upstox is the active broker backend — "
+                       "see GET /api/v1/broker/status."),
+        }
+
     if legacy_active:
         return {
             "connected":              True,
+            "broker_enabled":         True,
             "credentials_configured": settings.kite_available,
             "via":                    "legacy_kite",
             "login_time":             row.login_time.isoformat() if row.login_time else None,
@@ -172,6 +237,7 @@ async def get_kite_status(db: AsyncSession = Depends(get_db)):
     if v3 and v3.get("connected"):
         return {
             **v3,
+            "broker_enabled": True,
             "holdings_count": holdings_count,
             "login_url":      None,
         }
@@ -190,6 +256,7 @@ async def get_kite_status(db: AsyncSession = Depends(get_db)):
 
     return {
         "connected":              False,
+        "broker_enabled":         True,
         "credentials_configured": has_any_creds,
         "holdings_count":         holdings_count,
         "login_url":              login_url,
@@ -302,7 +369,7 @@ async def add_manual_holding(
 
 # ── 6. Sync ───────────────────────────────────────────────────────────────────
 
-@router.post("/sync", dependencies=[Depends(require_auth)])
+@router.post("/sync", dependencies=[Depends(require_auth), Depends(_require_zerodha_enabled)])
 async def sync_holdings(db: AsyncSession = Depends(get_db)):
     """Immediately re-fetch holdings from Kite and update the DB.
 
@@ -336,7 +403,7 @@ async def sync_holdings(db: AsyncSession = Depends(get_db)):
 
 # ── 7. Disconnect ─────────────────────────────────────────────────────────────
 
-@router.post("/disconnect", dependencies=[Depends(require_auth)])
+@router.post("/disconnect", dependencies=[Depends(require_auth), Depends(_require_zerodha_enabled)])
 async def disconnect(db: AsyncSession = Depends(get_db)):
     """Deactivate the current Kite session."""
     await KiteService.disconnect(db)

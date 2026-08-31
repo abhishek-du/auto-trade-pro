@@ -1202,6 +1202,26 @@ def _err(status: int, exc: Exception) -> HTTPException:
 
 
 def _need_connection():
+    """Guard for the 40 endpoints in this router that call Kite directly.
+
+    Now also honours the RUNTIME broker toggle (2026-08-31). Kite Connect's
+    token expired and Upstox is the sole backend; an operator can disable
+    Zerodha from /settings without a restart, and these routes must respect
+    that rather than continuing to attempt calls against a dead API.
+
+    The toggle is read synchronously here because this helper is called from
+    plain (non-async) code paths. broker_enabled_sync() falls back to the .env
+    flag, which is the same value the original check used.
+    """
+    from utils.runtime_config import broker_enabled_sync
+
+    if not broker_enabled_sync("zerodha"):
+        raise HTTPException(
+            status_code=409,
+            detail=("Zerodha is disabled. Upstox is the active broker — see "
+                    "GET /api/v1/broker/status, or re-enable Zerodha at "
+                    "/settings under Broker Backend."),
+        )
     if not settings.ZERODHA_ACCESS_TOKEN or not settings.ZERODHA_ENABLED:
         raise HTTPException(status_code=401, detail="Zerodha not connected")
 
@@ -1591,8 +1611,24 @@ async def ticker_stop():
         raise _err(502, exc)
 
 
-@router.get("/ticker/status")
+@router.get("/ticker/status", deprecated=True,
+            summary="DEPRECATED — use GET /api/v1/broker/ticker/status")
 async def ticker_status():
+    """Kept so any older client keeps working; it now reports the ACTIVE
+    broker's feed, not Kite's, because reporting a dead Kite ticker as the
+    system's live status is exactly what made the old UI untruthful."""
+    try:
+        from db.database import AsyncSessionLocal
+        from api.broker import ticker_status as _broker_ticker
+
+        async with AsyncSessionLocal() as _s:
+            return await _broker_ticker(_s)
+    except Exception:
+        pass
+    return await _legacy_kite_ticker_status()
+
+
+async def _legacy_kite_ticker_status():
     try:
         from crawler.zerodha_ticker import is_ticker_running, LIVE_TICKS
         return {

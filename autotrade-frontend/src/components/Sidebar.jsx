@@ -9,7 +9,7 @@ import {
   Bot, Stethoscope, FileText, BrainCircuit, Sparkles, ChevronDown, Compass, ClipboardList, Scale, Layers, GitBranch,
   BookOpen,
 } from 'lucide-react';
-import { getZerodhaStatus, getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
+import { getIndiaMarketStatus, getWatchlist, apiFetch } from '../api/client';
 
 // ── 6-section information architecture ────────────────────────────────────────
 // Collapses ~25 routes into 6 collapsible groups: Terminal · Discover · Stocks ·
@@ -364,31 +364,38 @@ function IPOBadge() {
   );
 }
 
-function ZerodhaDot() {
-  // Status states: null (loading) → { connected, paper_mode, ticker_running, cash }
+// Broker status dot — broker-AGNOSTIC since 2026-08-31.
+//
+// This previously polled /api/v1/zerodha/ticker/status and rendered "Zerodha
+// not connected". After Kite Connect's token expired and Upstox became the
+// sole backend, that dot was reporting on a broker the system no longer uses.
+//
+// It now reads /api/v1/broker/status, which names whichever broker is actually
+// serving data and distinguishes three states the old dot could not:
+//
+//   down       no usable broker at all — there is no price source
+//   degraded   REST quotes work, live tick feed is not connected
+//   connected  streaming
+//
+// "degraded" matters: it is the real state whenever the WebSocket feed host is
+// unreachable (currently blocked by the corporate firewall) while REST polling
+// still serves prices.
+function BrokerDot() {
   const [info, setInfo] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const s = await getZerodhaStatus();
-        if (cancelled) return;
-        // Best-effort: ticker status (separate endpoint, fast)
-        let ticker = false;
-        try {
-          const t = await apiFetch('/api/v1/zerodha/ticker/status');
-          ticker = Boolean(t?.running);
-        } catch { /* ignore */ }
+        const b = await apiFetch('/api/v1/broker/status');
         if (cancelled) return;
         setInfo({
-          connected:      Boolean(s?.connected),
-          paper_mode:     Boolean(s?.paper_mode ?? true),
-          ticker_running: ticker,
-          cash:           Number(s?.available_margins_inr ?? 0),
+          state:  b?.state ?? 'down',
+          broker: b?.active_name ?? null,
+          note:   b?.note ?? '',
         });
       } catch {
-        if (!cancelled) setInfo({ connected: false, paper_mode: true, ticker_running: false, cash: 0 });
+        if (!cancelled) setInfo({ state: 'down', broker: null, note: 'Broker status unavailable' });
       }
     };
     load();
@@ -398,43 +405,27 @@ function ZerodhaDot() {
 
   if (info === null) return null;
 
-  // Color logic per spec:
-  //   not connected         → amber
-  //   connected + paper     → blue
-  //   connected + real      → green pulsing
-  let dotCls = 'bg-amber-400';
-  if (info.connected) {
-    dotCls = info.paper_mode ? 'bg-blue-400' : 'bg-emerald-400 animate-pulse';
-  }
-
-  // Cash badge (only when connected & non-zero)
-  const cashLabel = info.connected && info.cash > 0
-    ? (info.cash >= 100_000
-        ? '₹' + (info.cash / 100_000).toFixed(1) + 'L'
-        : '₹' + Math.round(info.cash / 1000) + 'K')
-    : null;
+  //   down      → rose   (no price source — this is an alarm, not a warning)
+  //   degraded  → amber  (serving, but polling instead of streaming)
+  //   connected → emerald, pulsing
+  const dotCls =
+    info.state === 'connected' ? 'bg-emerald-400 animate-pulse'
+    : info.state === 'degraded' ? 'bg-amber-400'
+    : 'bg-rose-500';
 
   return (
     <span className="ml-auto flex items-center gap-1 shrink-0">
-      {cashLabel && (
-        <span className="text-[10px] font-bold text-slate-400/80 tabular-nums">{cashLabel}</span>
+      {info.broker && (
+        <span className="text-[10px] font-bold text-slate-400/80">{info.broker}</span>
       )}
-      <span
-        className={`w-2 h-2 rounded-full ${dotCls}`}
-        title={
-          !info.connected ? 'Zerodha not connected' :
-          info.paper_mode ? 'Connected (paper mode)' :
-          info.ticker_running ? 'LIVE — real orders enabled' :
-          'Connected — real orders enabled'
-        }
-      />
+      <span className={`w-2 h-2 rounded-full ${dotCls}`} title={info.note} />
     </span>
   );
 }
 
 // Maps a nav item's `badge` key to its live status component.
 const BADGE_MAP = {
-  zerodha:       ZerodhaDot,
+  zerodha:       BrokerDot,
   liveMarket:    MarketDot,
   watchlist:     WatchlistBadge,
   breadth:       BreadthDot,

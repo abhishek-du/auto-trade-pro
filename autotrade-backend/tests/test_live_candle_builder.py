@@ -145,29 +145,31 @@ class TestPublication:
 
 
 class TestSampleOnce:
+    # UPSTOX-BACKED since 2026-08-31. sample_once used to look a symbol up in
+    # NSE_TOKENS to get an instrument token, then index the Kite ticker's
+    # LIVE_TICKS by that token. The Upstox tick store is keyed by symbol, so
+    # the token maps are gone and only get_live_tick is patched.
 
     @pytest.mark.asyncio
     async def test_reads_live_ticks_and_tolerates_unknown_symbols(self):
         b = LiveCandleBuilder()
-        with patch("crawler.zerodha_ticker.LIVE_TICKS", {111: {"last_price": 100.0, "volume_traded": 5.0, "_ts": _ts(1)}}), \
-             patch("crawler.zerodha_market.NSE_TOKENS", {"X.NS": 111}), \
-             patch("crawler.zerodha_market.INDEX_TOKENS", {}):
+        ticks = {"X.NS": {"last_price": 100.0, "volume_traded": 5.0, "_ts": _ts(1)}}
+        with patch("crawler.upstox_websocket.get_live_tick",
+                   lambda sym: ticks.get(sym)):
             out = await b.sample_once(["X.NS", "UNKNOWN.NS"])
         assert out["observed"] == 1
         assert out["tracking"] == 1
 
     @pytest.mark.asyncio
     async def test_no_ticks_is_harmless(self):
-        with patch("crawler.zerodha_ticker.LIVE_TICKS", {}), \
-             patch("crawler.zerodha_market.NSE_TOKENS", {"X.NS": 111}), \
-             patch("crawler.zerodha_market.INDEX_TOKENS", {}):
+        with patch("crawler.upstox_websocket.get_live_tick", lambda sym: None):
             out = await LiveCandleBuilder().sample_once(["X.NS"])
         assert out["observed"] == 0
 
 
 class TestWiredIntoUvicorn:
     def test_loop_runs_in_the_ticker_process(self):
-        """LIVE_TICKS is a module dict owned by the ticker thread in uvicorn —
+        """The tick store is a module dict owned by the feed thread in uvicorn —
         the sampler must run there, not in a Celery worker."""
         import pathlib
         src = (pathlib.Path(__file__).resolve().parent.parent / "main.py").read_text()

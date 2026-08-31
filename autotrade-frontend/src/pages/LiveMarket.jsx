@@ -234,7 +234,7 @@ export default function LiveMarket() {
             Data from yfinance — refreshes every 15 s during market hours, 60 s otherwise
           </span>
           <span className="text-cyan/70 text-xs">
-            Upgrade to Zerodha KiteConnect (paid plan) for real-time tick data
+            Real-time ticks come from the broker feed when it is connected
           </span>
         </div>
       </div>
