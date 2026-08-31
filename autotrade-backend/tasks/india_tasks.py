@@ -2579,6 +2579,9 @@ async def _refresh_zerodha_instruments():
 @celery_app.task(name="tasks.india_tasks.refresh_zerodha_instruments")
 def refresh_zerodha_instruments():
     """Download fresh NSE instrument master from Kite daily before market open."""
+    _skip = _zerodha_off("refresh_zerodha_instruments")
+    if _skip:
+        return _skip
     _run_async(_refresh_zerodha_instruments())
 
 
@@ -2629,6 +2632,9 @@ async def _check_zerodha_token():
 @celery_app.task(name="tasks.india_tasks.check_zerodha_token")
 def check_zerodha_token():
     """Check token validity at 6:05 AM IST (right after daily expiry)."""
+    _skip = _zerodha_off("check_zerodha_token")
+    if _skip:
+        return _skip
     _run_async(_check_zerodha_token())
 
 
@@ -2954,6 +2960,9 @@ def weekly_report():
 @celery_app.task(name="tasks.kite_sync_holdings")
 def kite_sync_holdings_task():
     """Sync Demat holdings from Kite into portfolio_holdings (daily 15:35 IST)."""
+    _skip = _zerodha_off("kite_sync_holdings_task")
+    if _skip:
+        return _skip
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
         return {"skipped": True}
@@ -3071,9 +3080,12 @@ def kite_live_candles_task(closing_sweep: bool = False):
 @celery_app.task(name="tasks.kite_sync_candles")
 def kite_sync_candles_task():
     """Fetch daily candles for all NSE watchlist symbols via Kite (10:00 UTC)."""
-    from utils.config import settings
-    if not settings.ZERODHA_ENABLED:
-        return {"skipped": True}
+    # NOT gated on the Zerodha toggle: sync_all_nse_candles() goes through
+    # get_kite_candles_for_range(), which delegates to Upstox since 2026-08-31.
+    # The task keeps its Kite-era name so the beat schedule and any runbook
+    # still resolve. The old `if not ZERODHA_ENABLED: skip` guard was removed
+    # for the same reason -- with Kite's token dead it made this a permanent
+    # no-op even though the underlying fetch works.
 
     async def _run():
         from db.database import get_db
@@ -3089,6 +3101,9 @@ def kite_sync_candles_task():
 @celery_app.task(name="tasks.kite_refresh_instruments")
 def kite_refresh_instruments_task():
     """Refresh the NSE instrument cache (02:30 UTC / 08:00 IST)."""
+    _skip = _zerodha_off("kite_refresh_instruments_task")
+    if _skip:
+        return _skip
     from utils.config import settings
     if not settings.ZERODHA_ENABLED:
         return {"skipped": True}
@@ -3105,6 +3120,9 @@ def kite_refresh_instruments_task():
 @celery_app.task(name="tasks.kite_check_token")
 def kite_check_token_task():
     """Verify token validity after the 6:00 AM IST expiry (00:35 UTC)."""
+    _skip = _zerodha_off("kite_check_token_task")
+    if _skip:
+        return _skip
     from utils.config import settings
     from crawler.zerodha_kite_lib import verify_token, _write_env, reset_kite
     valid = False
@@ -3436,6 +3454,9 @@ def zerodha_token_refresh_task():
     → access_token exchange. On success, ZERODHA_ENABLED flips to True in
     memory so the ticker start task that fires at 09:15 IST will start live feeds.
     """
+    _skip = _zerodha_off("zerodha_token_refresh_task")
+    if _skip:
+        return _skip
     try:
         # Ensure the backend root is importable regardless of the worker's cwd —
         # a worker started from a different directory previously failed with
@@ -3901,6 +3922,33 @@ def purge_old_news_task(days: int = 60):
 
 
 # ── Daily NSE+BSE EQ instrument sync (Zerodha full dump) ────────────────────
+
+def _zerodha_off(task: str) -> dict | None:
+    """Skip a Zerodha task when the broker toggle is off.
+
+    Added 2026-08-31: Kite Connect's token expired mid-session and ten
+    scheduled tasks kept calling it, each failing with "Invalid `api_key` or
+    `access_token`". The toggle lives in RuntimeConfig so it can be flipped
+    from the UI without a restart -- see /api/v1/settings/brokers.
+
+    Returns a skip dict when the broker is OFF, or None to proceed.
+    """
+    from utils.runtime_config import broker_enabled
+
+    async def _check():
+        async with celery_session() as session:
+            return await broker_enabled(session, "zerodha")
+
+    try:
+        if _run_async(_check()):
+            return None
+    except Exception:
+        # Cannot read the toggle -> treat Zerodha as OFF. Failing closed here
+        # costs a skipped data refresh; failing open costs a call storm.
+        pass
+    logger.info(f"[{task}] skipped — Zerodha broker toggle is OFF")
+    return {"skipped": "zerodha_disabled", "task": task}
+
 
 async def _sync_upstox_instrument_keys():
     """Daily: populate instrument_key/isin on NSE rows (Upstox migration).

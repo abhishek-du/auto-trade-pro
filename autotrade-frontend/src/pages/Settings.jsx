@@ -195,6 +195,239 @@ function NseWatchlistEditor() {
 }
 
 
+// ── Broker Backend Toggles (BACKEND-WIRED) ─────────────────────────────────
+// Which broker the system may use for market data and orders. Stored in
+// RuntimeConfig, so a change takes effect at every process's next call with no
+// restart — which is the whole point: Zerodha Kite's token expired mid-session
+// on 2026-08-31 and every scheduled Kite task kept firing failed calls until
+// they could be gated from here.
+//
+// Unlike the strategy flags, these default to their LAST SAVED value and never
+// fail open. A broker with a dead token that defaults to "enabled" produces a
+// storm of failing calls, which is exactly what this panel exists to stop.
+
+const BROKERS = [
+  { id: 'upstox', name: 'Upstox',
+    desc: 'Primary backend since 2026-08-31 — live quotes, historical candles, instruments, fundamentals and the WebSocket tick feed.' },
+  { id: 'zerodha', name: 'Zerodha Kite',
+    desc: 'Legacy backend. Its subscription token has expired; leaving this on only produces failing API calls.' },
+];
+
+function BrokerPanel() {
+  const [flags,   setFlags]   = useState(null);
+  const [health,  setHealth]  = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
+  const [saving,  setSaving]  = useState(null);
+  const [pending, setPending] = useState(null);   // { id, next } awaiting confirm
+
+  // No synchronous setState here: `loading` already starts true, and calling
+  // setLoading(true) inline would fire during the effect and trigger a
+  // cascading render (react-hooks/set-state-in-effect). The manual "Try again"
+  // path sets it explicitly instead.
+  const load = useCallback(async () => {
+    try {
+      const d = await apiFetch('/api/v1/settings/brokers');
+      setFlags(d?.flags ?? null);
+      setHealth(d?.health ?? {});
+      setError(null);
+    } catch (e) {
+      setError(e?.message || 'Could not load broker toggles');
+      setFlags(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const retry = useCallback(() => { setLoading(true); load(); }, [load]);
+
+  // Async IIFE with a mounted guard, rather than a bare `load()`: the effect
+  // then contains no synchronous setState, and a response landing after
+  // unmount cannot write to a dead component.
+  useEffect(() => {
+    let alive = true;
+    (async () => { if (alive) await load(); })();
+    return () => { alive = false; };
+  }, [load]);
+
+  const commit = async ({ id, next }) => {
+    setPending(null);
+    setSaving(id);
+    const prev = flags;
+    setFlags(f => ({ ...f, [id]: next }));       // optimistic
+    try {
+      const res = await apiFetch('/api/v1/settings/brokers', {
+        method: 'POST',
+        body: JSON.stringify({ flags: { [id]: next } }),
+      });
+      if (res?.flags) setFlags(res.flags);        // server is the authority
+      const label = BROKERS.find(b => b.id === id)?.name || id;
+      toast.success(`${label} ${next ? 'enabled' : 'disabled'} — effective now`);
+    } catch (e) {
+      setFlags(prev);                             // roll back
+      toast.error(e?.message || 'Could not save — the broker was not changed');
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  // Every change is confirmed. Turning a broker off mid-session stops a live
+  // data source; turning one on with a dead token starts a call storm. Neither
+  // should be one stray click away.
+  const request = (id) => {
+    if (!flags || saving) return;
+    setPending({ id, next: !flags[id] });
+  };
+
+  const noneOn = flags && BROKERS.every(b => !flags[b.id]);
+
+  return (
+    <div className="glass-panel border border-border rounded-xl overflow-hidden">
+      <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
+        <Zap size={16} className="text-cyan" />
+        <h2 className="text-slate-200 font-semibold text-sm">Broker Backend</h2>
+        <span className="text-muted text-xs">— live control, takes effect immediately</span>
+      </div>
+
+      <div className="flex items-start gap-2.5 mx-5 mt-4 bg-cyan-500/10 border border-cyan-500/25 rounded-lg px-3 py-2.5">
+        <Zap size={13} className="text-cyan mt-0.5 shrink-0" />
+        <p className="text-cyan-300 text-[11px] leading-relaxed">
+          Controls which broker the system may call for <strong>prices, candles and orders</strong>.
+          At least one must stay enabled — with none on there is no price source, and the
+          5-second stop-loss loop would stop seeing prices for open positions.
+        </p>
+      </div>
+
+      {noneOn && (
+        <div className="flex items-start gap-2.5 mx-5 mt-3 bg-rose-500/10 border border-rose-500/25 rounded-lg px-3 py-2.5">
+          <AlertTriangle size={13} className="text-rose-400 mt-0.5 shrink-0" />
+          <p className="text-rose-300 text-[11px] leading-relaxed">
+            No broker is enabled. There is no live price source.
+          </p>
+        </div>
+      )}
+
+      <div className="px-5 py-2">
+        {loading && <div className="py-6 flex justify-center"><LoadingSpinner /></div>}
+
+        {!loading && error && (
+          <div className="py-5 text-center">
+            <p className="text-rose-300 text-xs mb-2">{error}</p>
+            <button onClick={retry}
+              className="text-cyan text-xs underline hover:no-underline focus:outline-none focus:ring-2 focus:ring-cyan/50 rounded">
+              Try again
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && flags && (
+          <div className="divide-y divide-border/50">
+            {BROKERS.map(b => {
+              const tokenOk = health[b.id] === 'token_present';
+              return (
+                <div key={b.id} className="flex items-center gap-3 py-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-slate-200 text-sm font-medium">{b.name}</p>
+                      <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                        flags[b.id] ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-600/30 text-slate-400'
+                      }`}>
+                        {flags[b.id] ? 'On' : 'Off'}
+                      </span>
+                      {/* Token health is shown even when the toggle is off, so an
+                          operator can see BEFORE enabling that it cannot work. */}
+                      <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                        tokenOk ? 'bg-cyan-500/15 text-cyan-300' : 'bg-amber-500/15 text-amber-300'
+                      }`}>
+                        {tokenOk ? 'Token OK' : 'No token'}
+                      </span>
+                    </div>
+                    <p className="text-muted text-[11px] mt-0.5 leading-snug">{b.desc}</p>
+                    {!tokenOk && flags[b.id] && (
+                      <p className="text-amber-300 text-[11px] mt-1 leading-snug">
+                        Enabled but has no valid token — its calls will fail.
+                      </p>
+                    )}
+                  </div>
+                  <ToggleSwitch
+                    checked={!!flags[b.id]}
+                    disabled={saving === b.id}
+                    onClick={() => request(b.id)}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {pending && (
+        <ConfirmBrokerDialog
+          broker={BROKERS.find(b => b.id === pending.id)}
+          nextState={pending.next}
+          tokenOk={health[pending.id] === 'token_present'}
+          onConfirm={() => commit(pending)}
+          onCancel={() => setPending(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ConfirmBrokerDialog({ broker, nextState, tokenOk, onConfirm, onCancel }) {
+  if (!broker) return null;
+  const turningOn = nextState;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+         role="dialog" aria-modal="true" aria-labelledby="broker-confirm-title">
+      <div className="glass-panel border border-border rounded-xl max-w-md w-full p-5">
+        <div className="flex items-start gap-2.5 mb-3">
+          <AlertTriangle size={18} className={turningOn ? 'text-amber-400' : 'text-rose-400'} />
+          <h3 id="broker-confirm-title" className="text-slate-100 font-semibold text-sm">
+            {turningOn ? 'Enable' : 'Disable'} {broker.name}?
+          </h3>
+        </div>
+
+        <p className="text-slate-300 text-xs leading-relaxed mb-3">
+          {turningOn
+            ? <>The system will start routing market-data and order calls to <strong>{broker.name}</strong> immediately.</>
+            : <>The system will stop calling <strong>{broker.name}</strong> immediately. Any data it was the only source for will go stale.</>}
+        </p>
+
+        {turningOn && !tokenOk && (
+          <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2.5 mb-3">
+            <AlertTriangle size={13} className="text-amber-400 mt-0.5 shrink-0" />
+            <p className="text-amber-300 text-[11px] leading-relaxed">
+              {broker.name} has <strong>no valid token</strong>. Enabling it will produce failing
+              API calls until a token is set.
+            </p>
+          </div>
+        )}
+
+        <p className="text-muted text-[11px] leading-relaxed mb-4">
+          Takes effect at every process&rsquo;s next call — no restart. Open positions keep
+          exiting on stop-loss as long as one broker remains enabled.
+        </p>
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel}
+            className="px-3 py-1.5 text-xs rounded-lg border border-border text-slate-300 hover:bg-slate-700/40 focus:outline-none focus:ring-2 focus:ring-cyan/50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} autoFocus
+            className={`px-3 py-1.5 text-xs rounded-lg font-medium focus:outline-none focus:ring-2 ${
+              turningOn
+                ? 'bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30 focus:ring-emerald-400/50'
+                : 'bg-rose-500/20 text-rose-200 hover:bg-rose-500/30 focus:ring-rose-400/50'
+            }`}>
+            {turningOn ? 'Enable' : 'Disable'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Strategy Execution Toggles (BACKEND-WIRED) ─────────────────────────────
 // Unlike StrategiesPanel below — which is a local display preference — these
 // switches write to RuntimeConfig in the database. Every process (uvicorn,
@@ -636,6 +869,8 @@ export default function Settings() {
       </div>
 
       {/* Strategies — always visible, never blocked by the backend fetch below */}
+      <BrokerPanel />
+
       <StrategyExecutionPanel />
       <StrategiesPanel />
 

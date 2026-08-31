@@ -93,6 +93,17 @@ _KNOWN_KEYS: dict[str, type] = {
     "strategy_direct_news_enabled":         bool,
     "strategy_tactical_enabled":            bool,
     "strategy_master_intelligence_enabled": bool,
+    # ── Broker provider toggles (2026-08-31) ────────────────────────────────
+    # Which broker backend may be used for market data and orders. Both can be
+    # on (Upstox primary, Zerodha as fallback) or either can be off.
+    #
+    # DB-backed rather than .env so an operator can cut a broker off MID-SESSION
+    # without a restart -- which is exactly the situation these were added for:
+    # Kite Connect's token expired on 2026-08-31 while the market was open, and
+    # every Kite call was failing with "Invalid `api_key` or `access_token`"
+    # until the tasks were gated.
+    "broker_upstox_enabled":   bool,
+    "broker_zerodha_enabled":  bool,
     # Transient market-shock cooldown: ISO-8601 UTC timestamp until which new
     # entries are blocked after a shock FLATTEN. Cleared automatically once past.
     "shock_cooldown_until":    str,
@@ -355,6 +366,53 @@ class RuntimeConfig:
 
 # Short admin-UI name -> RuntimeConfig key. The API and the frontend both speak
 # the short name; only this map knows the storage key.
+# UI name -> RuntimeConfig key. Mirrors STRATEGY_FLAGS below.
+BROKER_FLAGS: dict[str, str] = {
+    "upstox":  "broker_upstox_enabled",
+    "zerodha": "broker_zerodha_enabled",
+}
+
+# Defaults if no row exists yet. Upstox ON, Zerodha OFF -- the state after the
+# 2026-08-31 migration. Deliberately NOT fail-open like the strategy flags: a
+# broker with an expired token that defaults to "enabled" produces a storm of
+# failing calls, which is what this toggle exists to stop.
+BROKER_DEFAULTS: dict[str, bool] = {"upstox": True, "zerodha": False}
+
+
+async def broker_enabled(session, name: str) -> bool:
+    """Is this broker allowed to be used right now?
+
+    Reads RuntimeConfig so every process (uvicorn, 4 celery workers, the news
+    engine) sees a change at its next call -- no restart.
+
+    Fails to the DEFAULT, not to True. An unreachable DB must not silently
+    re-enable a broker whose token is dead.
+    """
+    key = BROKER_FLAGS.get(name)
+    if not key:
+        return False
+    default = BROKER_DEFAULTS.get(name, False)
+    try:
+        cfg = await RuntimeConfig.load(session)
+        return bool(cfg._get(key, default))
+    except Exception:
+        return default
+
+
+def broker_enabled_sync(name: str) -> bool:
+    """Synchronous variant for call sites that have no session.
+
+    Falls back to the .env flag, then the default. Used by the few Kite paths
+    that are plain functions rather than async tasks.
+    """
+    default = BROKER_DEFAULTS.get(name, False)
+    if name == "zerodha":
+        return bool(getattr(settings, "ZERODHA_ENABLED", default))
+    if name == "upstox":
+        return bool(getattr(settings, "UPSTOX_ACCESS_TOKEN", "")) 
+    return default
+
+
 STRATEGY_FLAGS: dict[str, str] = {
     "india_trade_loop":    "strategy_india_trade_loop_enabled",
     "news_engine":         "strategy_news_engine_enabled",

@@ -209,6 +209,96 @@ class StrategyFlagsUpdate(BaseModel):
     )
 
 
+class BrokerFlagsUpdate(BaseModel):
+    flags: dict[str, bool] = Field(
+        ...,
+        description='Broker name -> enabled. e.g. {"zerodha": false, "upstox": true}',
+    )
+
+
+@router.get(
+    "/brokers",
+    summary="Which broker backends are enabled (Upstox / Zerodha)",
+)
+async def get_broker_flags(db: AsyncSession = Depends(get_db)):
+    """Read-only, so no auth — consistent with GET /settings/strategies.
+
+    Values come from RuntimeConfig (DB-backed), so this reflects what every
+    process sees rather than one uvicorn worker's in-memory settings.
+    """
+    from utils.runtime_config import BROKER_DEFAULTS, BROKER_FLAGS, RuntimeConfig
+
+    cfg = await RuntimeConfig.load(db)
+    flags = {name: bool(cfg._get(key, BROKER_DEFAULTS.get(name, False)))
+             for name, key in BROKER_FLAGS.items()}
+
+    # Live health, so the UI can warn BEFORE an operator turns something on
+    # that cannot actually work. Kite's token expired on 2026-08-31 and the
+    # symptom was a storm of failing calls, not an obvious error.
+    health: dict[str, str] = {}
+    try:
+        from crawler.zerodha_kite_lib import get_kite
+        health["zerodha"] = "token_present" if getattr(get_kite(), "access_token", None) else "no_token"
+    except Exception:
+        health["zerodha"] = "unavailable"
+    from utils.config import settings as _s
+    health["upstox"] = "token_present" if getattr(_s, "UPSTOX_ACCESS_TOKEN", "") else "no_token"
+
+    return {
+        "flags": flags,
+        "health": health,
+        "effective": "immediate",
+        "note": "Stored in RuntimeConfig (DB). Every process picks the change up "
+                "on its next call; no restart required.",
+    }
+
+
+@router.post(
+    "/brokers",
+    summary="Enable or disable a broker backend at runtime",
+    dependencies=[Depends(require_auth)],
+)
+async def update_broker_flags(
+    payload: BrokerFlagsUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Flip a broker on or off. Takes effect on the next call, no restart.
+
+    REFUSES to disable every broker. With none enabled there is no price
+    source at all: the 5-second stop-loss loop would read nothing and open
+    positions would go unmonitored. That is a strictly worse state than a
+    broker with a dead token, so it is rejected rather than warned about.
+    """
+    from utils.runtime_config import BROKER_DEFAULTS, BROKER_FLAGS, RuntimeConfig
+
+    unknown = set(payload.flags) - set(BROKER_FLAGS)
+    if unknown:
+        raise HTTPException(400, f"unknown broker(s): {sorted(unknown)}")
+
+    cfg = await RuntimeConfig.load(db)
+    current = {name: bool(cfg._get(key, BROKER_DEFAULTS.get(name, False)))
+               for name, key in BROKER_FLAGS.items()}
+    proposed = {**current, **payload.flags}
+
+    if not any(proposed.values()):
+        raise HTTPException(
+            409,
+            "Refusing to disable every broker: no price source would remain, "
+            "and the 5-second stop-loss loop would stop seeing prices for open "
+            "positions. Enable at least one.",
+        )
+
+    for name, value in payload.flags.items():
+        await RuntimeConfig.set(db, BROKER_FLAGS[name], bool(value))
+    await db.commit()
+
+    changed = {k: v for k, v in payload.flags.items() if current.get(k) != v}
+    if changed:
+        logger.warning(f"[settings] BROKER TOGGLE changed: {changed} -> {proposed}")
+
+    return {"flags": proposed, "changed": changed, "effective": "immediate"}
+
+
 @router.get(
     "/strategies",
     summary="Current on/off state of every strategy execution toggle",
