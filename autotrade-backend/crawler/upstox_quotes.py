@@ -43,6 +43,43 @@ _API_V3 = "https://api.upstox.com/v3"
 # safe instrument count per URL is lower than the documented 500 ceiling.
 _BATCH = 250
 
+# INDEX instrument keys.
+#
+# Indices live in the NSE_INDEX segment, not NSE_EQ, and have no ISIN, so the
+# instrument-master sync (which resolves equities by ISIN) can never produce
+# them. They are hardcoded because they are a fixed, tiny set that the market
+# regime engine and intelligence_hub read every cycle -- and because a missing
+# index key silently degrades the 5-state regime engine to "unknown" rather
+# than failing loudly.
+#
+# Verified live 2026-08-31: Nifty 50 = 24035.6, India VIX = 11.22,
+# Nifty Bank = 57321.9.
+_INDEX_KEYS: dict[str, str] = {
+    "^NSEI":      "NSE_INDEX|Nifty 50",
+    "^NSEBANK":   "NSE_INDEX|Nifty Bank",
+    "^INDIAVIX":  "NSE_INDEX|India VIX",
+    "NIFTY 50":   "NSE_INDEX|Nifty 50",
+    "NIFTY BANK": "NSE_INDEX|Nifty Bank",
+    "INDIA VIX":  "NSE_INDEX|India VIX",
+    "NIFTY IT":         "NSE_INDEX|Nifty IT",
+    "NIFTY AUTO":       "NSE_INDEX|Nifty Auto",
+    "NIFTY PHARMA":     "NSE_INDEX|Nifty Pharma",
+    "NIFTY FMCG":       "NSE_INDEX|Nifty FMCG",
+    "NIFTY METAL":      "NSE_INDEX|Nifty Metal",
+    "NIFTY ENERGY":     "NSE_INDEX|Nifty Energy",
+    "NIFTY MEDIA":      "NSE_INDEX|Nifty Media",
+    "NIFTY INFRA":      "NSE_INDEX|Nifty Infra",
+    "NIFTY PSU BANK":   "NSE_INDEX|Nifty PSU Bank",
+    "NIFTY FIN SERVICE": "NSE_INDEX|Nifty Fin Service",
+    "NIFTY NEXT 50":    "NSE_INDEX|Nifty Next 50",
+    "NIFTY 100":        "NSE_INDEX|Nifty 100",
+    "NIFTY 200":        "NSE_INDEX|Nifty 200",
+    "NIFTY 500":        "NSE_INDEX|Nifty 500",
+    "NIFTY MIDCAP 50":  "NSE_INDEX|Nifty Midcap 50",
+    "NIFTY MIDCAP 100": "NSE_INDEX|NIFTY MIDCAP 100",
+    "NIFTY SMALLCAP 100": "NSE_INDEX|NIFTY SMLCAP 100",
+}
+
 # Cached symbol -> instrument_key map. Rebuilt lazily; the instrument master
 # changes once a day, so a process-lifetime cache is correct and avoids a DB
 # round trip on every 15-second price tick.
@@ -69,6 +106,10 @@ async def ensure_key_map(force: bool = False) -> int:
 
         async with AsyncSessionLocal() as s:
             _KEY_MAP, _REV_MAP = await build_key_maps(s)
+        # Indices are additive to whatever the equity master holds.
+        _KEY_MAP.update(_INDEX_KEYS)
+        for sym, key in _INDEX_KEYS.items():
+            _REV_MAP.setdefault(key, sym)
         _MAP_LOADED = True
         logger.info(f"[upstox_quotes] instrument key map loaded: {len(_KEY_MAP):,} symbols")
     except Exception as exc:
@@ -86,6 +127,13 @@ def _to_key(symbol: str) -> str | None:
     if not symbol:
         return None
     s = symbol.strip().upper()
+    # Indices first: they are addressed in a different segment and would never
+    # appear in the equity master.
+    if s in _INDEX_KEYS:
+        return _INDEX_KEYS[s]
+    bare = s.split(":")[-1]          # tolerate "NSE:NIFTY 50"
+    if bare in _INDEX_KEYS:
+        return _INDEX_KEYS[bare]
     if s in _KEY_MAP:
         return _KEY_MAP[s]
     if not s.endswith(".NS"):

@@ -109,10 +109,15 @@ async def fetch_live_snapshot(extra_symbols: list[str] | None = None) -> dict[st
     from crawler.live_prices import PRICE_CACHE
     from crawler.sector_data import SECTOR_CACHE
 
+    # The Kite-token guard was removed 2026-08-31: Kite's token is permanently
+    # expired and this snapshot is now served by Upstox. Keeping the guard made
+    # the whole function a no-op, which silently blanked the index/sector
+    # snapshot the market-regime engine reads every cycle.
+    #
+    # get_kite_client() is still called because _symbol_to_kite() below builds
+    # the instrument strings this function keys its output on; it performs no
+    # network I/O.
     kite = get_kite_client()
-    if not kite.access_token:
-        logger.debug("[live_snapshot] no Kite token — skipping")
-        return {}
 
     # Build instrument list: always-fetch indices + stock extras
     sym_to_kite: dict[str, str] = {
@@ -128,10 +133,26 @@ async def fetch_live_snapshot(extra_symbols: list[str] | None = None) -> dict[st
     all_instruments = list(set(sym_to_kite.values()))
 
     # Single batch OHLC call — returns last_price + OHLC (prev_close = ohlc.close)
+    #
+    # UPSTOX since 2026-08-31 (Kite token expired). The adapter returns the
+    # same {open, high, low, close, volume, last_price} per symbol, so the
+    # snapshot construction below is unchanged. Indices resolve through
+    # upstox_quotes._INDEX_KEYS (NSE_INDEX segment), which is why the sector
+    # and regime reads keep working.
     try:
-        raw = await kite.get_ohlc(all_instruments)
+        from crawler.upstox_quotes import get_ohlc_batch as _ux_ohlc
+
+        ux = await _ux_ohlc(list(sym_to_kite.keys()))
+        # Re-key to the caller's kite-style instrument strings so the loop
+        # below needs no change.
+        raw = {sym_to_kite[sym]: {
+                   "last_price": v.get("last_price", 0.0),
+                   "ohlc": {"open": v.get("open", 0.0), "high": v.get("high", 0.0),
+                            "low": v.get("low", 0.0), "close": v.get("close", 0.0)},
+                   "volume": v.get("volume", 0),
+               } for sym, v in ux.items() if sym in sym_to_kite}
     except Exception as exc:
-        logger.warning(f"[live_snapshot] Kite OHLC batch failed: {exc}")
+        logger.warning(f"[live_snapshot] Upstox OHLC batch failed: {exc}")
         return {}
 
     snapshot: dict[str, dict] = {}
