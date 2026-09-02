@@ -168,7 +168,20 @@ async def get_current_price(symbol: str) -> float | None:
 
 
 async def get_prices_batch(symbols: list[str]) -> dict[str, float]:
-    """Batch price fetch — cache first, MF NAV for MF: symbols, yfinance for misses."""
+    """Batch price fetch — cache first, MF NAV for MF: symbols, broker/yfinance for misses.
+
+    Despite the name this used to batch nothing: every cache miss went through
+    get_current_price() one symbol at a time, and each of those is a blocking
+    yfinance round-trip in a thread. A 56-holding portfolio therefore took ~17
+    SECONDS, and GET /api/v1/portfolios/ — which calls this once per portfolio —
+    took 19-32s, well past any sane client timeout.
+
+    Now the misses go out as ONE Upstox request (the helper chunks at 250
+    symbols), with the old per-symbol yfinance walk kept only for whatever
+    Upstox could not price: unlisted names, and MF: symbols which are handled
+    above. Same return type, same semantics — a symbol that cannot be priced is
+    simply absent from the dict, exactly as before.
+    """
     from crawler.live_prices import PRICE_CACHE
     result: dict[str, float] = {}
     missing: list[str] = []
@@ -183,10 +196,25 @@ async def get_prices_batch(symbols: list[str]) -> dict[str, float]:
             result[sym] = float(cached["price"])
         else:
             missing.append(sym)
-    for sym in missing:
-        price = await get_current_price(sym)
-        if price:
-            result[sym] = price
+
+    if missing:
+        try:
+            from crawler.upstox_quotes import get_live_prices
+
+            quoted = await get_live_prices(missing)
+            for sym, data in (quoted or {}).items():
+                px = (data or {}).get("price") or (data or {}).get("last_price")
+                if px:
+                    result[sym] = float(px)
+        except Exception as exc:
+            # Never fatal: the per-symbol walk below still covers everything.
+            logger.debug(f"[portfolio] batch quote failed: {type(exc).__name__}: {exc}")
+
+        # Whatever the broker could not price falls back to the original path.
+        for sym in [s for s in missing if s not in result]:
+            price = await get_current_price(sym)
+            if price:
+                result[sym] = price
     return result
 
 

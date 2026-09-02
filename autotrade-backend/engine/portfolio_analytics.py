@@ -392,6 +392,13 @@ async def save_capital_snapshot(session: AsyncSession) -> AgentCapitalSnapshot |
 
 # ── Rebalancing logic ─────────────────────────────────────────────────────────
 
+# How recent a Hub score must be to count as a current signal for rebalancing.
+# 7 days spans a normal scoring cadence plus a long weekend and a holiday. If
+# the Hub has not scored anything inside this window, compute_rebalance_trades
+# returns [] — no advice, rather than advice built on stale scores.
+_RECENT_SCORE_DAYS = 7
+
+
 async def compute_rebalance_trades(
     session: AsyncSession,
     top_n: int = 10,
@@ -402,39 +409,46 @@ async def compute_rebalance_trades(
     BUY  → underweight vs target.
     SELL → overweight vs target.
     """
-    from db.models import MasterIntelligenceScore
-    from sqlalchemy import func as _func
+    from sqlalchemy import text as _text
 
     policy = await _get_policy(session)
     pos_weights = await get_position_weights(session)
 
-    # Get top-N current Hub BUY signals
-    _latest_subq = (
-        select(
-            MasterIntelligenceScore.symbol.label("sym"),
-            _func.max(MasterIntelligenceScore.scored_at).label("max_at"),
+    # Top-N current Hub BUY signals.
+    #
+    # This was an unbounded `GROUP BY symbol` over the whole
+    # master_intelligence_scores table (1.7M rows, ~2.6M since June) joined back
+    # to itself. On a cold cache it read ~113k buffers and took 54 SECONDS,
+    # which made GET /api/v1/portfolio/capital-model hang past every sensible
+    # client timeout — the page simply never loaded.
+    #
+    # Two changes, and the second is a correctness fix rather than a speed one:
+    #
+    #   1. DISTINCT ON (symbol) instead of the self-join, so each symbol's
+    #      newest row is taken directly in index order.
+    #   2. A _RECENT_SCORE_DAYS window. The old query would happily return a
+    #      symbol's last score from three months ago and present it as a live
+    #      rebalance signal. A stale score is not a current view, so it is
+    #      excluded rather than ranked.
+    #
+    # The signal/is_blocked filter stays OUTSIDE the DISTINCT ON deliberately:
+    # filtering inside would pick each symbol's most recent *BUY*, which for a
+    # symbol since downgraded to SELL would resurrect a signal the Hub has
+    # already withdrawn.
+    top_rows = (await session.execute(_text("""
+        WITH latest AS (
+            SELECT DISTINCT ON (symbol) symbol, master_score, signal, is_blocked
+            FROM master_intelligence_scores
+            WHERE symbol LIKE '%.NS'
+              AND scored_at >= now() - make_interval(days => :days)
+            ORDER BY symbol, scored_at DESC
         )
-        .where(MasterIntelligenceScore.symbol.like("%.NS"))
-        .group_by(MasterIntelligenceScore.symbol)
-    ).subquery()
-
-    top_rows = (await session.execute(
-        select(
-            MasterIntelligenceScore.symbol,
-            MasterIntelligenceScore.master_score,
-        )
-        .join(
-            _latest_subq,
-            (MasterIntelligenceScore.symbol == _latest_subq.c.sym)
-            & (MasterIntelligenceScore.scored_at == _latest_subq.c.max_at),
-        )
-        .where(
-            MasterIntelligenceScore.is_blocked == False,
-            MasterIntelligenceScore.signal.in_(["BUY", "STRONG_BUY"]),
-        )
-        .order_by(MasterIntelligenceScore.master_score.desc())
-        .limit(top_n)
-    )).all()
+        SELECT symbol, master_score
+        FROM latest
+        WHERE is_blocked = false AND signal IN ('BUY', 'STRONG_BUY')
+        ORDER BY master_score DESC
+        LIMIT :top_n
+    """), {"days": _RECENT_SCORE_DAYS, "top_n": top_n})).all()
 
     if not top_rows:
         return []

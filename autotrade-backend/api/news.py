@@ -177,6 +177,13 @@ async def get_sse_announcements(
     for row in result.scalars().all():
         out.append(SSEAnnouncementOut(
             id=row.id,
+            # seq_id and ann_tstamp are REQUIRED by the response model but were
+            # never passed here, so this endpoint returned 500 for every request
+            # that found at least one row — pydantic rejected the first one it
+            # built. Silent because the failure is a 500 with no logged
+            # traceback; the /sse-announcements page simply never loaded.
+            seq_id=row.seq_id,
+            ann_tstamp=row.ann_tstamp,
             comp_name=row.comp_name,
             symbol=row.symbol,
             an_desc=row.an_desc,
