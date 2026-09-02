@@ -61,40 +61,31 @@ async def get_kite_candles_for_range(
     """
     from crawler.upstox_candles import get_upstox_candles_for_range
 
-    out = await get_upstox_candles_for_range(symbol, from_date, to_date,
-                                             interval=interval, oi=oi)
-    if out:
-        return out
-    # Fall through to the Kite path only if it is somehow authenticated again.
-    # With the token expired this returns [] immediately, which is the same
-    # answer the caller already handles.
+    # Upstox is the ONLY source here as of 2026-09-02.
+    #
+    # A Kite fallback used to sit below this: if Upstox returned [], it looked up
+    # an instrument_token and called Kite. That path can no longer succeed — the
+    # token is expired and Zerodha is disabled — so for every symbol without an
+    # Upstox instrument_key (mostly ETFs and INAV feeds) it spent a thread and a
+    # network round-trip to fail, then logged
+    # "Fetch failed for IVP.NS: Invalid `api_key`" at WARNING. Across the 1,896
+    # symbols the priority backfill touches, that is pure noise plus wasted work,
+    # and it makes a real failure harder to spot.
+    #
+    # An empty list is the correct and complete answer: every caller already
+    # treats [] as "no data for this symbol".
+    return await get_upstox_candles_for_range(symbol, from_date, to_date,
+                                              interval=interval, oi=oi)
+
+
+async def _kite_candles_for_range_DEPRECATED(symbol, from_date, to_date,
+                                             interval="1d", oi=False):
+    """DEAD — unreferenced. Kept only as a record of the Kite request shape."""
     token = get_token(symbol)
     if token is None:
-        logger.debug(f"[zerodha_historical] No instrument token for {symbol}")
         return []
 
     from crawler.zerodha_kite_lib import get_historical_data
-
-    kite_interval = _to_kite_interval(interval)
-    raw = []
-    for attempt in range(4):
-        try:
-            raw = await asyncio.to_thread(
-                get_historical_data,
-                instrument_token=token,
-                from_date=from_date,
-                to_date=to_date,
-                interval=kite_interval,
-                oi=oi,
-            )
-            break
-        except Exception as exc:
-            if "Too many requests" in str(exc) or "429" in str(exc):
-                if attempt < 3:
-                    await asyncio.sleep(1.0 * (attempt + 1))
-                    continue
-            logger.warning(f"[zerodha_historical] Fetch failed for {symbol}: {exc}")
-            return []
 
     # Normalise into Candle DB row format
     tf_reverse = {v: k for k, v in INTERVAL_MAP.items()}

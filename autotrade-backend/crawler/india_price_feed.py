@@ -267,7 +267,17 @@ def fetch_nse_candles(
     # Upstox — the PRIMARY source since 2026-08-31, despite its position in the
     # file. It is reached first in practice because the Kite branch above is
     # switched off; yfinance below it remains the genuine fallback.
-    if getattr(_s, "UPSTOX_ENABLED", False) and getattr(_s, "UPSTOX_ACCESS_TOKEN", ""):
+    #
+    # The gate used to be `getattr(_s, "UPSTOX_ENABLED", False)`. That setting is
+    # referenced HERE AND NOWHERE ELSE and has never been defined — not in
+    # utils/config.Settings, not in .env — so getattr returned the False default
+    # on every call and this entire branch was dead. fetch_nse_candles silently
+    # served yfinance data while appearing to prefer the broker.
+    #
+    # Gating on the token alone matches every other Upstox module in the
+    # codebase (upstox_candles, upstox_quotes, upstox_data all do exactly this),
+    # so there is no second flag to forget to define.
+    if getattr(_s, "UPSTOX_ACCESS_TOKEN", ""):
         try:
             import datetime as _dt
             import asyncio
@@ -322,8 +332,17 @@ def fetch_nse_candles(
                         if isinstance(ts, _dt.datetime):
                             if ts.tzinfo is not None:
                                 ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
-                            if interval in ("1d", "1wk", "1mo"):
-                                ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+                            # The hour is NOT zeroed here any more.
+                            #
+                            # It used to be: `ts.replace(hour=0, ...)` for daily
+                            # bars. Upstox sends 2026-09-01T00:00:00+05:30, which
+                            # converts correctly to 2026-08-31 18:30 UTC — the
+                            # LIVE daily series in this database. Zeroing the hour
+                            # then rewrote it to 2026-08-31 00:00, which is the
+                            # DEAD, pre-split duplicate series (2,596 stale rows
+                            # for RELIANCE.NS, last written June). Reading that
+                            # series is what produced a retracted +1.9% overnight
+                            # "gap" earlier in this project. Keep true UTC.
 
                         rows.append({
                             "symbol": symbol,
@@ -335,6 +354,16 @@ def fetch_nse_candles(
                             "volume": float(c.get("volume", 0)),
                             "timestamp": ts,
                         })
+                    # Upstox returns candles NEWEST-FIRST; yfinance (the other
+                    # branch of this same function) returns them oldest-first.
+                    # Every consumer assumes the yfinance order — most damagingly
+                    # engine/direct_news_strategy.py, a LIVE trade-origination
+                    # path, which reads `close.iloc[-1]` as "the latest close"
+                    # and runs `ewm(span=20)` for its EMA gate. On reversed data
+                    # that compared a 60-day-old price against an EMA computed
+                    # backwards through time. Sort ascending so both branches of
+                    # this function agree.
+                    rows.sort(key=lambda r: r["timestamp"])
                     if rows:
                         logger.info(f"Upstox NSE✓  {symbol:<15}  {len(rows):4d} candles  interval={interval}  latest={rows[-1]['timestamp'].strftime('%Y-%m-%d %H:%M')}")
                         return rows

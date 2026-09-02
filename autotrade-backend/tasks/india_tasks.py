@@ -4234,11 +4234,11 @@ async def _backfill_hub_1d_candles():
     from tasks._db import celery_session
     import datetime as _dt
 
-    from crawler.zerodha_kite_lib import get_kite
-    kite = get_kite()
-    if not kite.access_token:
-        logger.warning("[backfill_hub_1d] Zerodha not authenticated — skipping")
-        return {"skipped": True, "reason": "not_authenticated"}
+    # Kite token guard REMOVED 2026-09-02. get_kite_candles_for_range() has been
+    # Upstox-backed since 2026-08-31 and needs no Kite token — but this guard
+    # still ran ahead of it, so this scheduled backfill returned
+    # {"skipped": "not_authenticated"} every time and the hub's daily candles
+    # stopped being refreshed. Same leftover-guard pattern as get_kite_historical.
 
     # get_kite_candles_for_range() resolves each symbol's instrument_token via
     # the in-memory INSTRUMENT_CACHE, which is only populated by an explicit
@@ -4483,16 +4483,14 @@ async def _refresh_priority_1d_candles():
     from sqlalchemy import text as _text
     from crawler.price_feed import save_candles_to_db
     from crawler.zerodha_historical import get_kite_candles_for_range
-    from crawler.zerodha_kite_lib import get_kite
     from crawler.zerodha_instruments import INSTRUMENT_CACHE, refresh_instrument_cache
     from engine.hub_universe import get_hub_universe
     from tasks._db import celery_session
     import datetime as _dt
 
-    kite = get_kite()
-    if not kite.access_token:
-        logger.warning("[refresh_1d_priority] Zerodha not authenticated — skipping")
-        return {"skipped": True, "reason": "not_authenticated"}
+    # Kite token guard REMOVED 2026-09-02 — see _backfill_hub_1d_candles above.
+    # This one matters more: its priority list puts OPEN POSITIONS first,
+    # precisely because their bars must never go stale.
     if not INSTRUMENT_CACHE:
         await refresh_instrument_cache()
 

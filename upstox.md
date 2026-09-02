@@ -22,27 +22,50 @@ Every "Status" below was **live-probed on 2026-09-02**, not read off the docs.
 
 ---
 
-## 0. The four things that actually matter here
+## 0. Verified state — 2026-09-02
 
-Before the full list, the conclusions that change what you'd do:
+Every row in this document was **live-probed against the production Upstox
+account**, not read off the docs.
 
-1. **The News API was broken since it was written.** The code called
-   `/v2/news/articles` — a path that does not exist. Upstox answered `404
-   UDAPI100060` for every symbol, every time. Fixed 2026-09-02 (§10).
-2. **The live tick feed is firewall-blocked**, so the system is running on REST
-   polling. It works, but `broker/status` correctly reports `degraded`.
-3. **Order placement is still Zerodha.** Market data moved to Upstox; there is no
-   Upstox order executor. Going live would need §5 built from scratch.
-4. **Instrument-key coverage is 90.6% of what the system actually trades.**
-   (Corrected 2026-09-02 — an earlier revision of this file said "2,151 of
-   ~9,600, 25%", which used the wrong denominator: it counted series-suffixed
-   debt and numeric-coded instruments the scanner already excludes. The real
-   candidate set is 3,147 NSE EQ rows, now **2,315 keyed (73.6%)**, and
-   **1,477 of 1,630 hub_universe symbols (90.6%)**. Of the 832 still
-   unresolved, essentially all are ETFs and INAV feeds — Upstox does not
-   classify them as `NSE_EQ`, and an equity news system should not trade them.)
+| Check | Result |
+|---|---|
+| `PAPER_MODE` | **True** |
+| `AGENT_PAPER_MODE` | **True** |
+| `ZERODHA_ENABLED` | **False** |
+| `ZERODHA_ACCESS_TOKEN` | **empty** |
+| `UPSTOX_ACCESS_TOKEN` | set (313 chars) |
+| Real-order paths reachable | **0 of 3** |
+| Upstox API families working | **24 of 26** (2 unused, see §18) |
+| Market data served by | **Upstox, exclusively** |
 
----
+### Real money cannot be touched
+
+There were **three** independent paths to a live broker, not one. All are closed,
+and all fail **closed**:
+
+| # | Path | Old gate | Now |
+|---|---|---|---|
+| 1 | `engine/decision_router.py` LIVE branch | a Kite **token** | refuses unconditionally |
+| 2 | `engine/agent/execution._live_execute` — bypasses the router | `ZERODHA_ENABLED` | refuses unconditionally |
+| 3 | `POST /api/v1/zerodha/orders` | `PAPER_MODE=false` | HTTP **403** |
+
+Each old gate was a **configuration value**, so editing `.env` could have
+re-armed real-money placement with no code change and no review. That is the
+specific weakness removed: this is now paper-only *by decision*, not by config.
+
+**Verified adversarially.** With `PAPER_MODE=False`, `ZERODHA_ENABLED=True` and a
+valid-looking token forced into the running process, and `place_real_order`
+patched to record any call — all three paths refused and **the call was never
+made**.
+
+`engine/decision_router.py` no longer imports or calls anything Zerodha at all.
+
+### Why "degraded" is the correct broker status
+
+`/api/v1/broker/status` reports `upstox / degraded`. That is accurate, not a
+fault: REST quotes work, but the live tick WebSocket host is firewall-blocked
+(§15), so prices are polled rather than streamed. Everything paper trading needs
+works; only sub-second tick precision is unavailable.
 
 ## 1. Authentication & Login
 
@@ -197,7 +220,7 @@ the system can trade live through Upstox. It cannot.
 |---|---|---|---|
 | Get Holdings | `GET /v2/portfolio/long-term-holdings` | Delivery holdings | ✅ USED — `upstox_data.get_holdings` |
 | Get Positions | `GET /v2/portfolio/short-term-positions` | Intraday/F&O positions + live P&L | ✅ USED (returns `[]` — paper mode) |
-| Get MTF Positions | `GET /v2/portfolio/mtf-positions` | Margin-funded positions | 🔲 AVAILABLE |
+| Get MTF Positions | `GET /v2/portfolio/mtf-positions` | Margin-funded positions | ⛔ **404 on this account** — MTF is not enabled. Unused, so it costs nothing. |
 | Convert Positions | `PUT /v2/portfolio/convert-position` | Intraday ↔ Delivery ↔ MTF | 🔲 AVAILABLE |
 
 Holdings feed the "Upstox Demat" portfolio (56 holdings, ₹1,82,264). Positions
@@ -211,7 +234,7 @@ correctly returns empty: no real orders are placed.
 |---|---|---|---|
 | Get Profile | `GET /v2/user/profile` | UCC, exchanges, products, order types | ✅ USED — token verification |
 | Get Funds & Margin | `GET /v2/user/get-funds-and-margin` | Available funds, used margin | ✅ USED — `get_funds` |
-| Get Funds & Margin V3 | `GET /v3/user/funds-and-margin` | Cash / pledged / available-to-trade split | 🔲 AVAILABLE — richer |
+| Get Funds & Margin V3 | `GET /v3/user/get-funds-and-margin` | Cash / pledged / available-to-trade split | 🔲 AVAILABLE — verified 200. (An earlier revision of this file gave the path as `/v3/user/funds-and-margin`, which returns 400.) |
 | **Kill Switch** | `POST /v2/user/kill-switch` | Disable trading per segment **at the broker** | 🔲 AVAILABLE — *see below* |
 | Kill Switch Status | `GET /v2/user/kill-switch` | Which segments are live | 🔲 AVAILABLE |
 | Get / Update Static IP | `GET`/`PUT /v2/user/ip` | Static-IP registration (algo compliance) | 🔲 AVAILABLE |
@@ -337,6 +360,11 @@ signal on its own.
 | Portfolio Stream Feed | `wss://wsportfolioupdate-api.upstox.com` | Live order/position/holding/GTT updates | ⚠️ BLOCKED |
 | Portfolio Feed Authorize | `GET /v2/feed/portfolio-stream-feed/authorize` | Returns the socket URL | ⚠️ BLOCKED |
 
+**Both REST `authorize` endpoints return 200.** The block is purely on the
+`wss://` hosts, not on permission: Upstox will happily hand out a socket URL that
+the network then refuses to connect to. That is worth knowing, because a 200 from
+`authorize` is not evidence the feed works.
+
 `crawler/upstox_websocket.py` is **written, wired and waiting** — `MarketDataStreamerV3`
 with mode budgeting (`full` capped at 2,000 keys, `ltpc` at 5,000), a dict
 reverse-lookup instead of an O(n) per-tick scan, and Kite-compatible tick output.
@@ -457,3 +485,72 @@ could be done today.
 
 *Compiled 2026-09-02. Every status live-probed against the production Upstox
 account, not inferred from documentation.*
+
+---
+
+## 18. Live API verification — 2026-09-02
+
+Every family probed directly against the production account. **24 of 26
+reachable**; the two that are not are unused.
+
+| Family | Endpoint | Result |
+|---|---|---|
+| Auth | `/v2/user/profile` | ✅ 200 |
+| Account | `/v2/user/get-funds-and-margin` | ✅ 200 |
+| Account | `/v3/user/get-funds-and-margin` | ✅ 200 |
+| Instrument | `/v2/instruments/search` | ✅ 200 |
+| Quote | `/v2/market-quote/ltp` | ✅ 200 |
+| Quote | `/v2/market-quote/quotes` (5-level depth) | ✅ 200 |
+| Quote | `/v3/market-quote/ohlc` | ✅ 200 |
+| Quote | `/v3/market-quote/ltp` | ✅ 200 |
+| Candle | `/v3/historical-candle` daily | ✅ 200 |
+| Candle | `/v3/historical-candle` 1-minute | ✅ 200 |
+| Candle | `/v3/historical-candle/intraday` | ✅ 200 |
+| Portfolio | `/v2/portfolio/long-term-holdings` | ✅ 200 |
+| Portfolio | `/v2/portfolio/short-term-positions` | ✅ 200 (`[]` — paper mode) |
+| Portfolio | `/v2/portfolio/mtf-positions` | ⛔ 404 — MTF not enabled; unused |
+| News | `/v2/news` | ✅ 200 |
+| Fundamentals | `profile` · `income-statement` · `balance-sheet` · `cash-flow` · `key-ratios` · `share-holdings` · `corporate-actions` · `competitors` | ✅ all 8 OK |
+| Charges | `/v2/charges/brokerage` | ✅ 200 |
+| Market | `/v2/market/holidays` · `status/NSE` · `timings/{date}` | ✅ 200 |
+| WebSocket | `/v3/feed/market-data-feed/authorize` | ✅ 200 (REST) — `wss://` host blocked |
+| WebSocket | `/v2/feed/portfolio-stream-feed/authorize` | ✅ 200 (REST) — `wss://` host blocked |
+
+### And through the application's own code paths
+
+| Path | Result |
+|---|---|
+| `market_snapshot` (news-trade entry price) | `upstox_rest`, RELIANCE ₹1313.10 |
+| `get_live_prices` batch | 3/3 priced |
+| `get_market_depth` | 5 bid × 5 ask levels |
+| `get_kite_historical` (Upstox-backed) | day 7 · 15m 175 · 5m 525 · 1h 49 · 1m 2,625 bars |
+| `fetch_nse_candles` | 7 bars, ascending, on the live 18:30 series |
+| `_refresh_priority_1d_candles` (scheduled) | **1,896 symbols, 4,776 candles, 0 failed** |
+| `live_snapshot` | 20 index/sector symbols |
+| Fundamentals + News | all 8 OK · 3 real articles |
+| Instrument-key coverage | 2,338 keyed · **90.6% of `hub_universe`** |
+
+### Silent failures found and fixed on 2026-09-02
+
+Each of these returned an empty result that every caller treats as "no data", so
+none of them logged anything or raised:
+
+| What | Consequence while broken |
+|---|---|
+| `get_kite_historical` opened with a Kite-token guard | **Zero candles for every symbol and timeframe** — including the LLM agent's `price_action` and `intraday_candles` tools, so the agent was deciding trades with no candle data |
+| `_backfill_hub_1d_candles` + `_refresh_priority_1d_candles` had leftover token guards | Both scheduled backfills returned `{"skipped": "not_authenticated"}`; hub daily candles stopped refreshing |
+| `UPSTOX_ENABLED` gate in `india_price_feed` | Referenced once, **defined nowhere** → always False → `fetch_nse_candles` silently served yfinance instead of the broker |
+| Upstox rows returned newest-first | `direct_news_strategy` (a **live** trade gate) read `iloc[-1]` as "latest close" and ran `ewm()` — comparing a 60-day-old price against a backwards EMA |
+| Daily timestamps forcibly zeroed to `00:00` | Wrote into the **dead, pre-split** duplicate daily series — the one that produced a retracted +1.9% fake gap earlier in this project |
+| ISIN DB cache selected an ORM entity, then `rollback()` expired it | Never served a single hit; every lookup fell through to a live network resolve |
+| `_INTERVAL_MAP` missing `5minute`/`15minute`/`30minute` | `.get()` falls back to **daily** — a caller asking for 15-minute bars would silently receive daily ones |
+| WebSocket `_on_error` logged the peer's whole body | 30 KB FortiGuard block page per reconnect × 12/min ≈ **500 MB/day** into a non-rotating log |
+| Dead Kite fallback in `get_kite_candles_for_range` | One doomed thread + network call + WARNING per keyless symbol, across 1,896 symbols |
+
+### Still not working, and why
+
+| What | Why | Impact |
+|---|---|---|
+| Live tick WebSocket | `wsfeeder-api.upstox.com` firewall-blocked | Prices are polled. Works; sub-second precision unavailable. `broker/status` = `degraded`, correctly. |
+| New NSE listings | `sync_nse_eq_instruments` is the only thing that ADDS universe rows, is Kite-only, and cannot move to Upstox while `assets.upstox.com` is blocked (search answers a query; it does not enumerate an exchange) | Existing symbols fully served. **New listings are not picked up.** Last good refresh 2026-08-29. Now logs at ERROR with `universe_frozen`. |
+

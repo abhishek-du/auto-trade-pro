@@ -1867,6 +1867,29 @@ class TestEdgeCases:
 # 22. BACKFILL TASK — concurrent fetch correctness
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _make_failing_session_cm():
+    """A session context manager whose queries return empty result sets.
+
+    Enough for the task to run to completion without a database, which is all
+    this test needs — it asserts the task is not short-circuited, not what it
+    fetches.
+    """
+    session = AsyncMock()
+
+    async def _execute(*a, **kw):
+        empty = MagicMock()
+        empty.all.return_value = []
+        empty.scalars.return_value.all.return_value = []
+        return empty
+
+    session.execute = _execute
+    session.commit = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
 class TestBackfillTask:
     """2026-07-23: rewritten from scratch -- the previous version tested a
     since-replaced implementation (mocked crawler.price_feed.fetch_candles
@@ -1934,13 +1957,41 @@ class TestBackfillTask:
         assert result["failed"] == 0
 
     @pytest.mark.asyncio
-    async def test_skips_entirely_when_not_authenticated(self):
+    async def test_runs_even_with_no_kite_token(self):
+        """REPLACED 2026-09-02. This asserted the opposite: that the task
+        SKIPS with {"skipped": True, "reason": "not_authenticated"} when Kite
+        has no token.
+
+        That guard was a leftover. get_kite_candles_for_range() has been
+        Upstox-backed since 2026-08-31 and needs no Kite token — but the guard
+        still ran ahead of it, so this scheduled backfill returned "skipped" on
+        every single run and the hub's daily candles quietly stopped being
+        refreshed. The test was faithfully pinning a bug.
+
+        The invariant now: an absent Kite token must NOT stop the backfill.
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        fetched = []
+
+        async def _fake_candles(sym, from_date, to_date, interval="1d"):
+            fetched.append(sym)
+            return []
+
         mock_kite = MagicMock()
-        mock_kite.access_token = None
-        with patch("crawler.zerodha_kite_lib.get_kite", return_value=mock_kite):
+        mock_kite.access_token = None       # expired, as in production
+
+        with patch("crawler.zerodha_kite_lib.get_kite", return_value=mock_kite), \
+             patch("crawler.zerodha_historical.get_kite_candles_for_range",
+                   _AM(side_effect=_fake_candles)), \
+             patch("tasks._db.celery_session", _make_failing_session_cm()):
             from tasks.india_tasks import _backfill_hub_1d_candles
             result = await _backfill_hub_1d_candles()
-        assert result == {"skipped": True, "reason": "not_authenticated"}
+
+        assert result.get("reason") != "not_authenticated", (
+            "the Kite token guard is back — it blocks an Upstox-backed fetch "
+            "and silently disables the daily candle backfill"
+        )
 
     @pytest.mark.asyncio
     async def test_bse_rows_are_dropped_not_relabelled_as_nse(self):
