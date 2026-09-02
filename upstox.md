@@ -33,9 +33,14 @@ Before the full list, the conclusions that change what you'd do:
    polling. It works, but `broker/status` correctly reports `degraded`.
 3. **Order placement is still Zerodha.** Market data moved to Upstox; there is no
    Upstox order executor. Going live would need §5 built from scratch.
-4. **Instrument-key coverage is 2,151 of ~9,600 NSE EQ rows** — because
-   `assets.upstox.com` (the bulk instrument file) is blocked, keys are resolved
-   one-at-a-time through search.
+4. **Instrument-key coverage is 90.6% of what the system actually trades.**
+   (Corrected 2026-09-02 — an earlier revision of this file said "2,151 of
+   ~9,600, 25%", which used the wrong denominator: it counted series-suffixed
+   debt and numeric-coded instruments the scanner already excludes. The real
+   candidate set is 3,147 NSE EQ rows, now **2,315 keyed (73.6%)**, and
+   **1,477 of 1,630 hub_universe symbols (90.6%)**. Of the 832 still
+   unresolved, essentially all are ETFs and INAV feeds — Upstox does not
+   classify them as `NSE_EQ`, and an equity news system should not trade them.)
 
 ---
 
@@ -85,9 +90,19 @@ expiry**. AutoTrade Pro stores `instrument_key` in `kite_instruments.instrument_
 
 **The blocked bulk file has a measurable cost.** With `assets.upstox.com`
 unreachable, `sync_upstox_instrument_keys()` resolves keys one search call at a
-time. Coverage is **2,151 of ~9,600** NSE EQ rows. This directly bounds the
-weekly whole-market candle refresh, which now logs `key_coverage_pct` so the
-number is visible rather than assumed.
+time. That is slower, but it is **not** the coverage limit it first appeared to
+be. Measured against the right denominator — the 3,147 NSE EQ rows the scanner
+actually considers, after excluding series-suffixed debt (`-SG`, `-N0`, …) and
+numeric-coded instruments — coverage is **2,315 (73.6%)**, and **90.6% of
+`hub_universe`**, the set the system actually trades.
+
+Of the 832 names still without a key, essentially all are **ETFs and INAV
+feeds** (BANKBEES, LIQUIDBEES, HDFCVLINAV, …). Upstox does not classify those as
+`NSE_EQ`, so they will never resolve — and an equity news-driven system should
+not be trading them anyway. They are not a gap.
+
+The weekly whole-market candle refresh logs `key_coverage_pct` so this stays
+visible rather than assumed.
 
 **Suspended instruments is the one unused file I'd argue for.** A suspended
 symbol that still has candles will pass every scan and produce a signal that can
@@ -389,7 +404,7 @@ exemption and no Fortinet CA install are needed.
 |---|---|---|
 | `wsfeeder-api.upstox.com` | Live market tick feed — real-time prices for the 5-second stop-loss loop | **Critical** |
 | `upstox.com` | **OAuth login page** — without it no daily access token can be generated and *every* Upstox call stops. Not merely "documentation". | **Critical** |
-| `assets.upstox.com` | Daily instrument master. Its absence is why key coverage is 2,151/9,600. | **High** |
+| `assets.upstox.com` | Daily instrument master. Without it, keys are resolved one search call at a time, and no NEW listing can enter the universe at all. | **High** |
 | `wsportfolioupdate-api.upstox.com` | Order/position update stream | Medium (needed only with live orders) |
 | `trendlyne.com` | Earnings **conference-call transcripts**. Beat task `tasks.fetch_earnings_transcripts` runs on schedule and silently returns nothing. | Medium |
 | `www.moneycontrol.com` | 1 of 6 India RSS feeds in the narrative engine — currently running on 5. | Low |

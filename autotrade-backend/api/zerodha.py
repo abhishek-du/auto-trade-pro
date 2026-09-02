@@ -414,11 +414,39 @@ async def place_order(
     db: AsyncSession = Depends(get_db),
     _admin: str = Depends(require_auth),   # security: real order placement requires admin JWT
 ):
-    """Place a REAL order through Zerodha — extreme care required.
+    """Place a REAL order through Zerodha — DISABLED SYSTEM-WIDE (2026-09-02).
 
-    Requires header: X-Confirm-Real-Order: yes
-    PAPER_MODE must be false AND ZERODHA_ENABLED must be true.
+    This is the THIRD real-order path in the codebase, alongside
+    engine/decision_router.py and engine/agent/execution.py. All three are now
+    closed. Blocking only the automated ones would have left a manually
+    callable endpoint that still reaches a live broker.
+
+    Its previous guards were a confirmation header, `PAPER_MODE=false` and a
+    valid Kite token. Two of those three are configuration values, so editing
+    .env was enough to arm real-money placement — no code change, no review.
+    This deployment is paper-only by decision, not by configuration, so the
+    refusal below is unconditional and comes first.
+
+    Returns 403 rather than 404: the route exists and the caller's request was
+    well-formed; it is the capability that is withdrawn.
     """
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Real order placement is disabled system-wide. This deployment is "
+            "paper-only: Zerodha is switched off, there is no Upstox order "
+            "executor, and no code path can place a real order. Paper trades "
+            "continue normally — see GET /api/v1/broker/status."
+        ),
+    )
+
+
+async def _place_order_DISABLED(
+    body: dict,
+    x_confirm_real_order: str | None = None,
+    db: AsyncSession = None,
+):
+    """Unreferenced. Retained so a future live path can reuse the guard order."""
     if x_confirm_real_order != "yes":
         raise HTTPException(
             status_code=400,

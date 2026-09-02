@@ -227,7 +227,9 @@ async def lifespan(app: FastAPI):
         await _asyncio.sleep(45)   # let the ticker connect and do its first subscribe
         while not _stop_event.is_set():
             try:
-                from crawler.zerodha_ticker import sync_open_position_subscriptions
+                # UPSTOX since 2026-09-02. The Kite reconciler could not
+                # subscribe anything — its ticker is no longer started here.
+                from crawler.upstox_websocket import sync_open_position_subscriptions
                 await sync_open_position_subscriptions()
             except Exception as exc:
                 logger.warning(f"[ticker_sync] reconcile failed: {exc}")
@@ -293,15 +295,25 @@ async def lifespan(app: FastAPI):
 
     _bg_tasks.append(_asyncio.create_task(_fast_candle_loop()))
 
-    # ── Kite WebSocket ticker ────────────────────────────────────────────────
-    # Start whenever Zerodha is enabled + token is present — market-hours check
-    # was removed so a mid-session backend restart auto-reconnects the feed.
-    # The `kite-start-ticker-on-open` Celery cron (03:45 UTC = 09:15 IST) also
-    # fires at market open as a belt-and-suspenders guarantee.
-    if settings.ZERODHA_ENABLED and settings.ZERODHA_ACCESS_TOKEN:
+    # ── Live tick feed (Upstox Market Data Feed V3) ──────────────────────────
+    # UPSTOX since 2026-09-02. This block was gated on ZERODHA_ENABLED +
+    # ZERODHA_ACCESS_TOKEN; with Zerodha off by default and its token expired,
+    # the condition was never true and uvicorn started NO feed at all. The
+    # Celery `kite-start-ticker-on-open` task did start an Upstox feed — but in
+    # the CELERY process, and the tick store is a per-process module dict, so
+    # uvicorn's PRICE_CACHE never saw a single tick from it.
+    #
+    # Starting it here too is deliberate, not duplication: each process needs
+    # its own socket to populate its own cache, and uvicorn is the process that
+    # serves prices to the API and the WebSocket clients.
+    #
+    # No market-hours check, so a mid-session restart reconnects immediately.
+    if settings.UPSTOX_ACCESS_TOKEN:
         try:
             import threading as _threading
-            from crawler.zerodha_ticker import start_kite_ticker
+
+            from crawler.upstox_instruments import build_key_maps
+            from crawler.upstox_websocket import start_upstox_websocket
             # Explicit DAEMON thread, not asyncio.to_thread (2026-08-17).
             # to_thread runs on the default ThreadPoolExecutor, whose workers
             # are non-daemon and are JOINED at interpreter exit. The Kite
@@ -310,12 +322,37 @@ async def lifespan(app: FastAPI):
             # every shutdown needing SIGKILL. A daemon thread is torn down with
             # the process instead. (The ticker holds no un-flushed state: it
             # only writes to the in-memory LIVE_TICKS/PRICE_CACHE dicts.)
-            _threading.Thread(
-                target=start_kite_ticker, name="kite-ticker", daemon=True,
-            ).start()
-            logger.info("Kite WebSocket ticker started on app startup")
+            async def _boot_feed():
+                from db.database import AsyncSessionLocal
+                from sqlalchemy import text as _t
+
+                async with AsyncSessionLocal() as _s:
+                    fwd, _rev = await build_key_maps(_s)
+                    # Open positions get "full" mode first: a stale tick on a
+                    # position we hold is what delays a stop-loss.
+                    held = {r[0] for r in (await _s.execute(
+                        _t("SELECT DISTINCT symbol FROM open_positions"))).all()}
+                    top = {r[0] for r in (await _s.execute(
+                        _t("SELECT symbol FROM hub_universe ORDER BY rank LIMIT 500"))).all()}
+                return fwd, (held | top)
+
+            _fwd, _prio = await _boot_feed()
+            if not _fwd:
+                logger.warning(
+                    "feed: no instrument_key map — run sync_upstox_instrument_keys"
+                )
+            else:
+                _threading.Thread(
+                    target=start_upstox_websocket, args=(_fwd,),
+                    kwargs={"priority_symbols": _prio},
+                    name="upstox-feed", daemon=True,
+                ).start()
+                logger.info(
+                    f"Upstox market feed starting on app startup "
+                    f"({len(_fwd)} instruments, {len(_prio)} priority)"
+                )
         except Exception as exc:
-            logger.warning(f"Kite ticker startup failed: {exc}")
+            logger.warning(f"Upstox feed startup failed: {type(exc).__name__}: {exc}")
 
     yield
 

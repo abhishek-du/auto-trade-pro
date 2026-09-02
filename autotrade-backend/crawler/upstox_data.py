@@ -308,17 +308,25 @@ async def _resolve_isin_uncached(bare: str, is_bse: bool = False) -> str | None:
             from db.models import SymbolISINMap
             from sqlalchemy import select as _select
             async with AsyncSessionLocal() as s:
-                row = (await s.execute(
-                    _select(SymbolISINMap).where(SymbolISINMap.symbol == bare)
+                # Select the COLUMN, not the ORM entity. Selecting the entity
+                # returned a SymbolISINMap instance whose attributes were
+                # expired by the rollback below, so reading `row.isin`
+                # afterwards raised "Instance <SymbolISINMap> is not bound to a
+                # Session" — caught by the except and logged at DEBUG, so every
+                # single lookup silently fell through to the LIVE network
+                # resolution. The DB cache existed and never once served a hit.
+                # A scalar has no identity map and no refresh, so it survives.
+                isin = (await s.execute(
+                    _select(SymbolISINMap.isin).where(SymbolISINMap.symbol == bare)
                 )).scalar_one_or_none()
                 # Close the read transaction here rather than at the context
                 # manager's exit: that exit is an await point, so under a busy
                 # event loop the connection can sit idle-in-transaction for
                 # seconds. Observed as the only such query in production.
                 await s.rollback()
-            if row and row.isin:
-                _ISIN_CACHE[bare] = row.isin
-                return row.isin
+            if isin:
+                _ISIN_CACHE[bare] = isin
+                return isin
             _ISIN_DB_MISS.add(bare)
         except Exception as e:
             logger.debug(f"[upstox] ISIN DB-cache lookup failed for {bare}: {e}")

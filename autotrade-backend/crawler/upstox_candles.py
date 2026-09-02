@@ -35,13 +35,22 @@ from utils.logger import logger
 _V3 = "https://api.upstox.com/v3/historical-candle"
 
 # Kite timeframe -> (upstox unit, upstox interval)
+# Both vocabularies map here on purpose. This project speaks "15m"; the old Kite
+# call sites speak "15minute". A missing alias does NOT raise — .get() below
+# falls back to the DAILY default, so a caller asking for 15-minute bars would
+# quietly receive daily ones. That silent downgrade is far worse than an error,
+# which is why every Kite-style name is listed explicitly.
 _INTERVAL_MAP: dict[str, tuple[str, str]] = {
-    "1m": ("minutes", "1"), "minute": ("minutes", "1"),
-    "3m": ("minutes", "3"), "5m": ("minutes", "5"),
-    "10m": ("minutes", "10"), "15m": ("minutes", "15"),
-    "30m": ("minutes", "30"),
-    "1h": ("hours", "1"), "60minute": ("hours", "1"),
-    "1d": ("days", "1"), "day": ("days", "1"),
+    "1m": ("minutes", "1"),   "minute":   ("minutes", "1"),
+    "3m": ("minutes", "3"),   "3minute":  ("minutes", "3"),
+    "5m": ("minutes", "5"),   "5minute":  ("minutes", "5"),
+    "10m": ("minutes", "10"), "10minute": ("minutes", "10"),
+    "15m": ("minutes", "15"), "15minute": ("minutes", "15"),
+    "30m": ("minutes", "30"), "30minute": ("minutes", "30"),
+    "1h": ("hours", "1"),     "60minute": ("hours", "1"),
+    "1d": ("days", "1"),      "day":      ("days", "1"),
+    "1wk": ("weeks", "1"),    "week":     ("weeks", "1"),
+    "1mo": ("months", "1"),   "month":    ("months", "1"),
 }
 
 _IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
@@ -102,7 +111,9 @@ async def get_upstox_candles_for_range(
     tf = interval if interval in _INTERVAL_MAP else "1d"
     # Normalise the stored timeframe label to this project's vocabulary so the
     # resampler and every downstream query keep matching on "1m"/"1d".
-    tf = {"minute": "1m", "day": "1d", "60minute": "1h"}.get(tf, tf)
+    tf = {"minute": "1m", "3minute": "3m", "5minute": "5m", "10minute": "10m",
+          "15minute": "15m", "30minute": "30m", "60minute": "1h",
+          "day": "1d", "week": "1wk", "month": "1mo"}.get(tf, tf)
 
     frm, to = _as_date(from_date), _as_date(to_date)
     today = _dt.datetime.now(_IST).date().isoformat()

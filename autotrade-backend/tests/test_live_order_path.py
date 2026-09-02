@@ -1,13 +1,26 @@
-"""D2 regression — the live order path must not raise TypeError.
+"""LIVE mode must reach no broker at all.
 
-`route_decision`'s LIVE branch called `place_real_order(signal_id=..., confidence=...)`,
-but neither is a parameter of that function. Every live order therefore raised
-TypeError, which the broad `except Exception` in route_decision swallowed and
-reported as a generic RoutingOutcome.ERROR — indistinguishable from a broker
-outage. It was latent only because PAPER_MODE=true.
+HISTORY
+-------
+This file began as the D2 regression test. `route_decision`'s LIVE branch called
+`place_real_order(signal_id=..., confidence=...)`, and neither is a parameter of
+that function, so every live order raised TypeError — swallowed by a broad
+`except` and reported as a generic RoutingOutcome.ERROR, indistinguishable from a
+broker outage. It was latent only because PAPER_MODE=true.
 
-The signature-binding test below is the important one: it fails if the call site
-and the callee ever drift apart again, without needing a live broker.
+WHAT CHANGED (2026-09-02)
+-------------------------
+The live branch is gone. This deployment is paper-only: Zerodha is disabled
+everywhere and there is no Upstox order executor, so `route_decision` now
+hard-blocks LIVE before touching any broker code.
+
+That makes D2 unreachable rather than fixed, so the old call-site binding test no
+longer has a call site to bind. The tests below replace it with the stronger
+property: **no broker call is reachable from route_decision at all.**
+
+`engine/zerodha_executor.place_real_order` still exists and is still imported
+here on purpose — if someone builds a live path again, the signature guard is
+ready to be re-pointed at it.
 """
 from __future__ import annotations
 
@@ -31,71 +44,97 @@ def _signal(**kw):
     return s
 
 
-class TestPlaceRealOrderCallSite:
+class TestNoBrokerCallIsReachable:
 
-    def test_call_site_kwargs_all_exist_on_the_callee(self):
-        """Statically bind route_decision's call to place_real_order's signature."""
-        src = inspect.getsource(route_decision)
-        tree = ast.parse(inspect.cleandoc(src))
+    def test_route_decision_does_not_call_place_real_order(self):
+        """The strongest form of the D2 guarantee: there is no call to break."""
+        tree = ast.parse(inspect.cleandoc(inspect.getsource(route_decision)))
         calls = [
             n for n in ast.walk(tree)
             if isinstance(n, ast.Call)
             and getattr(n.func, "id", getattr(n.func, "attr", None)) == "place_real_order"
         ]
-        assert calls, "route_decision no longer calls place_real_order — update this test"
-
-        accepted = set(inspect.signature(place_real_order).parameters)
-        for call in calls:
-            passed = {k.arg for k in call.keywords if k.arg}
-            unknown = passed - accepted
-            assert not unknown, (
-                f"route_decision passes {sorted(unknown)} to place_real_order, which "
-                f"accepts {sorted(accepted)}. This is exactly the D2 defect."
-            )
-
-    def test_signal_is_forwarded_so_the_confidence_gate_is_armed(self):
-        """place_real_order's Rule 3 reads confidence off `signal`.
-
-        With signal=None it defaults to 100.0 and the gate is a no-op, so the
-        fix must pass the signal through rather than merely dropping the bad
-        kwargs.
-        """
-        src = inspect.getsource(route_decision)
-        tree = ast.parse(inspect.cleandoc(src))
-        call = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Call)
-            and getattr(n.func, "id", getattr(n.func, "attr", None)) == "place_real_order"
+        assert not calls, (
+            "route_decision calls place_real_order again. If a live executor was "
+            "deliberately re-introduced, restore the signature-binding test from "
+            "git history — D2 was a kwarg mismatch that failed silently."
         )
-        assert "signal" in {k.arg for k in call.keywords if k.arg}
+
+    def test_route_decision_imports_no_zerodha_module(self):
+        """A credential check would re-arm live trading without a code review.
+
+        The old gate was `if not kite.access_token`, which made 'can we trade
+        live?' depend on a CREDENTIAL rather than a DECISION — dropping a valid
+        token into .env would have silently re-enabled real orders.
+
+        Asserted against the AST, not the raw text: the function's own comments
+        legitimately name these modules while explaining why they are NOT used,
+        and a substring search over source would match that prose and fail.
+        """
+        tree = ast.parse(inspect.cleandoc(inspect.getsource(route_decision)))
+
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+                imported.update(a.name for a in node.names)
+        # Attribute/name references that survive comment-stripping.
+        called = {
+            getattr(n.func, "id", getattr(n.func, "attr", None))
+            for n in ast.walk(tree) if isinstance(n, ast.Call)
+        }
+
+        for banned in ("crawler.zerodha_client", "engine.zerodha_executor"):
+            assert banned not in imported, (
+                f"route_decision imports {banned!r}. Live execution must not "
+                f"depend on broker credentials being present or absent."
+            )
+        assert "get_kite_client" not in called and "get_kite_client" not in imported
 
 
-class TestRouteDecisionLiveBranch:
+class TestLiveModeIsHardBlocked:
 
     @pytest.mark.asyncio
-    async def test_live_route_reaches_executor_without_typeerror(self):
-        captured = {}
-
-        async def _fake_place_real_order(symbol, transaction_type, quantity, session, **kw):
-            # Bind against the REAL signature — a bad kwarg raises here, as in prod.
-            inspect.signature(place_real_order).bind(
-                symbol, transaction_type, quantity, session, **kw
-            )
-            captured.update(kw)
-            return {"order_id": "ORDER-1", "symbol": symbol, "qty": quantity}
-
+    async def test_live_is_blocked_even_with_a_valid_token(self):
+        """A working Zerodha token must NOT be enough to place a real order."""
         with patch("engine.decision_router.resolve_mode",
                    AsyncMock(return_value=TradeMode.LIVE)), \
-             patch("engine.zerodha_executor.place_real_order",
-                   AsyncMock(side_effect=_fake_place_real_order)), \
              patch("engine.decision_router._log_decision_audit", AsyncMock()), \
-             patch("utils.config.settings.ZERODHA_ACCESS_TOKEN", "tok"), \
+             patch("utils.config.settings.ZERODHA_ACCESS_TOKEN", "a-valid-looking-token"), \
              patch("utils.config.settings.LIVE_CONFIDENCE_THRESHOLD", 10.0):
             result = await route_decision(
                 _signal(), MagicMock(), position_size={"units": 3, "usd_value": 300.0},
             )
 
-        assert result.outcome is not RoutingOutcome.ERROR, (
-            f"live route errored: {result.reason} — D2 has regressed"
-        )
-        assert "signal_id" not in captured and "confidence" not in captured
+        assert result.outcome is RoutingOutcome.BLOCKED_NO_TOKEN
+        assert result.metadata.get("paper_only") is True
+        # Not an ERROR: this is a deliberate refusal, and callers must be able to
+        # tell it apart from a broker outage.
+        assert result.outcome is not RoutingOutcome.ERROR
+
+    @pytest.mark.asyncio
+    async def test_live_block_happens_before_any_executor_import(self):
+        """If the block leaked, this patch would be hit and the test would fail."""
+        with patch("engine.decision_router.resolve_mode",
+                   AsyncMock(return_value=TradeMode.LIVE)), \
+             patch("engine.decision_router._log_decision_audit", AsyncMock()), \
+             patch("engine.zerodha_executor.place_real_order",
+                   AsyncMock(side_effect=AssertionError(
+                       "place_real_order was reached — LIVE is not blocked"))):
+            result = await route_decision(
+                _signal(), MagicMock(), position_size={"units": 1, "usd_value": 100.0},
+            )
+
+        assert result.outcome is RoutingOutcome.BLOCKED_NO_TOKEN
+
+
+class TestExecutorStillIntactForFutureUse:
+
+    def test_place_real_order_signature_is_unchanged(self):
+        """Kept so a future live path can be re-pinned against it."""
+        params = set(inspect.signature(place_real_order).parameters)
+        assert {"symbol", "transaction_type", "quantity", "session"} <= params
+        # The two kwargs that caused D2 must still NOT be accepted.
+        assert "signal_id" not in params and "confidence" not in params

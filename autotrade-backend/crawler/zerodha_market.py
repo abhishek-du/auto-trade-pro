@@ -337,10 +337,35 @@ async def sync_nse_eq_instruments(session: AsyncSession) -> dict:
 
     Returns: {"nse_eq": int, "bse_eq": int, "total": int}
     """
+    # DEAD SINCE 2026-08-31 and NOT migrated — read this before "fixing" it.
+    #
+    # This is the only thing that ADDS ROWS to kite_instruments. Everything else
+    # (sync_upstox_instrument_keys, the candle syncs, hub rebuild) enriches or
+    # reads rows that already exist. With Kite's token expired it returns the
+    # error dict below every morning at 08:30 IST, so **no newly listed NSE
+    # symbol can enter the universe at all**. The table's last successful
+    # refresh was 2026-08-29.
+    #
+    # It cannot simply be pointed at Upstox: the equivalent is the bulk
+    # instrument master at assets.upstox.com, which the corporate firewall
+    # blocks. /v2/instruments/search cannot substitute — it answers a query, it
+    # does not enumerate an exchange.
+    #
+    # So the honest state is: existing symbols are fully served by Upstox; NEW
+    # LISTINGS ARE NOT PICKED UP until either assets.upstox.com is unblocked or
+    # a Kite token returns. Logged at ERROR, not WARNING, because a silent daily
+    # no-op on the universe feed is exactly the kind of failure this codebase
+    # has been bitten by before.
     kite = get_kite_client()
     if not kite.access_token:
-        logger.warning("[zerodha_market] No access token — skipping NSE EQ instrument sync")
-        return {"nse_eq": 0, "bse_eq": 0, "total": 0, "error": "no_access_token"}
+        logger.error(
+            "[zerodha_market] NSE EQ instrument sync SKIPPED — no Kite token. "
+            "The instrument universe is frozen: no newly listed symbol will be "
+            "added. Unblock assets.upstox.com to replace this with the Upstox "
+            "instrument master."
+        )
+        return {"nse_eq": 0, "bse_eq": 0, "total": 0, "error": "no_access_token",
+                "universe_frozen": True}
 
     from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
@@ -673,71 +698,51 @@ async def get_kite_historical(
     interval: str = "60minute",
     session: AsyncSession | None = None,
 ) -> list[dict]:
-    """Fetch OHLCV candles from Kite and return in save_candles_to_db-compatible format."""
-    token = _get_token(symbol)
-    if token is None and session:
-        token = await _get_token_from_db(symbol, session)
-    if token is None:
-        logger.warning(f"[zerodha_market] No instrument token for {symbol}")
-        return []
+    """Fetch OHLCV candles and return in save_candles_to_db-compatible format.
 
-    kite = get_kite_client()
-    if not kite.access_token:
-        return []
+    UPSTOX-BACKED since 2026-09-02. The name is kept because six production call
+    sites use it, but every line below now goes to Upstox.
 
-    if not _kite_historical_available():
-        return []  # in a short post-403 cooldown — use yfinance fallback meanwhile
+    WHY THIS MATTERED
+    -----------------
+    This opened with `if not kite.access_token: return []`. With Kite's token
+    expired that guard hit on every call, so the function returned ZERO candles
+    for every symbol and every timeframe — verified before the change. It is
+    called by:
 
-    kite_interval = _to_kite_interval(interval)
-    # Map interval back to our timeframe string for the candles table
-    tf_reverse = {v: k for k, v in _TF_MAP.items()}
-    timeframe = tf_reverse.get(kite_interval, interval)
+      * engine/agent/decision_engine.py  — the LLM's `price_action` (day) and
+        `intraday_candles` (15minute) tools, i.e. the agent was reasoning about
+        trades with no candle data at all
+      * news_discovery_engine.py (x2)    — entry confirmation checks
+      * paper_trading/trade_simulator.py — exit checks
+      * crawler/india_price_feed.py      — daily backfill
+      * api/zerodha.py (x2)              — auto-scan / deep-analysis
 
+    Every one of them treats [] as "no data available" rather than an error, so
+    the failure was completely silent.
+
+    The `token`/`session` parameters are retained for signature compatibility and
+    are no longer used: Upstox resolves the instrument by symbol.
+    """
+    from crawler.upstox_candles import get_upstox_candles_for_range
+
+    _ = session  # kept for call-site compatibility; Upstox needs no token lookup
+
+    # get_upstox_candles_for_range already returns rows shaped for
+    # save_candles_to_db, with naive-UTC timestamps (the +05:30 -> UTC conversion
+    # lives in upstox_candles._to_naive_utc). Kite-style interval names such as
+    # "15minute" and "day" are accepted directly by its _INTERVAL_MAP.
     try:
-        raw = await kite.get_historical_data(token, from_date, to_date, kite_interval)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 403:
-            _handle_market_data_403("historical")
-        else:
-            logger.warning(f"[zerodha_market] Historical fetch failed for {symbol}: {exc}")
-        return []
+        return await get_upstox_candles_for_range(
+            symbol, from_date, to_date, interval=interval,
+        )
     except Exception as exc:
-        logger.warning(f"[zerodha_market] Historical fetch failed for {symbol}: {exc}")
+        logger.warning(
+            f"[zerodha_market] Upstox historical fetch failed for {symbol}: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return []
 
-    candles = []
-    for c in raw:
-        ts_raw = c["timestamp"]
-        # Kite returns ISO-8601 string; convert to naive UTC datetime
-        if isinstance(ts_raw, str):
-            try:
-                ts_ist = datetime.datetime.fromisoformat(ts_raw)
-                if ts_ist.tzinfo is not None:
-                    ts_utc = ts_ist.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-                else:
-                    # Kite historical data is in IST even without tzinfo marker
-                    ts_utc = ts_ist.replace(tzinfo=_IST).astimezone(
-                        datetime.timezone.utc
-                    ).replace(tzinfo=None)
-            except ValueError:
-                continue
-        else:
-            ts_utc = ts_raw
-
-        candles.append({
-            "symbol":    symbol,
-            "timeframe": timeframe,
-            "open":      float(c["open"]),
-            "high":      float(c["high"]),
-            "low":       float(c["low"]),
-            "close":     float(c["close"]),
-            "volume":    float(c["volume"]),
-            "timestamp": ts_utc,
-        })
-    return candles
-
-
-# ── 4. Sync candles to DB ─────────────────────────────────────────────────────
 
 async def sync_kite_candles_to_db(session: AsyncSession) -> dict:
     """Fetch 60 days of 1-hour candles for all NSE_TOKENS symbols and save to DB.

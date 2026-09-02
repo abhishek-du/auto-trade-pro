@@ -189,10 +189,35 @@ class AgentExecutionManager:
         return order_id
 
     async def _live_execute(self, decision, session: AsyncSession) -> str | None:
-        if not settings.ZERODHA_ENABLED:
-            logger.error("[agent] Live execution attempted but Zerodha not connected")
-            return None
+        """Real-money execution — DISABLED SYSTEM-WIDE (2026-09-02).
 
+        This is a SECOND live path: it calls place_real_order directly and does
+        not pass through engine/decision_router.py, so hard-blocking LIVE there
+        would have left this one open. Both are now closed.
+
+        The old guard was `if not settings.ZERODHA_ENABLED` — a config flag. That
+        makes real-money execution depend on an .env value, so flipping one
+        setting would re-arm it with no code change and no review. This
+        deployment is paper-only by decision, not by configuration.
+
+        Fails CLOSED and unconditionally: refusing a live order costs an
+        opportunity, placing one by accident costs real money. Those are not
+        symmetric, so the safe default is refusal.
+        """
+        logger.error(
+            f"[agent] LIVE BLOCKED (paper-only system): {decision.symbol} "
+            f"{decision.action} qty={getattr(decision, 'qty', '?')}. No real order "
+            f"was placed. Zerodha is disabled and there is no Upstox order executor."
+        )
+        return None
+
+    async def _live_execute_DISABLED(self, decision, session: AsyncSession) -> str | None:
+        """Retained unreferenced for the day an executor is deliberately built.
+
+        Nothing calls this. It is kept rather than deleted because it encodes the
+        NSE delivery-short-sell rule below, which is regulatory and worth not
+        having to rediscover.
+        """
         product = getattr(decision, "product", "CNC")
 
         # NSE/BSE Rule: CNC delivery SELL requires an existing holding.

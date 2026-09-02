@@ -157,14 +157,59 @@ def _on_message(message):
         logger.error(f"[upstox/websocket] parse error: {type(exc).__name__}: {exc}")
 
 
+# Repeated-error suppression state. The streamer auto-reconnects, so a
+# persistent failure re-fires this handler every few seconds.
+_LAST_ERR_KEY: str = ""
+_LAST_ERR_AT: float = 0.0
+_ERR_REPEATS: int = 0
+_ERR_QUIET_SEC = 300.0
+
+
 def _on_error(error):
-    logger.error(f"[upstox/websocket] error: {error}")
+    """Log connection errors WITHOUT dumping the peer's response body.
+
+    A blocked handshake returns an HTML page, and the corporate FortiGuard block
+    page is ~30 KB. This handler used to interpolate the whole error object, so
+    each failed reconnect wrote 30 KB to a log that does not rotate — measured at
+    12 retries per minute, roughly 500 MB/day, on a box where celery_worker.log
+    has already reached 2.6 GB.
+
+    So: classify, truncate, and suppress repeats. The firewall block gets its own
+    one-line message because "Handshake status 403" plus 30 KB of HTML does not
+    tell an operator what to actually do about it.
+    """
+    global _LAST_ERR_KEY, _LAST_ERR_AT, _ERR_REPEATS
+    import time as _t
+
+    raw = str(error)
+    if "FortiGuard" in raw or "Web Filter Violation" in raw or "Web Page Blocked" in raw:
+        msg = ("handshake blocked by the network web filter (FortiGuard). "
+               "wsfeeder-api.upstox.com must be whitelisted; REST quotes are "
+               "unaffected and prices continue to be polled.")
+        key = "firewall_block"
+    else:
+        # Never log more than one line of a peer response.
+        msg = raw.split("-+-+-")[0].strip()[:200]
+        key = msg[:80]
+
+    now = _t.monotonic()
+    if key == _LAST_ERR_KEY and (now - _LAST_ERR_AT) < _ERR_QUIET_SEC:
+        _ERR_REPEATS += 1
+        return                      # identical error, still inside the quiet window
+    if _ERR_REPEATS:
+        logger.error(f"[upstox/websocket] {msg} (repeated {_ERR_REPEATS}x while quiet)")
+    else:
+        logger.error(f"[upstox/websocket] {msg}")
+    _LAST_ERR_KEY, _LAST_ERR_AT, _ERR_REPEATS = key, now, 0
 
 
 def _on_close(status_code=None, close_msg=None):
     global _CONNECTED
     _CONNECTED = False
-    logger.warning(f"[upstox/websocket] closed: {status_code} {close_msg}")
+    # Same reasoning as _on_error: close_msg can carry the block page.
+    logger.warning(
+        f"[upstox/websocket] closed: {status_code} {str(close_msg or '')[:120]}"
+    )
 
 
 def start_upstox_websocket(instrument_map: dict[str, str],
@@ -255,6 +300,64 @@ def subscribe_symbol(symbol: str, instrument_key: str) -> bool:
     except Exception as exc:
         logger.warning(f"[upstox/websocket] subscribe {symbol} failed: {exc}")
         return False
+
+
+async def sync_open_position_subscriptions() -> dict:
+    """Reconcile the live subscription set against `open_positions`.
+
+    Upstox counterpart of crawler.zerodha_ticker.sync_open_position_subscriptions,
+    added 2026-09-02 when uvicorn stopped starting the Kite ticker.
+
+    THE CROSS-PROCESS SUBSCRIPTION GAP (unchanged by the broker swap)
+    ----------------------------------------------------------------
+    `subscribe_symbol()` only affects the process that owns the socket. The feed
+    runs in ONE process, but trades are opened by the news engine and the Celery
+    worker — separate OS processes whose `_STREAMER` is None, so their subscribe
+    call returns False without subscribing and without raising. Reconciling
+    against the DB here makes the database the source of truth, so it works no
+    matter which process opened the trade and self-heals after a reconnect.
+
+    No-ops harmlessly when the socket is not connected — which is the current
+    state, since wsfeeder-api.upstox.com is firewall-blocked.
+    """
+    if not _CONNECTED or _STREAMER is None:
+        return {"subscribed": 0, "reason": "feed_not_connected"}
+
+    from sqlalchemy import text as _text
+
+    from crawler.upstox_instruments import get_instrument_key
+    from db.database import AsyncSessionLocal
+
+    added = 0
+    missing_key: list[str] = []
+    try:
+        async with AsyncSessionLocal() as session:
+            held = [r[0] for r in (await session.execute(
+                _text("SELECT DISTINCT symbol FROM open_positions"))).all()]
+            for sym in held:
+                with _LOCK:
+                    if sym in _FWD:
+                        continue
+                ikey = await get_instrument_key(session, sym)
+                if not ikey:
+                    # An open position we cannot stream is worth saying out
+                    # loud: its P&L will only move on the slow polling loop.
+                    missing_key.append(sym)
+                    continue
+                if subscribe_symbol(sym, ikey):
+                    added += 1
+    except Exception as exc:
+        logger.warning(f"[upstox/websocket] position reconcile failed: {type(exc).__name__}: {exc}")
+        return {"subscribed": added, "error": type(exc).__name__}
+
+    if missing_key:
+        logger.warning(
+            f"[upstox/websocket] {len(missing_key)} open positions have no "
+            f"instrument_key and will not stream: {missing_key[:8]}"
+        )
+    if added:
+        logger.info(f"[upstox/websocket] reconcile subscribed {added} open positions")
+    return {"subscribed": added, "no_instrument_key": len(missing_key)}
 
 
 def get_live_tick(symbol: str) -> dict | None:

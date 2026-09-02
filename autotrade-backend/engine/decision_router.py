@@ -308,74 +308,45 @@ async def route_decision(
             metadata={"confidence": conf, "source": source},
         )
 
-    # ── LIVE — Zerodha execution ──────────────────────────────────────────────
+    # ── LIVE — real-money execution ───────────────────────────────────────────
     #
-    # DELIBERATELY NOT MIGRATED to Upstox (2026-08-31). Market DATA moved to
-    # Upstox; ORDER PLACEMENT did not, because no Upstox order executor exists —
-    # engine/zerodha_executor.py and its 10 safety rules are still the only
-    # execution path. So this token check stays, and it is load-bearing: with
-    # Kite's token expired it blocks live orders outright, which is the correct
-    # and safe outcome. The message says so, rather than implying that
-    # refreshing a token would make live trading work.
+    # NO REAL ORDER EXECUTION (2026-09-02, operator decision).
+    #
+    # This system is paper-only. The one real-broker executor it has
+    # (engine/zerodha_executor.py) runs on Zerodha, and Zerodha is now disabled
+    # everywhere; there is no Upstox order executor. So LIVE has no path to a
+    # broker at all, and the honest thing is to say so and stop.
+    #
+    # WHY THIS IS A HARD BLOCK AND NOT A TOKEN CHECK
+    # ----------------------------------------------
+    # Until today this gate read `if not kite.access_token`. That made "can we
+    # trade live?" depend on a CREDENTIAL rather than on a DECISION — so
+    # dropping a valid Kite token into .env would silently re-arm real order
+    # placement, with no code change and no review, straight into
+    # engine/zerodha_executor.py's known-broken call path (audit defect D2).
+    # A configuration value must not be able to switch real money back on.
+    #
+    # This is deliberately NOT the strategy-toggle posture. Those fail OPEN so a
+    # database blip cannot halt trading. This fails CLOSED, unconditionally,
+    # because the failure modes are not symmetric: refusing a live order costs
+    # an opportunity, while accidentally placing one costs real money.
+    #
+    # To re-enable live trading, build an executor and delete this block
+    # deliberately. Do not re-introduce a credential check in its place.
     if mode == TradeMode.LIVE:
-        from crawler.zerodha_client import get_kite_client
-        kite = get_kite_client()
-        if not kite.access_token:
-            logger.warning(
-                "[decision_router] LIVE blocked: no Zerodha token. Order placement "
-                "still runs through Zerodha; only market data moved to Upstox."
-            )
-            return RoutingResult(
-                outcome=RoutingOutcome.BLOCKED_NO_TOKEN,
-                mode=mode,
-                reason=("Zerodha access token missing or expired — live order placement "
-                        "is unavailable. Market data comes from Upstox, but there is no "
-                        "Upstox order executor, so LIVE mode cannot execute."),
-                metadata={"source": source},
-            )
-
-        try:
-            from engine.zerodha_executor import place_real_order
-            qty = int(position_size.get("units", 1)) if position_size else 1
-            # D2 (audit 2026-08-19): signal_id= and confidence= were passed
-            # here but place_real_order() accepts neither (its keyword-only
-            # params are signal, order_type, product, exchange, variety, price,
-            # trigger_price, tag). Every live order therefore raised TypeError,
-            # which the broad `except Exception` below swallowed and reported as
-            # a generic RoutingOutcome.ERROR -- indistinguishable from a broker
-            # outage. Nothing is lost by dropping them: `conf` is already logged
-            # below, and place_real_order derives its own ATP_{id} tag from
-            # signal.id. tests/test_live_order_path.py pins this against the
-            # real signature so it cannot drift again.
-            result = await place_real_order(
-                symbol=signal.symbol,
-                transaction_type=signal.action,
-                quantity=qty,
-                session=session,
-                signal=signal,
-                product=product,
-            )
-            order_id = (result or {}).get("order_id")
-            outcome = (
-                RoutingOutcome.EXECUTED_LIVE if order_id
-                else RoutingOutcome.BLOCKED_GATE
-            )
-            reason = "live order placed" if order_id else (result or {}).get("error", "live order failed")
-            logger.info(
-                f"[decision_router] LIVE {signal.symbol} {signal.action} "
-                f"qty={qty} conf={conf:.1f} → {outcome.value} order_id={order_id}"
-            )
-            return RoutingResult(
-                outcome=outcome, mode=mode, reason=reason, order_id=order_id,
-                metadata={"confidence": conf, "source": source},
-            )
-        except Exception as exc:
-            logger.error(f"[decision_router] LIVE error for {signal.symbol}: {exc}")
-            return RoutingResult(
-                outcome=RoutingOutcome.ERROR, mode=mode,
-                reason=f"live execution error: {exc}",
-                metadata={"source": source},
-            )
+        logger.error(
+            f"[decision_router] LIVE BLOCKED (paper-only system): {signal.symbol} "
+            f"{signal.action} conf={conf:.1f} source={source}"
+        )
+        await _log_decision_audit(signal, mode, "BLOCKED_NO_TOKEN", source, session)
+        return RoutingResult(
+            outcome=RoutingOutcome.BLOCKED_NO_TOKEN,
+            mode=mode,
+            reason=("Live order execution is disabled system-wide. This deployment is "
+                    "paper-only: Zerodha is switched off and there is no Upstox order "
+                    "executor, so no real order can be placed by any path."),
+            metadata={"source": source, "confidence": conf, "paper_only": True},
+        )
 
     # ── PAPER — simulator execution ───────────────────────────────────────────
     try:

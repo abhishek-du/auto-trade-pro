@@ -179,7 +179,7 @@ async def fetch_live_snapshot(extra_symbols: list[str] | None = None) -> dict[st
             "open":       float(ohlc.get("open", 0) or 0),
             "high":       float(ohlc.get("high", 0) or 0),
             "low":        float(ohlc.get("low", 0) or 0),
-            "source":     "kite_ohlc",
+            "source":     "upstox_ohlc",
             "_ts":        now_ts,
         }
 
