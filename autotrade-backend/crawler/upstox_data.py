@@ -375,17 +375,37 @@ async def get_news(symbol: str, limit: int = 10) -> list[dict]:
         logger.warning(f"[upstox/news] No instrument key for {symbol}")
         return []
 
+    # Endpoint corrected 2026-09-02. This called `{_V2}/news/articles`, which
+    # does not exist — Upstox answered 404 UDAPI100060 for every symbol, ever.
+    # The real path is `/v2/news`, and it requires a `category`: the API rejects
+    # the request outright without it (UDAPI1189, "Allowed values:
+    # instrument_keys, positions, holdings"). Parameter names differ too —
+    # `instrument_keys` (plural) and `page_number`, not `instrument_key`/`page`.
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(
-                f"{_V2}/news/articles",
+                f"{_V2}/news",
                 headers=_headers(),
-                params={"instrument_key": ikey, "page_size": limit, "page": 1},
+                params={
+                    "category":        "instrument_keys",
+                    "instrument_keys": ikey,
+                    "page_number":     1,
+                    "page_size":       limit,
+                },
             )
             if r.status_code == 200:
-                data = r.json().get("data", {})
-                articles = data.get("articles", data) if isinstance(data, dict) else data
-                out = [_parse_news_item(a) for a in (articles if isinstance(articles, list) else [])]
+                # data is keyed BY instrument_key: {"NSE_EQ|INE...": [article…]}.
+                # It is not a flat list, and it is {} when there is no news —
+                # which is a valid empty result, not a failure.
+                data = r.json().get("data") or {}
+                articles: list = []
+                if isinstance(data, dict):
+                    for _key, items in data.items():
+                        if isinstance(items, list):
+                            articles.extend(items)
+                elif isinstance(data, list):
+                    articles = data
+                out = [_parse_news_item(a) for a in articles][:limit]
                 _set_cache(ck, out, "news")
                 return out
             logger.warning(f"[upstox/news] {symbol} → {r.status_code}: {r.text[:200]}")
@@ -395,12 +415,32 @@ async def get_news(symbol: str, limit: int = 10) -> list[dict]:
 
 
 def _parse_news_item(a: dict) -> dict:
+    """Normalise one Upstox article.
+
+    The real payload is {heading, summary, thumbnail, article_link,
+    published_time}. This parser previously read title/url/source/published_at,
+    none of which Upstox sends — so had the endpoint above ever returned 200,
+    every field except `summary` would still have come back empty. The old
+    names are kept as fallbacks in case the shape varies by article type.
+
+    `published_time` is epoch MILLISECONDS; it is converted to an ISO string so
+    it sorts and renders like every other news source in this codebase.
+    """
+    ts = a.get("published_time") or a.get("published_at") or a.get("date") or ""
+    if isinstance(ts, (int, float)) and ts > 0:
+        import datetime as _dt
+
+        # Milliseconds since epoch — seconds would put these dates in 1970.
+        ts = _dt.datetime.fromtimestamp(ts / 1000, _dt.timezone.utc).isoformat()
+
     return {
-        "title":       a.get("title") or a.get("headline", ""),
-        "url":         a.get("url") or a.get("link", ""),
-        "source":      a.get("source") or a.get("publisher", ""),
-        "published_at": a.get("published_at") or a.get("date", ""),
-        "summary":     a.get("summary") or a.get("description", ""),
+        "title":        a.get("heading") or a.get("title") or "",
+        "url":          a.get("article_link") or a.get("url") or a.get("link", ""),
+        # Upstox does not attribute a publisher on these; it is their own desk.
+        "source":       a.get("source") or a.get("publisher") or "Upstox",
+        "published_at": ts,
+        "summary":      a.get("summary") or a.get("description", ""),
+        "thumbnail":    a.get("thumbnail", ""),
     }
 
 
