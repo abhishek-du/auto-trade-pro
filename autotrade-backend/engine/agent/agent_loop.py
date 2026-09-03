@@ -1058,7 +1058,7 @@ async def _build_scan_universe(session: AsyncSession) -> list[str]:
 
     # 1. BUY-signaled stocks from the latest market shortlist
     try:
-                limit = int(getattr(settings, "MAX_AGENT_SHORTLIST", 500))
+        limit = int(getattr(settings, "MAX_AGENT_SHORTLIST", 500))
         rows = (await session.execute(
             _sel(MarketShortlist.symbol, MarketShortlist.signal, MarketShortlist.master_score)
             .where(MarketShortlist.signal.in_(["BUY", "STRONG_BUY", "HOLD"]))

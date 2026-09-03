@@ -647,7 +647,13 @@ class KiteInstrument(Base):
     )
 
     id:               Mapped[int]          = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instrument_token: Mapped[int]          = mapped_column(Integer,     nullable=False)
+    # Nullable since 2026-09-03. This is KITE's instrument token. Rows sourced
+    # from the Upstox bulk master (crawler.upstox_instruments
+    # .sync_nse_instruments_from_bulk) have no Kite token and never will — NULL
+    # is the truthful value. Upstox rows are identified by `instrument_key`.
+    # Postgres permits multiple NULLs under uq_kite_instrument_token, so the
+    # existing uniqueness guarantee for Kite-sourced rows is unaffected.
+    instrument_token: Mapped[int | None]   = mapped_column(Integer,     nullable=True)
     exchange_token:   Mapped[int]          = mapped_column(Integer,     nullable=False, default=0)
     tradingsymbol:    Mapped[str]          = mapped_column(String(30),  nullable=False)
     # ── Upstox migration (2026-08-31) ────────────────────────────────────────

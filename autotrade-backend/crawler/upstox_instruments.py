@@ -310,3 +310,130 @@ async def build_key_maps(session) -> tuple[dict, dict]:
     fwd = {f"{r.tradingsymbol}.NS": r.instrument_key for r in rows}
     rev = {r.instrument_key: f"{r.tradingsymbol}.NS" for r in rows}
     return fwd, rev
+
+
+# ── Bulk instrument master (assets.upstox.com) ────────────────────────────────
+#
+# Added 2026-09-03, the day the corporate firewall stopped blocking
+# assets.upstox.com.
+#
+# WHY THIS EXISTS
+# ---------------
+# Until now the ONLY thing that added rows to `kite_instruments` was
+# crawler.zerodha_market.sync_nse_eq_instruments, which downloads Kite's
+# instrument dump. That has been dead since Kite's token expired on 2026-08-31 —
+# it returned {"error": "no_access_token"} every morning at 08:30 IST, so the
+# universe was frozen at its 2026-08-29 contents and no newly listed NSE symbol
+# could enter the system at all.
+#
+# search_instrument() could not replace it: /v2/instruments/search answers a
+# query, it does not enumerate an exchange. The bulk file does, and it carries
+# `instrument_key` and `isin` inline — so this single download also does the job
+# that sync_upstox_instrument_keys() was doing one HTTP request at a time.
+#
+# NSE-ONLY, deliberately. The file also contains BSE and derivatives; both are
+# out of scope (see docs/NEWS_ONLY_TARGET_ARCHITECTURE_CONTRACT.md and the
+# Step 2A NSE-only enforcement). Filtering here keeps BSE rows from re-entering
+# the table through a new door.
+
+_BULK_NSE_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+
+
+async def sync_nse_instruments_from_bulk(session, *, url: str = _BULK_NSE_URL) -> dict:
+    """Download the Upstox NSE instrument master and upsert the EQ rows.
+
+    Returns a summary dict. Never raises: a failed download leaves the existing
+    universe untouched, which is the safe outcome — a partial or empty write
+    would silently shrink the tradeable universe.
+    """
+    import datetime as _dt
+    import gzip
+    import json
+
+    from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+    from db.models import KiteInstrument
+
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as c:
+            r = await c.get(url)
+        if r.status_code != 200:
+            logger.error(f"[upstox_instruments] bulk master HTTP {r.status_code}")
+            return {"downloaded": 0, "upserted": 0, "error": f"http_{r.status_code}"}
+        raw = json.loads(gzip.decompress(r.content))
+    except Exception as exc:
+        # The firewall block presented exactly here for weeks; name it clearly.
+        logger.error(
+            f"[upstox_instruments] bulk master download failed: "
+            f"{type(exc).__name__}: {exc}. Universe NOT updated."
+        )
+        return {"downloaded": 0, "upserted": 0, "error": type(exc).__name__}
+
+    now = _dt.datetime.utcnow()
+    batch: list[dict] = []
+    seen: set[str] = set()
+    for i in raw:
+        if i.get("segment") != _NSE_EQ or i.get("instrument_type") != "EQ":
+            continue
+        sym = str(i.get("trading_symbol") or "").strip()
+        ikey = str(i.get("instrument_key") or "").strip()
+        if not sym or not ikey or sym in seen:
+            continue
+        seen.add(sym)
+
+        # exchange_token is the exchange's own numeric id. It is NOT Kite's
+        # instrument_token (Kite derives its own), so it must not be written to
+        # that column — doing so would collide with the existing Kite-sourced
+        # rows under uq_kite_instrument_token. The upsert below keys on
+        # (exchange, tradingsymbol) instead and leaves instrument_token alone.
+        try:
+            xtok = int(i.get("exchange_token") or 0)
+        except (TypeError, ValueError):
+            xtok = 0
+
+        batch.append({
+            "exchange_token":  xtok,
+            "tradingsymbol":   sym,
+            "name":            str(i.get("name") or "").strip(),
+            "last_price":      0.0,
+            "expiry":          "",
+            "strike":          0.0,
+            "tick_size":       float(i.get("tick_size") or 0.05),
+            "lot_size":        int(float(i.get("lot_size") or 1)),
+            "instrument_type": "EQ",
+            "segment":         "NSE",
+            "exchange":        "NSE",
+            "instrument_key":  ikey,
+            "isin":            str(i.get("isin") or "").strip() or None,
+            "refreshed_at":    now,
+        })
+
+    if not batch:
+        logger.error("[upstox_instruments] bulk master parsed 0 NSE_EQ rows — not writing")
+        return {"downloaded": len(raw), "upserted": 0, "error": "no_eq_rows"}
+
+    # 14 columns x 1,500 rows = 21,000 bind params, under PostgreSQL's 32,767 cap.
+    _CHUNK = 1500
+    upserted = 0
+    for n in range(0, len(batch), _CHUNK):
+        chunk = batch[n:n + _CHUNK]
+        stmt = _pg_insert(KiteInstrument).values(chunk)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["exchange", "tradingsymbol"],
+            set_={
+                "name":           stmt.excluded.name,
+                "instrument_key": stmt.excluded.instrument_key,
+                "isin":           stmt.excluded.isin,
+                "tick_size":      stmt.excluded.tick_size,
+                "lot_size":       stmt.excluded.lot_size,
+                "exchange_token": stmt.excluded.exchange_token,
+                "refreshed_at":   stmt.excluded.refreshed_at,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+        upserted += len(chunk)
+
+    summary = {"downloaded": len(raw), "nse_eq": len(batch), "upserted": upserted}
+    logger.info(f"[upstox_instruments] bulk master → {summary}")
+    return summary

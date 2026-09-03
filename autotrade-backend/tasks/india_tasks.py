@@ -3974,27 +3974,41 @@ def sync_upstox_instrument_keys_task():
 
 
 async def _sync_nse_eq_instruments():
-    """Download ALL NSE+BSE equity instruments from Zerodha and upsert into kite_instruments.
+    """Refresh the NSE equity universe from the Upstox bulk instrument master.
 
-    This populates the full ~9,600 NSE EQ universe so that every stock
-    automatically gets an instrument_token and daily candle ingestion.
-    Without this, only the 30 hardcoded symbols in NSE_TOKENS are tracked.
+    UPSTOX-BACKED since 2026-09-03. This ran on Kite's instrument dump and had
+    been returning {"error": "no_access_token"} every morning since that token
+    expired on 2026-08-31 — so the universe was frozen at its 2026-08-29
+    contents and no newly listed NSE symbol could enter the system. It could not
+    be migrated earlier because assets.upstox.com was blocked by the corporate
+    firewall; that block was lifted on 2026-09-03.
+
+    The bulk file carries `instrument_key` and `isin` inline, so this one
+    download also does the work sync_upstox_instrument_keys() was doing a single
+    HTTP search at a time. That task stays scheduled as a safety net for
+    anything the master omits, but it should now find little to do.
+
+    NSE-only: the file also contains BSE and derivatives, both out of scope.
     """
-    from crawler.zerodha_market import sync_nse_eq_instruments
-    from crawler.zerodha_market import hydrate_tokens_from_db
+    from crawler.upstox_instruments import sync_nse_instruments_from_bulk
     from tasks._db import celery_session
 
     async with celery_session() as session:
-        result = await sync_nse_eq_instruments(session)
-        # Re-hydrate the in-memory NSE_TOKENS map so this worker
-        # immediately benefits from the new symbols without a restart.
-        await hydrate_tokens_from_db(session)
+        result = await sync_nse_instruments_from_bulk(session)
 
-    logger.info(
-        f"[sync_nse_eq_instruments] done — "
-        f"NSE={result.get('nse_eq', 0):,}  BSE={result.get('bse_eq', 0):,}  "
-        f"total={result.get('total', 0):,}"
-    )
+    if result.get("error"):
+        # Loud, because a silent no-op here freezes the universe — exactly the
+        # failure mode the Kite version had for four days without anyone noticing.
+        logger.error(
+            f"[sync_nse_eq_instruments] FAILED ({result['error']}) — universe NOT "
+            f"updated; newly listed symbols will be missing until this succeeds"
+        )
+    else:
+        logger.info(
+            f"[sync_nse_eq_instruments] done — NSE_EQ={result.get('nse_eq', 0):,} "
+            f"upserted={result.get('upserted', 0):,} "
+            f"(of {result.get('downloaded', 0):,} instruments in the master)"
+        )
     return result
 
 
