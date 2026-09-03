@@ -44,7 +44,7 @@ async def _run_market_scanner(force: bool = False):
         logger.info("[market_scanner] Outside trading window — skipping")
         return {"status": "skipped", "reason": "outside trading window"}
 
-    top_n    = int(getattr(settings, "MARKET_SCANNER_TOP_N",           100))
+    top_n    = int(getattr(settings, "MAX_SCANNER_SHORTLIST", 500))
     min_vol  = float(getattr(settings, "MARKET_SCANNER_MIN_VOLUME_RATIO", 0.0))
     min_score = float(getattr(settings, "MARKET_SCANNER_MIN_MASTER_SCORE", 0.0))
 

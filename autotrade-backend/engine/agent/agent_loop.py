@@ -1058,11 +1058,12 @@ async def _build_scan_universe(session: AsyncSession) -> list[str]:
 
     # 1. BUY-signaled stocks from the latest market shortlist
     try:
+                limit = int(getattr(settings, "MAX_AGENT_SHORTLIST", 500))
         rows = (await session.execute(
             _sel(MarketShortlist.symbol, MarketShortlist.signal, MarketShortlist.master_score)
             .where(MarketShortlist.signal.in_(["BUY", "STRONG_BUY", "HOLD"]))
             .order_by(MarketShortlist.master_score.desc())
-            .limit(120)
+            .limit(limit)
         )).all()
         for row in rows:
             sym = row.symbol if row.symbol.endswith(".NS") else row.symbol + ".NS"
@@ -1102,7 +1103,7 @@ async def _build_scan_universe(session: AsyncSession) -> list[str]:
     except Exception as _me:
         logger.debug(f"[agent] momentum_filter refresh error: {_me}")
 
-    return universe[:150]
+    return universe[:limit]
 
 async def _fetch_hub_scores(universe: list[str], session: AsyncSession) -> dict[str, dict]:
     """Fetch hub composite scores + signals for all universe symbols in one query."""

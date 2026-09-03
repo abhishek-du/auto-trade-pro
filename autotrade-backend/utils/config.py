@@ -460,6 +460,8 @@ class Settings(BaseSettings):
     # cycle, and GAP_AND_GO scores 96-99 vs VOLUME_BREAKOUT 72-74 so gaps took
     # the whole top-5 and every other rule was structurally starved.
     TACTICAL_MAX_SIGNALS_PER_CYCLE: int = 40
+    MAX_AGENT_SHORTLIST:          int   = 500
+    MAX_SCANNER_SHORTLIST:        int   = 500
     TACTICAL_TOP_N:               int   = 15
     # Fast candle lane (audit blocker 3). Builds 1m bars from the live tick
     # stream so F1 stops computing indicators on 20-40 minute old DB bars.

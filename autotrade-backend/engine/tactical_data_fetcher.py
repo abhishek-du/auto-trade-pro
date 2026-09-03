@@ -354,21 +354,26 @@ async def get_market_context() -> MarketContext:
 
 
 async def get_universe(session: AsyncSession, limit: int) -> list[str]:
-    """Top-N symbols from `hub_universe` by turnover rank. READ-ONLY.
-
-    `hub_universe` is rebuilt daily as the top-N NSE equities by average daily
-    turnover, so `rank` is already a liquidity ordering — which is what F1 needs
-    and what the brief approximates as "Nifty 50". There is no Nifty-50
-    constituent list in this repo (`_NIFTY50` in engine/india_specific.py is the
-    index symbol "^NSEI", not a membership list), so turnover rank is the
-    defensible substitute.
-    """
+    """Dynamic symbols from `hub_universe` by turnover and price. READ-ONLY."""
     try:
+        from utils.config import settings
+        from db.models import HubUniverse, KiteInstrument
+        from sqlalchemy import select, func
+        min_turnover = float(getattr(settings, "TACTICAL_F1_MIN_TURNOVER_CR", 5.0))
+        min_price = float(getattr(settings, "TACTICAL_F1_MIN_PRICE", 20.0))
+        
         rows = (
             await session.execute(
                 select(HubUniverse.symbol)
-                .where(HubUniverse.rank > 0)
-                .order_by(HubUniverse.rank.asc())
+                .join(
+                    KiteInstrument,
+                    KiteInstrument.tradingsymbol == func.replace(HubUniverse.symbol, ".NS", "")
+                )
+                .where(
+                    (HubUniverse.turnover_cr >= min_turnover) & 
+                    (KiteInstrument.last_price >= min_price)
+                )
+                .order_by(HubUniverse.turnover_cr.desc())
                 .limit(limit)
             )
         ).scalars().all()
@@ -377,40 +382,39 @@ async def get_universe(session: AsyncSession, limit: int) -> list[str]:
         logger.warning(f"[tactical] universe fetch failed: {exc}")
         return []
 
-
 async def get_symbols_with_timeframe(
     session: AsyncSession, timeframe: str, limit: int
 ) -> list[str]:
-    """Universe intersected with symbols that actually have data for `timeframe`.
-
-    F4 runs on 5m candles, which cover ~1,250 symbols versus 1m's ~4,300.
-    Scanning a symbol with no 5m history just burns the cycle, so intersect
-    first rather than discovering it per-symbol.
-    """
+    """Universe intersected with symbols that actually have data for `timeframe`."""
     from sqlalchemy import text
+    from utils.config import settings
+    min_turnover = float(getattr(settings, "TACTICAL_F1_MIN_TURNOVER_CR", 5.0))
+    min_price = float(getattr(settings, "TACTICAL_F1_MIN_PRICE", 20.0))
 
     try:
         rows = (
             await session.execute(
                 text(
                     """
-                    SELECT c.symbol
+                    SELECT h.symbol
                       FROM hub_universe h
                       JOIN (SELECT DISTINCT symbol FROM candles
                              WHERE timeframe = :tf
                                AND timestamp > now() - interval '3 days') c
                         ON c.symbol = h.symbol
-                     WHERE h.rank > 0
-                     ORDER BY h.rank ASC
-                     LIMIT :lim
+                      JOIN kite_instruments k 
+                        ON k.tradingsymbol = REPLACE(h.symbol, '.NS', '')
+                     WHERE h.turnover_cr >= :min_turnover
+                       AND k.last_price >= :min_price
+                     ORDER BY h.turnover_cr DESC
                     """
                 ),
-                {"tf": timeframe, "lim": limit},
+                {"tf": timeframe, "min_turnover": min_turnover, "min_price": min_price}
             )
-        ).all()
-        return [r[0] for r in rows]
+        ).scalars().all()
+        return [s for s in rows if s]
     except Exception as exc:
-        logger.warning(f"[tactical] {timeframe} universe fetch failed: {exc}")
+        logger.warning(f"[tactical] timeframe universe fetch failed: {exc}")
         return []
 
 
