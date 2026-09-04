@@ -157,6 +157,68 @@ def _to_float(value, default: float = 0.0) -> float:
 import time
 _YF_RATE_LIMIT_UNTIL = 0.0
 
+def _delegate_daily_equity_to_canonical(symbol: str, period: str) -> list[dict]:
+    """Route an NSE-equity daily request to the canonical Upstox writer.
+
+    Synchronous, because fetch_nse_candles() is called from threads via
+    run_in_executor. asyncio.run() is safe here for exactly that reason, and
+    the RuntimeError guard covers the case where a caller is already on a loop.
+    """
+    import asyncio as _a
+    import datetime as _d
+
+    days = 60
+    try:
+        if period.endswith("d"):
+            days = int(period[:-1])
+        elif period.endswith("mo"):
+            days = int(period[:-2]) * 30
+        elif period.endswith("y"):
+            days = int(period[:-1]) * 365
+        elif period == "max":
+            days = 3650
+    except ValueError:
+        days = 60
+
+    to_d = _d.date.today()
+    frm = (to_d - _d.timedelta(days=days)).isoformat()
+
+    from crawler.upstox_candles import get_upstox_candles_for_range
+
+    try:
+        _a.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        # Already inside a loop: cannot asyncio.run(). Returning [] is correct —
+        # fail closed rather than fall back to a different provider.
+        logger.warning(
+            f"[india_price_feed] {symbol}: daily equity delegation called from a "
+            f"running loop; returning [] (use get_upstox_candles_for_range directly)"
+        )
+        return []
+
+    try:
+        rows = _a.run(get_upstox_candles_for_range(symbol, frm, to_d.isoformat(),
+                                                   interval="1d"))
+    except Exception as exc:
+        logger.warning(f"[india_price_feed] {symbol}: canonical daily fetch failed: {exc}")
+        return []
+
+    if rows:
+        logger.info(
+            f"Upstox NSE(canonical) ✓  {symbol:<15} {len(rows):4d} daily candles  "
+            f"latest={rows[-1]['timestamp']}"
+        )
+    else:
+        # Explicitly NOT falling back to yfinance — see the docstring above.
+        logger.warning(
+            f"[india_price_feed] {symbol}: no canonical Upstox daily data; "
+            f"returning [] (yfinance fallback is disabled for NSE equity 1d)"
+        )
+    return rows
+
+
 def fetch_nse_candles(
     symbol: str,
     interval: str = "1h",
@@ -174,8 +236,34 @@ def fetch_nse_candles(
     -------
     list of dicts compatible with ``save_candles_to_db()``.
     Returns ``[]`` on any error — never raises.
+
+    DAILY NSE EQUITY IS DELEGATED (Step 2C.2)
+    -----------------------------------------
+    This function used to be a SECOND daily pipeline. Its Upstox branch wrote
+    18:30 UTC and its yfinance fallback wrote 00:00 UTC, while the canonical
+    writer wrote 03:45 — three conventions for one table.
+
+    For an NSE EQUITY at interval '1d' it now delegates to the one canonical
+    implementation, crawler.upstox_candles.get_upstox_candles_for_range, rather
+    than converting timestamps a second time. There must be exactly one place
+    that knows how an Upstox daily label becomes a stored timestamp.
+
+    And it FAILS CLOSED: if Upstox returns nothing for an equity daily request
+    the answer is [], never a yfinance-derived 00:00 bar. A silent provider
+    fallback that also changes the timestamp convention is worse than no data,
+    because the caller cannot tell the difference.
+
+    Non-equity symbols (indices, ETFs, debt series) keep the legacy behaviour —
+    they are outside the equity contract and ^NSEI has no Upstox instrument key.
     """
     global _YF_RATE_LIMIT_UNTIL
+
+    if interval in ("1d", "day"):
+        from utils.candle_contract import InstrumentClass, classify_instrument
+
+        if classify_instrument(symbol) is InstrumentClass.NSE_EQUITY:
+            return _delegate_daily_equity_to_canonical(symbol, period)
+
     if time.time() < _YF_RATE_LIMIT_UNTIL:
         return []
         

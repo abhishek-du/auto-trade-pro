@@ -371,20 +371,54 @@ def _to_naive_utc(ts) -> datetime:
     return ts
 
 
-async def save_candles_to_db(candles: list[dict], session: AsyncSession) -> int:
+async def save_candles_to_db(
+    candles: list[dict],
+    session: AsyncSession,
+    *,
+    source: str = "unspecified",
+    enforce_contract: bool = True,
+) -> int:
     """Batch-insert candles, skipping any that already exist.
 
-    Uses INSERT … ON CONFLICT DO NOTHING against the (symbol, timeframe, timestamp)
-    unique constraint.  Returns the count of genuinely new rows inserted.
+    CANONICAL DAILY GUARD (Step 2C.2)
+    ---------------------------------
+    Eleven code paths can persist a candle, and Step 2C.1 found three different
+    daily timestamp conventions actively writing to this one table. Enforcing
+    the contract at each call site would leave the next new writer free to
+    invent a fourth, so the check lives HERE — the single choke point every
+    writer but the resampler (5m/15m/1h only) and one manual script passes
+    through.
 
-    Rows are sent in chunks of 3 000 to stay under asyncpg's 32 767 parameter
-    limit (3 000 rows × 8 columns = 24 000 params per statement).
+    Only NSE EQUITY '1d' rows are governed: they must carry the canonical
+    03:45 UTC session-open timestamp. Intraday rows, indices, ETFs and debt
+    series pass through untouched — see utils/candle_contract.
+
+    Rejected rows are DROPPED and logged with their source, never rewritten.
+    Silent repair is how three conventions accumulated in the first place.
+
+    `source` names the calling pipeline so every dropped bar has a
+    deterministic provenance path. `enforce_contract=False` exists only for
+    the historical reconciliation work in Step 2D, which must be able to write
+    legacy timestamps deliberately.
+
+    Uses INSERT ON CONFLICT DO NOTHING against the (symbol, timeframe, timestamp)
+    unique constraint. Returns the count of genuinely new rows inserted.
+
+    Rows are sent in chunks of 3,000 to stay under asyncpg's 32,767 parameter
+    limit (3,000 rows x 8 columns = 24,000 params per statement).
 
     Timestamps are normalised to UTC-naive before insert to avoid asyncpg
     DataError when callers pass timezone-aware datetimes.
     """
     if not candles:
         return 0
+
+    if enforce_contract:
+        from utils.candle_contract import filter_canonical_candles
+
+        candles, _rejected = filter_canonical_candles(candles, source=source)
+        if not candles:
+            return 0
 
     rows = [
         {

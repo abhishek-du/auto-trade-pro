@@ -1,11 +1,46 @@
-"""One-shot backfill: download 1 year of daily candles from yfinance for every
-symbol in hub_universe plus any symbol that already has 1h candles in the DB.
+"""LEGACY / DISABLED — one-shot yfinance daily backfill.
 
-Run from the project root:
-    .venv/bin/python3 scripts/backfill_1d_candles.py
+DISABLED 2026-09-04 (Step 2C.2). DO NOT RE-ENABLE WITHOUT READING THIS.
 
-Safe to re-run — uses ON CONFLICT DO NOTHING so duplicates are skipped.
+This script writes daily candles from yfinance, whose daily timestamps are
+tz-naive MIDNIGHT — i.e. the 00:00 UTC series. That is one of the two legacy
+conventions Step 2C.1 identified, and it is the DEAD, pre-split series: for
+JLHL.NS its last close is 1348.0 against the live series' 315.45.
+
+It also bypasses the canonical guard entirely: it INSERTs straight into
+`candles` rather than going through price_feed.save_candles_to_db, so the
+contract check in utils/candle_contract cannot see it.
+
+Running it would silently reintroduce exactly the divergence Step 2C.2 exists
+to eliminate, across hub_universe.
+
+If a daily backfill is needed, use the canonical pipeline instead:
+
+    crawler.upstox_candles.get_upstox_candles_for_range(symbol, frm, to, "1d")
+    crawler.price_feed.save_candles_to_db(rows, session, source="manual-backfill")
+
+which produces 03:45 UTC session-open timestamps and is validated on write.
+
+The historical rows this script already created are NOT touched — historical
+reconciliation is Step 2D.
 """
+
+# Hard stop. Placed at import time so neither `python scripts/backfill_1d_candles.py`
+# nor an accidental `import` can reach the yfinance write path below.
+_DISABLED_REASON = (
+    "scripts/backfill_1d_candles.py is DISABLED (Step 2C.2): it writes the dead "
+    "00:00 UTC yfinance daily series and bypasses the canonical candle guard. "
+    "Use crawler.upstox_candles.get_upstox_candles_for_range + "
+    "price_feed.save_candles_to_db(source=...) instead. "
+    "Set ALLOW_LEGACY_1D_BACKFILL=1 only if you have read Step 2C.2 and intend "
+    "to write legacy-convention rows deliberately."
+)
+
+import os as _os
+
+if _os.environ.get("ALLOW_LEGACY_1D_BACKFILL") != "1":
+    raise SystemExit(_DISABLED_REASON)
+
 import asyncio
 import os
 import sys
