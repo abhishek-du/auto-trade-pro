@@ -50,6 +50,12 @@ from enum import Enum
 from utils.logger import logger
 
 # 09:15 IST session open, expressed in UTC. The single source of this constant.
+#
+# CAVEAT (Step 2D.0): this anchors the REGULAR session. NSE also runs a Diwali
+# Muhurat session of roughly 18:00-19:00 IST (2026-11-08), which does not open at
+# 09:15 — anchoring that day's bar to 03:45 UTC would place it ~8 hours before
+# trading actually began. One token session a year; flagged rather than silently
+# mis-anchored, pending a decision in Step 2D.
 CANONICAL_DAILY_UTC_TIME = _dt.time(3, 45)
 IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
 
@@ -98,17 +104,86 @@ def classify_instrument(symbol: str | None) -> InstrumentClass:
     return InstrumentClass.NSE_EQUITY
 
 
-def is_nse_trading_session(d: _dt.date, holidays: set[str] | None = None) -> bool:
-    """Weekday and (when supplied) not an NSE holiday.
+def nse_closed_dates(holidays_payload: list[dict] | None) -> set[str]:
+    """Dates NSE is ACTUALLY SHUT, from an Upstox /v2/market/holidays payload.
 
-    `holidays` is injected rather than fetched so this stays synchronous and
-    testable; callers with a calendar pass it, callers without get the weekday
-    check alone. Absence of a calendar must not turn into a silent pass of a
-    holiday date, so the caller is told which check ran.
+    THIS IS NOT "every date the endpoint returns" (fixed 2026-09-04, Step 2D.0).
+
+    That endpoint mixes three kinds of entry, and only one of them closes NSE:
+
+        TRADING_HOLIDAY     NSE shut                       -> exclude the session
+        SETTLEMENT_HOLIDAY  NSE TRADES NORMALLY            -> a real session
+        SPECIAL_TIMING      NSE trades on a shifted clock  -> a real session
+
+    Measured on the 2026 calendar: 22 entries, of which **6 are days NSE is
+    open** — Id-E-Milad (26-Aug), Gudi Padwa, Budget Day, Diwali Laxmi Pujan and
+    two more. RELIANCE traded 5,744,474 shares on 26-Aug-2026.
+
+    Treating the raw list as closures would therefore discard six genuine
+    trading sessions a year, and they are exactly the unusual sessions a
+    prediction model most wants.
+
+    The authority is each entry's `open_exchanges`: if NSE appears there, the
+    market was open, whatever the entry is called.
     """
+    closed: set[str] = set()
+    for h in holidays_payload or []:
+        d = h.get("date")
+        if not d:
+            continue
+        opens = {e.get("exchange") for e in (h.get("open_exchanges") or [])}
+        if "NSE" not in opens:
+            closed.add(d)
+    return closed
+
+
+def nse_extra_open_dates(holidays_payload: list[dict] | None) -> set[str]:
+    """Dates NSE trades that a weekday test would wrongly reject.
+
+    NSE runs SPECIAL WEEKEND SESSIONS (discovered 2026-09-04, Step 2D.0):
+
+        2026-02-01  Sunday  Budget Day Session   09:15-15:30 IST  (a FULL session)
+        2026-11-08  Sunday  Diwali Laxmi Pujan   18:00-19:00 IST  (Muhurat)
+
+    A weekday-only session test discards both. Budget Day in particular is a
+    normal-length session whose bar a prediction model would very much want.
+    """
+    extra: set[str] = set()
+    for h in holidays_payload or []:
+        d = h.get("date")
+        if not d:
+            continue
+        opens = {e.get("exchange") for e in (h.get("open_exchanges") or [])}
+        if "NSE" in opens and _dt.date.fromisoformat(d).weekday() >= 5:
+            extra.add(d)
+    return extra
+
+
+def is_nse_trading_session(
+    d: _dt.date,
+    holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
+) -> bool:
+    """Was NSE open on this date?
+
+    `holidays`   — dates NSE was ACTUALLY SHUT. Build with nse_closed_dates(),
+                   never from the raw /market/holidays date list, or six real
+                   sessions a year are thrown away (settlement holidays and
+                   special-timing days trade normally).
+    `extra_open` — weekend dates NSE nonetheless traded. Build with
+                   nse_extra_open_dates(). Without it, Budget Day and Muhurat
+                   sessions are wrongly rejected.
+
+    The calendar is authoritative over the weekday heuristic, in both
+    directions. Both sets are injected rather than fetched so this stays
+    synchronous and testable.
+    """
+    iso = d.isoformat()
+    if extra_open and iso in extra_open:
+        return True                      # calendar overrides the weekday rule
     if d.weekday() >= 5:
         return False
-    if holidays and d.isoformat() in holidays:
+    if holidays and iso in holidays:
         return False
     return True
 
