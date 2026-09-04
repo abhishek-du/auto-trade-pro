@@ -158,7 +158,12 @@ import time
 _YF_RATE_LIMIT_UNTIL = 0.0
 
 def _delegate_daily_equity_to_canonical(symbol: str, period: str) -> list[dict]:
-    """Route an NSE-equity daily request to the canonical Upstox writer.
+    """Route an NSE equity OR INDEX daily request to the canonical Upstox writer.
+
+    Indices were added in Step 2D.0.1. They share the equity mapping exactly, so
+    this stays one function — a separate index path would be a second place that
+    knows how an Upstox daily label becomes a timestamp, which is the thing this
+    whole line of work exists to prevent.
 
     Synchronous, because fetch_nse_candles() is called from threads via
     run_in_executor. asyncio.run() is safe here for exactly that reason, and
@@ -214,7 +219,7 @@ def _delegate_daily_equity_to_canonical(symbol: str, period: str) -> list[dict]:
         # Explicitly NOT falling back to yfinance — see the docstring above.
         logger.warning(
             f"[india_price_feed] {symbol}: no canonical Upstox daily data; "
-            f"returning [] (yfinance fallback is disabled for NSE equity 1d)"
+            f"returning [] (yfinance fallback is disabled for NSE equity/index 1d)"
         )
     return rows
 
@@ -261,7 +266,21 @@ def fetch_nse_candles(
     if interval in ("1d", "day"):
         from utils.candle_contract import InstrumentClass, classify_instrument
 
-        if classify_instrument(symbol) is InstrumentClass.NSE_EQUITY:
+        # NSE INDICES JOIN THE CANONICAL PIPELINE (Step 2D.0.1).
+        #
+        # 2D.0 proved Upstox serves NSE_INDEX daily data with exactly the same
+        # midnight-IST date-label semantics as equities, and that the canonical
+        # reader already resolves index keys (_to_key('^NSEI') ->
+        # 'NSE_INDEX|Nifty 50'). Indices were only landing at 00:00 because this
+        # function routed every non-equity to yfinance.
+        #
+        # Leaving them there would mean equity daily bars at 03:45 and index
+        # daily bars at 00:00 — and performance_engine._aligned_closes compares
+        # exactly those two series against each other.
+        #
+        # Same delegate, no separate index implementation.
+        if classify_instrument(symbol) in (InstrumentClass.NSE_EQUITY,
+                                           InstrumentClass.NSE_INDEX):
             return _delegate_daily_equity_to_canonical(symbol, period)
 
     if time.time() < _YF_RATE_LIMIT_UNTIL:

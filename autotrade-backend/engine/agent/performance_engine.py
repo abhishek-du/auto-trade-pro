@@ -71,19 +71,66 @@ def _trading_date(ts: datetime) -> date:
     return d
 
 
-async def _aligned_closes(symbol: str, days: int, session: AsyncSession) -> dict[date, float]:
+async def _aligned_closes(
+    symbol: str,
+    days: int,
+    session: AsyncSession,
+    *,
+    holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
+) -> dict[date, float]:
+    """Close per NSE SESSION for a symbol, resolved explicitly.
+
+    THE BUG THIS REPLACES (Step 2D.0, measured on live data)
+    -------------------------------------------------------
+    This grouped rows by `_trading_date(timestamp)` — effectively the calendar
+    date — and kept the first row under `timestamp DESC`. While the legacy and
+    canonical daily series coexist that silently imports the FUTURE:
+
+        RELIANCE  2026-09-02 03:45  close 1313.1   -> session 2026-09-02
+        RELIANCE  2026-09-02 18:30  close 1302.5   -> session 2026-09-03
+
+    Both carry the calendar date 2026-09-02, 18:30 sorts first, so 2026-09-02
+    was reported as 1302.5 — the NEXT session's close. 2,276 symbol/date pairs
+    currently hold both conventions, so this was not a corner case.
+
+    WHAT IT DOES NOW
+    ----------------
+    Every row is resolved to its actual session through
+    utils.candle_contract.resolve_daily_session_date, which is calendar-driven
+    (a Friday 18:30 bar belongs to Monday; the day before a closure belongs to
+    the next OPEN session) and refuses any timestamp whose convention it does
+    not recognise rather than guessing.
+
+    When two rows genuinely describe the SAME session, the canonical bar wins —
+    that is a tiebreak within one session, never a choice between sessions.
+    """
+    from utils.candle_contract import (
+        SessionStatus,
+        convention_rank,
+        resolve_daily_session_date,
+    )
+
     rows = (await session.execute(
         select(Candle.timestamp, Candle.close)
         .where(Candle.symbol == symbol, Candle.timeframe == "1d")
-        .order_by(Candle.timestamp.desc()).limit(days + 10)
+        # Over-fetch: several stored rows can collapse to one session, so
+        # `days + 10` rows no longer guarantees `days` sessions.
+        .order_by(Candle.timestamp.desc()).limit((days + 10) * 3)
     )).all()
-    # Newest-first; normalise to trading date and keep the first (latest) per date.
-    out: dict[date, float] = {}
+
+    best: dict[date, tuple[int, float]] = {}
     for r in rows:
-        td = _trading_date(r.timestamp)
-        if td not in out:
-            out[td] = float(r.close)
-    return out
+        res = resolve_daily_session_date(
+            symbol, "1d", r.timestamp, holidays=holidays, extra_open=extra_open)
+        if not res.usable or res.session_date is None:
+            continue                       # refuse, never approximate
+        rank = convention_rank(res.convention)
+        prev = best.get(res.session_date)
+        if prev is None or rank < prev[0]:
+            best[res.session_date] = (rank, float(r.close))
+
+    return {d: v for d, (_, v) in best.items()}
 
 
 async def compute_symbol_beta(symbol: str, session: AsyncSession, days: int = 180) -> float | None:

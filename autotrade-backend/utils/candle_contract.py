@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+from dataclasses import dataclass
 from enum import Enum
 
 from utils.logger import logger
@@ -69,6 +70,7 @@ _LEGACY_TIMES = {
 class InstrumentClass(str, Enum):
     NSE_EQUITY = "nse_equity"
     NSE_INDEX = "nse_index"
+    OTHER_INDEX = "other_index"               # ^BSESN and friends — not NSE
     ETF_OR_INAV = "etf_or_inav"
     NON_EQUITY_SERIES = "non_equity_series"   # -SG / -N0 / -GS / -TB / -SM ...
     NON_NSE = "non_nse"                       # .BO and anything else
@@ -84,6 +86,12 @@ _ETF_PAT = re.compile(
 )
 _SERIES_SUFFIX = re.compile(r"-[A-Z0-9]{2}$")
 
+# NSE indices Upstox serves under the NSE_INDEX segment. Kept in step with
+# crawler.upstox_quotes._INDEX_KEYS, which holds the actual instrument keys;
+# duplicated as a plain frozenset so this module stays import-light and
+# synchronous.
+_NSE_INDEX_SYMBOLS = frozenset({"^NSEI", "^NSEBANK", "^INDIAVIX"})
+
 
 def classify_instrument(symbol: str | None) -> InstrumentClass:
     """Classify a candle symbol. Never raises; unknown input is UNKNOWN."""
@@ -91,7 +99,14 @@ def classify_instrument(symbol: str | None) -> InstrumentClass:
         return InstrumentClass.UNKNOWN
     s = symbol.strip()
     if s.startswith("^"):
-        return InstrumentClass.NSE_INDEX
+        # Only indices Upstox actually serves under NSE_INDEX can join the
+        # canonical daily pipeline. ^BSESN is a BSE index with no Upstox key:
+        # classifying it as NSE_INDEX would route it to a canonical fetch that
+        # returns nothing and, because that path fails closed, would silently
+        # delete its data from /india/market-indices and the regime engine's
+        # _REGIME_DAILY_SYMBOLS. Keep it on its legacy source.
+        return (InstrumentClass.NSE_INDEX if s in _NSE_INDEX_SYMBOLS
+                else InstrumentClass.OTHER_INDEX)
     if not s.endswith(".NS"):
         return InstrumentClass.NON_NSE
     base = s[:-3]
@@ -257,3 +272,172 @@ def filter_canonical_candles(
             f"daily equity bars from source={source!r}: {rejected}"
         )
     return ok, rejected
+
+
+# ── Read-side: resolving a stored timestamp back to its NSE session ──────────
+#
+# Step 2D.0 proved that a reader which groups daily rows by `timestamp::date`
+# is ACTIVELY WRONG while the legacy and canonical series coexist:
+#
+#   RELIANCE  2026-09-02 03:45  close 1313.1   -> session 2026-09-02
+#   RELIANCE  2026-09-02 18:30  close 1302.5   -> session 2026-09-03
+#
+# Both share the calendar date 2026-09-02. Ordering `timestamp DESC` and keeping
+# the first row hands the NEXT session's close to 2026-09-02 — a one-session
+# look-ahead in every metric derived from it. 2,276 symbol/date pairs currently
+# hold both conventions.
+#
+# So the read side gets its own explicit contract. Nothing here guesses: a
+# timestamp whose convention is not recognised is refused, not approximated.
+
+class DailyConvention(str, Enum):
+    CANONICAL_0345 = "canonical_0345"   # 03:45 UTC — session open, current writer
+    LEGACY_1830 = "legacy_1830"         # 18:30 UTC — session date MINUS one
+    LEGACY_0000 = "legacy_0000"         # 00:00 UTC — session date, pre-split series
+    UNKNOWN = "unknown"
+
+
+class SessionStatus(str, Enum):
+    VALID_CANONICAL = "valid_canonical"
+    VALID_LEGACY = "valid_legacy"
+    # Equity 00:00 rows are the DEAD pre-split series. Their DATE is sound, their
+    # PRICES are not comparable with the live series — callers must not silently
+    # mix them into a return calculation.
+    VALID_LEGACY_UNADJUSTED = "valid_legacy_unadjusted"
+    UNRESOLVED = "unresolved"
+    REJECTED_FUTURE = "rejected_future"
+    REJECTED_NON_SESSION = "rejected_non_session"
+
+
+@dataclass(frozen=True)
+class SessionResolution:
+    session_date: _dt.date | None
+    convention: DailyConvention
+    status: SessionStatus
+    reason: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        return self.status in (
+            SessionStatus.VALID_CANONICAL,
+            SessionStatus.VALID_LEGACY,
+            SessionStatus.VALID_LEGACY_UNADJUSTED,
+        )
+
+
+def next_nse_session(
+    after: _dt.date,
+    holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
+    *,
+    max_lookahead: int = 15,
+) -> _dt.date | None:
+    """The first NSE trading session strictly after `after`.
+
+    Calendar-driven, never "+1 day": a Friday 18:30 bar belongs to Monday, and a
+    bar stored the day before a closure belongs to the next OPEN session, which
+    may be several days later. `max_lookahead` bounds the walk so a malformed
+    calendar cannot loop.
+    """
+    d = after + _dt.timedelta(days=1)
+    for _ in range(max_lookahead):
+        if is_nse_trading_session(d, holidays, extra_open):
+            return d
+        d += _dt.timedelta(days=1)
+    return None
+
+
+def resolve_daily_session_date(
+    symbol: str | None,
+    timeframe: str,
+    timestamp: _dt.datetime,
+    *,
+    holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
+    now_utc: _dt.datetime | None = None,
+) -> SessionResolution:
+    """Which NSE session does this stored daily bar represent?
+
+    Returns the session date, the convention it was recognised as, and a status
+    the caller can audit — never a bare date, so an ambiguous row cannot be
+    mistaken for a confident one.
+
+    Recognised conventions, and ONLY these:
+
+        03:45 UTC  -> session = timestamp.date()          (canonical)
+        18:30 UTC  -> session = next valid NSE session     (legacy, calendar-driven)
+        00:00 UTC  -> session = timestamp.date()          (legacy; unadjusted for equity)
+
+    Anything else is UNRESOLVED. A future timestamp or a resolved date that is
+    not a trading session is REJECTED. 00:00 is NEVER silently treated as 18:30 —
+    they are separate historical series.
+    """
+    if timeframe != "1d":
+        return SessionResolution(None, DailyConvention.UNKNOWN,
+                                 SessionStatus.UNRESOLVED,
+                                 f"timeframe {timeframe!r} is not daily")
+    if not isinstance(timestamp, _dt.datetime) or timestamp.tzinfo is not None:
+        return SessionResolution(None, DailyConvention.UNKNOWN,
+                                 SessionStatus.UNRESOLVED,
+                                 "timestamp must be a naive datetime")
+
+    ref = now_utc or _dt.datetime.utcnow()
+    if timestamp > ref + _dt.timedelta(minutes=5):
+        return SessionResolution(None, DailyConvention.UNKNOWN,
+                                 SessionStatus.REJECTED_FUTURE,
+                                 f"timestamp {timestamp} is in the future")
+
+    t = timestamp.time()
+    klass = classify_instrument(symbol)
+
+    if t == CANONICAL_DAILY_UTC_TIME:
+        d = timestamp.date()
+        if not is_nse_trading_session(d, holidays, extra_open):
+            return SessionResolution(None, DailyConvention.CANONICAL_0345,
+                                     SessionStatus.REJECTED_NON_SESSION,
+                                     f"{d} is not an NSE trading session")
+        return SessionResolution(d, DailyConvention.CANONICAL_0345,
+                                 SessionStatus.VALID_CANONICAL)
+
+    if t == _dt.time(18, 30):
+        d = next_nse_session(timestamp.date(), holidays, extra_open)
+        if d is None:
+            return SessionResolution(None, DailyConvention.LEGACY_1830,
+                                     SessionStatus.UNRESOLVED,
+                                     "no NSE session found within the lookahead window")
+        return SessionResolution(d, DailyConvention.LEGACY_1830,
+                                 SessionStatus.VALID_LEGACY)
+
+    if t == _dt.time(0, 0):
+        d = timestamp.date()
+        if not is_nse_trading_session(d, holidays, extra_open):
+            return SessionResolution(None, DailyConvention.LEGACY_0000,
+                                     SessionStatus.REJECTED_NON_SESSION,
+                                     f"{d} is not an NSE trading session")
+        # Index 00:00 is the CURRENT index source and is split-irrelevant.
+        # Equity 00:00 is the dead pre-split series — flagged, not refused, so a
+        # caller can still align dates while knowing not to mix the prices.
+        status = (SessionStatus.VALID_LEGACY
+                  if klass is InstrumentClass.NSE_INDEX
+                  else SessionStatus.VALID_LEGACY_UNADJUSTED)
+        return SessionResolution(d, DailyConvention.LEGACY_0000, status)
+
+    return SessionResolution(None, DailyConvention.UNKNOWN,
+                             SessionStatus.UNRESOLVED,
+                             f"unrecognised daily time-of-day {t}")
+
+
+# Preference when two rows resolve to the SAME session: the canonical bar is
+# authoritative, then the offset legacy series, then the unadjusted one. This is
+# only ever applied to rows already agreed to describe one session — it is not a
+# tiebreaker between different sessions.
+_CONVENTION_RANK = {
+    DailyConvention.CANONICAL_0345: 0,
+    DailyConvention.LEGACY_1830: 1,
+    DailyConvention.LEGACY_0000: 2,
+    DailyConvention.UNKNOWN: 9,
+}
+
+
+def convention_rank(c: DailyConvention) -> int:
+    return _CONVENTION_RANK.get(c, 9)
