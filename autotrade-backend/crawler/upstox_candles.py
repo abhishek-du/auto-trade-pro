@@ -69,16 +69,60 @@ def _as_date(d) -> str:
     return d.isoformat()
 
 
-def _to_naive_utc(raw: str) -> _dt.datetime | None:
-    """'2026-08-31T09:15:00+05:30' -> naive UTC datetime(2026,8,31,3,45).
+# NSE regular session opens 09:15 IST. This is the canonical anchor for a DAILY
+# bar's timestamp — see _to_naive_utc().
+_SESSION_OPEN_IST = _dt.time(9, 15)
 
-    Every candle row in this database is naive UTC. Returning anything else
-    would silently shift the whole series.
+
+def _to_naive_utc(raw: str, *, daily: bool = False) -> _dt.datetime | None:
+    """Upstox timestamp -> naive UTC, per this database's candle contract.
+
+    THE CONTRACT
+    ------------
+    `candles.timestamp` is the instant the bar's interval OPENS, in naive UTC.
+    For every intraday timeframe Upstox already sends exactly that, so the
+    conversion is a plain offset shift:
+
+        '2026-08-31T09:15:00+05:30'  ->  datetime(2026, 8, 31, 3, 45)
+
+    DAILY IS DIFFERENT, AND THIS IS THE BUG THAT WAS HERE (fixed 2026-09-04)
+    -----------------------------------------------------------------------
+    For a daily bar Upstox sends MIDNIGHT IST of the session date:
+
+        '2026-09-01T00:00:00+05:30'   -> session of Tuesday 01-Sep-2026
+
+    That is a DATE LABEL, not an instant — no trading happens at 00:00 IST.
+    Converting it as an instant gives 2026-08-31 18:30 UTC, whose `.date()` is
+    31-Aug: **the day before the session it describes.** Verified against an
+    independent NSE calendar: Monday 31-Aug's bar was stored dated Sunday
+    30-Aug, which is not a trading session at all.
+
+    The failure is quiet precisely because it is usually invisible: only a
+    MONDAY session lands on a weekend date. On the other four weekdays the
+    wrong date is still a plausible trading day, so a point-in-time join
+    silently reads the previous session and looks entirely correct.
+
+    So a daily label is re-anchored to the instant its session actually opened:
+
+        '2026-09-01T00:00:00+05:30'  ->  datetime(2026, 9, 1, 3, 45)
+
+    which makes `timestamp::date` the NSE session date directly, and puts daily
+    bars on the same "interval open in naive UTC" footing as every intraday
+    timeframe.
     """
     try:
         ts = _dt.datetime.fromisoformat(raw)
     except (ValueError, TypeError):
         return None
+
+    if daily:
+        # .date() on an aware datetime is evaluated in ITS OWN offset (+05:30),
+        # so this is the session date as Upstox labelled it — never re-derive it
+        # from a UTC-shifted value, which is the original mistake.
+        session_date = ts.date() if ts.tzinfo is not None else ts.date()
+        open_ist = _dt.datetime.combine(session_date, _SESSION_OPEN_IST, tzinfo=_IST)
+        return open_ist.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+
     if ts.tzinfo is not None:
         ts = ts.astimezone(_dt.timezone.utc).replace(tzinfo=None)
     return ts
@@ -150,7 +194,7 @@ async def get_upstox_candles_for_range(
         for c in rows:
             if not c or len(c) < 6:
                 continue
-            ts = _to_naive_utc(c[0])
+            ts = _to_naive_utc(c[0], daily=(unit == "days"))
             if ts is None or ts in seen:
                 continue
             seen.add(ts)
