@@ -1,0 +1,43 @@
+[Unit]
+Description=AutoTrade Pro — Vite dev server (frontend, :5173)
+# Wants, not Requires: the UI should still come up and show its own error state
+# if the API is down. Making it Requires would take the frontend down with the
+# backend, which hides exactly the failure an operator needs to see.
+After=network.target autotrade-uvicorn.service
+Wants=autotrade-uvicorn.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cis/windows/auto-trade-pro/autotrade-frontend
+
+# `vite --host` binds 0.0.0.0 so the UI is reachable from the LAN, matching the
+# package.json "dev" script the project already uses. npm is invoked with an
+# absolute path because a systemd unit gets a minimal PATH.
+ExecStart=/usr/bin/npm run dev
+
+Restart=always
+RestartSec=5
+
+# Vite is a dev server: it exits promptly on SIGTERM, so it needs nothing like
+# uvicorn's 30s graceful-shutdown budget.
+TimeoutStopSec=10
+
+# Memory containment, same reasoning as the uvicorn unit: this box was
+# OOM-killed twice in one week, and the kernel picks its victim across the whole
+# 22G machine. Capping the cgroup turns a machine-wide incident into a local
+# restart rather than an unrelated process dying.
+#
+# Sized from MEASUREMENT, not estimate: this unit sat at 870M within 30s of a
+# cold start on the 41-page app (Vite 8 + React 19). An earlier 1G/1.5G guess
+# here was wrong and would have started throttling reclaim almost immediately,
+# making HMR crawl for no obvious reason. 2G/3G matches the uvicorn unit and
+# leaves real headroom above the observed working set.
+MemoryAccounting=yes
+MemoryHigh=2G
+MemoryMax=3G
+
+StandardOutput=append:/home/cis/windows/auto-trade-pro/logs/frontend.log
+StandardError=append:/home/cis/windows/auto-trade-pro/logs/frontend.err
+
+[Install]
+WantedBy=default.target
