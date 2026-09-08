@@ -239,14 +239,16 @@ async def build_macro_context(session: AsyncSession) -> MacroContext:
     # If Nifty 50 is below its 200-EMA, the market is in a downtrend (BEAR regime),
     # which suppresses momentum swing buys to protect capital.
     try:
-        from sqlalchemy import text as _text
-        _rows = (await session.execute(_text("""
-            SELECT close FROM candles
-            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-            ORDER BY timestamp DESC LIMIT 220
-        """))).scalars().all()
+        # SESSION-CORRECT DAILY CLOSES (Step 2D.2) — same defect and same fix as
+        # engine/agent/market_regime.py. The old query returned 220 rows over
+        # only 80 sessions, so this 200-EMA was computed on a series where half
+        # the "days" were duplicates of the previous one, flattening the average
+        # toward the latest price and making the BEAR/BULL call unreliable.
+        from engine.daily_series import session_close_series
+
+        _rows = await session_close_series("NIFTYBEES.NS", session, sessions=220)
         if len(_rows) >= 200:
-            _closes = pd.Series(list(reversed(_rows)), dtype=float)
+            _closes = pd.Series(_rows, dtype=float)   # already oldest → newest
             ema200     = _closes.ewm(span=200, adjust=False).mean().iloc[-1]
             last_close = _closes.iloc[-1]
             nifty_regime = "BEAR" if last_close < ema200 else "BULL"

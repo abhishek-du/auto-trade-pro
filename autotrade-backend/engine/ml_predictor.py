@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from datetime import date as _dt_date
+
 import pandas as pd
 
 from utils.logger import logger
@@ -329,21 +331,60 @@ def build_lstm_model(input_shape: tuple):
 
 # ── Label construction ────────────────────────────────────────────────────────
 
-def _onehot_labels(df: pd.DataFrame) -> np.ndarray:
-    """Return one-hot encoded next-bar direction labels, shape (n, 3)."""
-    fut = df["close"].pct_change(1).shift(-1).fillna(0).values
-    cls = np.where(fut >  _LABEL_THRESHOLD, 2,
-          np.where(fut < -_LABEL_THRESHOLD, 0, 1)).astype(np.int32)
+def _onehot_labels(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """One-hot next-session direction labels (n, 3) **and a validity mask** (n,).
+
+    NO TARGET → NO TRAINING ROW (Step 2M.1)
+    ---------------------------------------
+    This used to end in ``.fillna(0)``. ``shift(-1)`` leaves the LAST row's
+    target undefined — that session's outcome has not happened yet — and
+    filling it with 0.0 put it inside the +/-0.5% band, so **the most recent
+    session of every symbol was labelled FLAT on every training run**. An
+    unknown future was taught to the model as "the market did nothing", and
+    because the 80/20 split puts the tail in validation, the poisoned row was
+    scored as if it were a real observation.
+
+    A genuine 0.0% return is a real outcome and still labels FLAT. The two
+    cases are only distinguishable through the mask, which is why the mask
+    exists rather than a sentinel value.
+
+    Also invalid: a row whose own close or whose next close is not a positive
+    finite price. ``pct_change`` off a 0.00 close yields ``inf``, which
+    survived the old ``fillna`` untouched and classified as a confident UP —
+    MAZDOCK.NS carries 8 such pre-listing bars.
+    """
+    close = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=float)
+    nxt   = np.roll(close, -1)
+    nxt[-1] = np.nan                               # no next session exists
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fut = np.where(close > 0, nxt / close - 1.0, np.nan)
+
+    valid = (np.isfinite(fut) & np.isfinite(close) & np.isfinite(nxt)
+             & (close > 0) & (nxt > 0))
+
+    safe = np.where(valid, fut, 0.0)               # never read for invalid rows
+    cls = np.where(safe >  _LABEL_THRESHOLD, 2,
+          np.where(safe < -_LABEL_THRESHOLD, 0, 1)).astype(np.int32)
     oh  = np.zeros((len(cls), 3), dtype=np.float32)
     oh[np.arange(len(cls)), cls] = 1.0
-    return oh
+    return oh, valid
 
 
 def _make_sequences(
-    features: np.ndarray, labels: np.ndarray
+    features: np.ndarray, labels: np.ndarray, valid: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Windows of `_SEQUENCE_LENGTH` bars ending at i-1, labelled by row i.
+
+    Rows whose target is unknown or non-finite are SKIPPED, not filled. Skipping
+    keeps every legitimate row — including genuine zero-return rows — and the
+    dropped rows are always at a boundary, so no window straddles a gap it
+    would silently span.
+    """
     X, y = [], []
     for i in range(_SEQUENCE_LENGTH, len(features)):
+        if valid is not None and not bool(valid[i]):
+            continue
         X.append(features[i - _SEQUENCE_LENGTH : i])
         y.append(labels[i])
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
@@ -376,8 +417,19 @@ def train_model(symbol: str, df: pd.DataFrame) -> dict:
 
     try:
         features = prepare_features(df, indicators=None, symbol=symbol)
-        labels   = _onehot_labels(df)
-        X, y     = _make_sequences(features, labels)
+        labels, valid = _onehot_labels(df)
+        X, y     = _make_sequences(features, labels, valid)
+
+        dropped = int((~valid[_SEQUENCE_LENGTH:]).sum())
+        if dropped:
+            logger.info(
+                f"[train_model] {symbol}: dropped {dropped} row(s) with no known "
+                f"next-session outcome (was silently labelled FLAT before 2M.1)"
+            )
+        if len(X) < _SEQUENCE_LENGTH:
+            msg = f"only {len(X)} trainable sequences after dropping unknown targets"
+            logger.warning(f"[train_model] {symbol}: {msg}")
+            return {"symbol": symbol, "error": msg}
 
         split = int(len(X) * 0.8)
         X_tr, X_val = X[:split], X[split:]
@@ -559,8 +611,19 @@ def get_ml_score(symbol: str, df: pd.DataFrame) -> float:
 
 # ── 6. train_all_models (async — for Celery beat) ─────────────────────────────
 
-async def train_all_models(session) -> None:
+async def train_all_models(session, *, as_of: "_dt_date | None" = None) -> None:
     """Train LSTM models for all NSE large + mid cap symbols.
+
+    POINT-IN-TIME (Step 2M)
+    -----------------------
+    `as_of` is the training cutoff: no session after it may enter a training
+    row. It is passed explicitly to the reader rather than relying on the
+    reader's default state, because a default is a property of when the code
+    runs and a training cutoff must be a property of the DATA.
+
+    Defaults to the latest COMPLETED session — never today's forming bar. Live
+    inference is unaffected: predict_direction() is handed a DataFrame by its
+    caller and has no reader of its own.
 
     Strategy
     --------
@@ -574,10 +637,22 @@ async def train_all_models(session) -> None:
     from db.models import Candle
     from utils.config import settings
 
+    from engine.daily_series import current_open_session
+
     symbols = settings.nse_symbols + settings.nse_mid_symbols
     loop    = asyncio.get_event_loop()
     cutoff  = datetime.datetime.utcnow() - datetime.timedelta(days=730)
     now     = datetime.datetime.utcnow()
+
+    # The training cutoff. If a session is in progress right now it is NOT a
+    # completed observation, so the cutoff steps back to the previous day and
+    # the reader's calendar resolves it to the last real session.
+    train_as_of = as_of
+    if train_as_of is None:
+        today = _dt_date.today()
+        train_as_of = (today - datetime.timedelta(days=1)
+                       if current_open_session() is not None else today)
+    logger.info(f"[train_all_models] training cutoff (as_of) = {train_as_of}")
 
     logger.info(f"[train_all_models] Starting for {len(symbols)} symbols")
 
@@ -594,27 +669,28 @@ async def train_all_models(session) -> None:
                 )
                 continue
 
-        rows = (await session.execute(
-            select(Candle)
-            .where(
-                Candle.symbol    == symbol,
-                Candle.timeframe == "1d",
-                Candle.timestamp >= cutoff,
-            )
-            .order_by(Candle.timestamp)
-        )).scalars().all()
+        # ONE ROW PER SESSION (Step 2D.2). The plain `timestamp >= cutoff` scan
+        # this replaces returned every stored convention, so a symbol carrying
+        # both a legacy and a canonical series trained on each session TWICE —
+        # 3,611 of 4,378 daily symbols are in that state. Duplicated bars make
+        # every rolling feature (returns, RSI, ATR, volume ratios) span half the
+        # calendar it claims, and they mix adjusted with unadjusted prices.
+        from engine.daily_series import session_bars
 
-        if not rows:
+        bars = await session_bars(symbol, cutoff.date(), train_as_of, session,
+                                  as_of=train_as_of)
+
+        if not bars:
             logger.warning(f"[train_all_models] {symbol}: no 1d candles in DB — skipping")
             continue
 
         df = pd.DataFrame([{
-            "open":   r.open,
-            "high":   r.high,
-            "low":    r.low,
-            "close":  r.close,
-            "volume": r.volume,
-        } for r in rows])
+            "open":   o,
+            "high":   h,
+            "low":    lo,
+            "close":  c,
+            "volume": v,
+        } for _, o, h, lo, c, v in bars])
 
         if len(df) < _MIN_TRAIN_ROWS:
             logger.warning(
@@ -988,15 +1064,38 @@ def train_random_forest(
         X_raw = _build_rf_features(df, indicators_list)
 
         # ── 5-day forward return labels ──────────────────────────────────────
-        fut = df["close"].pct_change(_RF_LABEL_WINDOW).shift(-_RF_LABEL_WINDOW).fillna(0).values
+        # Same NO TARGET → NO TRAINING ROW rule as the LSTM path (Step 2M.1).
+        # This path already dropped the undefined TAIL, but its .fillna(0) also
+        # covered interior holes: a 0.00 close makes pct_change return inf (or
+        # NaN when both ends are 0), and the fill turned that into a confident
+        # FLAT or left an inf to classify as UP.
+        c   = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=float)
+        fwd = np.roll(c, -_RF_LABEL_WINDOW).astype(float)
+        fwd[-_RF_LABEL_WINDOW:] = np.nan          # no outcome yet
+        with np.errstate(divide="ignore", invalid="ignore"):
+            fut = np.where(c > 0, fwd / c - 1.0, np.nan)
+        rf_valid = (np.isfinite(fut) & (c > 0)
+                    & np.isfinite(fwd) & (fwd > 0))
+        safe = np.where(rf_valid, fut, 0.0)
         y   = np.where(
-            fut >  _RF_LABEL_THRESHOLD, 2,       # UP
-            np.where(fut < -_RF_LABEL_THRESHOLD, 0, 1)   # DOWN / FLAT
+            safe >  _RF_LABEL_THRESHOLD, 2,       # UP
+            np.where(safe < -_RF_LABEL_THRESHOLD, 0, 1)   # DOWN / FLAT
         ).astype(np.int32)
 
-        # Drop tail rows where label is undefined
-        X_raw = X_raw[:-_RF_LABEL_WINDOW]
-        y     = y[:-_RF_LABEL_WINDOW]
+        # Keep only rows with a known, finite forward outcome. The tail window
+        # is excluded by the mask itself; interior invalid bars now go too.
+        keep  = np.flatnonzero(rf_valid)
+        if len(keep) < _RF_LABEL_WINDOW:
+            msg = f"only {len(keep)} rows with a known {_RF_LABEL_WINDOW}-day outcome"
+            logger.warning(f"[train_rf] {symbol}: {msg}")
+            return {"symbol": symbol, "error": msg}
+        if len(keep) != len(y):
+            logger.info(
+                f"[train_rf] {symbol}: dropped {len(y) - len(keep)} row(s) with "
+                f"no known forward outcome"
+            )
+        X_raw = X_raw[keep]
+        y     = y[keep]
 
         scaler   = StandardScaler()
         X_scaled = scaler.fit_transform(X_raw)

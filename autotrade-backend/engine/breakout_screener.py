@@ -115,29 +115,32 @@ async def scan_for_breakouts(session: AsyncSession) -> list[BreakoutCandidate]:
     """
     breakout_pct, vol_surge_min, rsi_max, max_inject = _thresh()
 
-    cutoff = datetime.utcnow() - timedelta(days=LOOKBACK_DAYS + 5)
+    # SESSIONS, not rows (Step 2K, H-1). The previous query pulled every 1d row
+    # in a LOOKBACK_DAYS+5 CALENDAR-day window, which while 18:30 coexists with canonical
+    # returns each session twice for most symbols — so `closes[-1]` and
+    # `closes[-2]` ("today" and "yesterday") could be the SAME session under two
+    # conventions, making the day-over-day change 0% and the volume ratio 1.0.
+    #
+    # session_bars_bulk resolves sessions with the shared resolver in a single
+    # query, and returns completed sessions only.
+    from engine.daily_series import session_bars_bulk
 
-    # Single SQL: fetch last LOOKBACK_DAYS daily bars for every .NS symbol
-    # ordered by symbol + timestamp so we can group in Python.
-    rows = (await session.execute(text("""
-        SELECT symbol, close, volume, timestamp
-        FROM   candles
-        WHERE  timeframe = '1d'
-          AND  symbol    LIKE '%.NS'
-          AND  timestamp >= :cutoff
-        ORDER  BY symbol, timestamp ASC
-    """), {"cutoff": cutoff})).all()
+    universe = [r[0] for r in (await session.execute(text(
+        "SELECT DISTINCT symbol FROM candles WHERE timeframe='1d' AND symbol LIKE '%.NS'"
+    ))).all()]
+    series = await session_bars_bulk(universe, session, sessions=LOOKBACK_DAYS)
 
-    if not rows:
+    if not series:
         logger.warning("[breakout_screener] No daily candle data found")
         return []
 
-    # Group by symbol
-    from collections import defaultdict
-    grouped: dict[str, list] = defaultdict(list)
-    for r in rows:
-        grouped[r.symbol].append(r)
+    grouped = {
+        sym: [type("_B", (), {"symbol": sym, "close": c, "volume": v,
+                             "timestamp": d})() for d, _o, _h, _l, c, v, _cv in rows]
+        for sym, rows in series.items()
+    }
 
+    # Group by symbol
     # Fetch existing hub_universe symbols to avoid re-injecting
     existing_hub = set(
         (await session.execute(

@@ -130,12 +130,22 @@ async def _fetch_regime_inputs(
     """Fetch (nifty_above_ema50, nifty_5d_ret, vix_val, breadth_pct, nifty_above_ema200)."""
     from sqlalchemy import text as _text
 
-    # NIFTYBEES last 210 candles — enough for EMA200 + 5-day return.
-    nifty_rows = (await session.execute(_text("""
-        SELECT close FROM candles
-        WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-        ORDER BY timestamp DESC LIMIT 210
-    """))).scalars().all()
+    # NIFTYBEES last 210 SESSIONS — enough for EMA200 + 5-day return.
+    #
+    # This was `ORDER BY timestamp DESC LIMIT 210` on the raw table, the exact
+    # query removed from market_regime in Step 2D.2 and left here. Measured
+    # 2026-09-08 those 210 rows were 110 canonical + 97 legacy 18:30 + 3 legacy
+    # 00:00, containing 75 DUPLICATED sessions — so the EMA50/EMA200 and the
+    # 5-day return ran on a series where a third of the "days" repeated.
+    #
+    # daily_series returns one row per resolved NSE session on a single price
+    # basis, oldest first, and by default excludes the in-progress bar: this is
+    # a morning classification of the regime we are ENTERING, so it must be
+    # built from completed sessions only.
+    from engine.daily_series import session_close_series
+
+    closes_asc = await session_close_series("NIFTYBEES.NS", session, sessions=210)
+    nifty_rows = list(reversed(closes_asc))     # newest-first, as the code below expects
 
     nifty_5d_ret: float | None      = None
     nifty_above_ema50: bool | None  = None
@@ -168,30 +178,30 @@ async def _fetch_regime_inputs(
     # approximation. If today > 50d-ago the stock is in an upswing.
     breadth_pct: float | None = None
     try:
-        breadth_row = (await session.execute(_text("""
-            WITH latest AS (
-                SELECT DISTINCT ON (symbol) symbol, close AS c_now
-                FROM candles
-                WHERE timeframe = '1d'
-                  AND symbol IN (SELECT symbol FROM hub_universe ORDER BY rank LIMIT 200)
-                ORDER BY symbol, timestamp DESC
-            ),
-            past AS (
-                SELECT DISTINCT ON (symbol) symbol, close AS c_past
-                FROM candles
-                WHERE timeframe = '1d'
-                  AND symbol IN (SELECT symbol FROM hub_universe ORDER BY rank LIMIT 200)
-                  AND timestamp <= NOW() - INTERVAL '48 days'
-                  AND timestamp >= NOW() - INTERVAL '56 days'
-                ORDER BY symbol, timestamp DESC
-            )
-            SELECT
-                ROUND(
-                    100.0 * COUNT(CASE WHEN l.c_now > p.c_past THEN 1 END)
-                    / NULLIF(COUNT(*), 0), 1
-                )
-            FROM latest l JOIN past p ON l.symbol = p.symbol
-        """))).scalar_one_or_none()
+        hub = [r[0] for r in (await session.execute(_text(
+            "SELECT symbol FROM hub_universe ORDER BY rank LIMIT 200"))).all()]
+        # SESSIONS, not calendar days (Step 2K, H-1).
+        #
+        # This compared each symbol's newest raw row against its newest raw row
+        # in a 48-56 CALENDAR-day window. Two problems: the comment says "50
+        # trading days" while the SQL counted calendar days, and both sides were
+        # raw rows, so an 18:30 bar (which belongs to the NEXT session) could
+        # serve as either endpoint.
+        #
+        # 51 resolved sessions gives exactly "now vs 50 sessions ago" — what the
+        # comment always claimed — on completed sessions only.
+        from engine.daily_series import session_closes_bulk
+
+        series = await session_closes_bulk(hub, session, sessions=51)
+        above = total = 0
+        for _sym, rows in series.items():
+            if len(rows) < 51:
+                continue
+            c_now, c_past = rows[-1][1], rows[0][1]
+            if c_past > 0:
+                total += 1
+                above += 1 if c_now > c_past else 0
+        breadth_row = round(100.0 * above / total, 1) if total else None
         if breadth_row is not None:
             breadth_pct = float(breadth_row)
     except Exception as exc:

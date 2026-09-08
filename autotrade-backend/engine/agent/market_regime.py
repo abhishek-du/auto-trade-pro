@@ -262,11 +262,29 @@ async def get_market_regime(
         from sqlalchemy import text as _text
         from crawler.live_prices import PRICE_CACHE
 
-        rows = (await session.execute(_text("""
-            SELECT close FROM candles
-            WHERE symbol = 'NIFTYBEES.NS' AND timeframe = '1d'
-            ORDER BY timestamp DESC LIMIT 220
-        """))).scalars().all()
+        # SESSION-CORRECT DAILY CLOSES (Step 2D.2).
+        #
+        # This was `ORDER BY timestamp DESC LIMIT 220` on the raw table. The
+        # candles table holds three daily conventions at once, so that returned
+        # 220 ROWS covering only 80 distinct SESSIONS — 140 repeats. Measured on
+        # the resulting series: 111 of 219 "daily returns" were exactly zero
+        # (51%), because consecutive points were the same session under two
+        # conventions, and volatility came out 39% too low. A 20-day ROC spanned
+        # about seven real sessions.
+        #
+        # That fed a TRADING GATE. engine.daily_series returns one row per NSE
+        # session, oldest first, on a single price basis.
+        from engine.daily_series import session_close_series
+
+        # include_current=True is DELIBERATE and explicit (Step 2K, H-2).
+        #
+        # daily_series now defaults to completed sessions only, so leaving this
+        # unqualified would silently change a live trading gate's behaviour. This
+        # gate is evaluated intraday and is meant to react to the session in
+        # progress — that is why breadth and VIX are live inputs too. Historical
+        # and training callers take the closed-only default instead.
+        rows = await session_close_series("NIFTYBEES.NS", session, sessions=220,
+                                          include_current=True)
 
         if not rows or len(rows) < 60:
             # P2.12 fix: fail-CLOSED — no macro context = block new entries.
@@ -274,7 +292,7 @@ async def get_market_regime(
             return RegimeResult(SIDEWAYS, 0.0, 0, False, False, 0.0,
                                 {"note": "insufficient_nifty_history_fail_closed"})
 
-        closes = pd.Series(list(reversed(rows)), dtype=float)   # oldest → newest
+        closes = pd.Series(rows, dtype=float)   # already oldest → newest
 
         # Live VIX from WebSocket cache
         vix: Optional[float] = None

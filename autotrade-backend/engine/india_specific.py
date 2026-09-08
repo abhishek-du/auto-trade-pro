@@ -98,15 +98,16 @@ async def _fetch_candle_prices(
 
     Returns (None, None) only when all three paths fail.
     """
-    rows = (await session.execute(
-        select(Candle)
-        .where(Candle.symbol == ticker, Candle.timeframe == "1d")
-        .order_by(desc(Candle.timestamp))
-        .limit(limit)
-    )).scalars().all()
+    # SESSIONS, not rows (Step 2D.2). `LIMIT 30` over a symbol holding two
+    # conventions returned 30 rows covering ~15 sessions, so the "30-day change"
+    # this computes was really a 15-day change — and could straddle the adjusted
+    # and unadjusted series, booking a corporate action as price movement.
+    from engine.daily_series import session_closes
 
-    if len(rows) >= 2:
-        return float(rows[0].close), float(rows[-1].close)
+    closes = await session_closes(ticker, session, sessions=limit)
+
+    if len(closes) >= 2:
+        return float(closes[-1][1]), float(closes[0][1])   # newest, oldest
 
     # Fallback 1: 1h candles for the same ticker — sufficient for a
     # 30-day comparison even with ~6 bars/day intraday density.

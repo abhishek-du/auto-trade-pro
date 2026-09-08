@@ -230,6 +230,21 @@ class TestAlignedClosesUsesTheResolver:
             if isinstance(n, ast.ImportFrom):
                 imported.update(a.name for a in n.names)
 
-        assert "resolve_daily_session_date" in imported | called
-        assert "convention_rank" in imported | called
+        # Step 2D.2 moved the resolution one level down: _aligned_closes now
+        # delegates to engine.daily_series, which every other daily reader also
+        # uses, so there is exactly one implementation to audit. The guarantee
+        # is unchanged and is asserted here at both levels.
+        assert "session_closes" in imported | called
         assert "_trading_date" not in called, "must not fall back to the old mapper"
+
+        from engine import daily_series
+
+        shared = ast.parse(inspect.getsource(daily_series))
+        shared_names = {getattr(n.func, "id", getattr(n.func, "attr", None))
+                        for n in ast.walk(shared) if isinstance(n, ast.Call)}
+        for n in ast.walk(shared):
+            if isinstance(n, ast.ImportFrom):
+                shared_names.update(a.name for a in n.names)
+
+        assert "resolve_daily_session_date" in shared_names
+        assert "convention_rank" in shared_names

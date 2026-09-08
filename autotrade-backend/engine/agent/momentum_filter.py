@@ -74,36 +74,31 @@ async def _compute_ranks(universe: list[str], session, top_pct: float) -> None:
     if not bare_list:
         return
 
-    # Build parameterised IN clause
-    placeholders = ", ".join(f":s{i}" for i in range(len(bare_list)))
-    ns_list      = [f"{b}.NS" for b in bare_list]
-    ns_places    = ", ".join(f":n{i}" for i in range(len(ns_list)))
+    # SESSIONS, not rows (Step 2K, H-1).
+    #
+    # This used one `SELECT ... WHERE timeframe='1d' ORDER BY timestamp DESC`
+    # and then took the newest 64 ROWS per symbol. While 18:30 coexists with
+    # canonical that is not 64 sessions — measured over a 90-day window, 110,246
+    # (symbol, session) pairs across 3,520 symbols carry two conventions, so the
+    # "63-day" return was computed over roughly half that span, and inconsistently
+    # between symbols depending on how much legacy each carries.
+    #
+    # session_closes_bulk keeps this a SINGLE query — a per-symbol round trip
+    # over the whole universe would be hundreds of queries — while resolving
+    # sessions with the same resolver daily_series uses. Completed sessions only.
+    from engine.daily_series import session_closes_bulk
 
-    params = {f"s{i}": v for i, v in enumerate(bare_list)}
-    params.update({f"n{i}": v for i, v in enumerate(ns_list)})
+    ns_list = [f"{b}.NS" for b in bare_list]
+    series  = await session_closes_bulk(ns_list, session, sessions=_MOM_LOOKBACK + 1)
 
-    rows = (await session.execute(
-        text(f"""
-            SELECT symbol, timestamp, close
-            FROM candles
-            WHERE timeframe = '1d'
-              AND symbol IN ({placeholders}, {ns_places})
-            ORDER BY symbol, timestamp DESC
-        """),
-        params,
-    )).fetchall()
+    sym_closes: dict[str, list[float]] = {}
+    for ns_sym, rows in series.items():
+        # newest-first, matching the indexing the ranking below already uses
+        sym_closes[_bare(ns_sym)] = [float(c) for _d, c, _cv in reversed(rows)]
 
-    if not rows:
+    if not sym_closes:
         logger.warning("[momentum_filter] no candle rows — fail-open")
         return
-
-    # Group closes per symbol, keep latest 64 bars (need 63-day return)
-    from collections import defaultdict
-    sym_closes: dict[str, list[float]] = defaultdict(list)
-    for sym, ts, close in rows:
-        b = _bare(sym)
-        if len(sym_closes[b]) < _MOM_LOOKBACK + 1:
-            sym_closes[b].append(float(close))
 
     # Compute 63-day HPR for each symbol that has enough history
     returns: dict[str, float] = {}

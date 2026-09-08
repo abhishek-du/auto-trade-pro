@@ -82,6 +82,9 @@ celery_app.conf.task_routes = {
     # load to the box.
     "tasks.resample_intraday_candles":                 {"queue": "scan_queue", "routing_key": "scan_queue"},
     "tasks.tactical_tasks.run_tactical_intraday":      {"queue": "scan_queue", "routing_key": "scan_queue"},
+    # Three symbols, one Upstox call each — but it feeds the regime gate, so it
+    # must not sit behind the default queue's backlog.
+    "tasks.sync_regime_daily_candles":                 {"queue": "scan_queue", "routing_key": "scan_queue"},
     "tasks.tactical_tasks.run_tactical_mean_reversion": {"queue": "scan_queue", "routing_key": "scan_queue"},
     # ── The trading loop gets its own lane (2026-08-25, BUG-2) ───────────────
     # Third instance of the same failure, same fix. Measured on 2026-08-25:
@@ -155,6 +158,17 @@ celery_app.conf.beat_schedule = {
     # ── Indian market tasks ───────────────────────────────────────────────────
 
     # Every 5 min during NSE hours: OHLCV candles + index snapshots + VIX
+    # The three NSE regime symbols, on their own cadence (Step 2F). Their only
+    # writer used to run as step 1b of india_price_scan below, behind a
+    # ~1,400-symbol crawl on a backlogged queue, so it fired about once a
+    # session instead of every five minutes. Same writer, own schedule, own
+    # queue.
+    "regime-daily-candles-every-5min": {
+        "task":     "tasks.sync_regime_daily_candles",
+        "schedule": 300,
+        "options":  {"countdown": 10},
+    },
+
     "india-price-scan-every-5min": {
         "task":     "tasks.india_price_scan",
         "schedule": 300,

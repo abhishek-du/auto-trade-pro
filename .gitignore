@@ -13,3 +13,7 @@ __pycache__/
 
 # Service stdout/stderr capture (systemd StandardOutput=append:)
 logs/
+
+# Materialized ML datasets — large generated artefacts, rebuilt by
+# autotrade-backend/scripts/build_v1_baseline.py and verified by its manifest.
+datasets/

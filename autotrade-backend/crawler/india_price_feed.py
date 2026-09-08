@@ -158,12 +158,13 @@ import time
 _YF_RATE_LIMIT_UNTIL = 0.0
 
 def _delegate_daily_equity_to_canonical(symbol: str, period: str) -> list[dict]:
-    """Route an NSE equity OR INDEX daily request to the canonical Upstox writer.
+    """Route ANY NSE-traded daily request to the canonical Upstox writer.
 
-    Indices were added in Step 2D.0.1. They share the equity mapping exactly, so
-    this stays one function — a separate index path would be a second place that
-    knows how an Upstox daily label becomes a timestamp, which is the thing this
-    whole line of work exists to prevent.
+    Indices were added in Step 2D.0.1; ETFs and the -BE/-SM/-BZ series in 2F.
+    They all share the equity mapping exactly, so this stays one function — a
+    separate path per class would be a second place that knows how an Upstox
+    daily label becomes a timestamp, which is the thing this whole line of work
+    exists to prevent.
 
     Synchronous, because fetch_nse_candles() is called from threads via
     run_in_executor. asyncio.run() is safe here for exactly that reason, and
@@ -279,8 +280,18 @@ def fetch_nse_candles(
         # exactly those two series against each other.
         #
         # Same delegate, no separate index implementation.
+        # ETFs joined equities and indices here in Step 2F. They used to fall
+        # through to the branch below, which applies the intraday IST->UTC shift
+        # and so yields an 18:30 bar; once the contract began governing
+        # ETF_OR_INAV that output would have been rejected at the choke point.
+        #
+        # The -BE/-SM/-BZ/-GS series deliberately do NOT delegate: Upstox has no
+        # instrument key for those symbol forms, so the canonical fetch returns
+        # nothing for them. They stay on the legacy path and are exempt from the
+        # contract by explicit declaration — see DailyPolicy.LEGACY_EXEMPT.
         if classify_instrument(symbol) in (InstrumentClass.NSE_EQUITY,
-                                           InstrumentClass.NSE_INDEX):
+                                           InstrumentClass.NSE_INDEX,
+                                           InstrumentClass.ETF_OR_INAV):
             return _delegate_daily_equity_to_canonical(symbol, period)
 
     if time.time() < _YF_RATE_LIMIT_UNTIL:
@@ -633,7 +644,13 @@ def fetch_india_vix() -> float:
 
 # Daily candles that MUST stay fresh — the 5-state market-regime engine reads
 # NIFTYBEES.NS 1d, and the indices back dashboards + shock guard.
-_REGIME_DAILY_SYMBOLS: tuple[str, ...] = ("NIFTYBEES.NS", "^NSEI", "^NSEBANK", "^BSESN")
+# NSE ONLY (Step 2F). ^BSESN was here until 2026-09-07: a BSE index inside the
+# active NSE regime writer. It contributed nothing — its last row landed
+# 2026-08-28, after which the NSE-only work of 401cb06 left it failing silently
+# every five minutes — but it was a BSE path in a pipeline that is meant to be
+# NSE-only, and the daily contract now rejects OTHER_INDEX outright. Its 35
+# historical rows are left untouched; this only stops NEW BSE data arriving.
+_REGIME_DAILY_SYMBOLS: tuple[str, ...] = ("NIFTYBEES.NS", "^NSEI", "^NSEBANK")
 
 
 async def fetch_indices_kite_first() -> dict:
@@ -690,56 +707,79 @@ async def fetch_vix_kite_first() -> float:
 
 
 async def sync_regime_daily_candles_kite(session: AsyncSession) -> int:
-    """Refresh recent DAILY candles for the regime + index symbols via Kite.
+    """Refresh recent DAILY candles for the regime + index symbols via Upstox.
 
-    Keeps NIFTYBEES.NS 1d current so the market-regime engine never decides on
-    stale data. Idempotent (save_candles_to_db upserts). Returns rows saved.
+    Keeps NIFTYBEES.NS, ^NSEI and ^NSEBANK current so the market-regime engine
+    never decides on stale data. Bars are canonical (03:45 UTC session open);
+    the current session's row is refreshed in place on each run, earlier
+    sessions are insert-only. Returns rows written.
     """
+    # CANONICAL SOURCE (Step 2F). This used get_kite_historical() directly and
+    # then re-anchored every bar to midnight IST, which is how ^NSEI, ^NSEBANK
+    # and NIFTYBEES.NS accumulated a 00:00 series while every other symbol moved
+    # to 03:45. It bypassed fetch_nse_candles(), where the Step 2D.0.1 index
+    # delegation lives, so the routing fix never applied to it.
+    #
+    # get_upstox_candles_for_range is the same function that delegation calls.
+    # Using it directly (fetch_nse_candles' delegation helper is synchronous and
+    # returns [] when called from a running loop, which this is) keeps ONE
+    # implementation of "an Upstox daily label becomes a timestamp" — the thing
+    # this whole line of work exists to protect.
     try:
-        from crawler.zerodha_market import get_kite_historical, hydrate_tokens_from_db
+        from crawler.upstox_candles import get_upstox_candles_for_range
     except Exception:
         return 0
-    try:
-        await hydrate_tokens_from_db(session)        # ensure NIFTYBEES/index tokens are loaded
-    except Exception:
-        pass
-    from sqlalchemy import and_ as _and, delete as _delete
-    from db.models import Candle as _Candle
-
     today = datetime.date.today()
     frm = (today - datetime.timedelta(days=15)).isoformat()
     to = today.isoformat()
-    window_start = datetime.datetime(today.year, today.month, today.day) - datetime.timedelta(days=15)
     saved_total = 0
     for sym in _REGIME_DAILY_SYMBOLS:
         try:
-            candles = await get_kite_historical(sym, frm, to, "1d", session)
-            # get_kite_historical applies an intraday IST→UTC shift that pushes a
-            # midnight-IST *daily* bar back one calendar day. Undo it so each 1d
-            # bar keeps its true IST trading date — otherwise the regime series
-            # gets off-by-one bars.
-            for c in candles:
-                ts = c["timestamp"]
-                ist_date = (ts + datetime.timedelta(hours=5, minutes=30)).date()
-                c["timestamp"] = datetime.datetime(ist_date.year, ist_date.month, ist_date.day)
+            candles = await get_upstox_candles_for_range(sym, frm, to, interval="1d")
+            # NO re-anchoring here, deliberately. upstox_candles._to_naive_utc()
+            # already maps a daily date label to its session open (03:45 UTC),
+            # and the contract at the choke point now enforces that for
+            # NSE_INDEX and ETF_OR_INAV as well as equities. A second opinion
+            # about timestamps in this function is exactly what produced the
+            # 00:00 series.
             if not candles:
                 continue
-            # Kite is authoritative for these regime symbols: clear any existing
-            # 1d rows in the window first (removes stale/off-by-one yfinance dupes),
-            # then insert the clean Kite bars → exactly one bar per trading day.
-            await session.execute(
-                _delete(_Candle).where(_and(
-                    _Candle.symbol == sym,
-                    _Candle.timeframe == "1d",
-                    _Candle.timestamp >= window_start,
-                ))
-            )
-            await session.commit()
-            saved_total += await save_candles_to_db(candles, session)
+            # THE DELETE THAT USED TO BE HERE IS GONE (Step 2D.2).
+            #
+            # It ran `DELETE FROM candles WHERE symbol = :sym AND timeframe='1d'
+            # AND timestamp >= now() - 15 days` before every insert, on the
+            # premise that this task was authoritative and was clearing stale
+            # yfinance duplicates. It is no longer either of those things:
+            #
+            #  * this path now sources from Upstox, not Kite, and
+            #  * since Step 2C.2 the canonical writer independently writes these
+            #    same symbols at 03:45 (session open).
+            #
+            # So the delete was destroying the CANONICAL rows every run. Measured
+            # 2026-09-07: all four _REGIME_DAILY_SYMBOLS had 0 raw (03:45/18:30)
+            # rows inside the 15-day window, while RELIANCE.NS and TCS.NS — same
+            # window, same days, not in this list — had 19 each. NIFTYBEES.NS
+            # 03:45 rows carried a last-written time of 2026-09-04 10:01 but the
+            # newest surviving session was 2026-08-21: written daily, deleted
+            # hours later.
+            #
+            # The consequence landed on a TRADING GATE. market_regime reads
+            # NIFTYBEES.NS, and with its canonical rows removed the only basis
+            # that reached the present was the corporate-action-ADJUSTED 00:00
+            # series this task writes.
+            #
+            # refresh_current_session=True: today's bar is overwritten in place
+            # on each 5-minute run, every earlier session is insert-only. That
+            # is the whole reason the old blind DELETE existed, without the part
+            # that destroyed other writers' rows.
+            saved_total += await save_candles_to_db(
+                candles, session, source="regime-daily", refresh_current_session=True)
         except Exception as exc:
             logger.warning(f"[india_price_feed] regime daily sync failed {sym}: {exc}")
     if saved_total:
-        logger.info(f"[india_price_feed] regime daily candles refreshed via Kite — {saved_total} rows")
+        logger.info(
+            f"[india_price_feed] regime daily candles refreshed via Upstox "
+            f"(canonical 03:45) — {saved_total} rows")
     return saved_total
 
 
@@ -1238,9 +1278,15 @@ async def run_india_price_crawl(
                 logger.warning(f"[india_price] final flush failed: {exc}")
     total_symbols = len(counted)
 
-    # Step 1b — refresh the regime's daily candles via Kite (fresh, not
-    # yfinance-throttled) so buy/sell gating never runs on stale index data.
-    await sync_regime_daily_candles_kite(session)
+    # Step 1b USED TO CALL sync_regime_daily_candles_kite() here (Step 2F).
+    #
+    # It now has its own beat entry (tasks.sync_regime_daily_candles, every 5
+    # minutes on scan_queue). Running it from inside this crawl made the regime
+    # symbols' freshness depend on a ~1,400-symbol pass completing first, and on
+    # 2026-09-07 that meant the indices refreshed once in a whole session.
+    #
+    # Deliberately NOT called from both places: two schedules for one writer is
+    # how a symbol ends up with two conventions.
 
     # Step 2 — fetch index snapshots (Kite-first, yfinance fallback)
     indices = await fetch_indices_kite_first()

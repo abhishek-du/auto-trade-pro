@@ -3077,6 +3077,43 @@ def kite_live_candles_task(closing_sweep: bool = False):
     return result
 
 
+@celery_app.task(name="tasks.sync_regime_daily_candles")
+def sync_regime_daily_candles_task():
+    """Canonical daily bars for the NSE regime symbols — ^NSEI, ^NSEBANK, NIFTYBEES.NS.
+
+    WHY THIS HAS ITS OWN SCHEDULE (Step 2F remediation)
+    ---------------------------------------------------
+    The writer itself is unchanged and is NOT duplicated here — this task calls
+    the same crawler.india_price_feed.sync_regime_daily_candles_kite() that has
+    always owned these three symbols. What changed is when it runs.
+
+    It used to execute as step 1b of run_india_price_crawl(), i.e. only after
+    that task's full ~1,400-symbol crawl. `tasks.india_price_scan` is dispatched
+    every 5 minutes onto the default queue, which on 2026-09-07 held a static
+    86-message backlog of orphaned dispatches; the crawl was starved and the
+    regime step was reached ONCE in a full trading session. The measured
+    consequence: today's ^NSEI daily bar froze at its 15:02 IST snapshot, close
+    23751.75 against a settled 23779.15, and the regime gate reads that series.
+
+    The indices have no other writer — the equity sync's universe is 33 symbols
+    and contains no index — so their freshness depends entirely on this path.
+
+    Routed to scan_queue, which has a dedicated worker and was empty at every
+    measurement, so a three-symbol fetch is not queued behind the equity crawl.
+    Idempotent: existing sessions insert-only, the current session refreshed in
+    place. Safe to run outside market hours; it simply re-writes the same bar.
+    """
+    async def _run():
+        from tasks._db import celery_session
+        from crawler.india_price_feed import sync_regime_daily_candles_kite
+        async with celery_session() as session:
+            return await sync_regime_daily_candles_kite(session)
+
+    n = _run_async(_run())
+    logger.info(f"[regime_daily] canonical rows written: {n}")
+    return n
+
+
 @celery_app.task(name="tasks.kite_sync_candles")
 def kite_sync_candles_task():
     """Fetch daily candles for all NSE watchlist symbols via Kite (10:00 UTC)."""

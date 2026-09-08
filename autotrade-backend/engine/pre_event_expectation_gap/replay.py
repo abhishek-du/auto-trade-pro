@@ -29,11 +29,11 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.logger import logger
-from db.models import Candle
+from typing import NamedTuple
+
 from engine.pre_event_expectation_gap.types import (
     ScheduledEvent, PreEventType, PreEventDecision,
 )
@@ -59,29 +59,66 @@ class OutcomeRecord:
     by_window:      dict = field(default_factory=dict)   # "t+3" -> {gross, net, nifty_adj, sector_adj, mfe, mae}
 
 
-async def _close_near(symbol: str, target: date, session: AsyncSession, tol: int = 4) -> float | None:
-    lo = datetime.combine(target - timedelta(days=tol), datetime.min.time())
-    hi = datetime.combine(target + timedelta(days=tol), datetime.max.time())
-    rows = (await session.execute(
-        select(Candle).where(
-            Candle.symbol == symbol, Candle.timeframe == "1d",
-            Candle.timestamp >= lo, Candle.timestamp <= hi,
-        ).order_by(Candle.timestamp.asc())
-    )).scalars().all()
-    if not rows:
-        return None
-    return min(rows, key=lambda r: abs((r.timestamp.date() - target).days)).close
+class _Bar(NamedTuple):
+    """Attribute-compatible stand-in for the ORM rows this used to return."""
+    session_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+    @property
+    def timestamp(self) -> datetime:      # legacy attribute, session-anchored
+        return datetime.combine(self.session_date, datetime.min.time())
+
+
+async def _close_near(symbol: str, target: date, session: AsyncSession, tol: int = 4,
+                      *, as_of: date | None = None) -> float | None:
+    """Close for `target`, or the nearest SESSION within `tol` days.
+
+    SESSION-CORRECT since Step 2D.2. This used
+    `min(rows, key=|row.timestamp.date() - target|)` — nearest CALENDAR date.
+    With three daily conventions in the table an 18:30 row carries the calendar
+    date of the day BEFORE its session, so a row matching `target` exactly could
+    be the following session's close: a replay reading the future, with distance
+    zero so nothing else could outrank it.
+
+    Delegates to engine.daily_series, which resolves each row to its real
+    session and fails closed rather than reaching outside tolerance.
+
+    POINT-IN-TIME (Step 2L)
+    -----------------------
+    `as_of` bounds the search so it can never resolve FORWARD. Without it the
+    nearest-session rule legitimately picks a later session, which is right for
+    an outcome measurement and wrong for an entry price. Reproduced on live
+    data: target 2026-09-06 (a Sunday) returned 1309.5 — the Sep 7 close — where
+    the last session actually known by that date was Sep 4 at 1322.0.
+
+    Entry lookups pass `as_of`; exit/outcome lookups deliberately do not, because
+    measuring what happened after an event is exactly what they are for.
+    """
+    from engine.daily_series import close_for_session
+
+    return await close_for_session(symbol, target, session, tol_days=tol, as_of=as_of)
 
 
 async def _candles_between(symbol: str, start: date, end: date, session: AsyncSession) -> list:
-    lo = datetime.combine(start, datetime.min.time())
-    hi = datetime.combine(end, datetime.max.time())
-    return (await session.execute(
-        select(Candle).where(
-            Candle.symbol == symbol, Candle.timeframe == "1d",
-            Candle.timestamp >= lo, Candle.timestamp <= hi,
-        ).order_by(Candle.timestamp.asc())
-    )).scalars().all()
+    """Bars whose SESSION falls in [start, end], oldest first.
+
+    SESSION-CORRECT since Step 2D.2. The plain `timestamp BETWEEN` range this
+    replaces bounded by CALENDAR date, so an 18:30 row dated `end` — which
+    belongs to the session AFTER `end` — was inside the window, and its high or
+    low could set the MFE/MAE of a hold that had already exited. The same range
+    returned a session twice whenever two conventions covered it, biasing the
+    excursion outward.
+    """
+    from engine.daily_series import session_bars
+
+    return [
+        _Bar(d, o, h, low, c, v)
+        for d, o, h, low, c, v in await session_bars(symbol, start, end, session)
+    ]
 
 
 def _window_return(entry: float, exit_close: float | None) -> float | None:
@@ -99,12 +136,18 @@ async def evaluate_outcome(
     event. Returns {} silently when prices are unavailable."""
     if entry_price is None or entry_price <= 0:
         return {}
-    nifty_entry  = await _close_near(NIFTY_SYMBOL, as_of.date(), session)
-    sector_entry = await _close_near(sector_index, as_of.date(), session) if sector_index else None
+    # ENTRY side: bounded to the cutoff. These price the position at `as_of`,
+    # so a session after it would be information the engine could not have had.
+    nifty_entry  = await _close_near(NIFTY_SYMBOL, as_of.date(), session, as_of=as_of.date())
+    sector_entry = (await _close_near(sector_index, as_of.date(), session, as_of=as_of.date())
+                    if sector_index else None)
 
     out: dict = {}
     for w in REACTION_WINDOWS:
         exit_date = event_date + timedelta(days=w)
+        # EXIT side: intentionally NOT bounded — this measures what happened
+        # after the event, so resolving to the nearest session (which may fall
+        # after exit_date) is the correct outcome semantics.
         exit_close = await _close_near(symbol, exit_date, session)
         gross = _window_return(entry_price, exit_close)
         if gross is None:
@@ -149,7 +192,8 @@ async def replay_event(
         except Exception as exc:
             logger.debug(f"[pre_event_gap/replay] predict failed {symbol}@{event_date}-{offset}d: {exc}")
             continue
-        entry = await _close_near(symbol, as_of.date(), session)
+        # ENTRY side: bounded to the cutoff (see _close_near).
+        entry = await _close_near(symbol, as_of.date(), session, as_of=as_of.date())
         by_window = await evaluate_outcome(symbol, event_date, as_of, entry, sector_index, session)
         records.append(OutcomeRecord(
             cutoff_offset=offset, as_of=as_of, decision=pred.decision.value,

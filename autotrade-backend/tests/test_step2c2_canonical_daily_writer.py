@@ -70,12 +70,26 @@ class TestContractAccepts:
         ok, why = validate(bar(timeframe=tf, timestamp=dt.datetime(2026, 9, 3, 5, 17)))
         assert ok is True and why is None
 
-    @pytest.mark.parametrize("sym", ["^NSEI", "NIFTYBEES.NS", "719GS2060-GS.NS"])
-    def test_non_equity_daily_passes_through(self, sym):
-        """Indices/ETFs/debt keep their own handling. ^NSEI has no Upstox key,
-        so forcing the equity contract on it would reject legitimate data."""
-        ok, _ = validate(bar(symbol=sym, timestamp=dt.datetime(2026, 9, 3, 0, 0)))
-        assert ok is True
+    @pytest.mark.parametrize("sym", ["^NSEI", "^NSEBANK", "NIFTYBEES.NS",
+                                     "3MINDIA.NS"])
+    def test_every_nse_traded_class_carries_the_contract(self, sym):
+        """UPDATED in Step 2F — this used to assert the OPPOSITE.
+
+        Until 2F the contract governed NSE_EQUITY only and returned (True, None)
+        for indices, ETFs and debt series. That exemption is precisely what let
+        sync_regime_daily_candles_kite write a 00:00 bar for ^NSEI, ^NSEBANK and
+        NIFTYBEES.NS every five minutes for months: the guard could not reject
+        what it did not govern, and those three feed the regime gate.
+
+        Every NSE-traded class now carries the timestamp contract. What still
+        differs between them is model-dataset eligibility, which is a reader
+        concern — see test_model_eligibility_is_separate_from_the_contract.
+        """
+        ok, _ = validate(bar(symbol=sym, timestamp=dt.datetime(2026, 9, 3, 3, 45)))
+        assert ok is True, f"{sym} must accept the canonical session-open bar"
+
+        ok, why = validate(bar(symbol=sym, timestamp=dt.datetime(2026, 9, 3, 0, 0)))
+        assert ok is False and "00:00" in why, f"{sym} must reject the legacy 00:00 bar"
 
 
 # ── Phase J — negative tests ─────────────────────────────────────────────────
@@ -124,8 +138,10 @@ class TestContractRejects:
                  bar(timestamp=dt.datetime(2026, 9, 3, 0, 0)),
                  bar(symbol="^NSEI", timestamp=dt.datetime(2026, 9, 3, 0, 0))]
         kept, rejected = filter_canonical_candles(batch, source="unit-test")
-        assert len(kept) == 2                      # canonical equity + the index
-        assert sum(rejected.values()) == 2
+        # Step 2F: the ^NSEI 00:00 bar is no longer waved through, so only the
+        # canonical equity bar survives.
+        assert len(kept) == 1
+        assert sum(rejected.values()) == 3
 
 
 # ── Phase G — the guard sits at the choke point ──────────────────────────────
@@ -232,3 +248,67 @@ class TestLegacyBackfillScriptIsDisabled:
         assert "raise SystemExit" in text
         # The guard must precede the yfinance import that does the writing.
         assert text.index("raise SystemExit") < text.index("import yfinance")
+
+
+# ── Step 2F — explicit per-class daily policy ────────────────────────────────
+
+class TestDailyPolicy:
+    """Every instrument class states its policy; nothing is silently exempt."""
+
+    @pytest.mark.parametrize("sym,expected", [
+        ("RELIANCE.NS",     "canonical"),
+        ("^NSEI",           "canonical"),
+        ("^NSEBANK",        "canonical"),
+        ("NIFTYBEES.NS",    "canonical"),
+        ("719GS2060-GS.NS", "legacy_exempt"),
+        ("ABC-BE.NS",       "legacy_exempt"),
+        ("^BSESN",          "excluded"),
+        ("TATASTEEL.BO",    "excluded"),
+    ])
+    def test_policy_per_class(self, sym, expected):
+        from utils.candle_contract import daily_policy
+        assert daily_policy(sym).value == expected
+
+    def test_every_class_has_a_declared_policy(self):
+        """A new InstrumentClass must not default to 'allow'."""
+        from utils.candle_contract import InstrumentClass, _DAILY_POLICY
+        missing = set(InstrumentClass) - set(_DAILY_POLICY)
+        assert not missing, f"classes with no declared daily policy: {missing}"
+
+    @pytest.mark.parametrize("sym", ["^BSESN", "TATASTEEL.BO"])
+    def test_excluded_classes_are_rejected_even_when_canonical(self, sym):
+        """^BSESN is a BSE index — a correct timestamp does not make it eligible."""
+        ok, why = validate(bar(symbol=sym, timestamp=dt.datetime(2026, 9, 3, 3, 45)))
+        assert ok is False and "excluded" in why
+
+    def test_series_symbols_are_exempt_but_never_model_eligible(self):
+        """Upstox publishes no instrument key for -BE/-SM/-BZ/-GS forms, so the
+        canonical fetch returns nothing for them. Enforcing the contract would
+        not move them to 03:45 — it would drop ~1,163 symbols' daily bars. They
+        are exempt from the timestamp contract and excluded from the dataset,
+        which is where the actual modelling risk sits."""
+        ok, _ = validate(bar(symbol="719GS2060-GS.NS",
+                             timestamp=dt.datetime(2026, 9, 2, 18, 30)))
+        assert ok is True, "series symbols must stay on the legacy path"
+        from utils.candle_contract import is_model_eligible
+        assert is_model_eligible("RELIANCE.NS") is True
+        assert is_model_eligible("^NSEI") is True
+        assert is_model_eligible("NIFTYBEES.NS") is True
+        assert is_model_eligible("ABC-BE.NS") is False
+        assert is_model_eligible("^BSESN") is False
+
+    @pytest.mark.parametrize("sym", ["3MINDIA.NS", "5PAISA.NS", "63MOONS.NS",
+                                     "360ONE.NS", "20MICRONS.NS"])
+    def test_digit_leading_names_are_ordinary_equities(self, sym):
+        """A leading digit is not a series marker.
+
+        `base[:1].isdigit()` classified these nine real NSE equities as
+        NON_EQUITY_SERIES, which exempted them from the daily contract. The
+        `-XX` suffix test still separates 3IINFOLTD.NS from 3IINFOLTD-BE.NS.
+        """
+        from utils.candle_contract import InstrumentClass, classify_instrument
+        assert classify_instrument(sym) is InstrumentClass.NSE_EQUITY
+
+    def test_the_be_series_of_a_digit_led_name_is_still_a_series(self):
+        from utils.candle_contract import InstrumentClass, classify_instrument
+        assert classify_instrument("3IINFOLTD-BE.NS") is InstrumentClass.NON_EQUITY_SERIES

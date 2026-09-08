@@ -192,21 +192,38 @@ async def get_nifty_return(
     days: int = 252,
 ) -> float | None:
     """Annualized NIFTY 50 return over the last `days` trading days from candles."""
+    # SESSION-CORRECT (Step 2F). This took `days + 1` raw ROWS ordered by
+    # timestamp DESC. That was safe only while ^NSEI carried exactly one daily
+    # convention — Step 2E flagged it as "safe in practice, latently fragile if
+    # a second convention ever appears". Step 2F added canonical 03:45 index
+    # bars, so the newest sessions began appearing TWICE (00:00 and 03:45): the
+    # window silently halved, every duplicated session contributed a spurious
+    # 0% return, and adjusted closes were differenced against raw ones.
+    #
+    # engine.daily_series returns one row per NSE session on a single price
+    # basis, which is the same fix market_regime and intelligence_hub took.
     try:
-        rows = (await session.execute(
-            select(Candle.close, Candle.timestamp)
-            .where(
-                Candle.symbol.in_(["^NSEI", "NIFTY50.NS", "NIFTY_50"]),
-                Candle.timeframe == "1d",
-            )
-            .order_by(Candle.timestamp.desc())
-            .limit(days + 1)
-        )).all()
+        from engine.daily_series import session_close_series
 
-        if len(rows) < 2:
+        closes: list[float] = []
+        for sym in ("^NSEI", "NIFTY50.NS", "NIFTY_50"):
+            closes = await session_close_series(sym, session, sessions=days + 1)
+            if len(closes) >= 2:
+                break
+
+        # Annualizing a short window is worse than declining to answer: ^NSEI
+        # currently holds only 11 canonical sessions (the legacy 00:00 series is
+        # excluded from the model dataset), and annualizing those returned
+        # -48.9% — a number that would flow straight into Treynor and Jensen as
+        # if it were a market return. Refuse below a quarter of sessions.
+        _MIN_SESSIONS = 60
+        if len(closes) < _MIN_SESSIONS:
+            logger.debug(
+                f"[portfolio_analytics] nifty return: only {len(closes)} canonical "
+                f"sessions (< {_MIN_SESSIONS}) — refusing to annualize"
+            )
             return None
 
-        closes = [r.close for r in reversed(rows)]
         daily_returns = [
             (closes[i] - closes[i - 1]) / closes[i - 1]
             for i in range(1, len(closes))

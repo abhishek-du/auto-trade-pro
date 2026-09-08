@@ -377,6 +377,8 @@ async def save_candles_to_db(
     *,
     source: str = "unspecified",
     enforce_contract: bool = True,
+    refresh_current_session: bool = False,
+    extra_open: set[str] | None = None,
 ) -> int:
     """Batch-insert candles, skipping any that already exist.
 
@@ -395,6 +397,23 @@ async def save_candles_to_db(
 
     Rejected rows are DROPPED and logged with their source, never rewritten.
     Silent repair is how three conventions accumulated in the first place.
+
+    CURRENT-SESSION REFRESH (Step 2F)
+    ---------------------------------
+    The default is INSERT ... ON CONFLICT DO NOTHING: a bar that already exists
+    is never touched. That is right for history and wrong for a writer that runs
+    every five minutes through a live session — its 09:20 snapshot of today's
+    daily bar would be frozen as the day's final record.
+
+    `refresh_current_session=True` upgrades ONLY rows whose session date is
+    today to ON CONFLICT DO UPDATE. Every earlier session stays insert-only, so
+    this cannot rewrite history: the two groups are split before the statement
+    is built, and the historical group never sees a DO UPDATE.
+
+    This replaces the blind `DELETE ... WHERE timestamp >= now() - 15 days` that
+    sync_regime_daily_candles_kite used to run for the same purpose. That delete
+    also removed rows written by OTHER writers — the canonical 03:45 bars — which
+    is how the regime symbols lost their canonical series (Step 2D.2 §4).
 
     `source` names the calling pipeline so every dropped bar has a
     deterministic provenance path. `enforce_contract=False` exists only for
@@ -416,7 +435,8 @@ async def save_candles_to_db(
     if enforce_contract:
         from utils.candle_contract import filter_canonical_candles
 
-        candles, _rejected = filter_canonical_candles(candles, source=source)
+        candles, _rejected = filter_canonical_candles(
+            candles, source=source, extra_open=extra_open)
         if not candles:
             return 0
 
@@ -433,6 +453,14 @@ async def save_candles_to_db(
         }
         for c in candles
     ]
+
+    # Split by session so a refresh can never reach a historical row.
+    today = _dt.datetime.utcnow().date()
+    if refresh_current_session:
+        current = [r for r in rows if r["timestamp"].date() == today]
+        rows     = [r for r in rows if r["timestamp"].date() != today]
+    else:
+        current = []
 
     _CHUNK = 3_000
     total  = 0
@@ -456,6 +484,34 @@ async def save_candles_to_db(
             total += result.rowcount
         except Exception as exc:
             logger.error(f"save_candles_to_db error (chunk {i}–{i+len(chunk)}): {exc}")
+            await session.rollback()
+            return total
+
+    # Current session only: overwrite OHLCV in place so an intraday snapshot
+    # becomes the settled bar as the session progresses. Scoped by the unique
+    # key, so a writer can only ever update its own (symbol, timeframe,
+    # timestamp) — never another symbol's row and never another session.
+    for i in range(0, len(current), _CHUNK):
+        chunk = current[i : i + _CHUNK]
+        try:
+            ins  = pg_insert(Candle).values(chunk)
+            stmt = ins.on_conflict_do_update(
+                constraint="uq_candle_bar",
+                set_={
+                    "open":   ins.excluded.open,
+                    "high":   ins.excluded.high,
+                    "low":    ins.excluded.low,
+                    "close":  ins.excluded.close,
+                    "volume": ins.excluded.volume,
+                },
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            total += result.rowcount
+        except Exception as exc:
+            logger.error(
+                f"save_candles_to_db current-session refresh failed "
+                f"(source={source!r}, chunk {i}–{i+len(chunk)}): {exc}")
             await session.rollback()
             return total
 

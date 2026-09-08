@@ -105,32 +105,12 @@ async def _aligned_closes(
     When two rows genuinely describe the SAME session, the canonical bar wins —
     that is a tiebreak within one session, never a choice between sessions.
     """
-    from utils.candle_contract import (
-        SessionStatus,
-        convention_rank,
-        resolve_daily_session_date,
-    )
+    from engine.daily_series import session_closes
 
-    rows = (await session.execute(
-        select(Candle.timestamp, Candle.close)
-        .where(Candle.symbol == symbol, Candle.timeframe == "1d")
-        # Over-fetch: several stored rows can collapse to one session, so
-        # `days + 10` rows no longer guarantees `days` sessions.
-        .order_by(Candle.timestamp.desc()).limit((days + 10) * 3)
-    )).all()
+    rows = await session_closes(symbol, session, sessions=days,
+                                holidays=holidays, extra_open=extra_open)
+    return {d: c for d, c, _ in rows}
 
-    best: dict[date, tuple[int, float]] = {}
-    for r in rows:
-        res = resolve_daily_session_date(
-            symbol, "1d", r.timestamp, holidays=holidays, extra_open=extra_open)
-        if not res.usable or res.session_date is None:
-            continue                       # refuse, never approximate
-        rank = convention_rank(res.convention)
-        prev = best.get(res.session_date)
-        if prev is None or rank < prev[0]:
-            best[res.session_date] = (rank, float(r.close))
-
-    return {d: v for d, (_, v) in best.items()}
 
 
 async def compute_symbol_beta(symbol: str, session: AsyncSession, days: int = 180) -> float | None:

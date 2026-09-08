@@ -206,17 +206,26 @@ async def check_and_handle_corporate_actions(session: "AsyncSession") -> list[Co
 
     for symbol in symbols:
         try:
-            # Last 1d close (yesterday)
-            last_1d = (await session.execute(
-                select(Candle.close, Candle.timestamp).where(
-                    Candle.symbol == symbol,
-                    Candle.timeframe == "1d",
-                ).order_by(Candle.timestamp.desc()).limit(1)
-            )).first()
+            # Last 1d close — RAW basis, explicitly (Step 2D.2).
+            #
+            # This compares yesterday's daily close against today's first
+            # intraday print and calls a large gap a split. Intraday candles are
+            # unadjusted, so the daily side must be unadjusted too: served an
+            # adjusted 00:00 close, the ratio between the two IS the corporate
+            # action, and the detector fires on a split that already happened —
+            # or, on the other side of an adjustment, stays silent through a real
+            # one. The open position it holds is then re-adjusted a second time.
+            #
+            # basis="raw" refuses rather than substituting: a symbol with no
+            # unadjusted daily row is skipped, which is the safe outcome for a
+            # guard that rewrites position quantities.
+            from engine.daily_series import session_closes
 
-            if not last_1d:
+            _raw = await session_closes(symbol, session, sessions=1, basis="raw")
+
+            if not _raw:
                 continue
-            price_before = float(last_1d[0])
+            price_before = float(_raw[-1][1])
 
             # First 1m candle today (today's open after 09:15 IST)
             import datetime as _dt

@@ -68,7 +68,7 @@ class TestEvaluateOutcome:
         as_of = datetime(2026, 7, 23)
 
         # stock: entry 100 → +10% ; nifty: entry 100 → +2%  (so nifty_adj ≈ 10% - cost - 2%)
-        async def close_near(symbol, target, session, tol=4):
+        async def close_near(symbol, target, session, tol=4, *, as_of=None):
             if symbol == replay.NIFTY_SYMBOL:
                 return 102.0 if target > event_date else 100.0
             return 110.0 if target > event_date else 100.0

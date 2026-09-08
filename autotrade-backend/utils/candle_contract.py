@@ -112,11 +112,119 @@ def classify_instrument(symbol: str | None) -> InstrumentClass:
     base = s[:-3]
     if not base:
         return InstrumentClass.UNKNOWN
-    if _SERIES_SUFFIX.search(base) or base[:1].isdigit():
+    # The `-BE` / `-SM` / `-GS` / `-SG` suffix is what marks a non-ordinary
+    # series. A LEADING digit does not: 3MINDIA, 5PAISA, 63MOONS, 360ONE,
+    # 20MICRONS, 21STCENMGM, 3BBLACKBIO, 3IINFOLTD and 3PLAND are ordinary NSE
+    # equities, and an earlier `base[:1].isdigit()` clause classified all nine as
+    # NON_EQUITY_SERIES — which exempted them from the daily contract entirely.
+    # The suffix test still separates 3IINFOLTD.NS (equity) from
+    # 3IINFOLTD-BE.NS (its trade-for-trade series), so dropping the digit rule
+    # costs nothing.
+    if _SERIES_SUFFIX.search(base):
         return InstrumentClass.NON_EQUITY_SERIES
     if _ETF_PAT.search(base):
         return InstrumentClass.ETF_OR_INAV
     return InstrumentClass.NSE_EQUITY
+
+
+class DailyPolicy(str, Enum):
+    """What the daily contract requires of an instrument class.
+
+    Step 2F. The contract previously governed NSE_EQUITY and returned
+    `(True, None)` for everything else, on the reasoning that indices and ETFs
+    "keep their own legacy handling". That exemption is what let
+    sync_regime_daily_candles_kite write `00:00` bars for ^NSEI, ^NSEBANK and
+    NIFTYBEES.NS every five minutes for months: the guard could not reject what
+    it did not govern, and those three feed the regime gate.
+
+    Each class now states its policy explicitly. Nothing is silently identical
+    to anything else, and nothing is silently exempt.
+    """
+
+    CANONICAL = "canonical"          # must be 03:45 UTC on a real NSE session
+    LEGACY_EXEMPT = "legacy_exempt"  # NSE-traded, contract NOT enforced, see below
+    EXCLUDED = "excluded"            # never accepted into the daily table at all
+
+
+# One row per class. A new InstrumentClass without an entry here raises on
+# lookup rather than defaulting to "allow" — the failure mode that created this
+# whole line of work.
+_DAILY_POLICY: dict[InstrumentClass, DailyPolicy] = {
+    # The regime + prediction dataset. All three carry the canonical contract.
+    InstrumentClass.NSE_EQUITY:        DailyPolicy.CANONICAL,
+    InstrumentClass.NSE_INDEX:         DailyPolicy.CANONICAL,   # ^NSEI, ^NSEBANK
+    InstrumentClass.ETF_OR_INAV:       DailyPolicy.CANONICAL,   # NIFTYBEES.NS
+    # -BE (trade-for-trade), -SM (SME), -BZ and -GS series. EXEMPT, and the
+    # exemption is a measured constraint rather than an oversight: Upstox's
+    # instrument master carries no key for any of these symbol forms (checked
+    # 2026-09-07 — SIMBHALS-BZ.NS, AAREYDRUGS-BE.NS, AAKAAR-SM.NS and
+    # 719GS2060-GS.NS all resolve to None against a 2,723-symbol map), so the
+    # canonical fetch returns nothing for them. Enforcing the contract would not
+    # move them onto 03:45; it would silently drop the daily bars of ~1,163
+    # symbols that currently arrive on the legacy path.
+    #
+    # They are excluded from the model dataset instead, which is where the risk
+    # actually lies. Revisit if Upstox ever publishes keys for these series.
+    InstrumentClass.NON_EQUITY_SERIES: DailyPolicy.LEGACY_EXEMPT,
+    # Not NSE. ^BSESN is a BSE index; .BO is the BSE cash segment. Neither
+    # belongs in the NSE daily table, and the NSE-only work of 2026-08-28 said
+    # so — this makes the choke point enforce it too.
+    InstrumentClass.OTHER_INDEX:       DailyPolicy.EXCLUDED,
+    InstrumentClass.NON_NSE:           DailyPolicy.EXCLUDED,
+    InstrumentClass.UNKNOWN:           DailyPolicy.EXCLUDED,
+}
+
+# Classes whose daily bars may be used to train or score a model.
+MODEL_ELIGIBLE_CLASSES = frozenset({
+    InstrumentClass.NSE_EQUITY,
+    InstrumentClass.NSE_INDEX,
+    InstrumentClass.ETF_OR_INAV,
+})
+
+
+def daily_policy(symbol: str | None) -> DailyPolicy:
+    """The daily-write policy for `symbol`'s instrument class."""
+    return _DAILY_POLICY[classify_instrument(symbol)]
+
+
+def is_model_eligible(symbol: str | None) -> bool:
+    """May this symbol's daily bars feed a prediction dataset?"""
+    return classify_instrument(symbol) in MODEL_ELIGIBLE_CLASSES
+
+
+# ── The NSE sessions that fall on a weekend ──────────────────────────────────
+#
+# Diwali Muhurat, Union Budget Saturdays, and three disaster-recovery sessions.
+# NSE genuinely traded on each of these, so the plain weekday rule refuses real
+# data. Ten of them land in the last ten years.
+#
+# CURATED ON PURPOSE. It is not derived from the candle data and not inferred
+# from whatever the API happens to return: letting a price source assert its own
+# trading calendar makes the validation circular — the thing being checked would
+# be supplying the check. Each entry is a documented exchange event.
+#
+# This is the ONE copy. The backfill writer and engine.daily_series both read it
+# from here, so writer and reader cannot drift apart — which is exactly the
+# asymmetry Step 2H.1 found, where the writer could store these sessions and the
+# reader then dropped them.
+#
+# NOT wired into the contract's own defaults. resolve_daily_session_date() and
+# validate_canonical_daily_equity_candle() still default to extra_open=None, so
+# no live writer changes behaviour because this exists. Supplying it to the
+# production writer is a separate decision — see the 2026-11-08 Muhurat note in
+# the Step 2H.1 report.
+NSE_SPECIAL_SESSIONS: frozenset[str] = frozenset({
+    "2016-10-30",  # Diwali Muhurat (Sunday)
+    "2019-10-27",  # Diwali Muhurat (Sunday)
+    "2020-02-01",  # Union Budget (Saturday)
+    "2020-11-14",  # Diwali Muhurat (Saturday)
+    "2023-11-12",  # Diwali Muhurat (Sunday)
+    "2024-01-20",  # special live / disaster-recovery session (Saturday)
+    "2024-03-02",  # special live / disaster-recovery session (Saturday)
+    "2024-05-18",  # special live / disaster-recovery session (Saturday)
+    "2025-02-01",  # Union Budget (Saturday)
+    "2026-02-01",  # Union Budget (Sunday)
+})
 
 
 def nse_closed_dates(holidays_payload: list[dict] | None) -> set[str]:
@@ -207,6 +315,7 @@ def validate_canonical_daily_equity_candle(
     candle: dict,
     *,
     holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
     now_utc: _dt.datetime | None = None,
 ) -> tuple[bool, str | None]:
     """(ok, reason). Applies the equity daily contract; passes everything else.
@@ -218,12 +327,25 @@ def validate_canonical_daily_equity_candle(
     if candle.get("timeframe") != "1d":
         return True, None
 
-    klass = classify_instrument(candle.get("symbol"))
-    if klass is not InstrumentClass.NSE_EQUITY:
-        # Indices/ETFs/debt keep their own (legacy) handling; BSE is rejected by
-        # the NSE-only gate elsewhere, not here.
+    sym = candle.get("symbol")
+    klass = classify_instrument(sym)
+    policy = _DAILY_POLICY.get(klass)
+
+    if policy is None:                       # a class with no declared policy
+        return False, f"{klass.value}: no daily policy declared — refusing"
+
+    if policy is DailyPolicy.EXCLUDED:
+        # ^BSESN and .BO. Historical rows are left alone; this only stops NEW
+        # non-NSE data entering the NSE daily table.
+        return False, f"{klass.value} is excluded from the NSE daily table"
+
+    if policy is DailyPolicy.LEGACY_EXEMPT:
+        # Declared exemption, not a silent one — see _DAILY_POLICY for why these
+        # series cannot be served canonically. They are kept out of the model
+        # dataset by MODEL_ELIGIBLE_CLASSES instead.
         return True, None
 
+    # CANONICAL carries the full timestamp contract below.
     ts = candle.get("timestamp")
     if not isinstance(ts, _dt.datetime):
         return False, f"timestamp is {type(ts).__name__}, expected datetime"
@@ -239,7 +361,19 @@ def validate_canonical_daily_equity_candle(
     if ts > ref + _dt.timedelta(minutes=5):
         return False, f"future timestamp {ts} (now {ref})"
 
-    if not is_nse_trading_session(ts.date(), holidays):
+    # `extra_open` names dates NSE traded that the weekday rule would refuse:
+    # Diwali Muhurat, Budget Saturdays, and the occasional disaster-recovery
+    # session. is_nse_trading_session has always supported it; until Step 2H the
+    # parameter simply was not plumbed through to here, so those sessions were
+    # unconditionally rejected at the write path.
+    #
+    # It stays OPTIONAL and defaults to None, which is exactly the previous
+    # behaviour — no existing caller changes. A caller that knows the calendar
+    # (the one-off backfill does, for ten years of it) can now pass it instead
+    # of losing real sessions. Ten such dates fall in the last ten years, and
+    # the legacy series carries all ten, so a canonical series that could not
+    # represent them could not replace the legacy one.
+    if not is_nse_trading_session(ts.date(), holidays, extra_open):
         kind = "weekend" if ts.date().weekday() >= 5 else "NSE holiday"
         return False, f"session date {ts.date()} is a {kind}"
 
@@ -250,6 +384,7 @@ def filter_canonical_candles(
     candles: list[dict],
     *,
     holidays: set[str] | None = None,
+    extra_open: set[str] | None = None,
     source: str = "unknown",
 ) -> tuple[list[dict], dict[str, int]]:
     """Split a batch into (accepted, rejection-reason counts).
@@ -260,7 +395,8 @@ def filter_canonical_candles(
     ok: list[dict] = []
     rejected: dict[str, int] = {}
     for c in candles:
-        good, why = validate_canonical_daily_equity_candle(c, holidays=holidays)
+        good, why = validate_canonical_daily_equity_candle(
+            c, holidays=holidays, extra_open=extra_open)
         if good:
             ok.append(c)
         else:

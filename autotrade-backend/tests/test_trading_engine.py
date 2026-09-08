@@ -1607,14 +1607,22 @@ class TestNiftyTrendGate:
     change, not drift. These tests cover the new function's equivalent
     (and now opposite-polarity) safety behavior."""
 
+    # Step 2D.2 note: these mock engine.daily_series.session_close_series, which
+    # is where get_market_regime now gets its closes. It used to read `candles`
+    # directly with `ORDER BY timestamp DESC LIMIT 220` — a query that returned
+    # 220 ROWS spanning only 80 SESSIONS, because three daily timestamp
+    # conventions coexist in that table. The gate's own contract is unchanged
+    # (fail CLOSED under 60 sessions, buy on a sustained uptrend); only the seam
+    # moved, so the mocks moved with it. Series are oldest -> newest, the order
+    # the shared reader guarantees.
+
     @pytest.mark.asyncio
     async def test_fails_closed_when_insufficient_history(self):
         from engine.agent.market_regime import get_market_regime, SIDEWAYS
         session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [100.0] * 30  # < 60 bars required
-        session.execute = AsyncMock(return_value=mock_result)
-        result = await get_market_regime(session)
+        with patch("engine.daily_series.session_close_series",
+                   AsyncMock(return_value=[100.0] * 30)):   # < 60 sessions
+            result = await get_market_regime(session)
         assert result.can_buy is False
         assert result.state == SIDEWAYS
 
@@ -1631,12 +1639,11 @@ class TestNiftyTrendGate:
     async def test_sufficient_rising_history_allows_buy(self):
         from engine.agent.market_regime import get_market_regime
         session = AsyncMock()
-        mock_result = MagicMock()
-        # DB returns DESC (most-recent first); a clearly rising series.
-        prices_desc = [float(x) for x in range(320, 100, -1)]  # 220 bars, latest=320
-        mock_result.scalars.return_value.all.return_value = prices_desc
-        session.execute = AsyncMock(return_value=mock_result)
-        with patch("crawler.live_prices.PRICE_CACHE", {}), \
+        # 220 SESSIONS, oldest -> newest, clearly rising (latest = 320).
+        prices_asc = [float(x) for x in range(101, 321)]
+        with patch("engine.daily_series.session_close_series",
+                   AsyncMock(return_value=prices_asc)), \
+             patch("crawler.live_prices.PRICE_CACHE", {}), \
              patch("crawler.market_breadth.get_breadth_cache", return_value={}), \
              patch("utils.llm.call_llm_chat", AsyncMock(side_effect=RuntimeError("no live LLM in tests"))):
             result = await get_market_regime(session, breadth_pct=70.0)
